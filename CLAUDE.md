@@ -33,3 +33,8 @@ Terminal mockups: `../../design/hifi/hifi-cli.jsx`
 ## Colors
 
 Amber `#f5b800` for branding, green `#8fc18b` for success, red `#e07a6a` for errors.
+
+
+## Keep shared docs in sync
+
+When you add/change/remove endpoints, types, build commands, or dependencies: update the relevant skill file in `/home/guus/code/beebeeb.io/.claude/skills/` (beebeeb-api.md, beebeeb-designs.md, beebeeb-stack.md, beebeeb-dev.md). Other agents depend on these being accurate.
