@@ -1,0 +1,27 @@
+[package]
+name = "beebeeb-cli"
+description = "bb — Beebeeb CLI for end-to-end encrypted cloud storage"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/beebeeb-io/cli"
+
+[[bin]]
+name = "bb"
+path = "src/main.rs"
+
+[dependencies]
+beebeeb-core = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-core" }
+beebeeb-types = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-types" }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "multipart"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+indicatif = "0.17"
+colored = "3"
+dirs = "6"
+uuid = { version = "1", features = ["v4"] }
+rpassword = "7"
+hostname = "0.4"
+rand = "0.8"

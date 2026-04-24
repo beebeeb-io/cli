@@ -1,0 +1,64 @@
+# Dependencies & vendor
+node_modules/
+vendor/
+.pnpm-store/
+bun.lockb
+
+# Build artifacts
+target/
+dist/
+build/
+.next/
+.astro/
+*.wasm
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.secret
+id_rsa
+id_ed25519
+credentials.json
+service_account.json
+token.json
+
+# Local data
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+.vscode/settings.json
+.vscode/launch.json
+
+# Logs
+*.log
+npm-debug.log*
+
+# Test & coverage
+coverage/
+.nyc_output/
+*.lcov
+
+# Expo / React Native
+.expo/
+ios/Pods/
+android/.gradle/
+android/app/build/
