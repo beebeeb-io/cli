@@ -35,7 +35,7 @@ FORBIDDEN_FILES=(
 )
 
 for pattern in "${FORBIDDEN_FILES[@]}"; do
-    MATCHES=$(echo "$STAGED" | grep -iE "$pattern" || true)
+    MATCHES=$(echo "$STAGED" | grep -iE "$pattern" | grep -v '\.example$' || true)
     if [ -n "$MATCHES" ]; then
         echo -e "${RED}BLOCKED: Secret/key file staged:${NC}"
         echo "$MATCHES"
@@ -43,7 +43,7 @@ for pattern in "${FORBIDDEN_FILES[@]}"; do
     fi
 done
 
-# 2. Block vendor/dependency directories
+# 2. Block vendor/dependency/build/debug artifacts
 VENDOR_DIRS=(
     '^node_modules/'
     '^vendor/'
@@ -53,6 +53,18 @@ VENDOR_DIRS=(
     '^build/'
     '/__pycache__/'
     '\.pyc$'
+    '\.map$'
+    '\.js\.map$'
+    '\.css\.map$'
+    '\.d\.ts\.map$'
+    '\.wasm\.map$'
+    '\.tsbuildinfo$'
+    '^\.expo/'
+    '^ios/Pods/'
+    '^android/.gradle/'
+    '^android/app/build/'
+    '\.asar$'
+    '\.sourcemap$'
 )
 
 for pattern in "${VENDOR_DIRS[@]}"; do
