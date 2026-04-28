@@ -54,6 +54,46 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    pub async fn opaque_login_start(
+        &self,
+        email: &str,
+        client_message_b64: &str,
+    ) -> Result<Value, String> {
+        let resp = self
+            .client
+            .post(self.url("/api/v1/opaque/login-start"))
+            .json(&serde_json::json!({
+                "email": email,
+                "client_message": client_message_b64,
+            }))
+            .send()
+            .await
+            .map_err(|e| format!("request failed: {e}"))?;
+
+        parse_response(resp).await
+    }
+
+    pub async fn opaque_login_finish(
+        &self,
+        email: &str,
+        client_message_b64: &str,
+        server_state_b64: &str,
+    ) -> Result<Value, String> {
+        let resp = self
+            .client
+            .post(self.url("/api/v1/opaque/login-finish"))
+            .json(&serde_json::json!({
+                "email": email,
+                "client_message": client_message_b64,
+                "server_state": server_state_b64,
+            }))
+            .send()
+            .await
+            .map_err(|e| format!("request failed: {e}"))?;
+
+        parse_response(resp).await
+    }
+
     pub async fn logout(&self) -> Result<Value, String> {
         let token = self.require_auth()?;
         let resp = self
