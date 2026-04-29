@@ -8,6 +8,10 @@ pub struct Config {
     pub api_url: String,
     pub session_token: Option<String>,
     pub email: Option<String>,
+    /// Base64-encoded 32-byte master key derived during login.
+    /// Used to derive per-file encryption keys for push/pull.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub master_key: Option<String>,
 }
 
 impl Default for Config {
@@ -16,6 +20,7 @@ impl Default for Config {
             api_url: DEFAULT_API_URL.to_string(),
             session_token: None,
             email: None,
+            master_key: None,
         }
     }
 }

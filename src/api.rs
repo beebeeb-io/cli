@@ -1,6 +1,5 @@
 use reqwest::Client;
 use serde_json::Value;
-use std::path::Path;
 
 use crate::config::load_config;
 
@@ -30,6 +29,7 @@ impl ApiClient {
         format!("{}{path}", self.base_url)
     }
 
+    #[allow(dead_code)]
     pub async fn signup(&self, email: &str, password: &str) -> Result<Value, String> {
         let resp = self
             .client
@@ -148,31 +148,40 @@ impl ApiClient {
         parse_response(resp).await
     }
 
-    pub async fn upload_file(
+    /// Get file metadata by ID.
+    pub async fn get_file(&self, file_id: &str) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .get(self.url(&format!("/api/v1/files/{file_id}")))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| format!("request failed: {e}"))?;
+
+        parse_response(resp).await
+    }
+
+    /// Upload an encrypted file via multipart.
+    ///
+    /// The server expects:
+    /// - A "metadata" text field containing JSON with name_encrypted, parent_id, mime_type, size_bytes
+    /// - One or more "chunk_N" binary fields containing the encrypted chunk data
+    pub async fn upload_encrypted(
         &self,
-        file_path: &Path,
-        parent_id: Option<&str>,
+        metadata_json: &str,
+        encrypted_chunks: &[(u32, Vec<u8>)],
     ) -> Result<Value, String> {
         let token = self.require_auth()?;
 
-        let file_name = file_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("file")
-            .to_string();
+        let mut form = reqwest::multipart::Form::new()
+            .text("metadata", metadata_json.to_string());
 
-        let file_bytes = std::fs::read(file_path)
-            .map_err(|e| format!("failed to read file: {e}"))?;
-
-        let file_part = reqwest::multipart::Part::bytes(file_bytes)
-            .file_name(file_name)
-            .mime_str("application/octet-stream")
-            .map_err(|e| format!("mime error: {e}"))?;
-
-        let mut form = reqwest::multipart::Form::new().part("file", file_part);
-
-        if let Some(pid) = parent_id {
-            form = form.text("parent_id", pid.to_string());
+        for (idx, data) in encrypted_chunks {
+            let part = reqwest::multipart::Part::bytes(data.clone())
+                .mime_str("application/octet-stream")
+                .map_err(|e| format!("mime error: {e}"))?;
+            form = form.part(format!("chunk_{idx}"), part);
         }
 
         let resp = self
@@ -187,6 +196,7 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    /// Download the raw encrypted bytes for a file.
     pub async fn download_file(&self, file_id: &str) -> Result<Vec<u8>, String> {
         let token = self.require_auth()?;
         let resp = self

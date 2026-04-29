@@ -9,8 +9,15 @@ fn b64() -> base64::engine::GeneralPurpose {
     base64::engine::general_purpose::STANDARD
 }
 
-/// Try OPAQUE login. Returns Ok(session_token) on success, Err on failure.
-async fn opaque_login(api: &ApiClient, email: &str, password: &[u8]) -> Result<String, String> {
+struct LoginResult {
+    token: String,
+    master_key_b64: String,
+}
+
+/// Try OPAQUE login. Returns Ok(LoginResult) on success, Err on failure.
+/// The OPAQUE export_key is deterministic for the same password and is used
+/// as the master encryption key (first 32 bytes of the 64-byte export_key).
+async fn opaque_login(api: &ApiClient, email: &str, password: &[u8]) -> Result<LoginResult, String> {
     // Step 1: Client starts OPAQUE login
     let start =
         beebeeb_core::opaque_protocol::client_login_start(password).map_err(|e| e.to_string())?;
@@ -56,7 +63,55 @@ async fn opaque_login(api: &ApiClient, email: &str, password: &[u8]) -> Result<S
         .and_then(|v| v.as_str())
         .ok_or("server did not return a session token")?;
 
-    Ok(token.to_string())
+    // Derive master key from the OPAQUE export_key (first 32 bytes).
+    // The export_key is deterministic for the same password+registration,
+    // making it ideal as the root of our key hierarchy.
+    let export_key = &finish.export_key;
+    if export_key.len() < 32 {
+        return Err("OPAQUE export key too short".to_string());
+    }
+    let mut mk_bytes = [0u8; 32];
+    mk_bytes.copy_from_slice(&export_key[..32]);
+    let master_key_b64 = b64().encode(mk_bytes);
+
+    Ok(LoginResult {
+        token: token.to_string(),
+        master_key_b64,
+    })
+}
+
+/// Legacy login for pre-OPAQUE accounts. Derives master key from password
+/// using Argon2id with the salt returned by the server.
+async fn legacy_login(api: &ApiClient, email: &str, password: &str) -> Result<LoginResult, String> {
+    let result = api.login(email, password).await?;
+
+    let token = result
+        .get("session_token")
+        .and_then(|v| v.as_str())
+        .ok_or("server did not return a session token")?
+        .to_string();
+
+    let salt_hex = result
+        .get("salt")
+        .and_then(|v| v.as_str())
+        .ok_or("server did not return salt")?;
+
+    // Decode hex salt
+    let salt_bytes: Vec<u8> = (0..salt_hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&salt_hex[i..i + 2], 16))
+        .collect::<Result<Vec<u8>, _>>()
+        .map_err(|e| format!("invalid salt hex: {e}"))?;
+
+    // Derive master key via Argon2id (same as beebeeb-core KDF)
+    let mk = beebeeb_core::kdf::derive_master_key(password, &salt_bytes)
+        .map_err(|e| format!("key derivation failed: {e}"))?;
+    let master_key_b64 = b64().encode(mk.to_bytes());
+
+    Ok(LoginResult {
+        token,
+        master_key_b64,
+    })
 }
 
 pub async fn run() -> Result<(), String> {
@@ -88,26 +143,22 @@ pub async fn run() -> Result<(), String> {
     let password_bytes = password.as_bytes();
 
     // Try OPAQUE first, fall back to legacy for accounts not yet migrated
-    let token = match opaque_login(&api, &email, password_bytes).await {
-        Ok(t) => t,
+    let login_result = match opaque_login(&api, &email, password_bytes).await {
+        Ok(r) => r,
         Err(_opaque_err) => {
-            // Legacy plaintext-password login for pre-OPAQUE accounts
-            let result = api.login(&email, &password).await?;
-            result
-                .get("session_token")
-                .and_then(|v| v.as_str())
-                .ok_or("server did not return a session token")?
-                .to_string()
+            legacy_login(&api, &email, &password).await?
         }
     };
 
-    // Save to config
+    // Save to config (session token + master key)
     let mut config = load_config();
-    config.session_token = Some(token);
+    config.session_token = Some(login_result.token);
     config.email = Some(email.clone());
+    config.master_key = Some(login_result.master_key_b64);
     save_config(&config)?;
 
-    // Fetch region for display
+    // Fetch region for display (use a new client with the saved token)
+    let api = ApiClient::from_config();
     let region = api
         .get_region()
         .await
