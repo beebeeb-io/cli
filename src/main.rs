@@ -62,11 +62,11 @@ enum Commands {
 
     /// Create an encrypted share link
     Share {
-        /// File path or ID to share
-        path: String,
+        /// File ID to share
+        file_id: String,
 
-        /// Link expiry duration (e.g. "24h", "7d")
-        #[arg(long, default_value = "24h")]
+        /// Link expiry in hours (e.g. 24) or duration (e.g. "7d")
+        #[arg(long)]
         expires: Option<String>,
 
         /// Maximum number of times the link can be opened
@@ -76,6 +76,15 @@ enum Commands {
         /// Prompt for a passphrase to protect the link
         #[arg(long)]
         passphrase: bool,
+    },
+
+    /// List all active share links
+    Shares,
+
+    /// Revoke a share link
+    Unshare {
+        /// Share ID to revoke
+        share_id: String,
     },
 
     /// Rotate your master vault key
@@ -96,11 +105,13 @@ async fn main() {
         Commands::Pull { file_id, output } => commands::pull::run(file_id, output).await,
         Commands::Ls { path } => commands::ls::run(path).await,
         Commands::Share {
-            path,
+            file_id,
             expires,
             max_opens,
             passphrase,
-        } => commands::share::run(path, expires, max_opens, passphrase).await,
+        } => commands::share::run(file_id, expires, max_opens, passphrase).await,
+        Commands::Shares => commands::share::list().await,
+        Commands::Unshare { share_id } => commands::share::revoke(share_id).await,
         Commands::Rotate => {
             println!(
                 "  {}",

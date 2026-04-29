@@ -196,6 +196,65 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    /// Create a share link for a file.
+    pub async fn create_share(
+        &self,
+        file_id: &str,
+        expires_in_hours: Option<u64>,
+        max_opens: Option<u32>,
+        passphrase: Option<&str>,
+    ) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let mut body = serde_json::json!({ "file_id": file_id });
+        if let Some(h) = expires_in_hours {
+            body["expires_in_hours"] = serde_json::json!(h);
+        }
+        if let Some(n) = max_opens {
+            body["max_opens"] = serde_json::json!(n);
+        }
+        if let Some(p) = passphrase {
+            body["passphrase"] = serde_json::json!(p);
+        }
+        let resp = self
+            .client
+            .post(self.url("/api/v1/shares"))
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("request failed: {e}"))?;
+
+        parse_response(resp).await
+    }
+
+    /// List the current user's shares.
+    pub async fn list_shares(&self) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .get(self.url("/api/v1/shares/mine"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| format!("request failed: {e}"))?;
+
+        parse_response(resp).await
+    }
+
+    /// Revoke a share by ID.
+    pub async fn delete_share(&self, share_id: &str) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .delete(self.url(&format!("/api/v1/shares/{share_id}")))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| format!("request failed: {e}"))?;
+
+        parse_response(resp).await
+    }
+
     /// Download the raw encrypted bytes for a file.
     pub async fn download_file(&self, file_id: &str) -> Result<Vec<u8>, String> {
         let token = self.require_auth()?;

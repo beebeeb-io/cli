@@ -1,19 +1,40 @@
 use colored::Colorize;
 use std::io::{self, Write};
 
+use crate::api::ApiClient;
+
+/// Parse a human duration like "24h", "7d", "1h" into hours.
+fn parse_hours(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    if let Some(rest) = s.strip_suffix('d') {
+        let days: u64 = rest.parse().map_err(|_| format!("invalid duration: {s}"))?;
+        Ok(days * 24)
+    } else if let Some(rest) = s.strip_suffix('h') {
+        rest.parse().map_err(|_| format!("invalid duration: {s}"))
+    } else {
+        s.parse::<u64>()
+            .map_err(|_| format!("invalid duration: {s} (use e.g. 24h or 7d)"))
+    }
+}
+
+/// `bb share <file_id>` — create a shareable link for a file.
 pub async fn run(
-    path: String,
+    file_id: String,
     expires: Option<String>,
     max_opens: Option<u32>,
     passphrase: bool,
 ) -> Result<(), String> {
+    let api = ApiClient::from_config();
+    api.require_auth()?;
+
     let passphrase_value = if passphrase {
         print!(
             "  {}",
             "? Passphrase (12+ chars, mixed): ".truecolor(245, 184, 0),
         );
         io::stdout().flush().map_err(|e| e.to_string())?;
-        let pass = rpassword::read_password().map_err(|e| format!("failed to read passphrase: {e}"))?;
+        let pass =
+            rpassword::read_password().map_err(|e| format!("failed to read passphrase: {e}"))?;
         if pass.len() < 12 {
             return Err("passphrase must be at least 12 characters".to_string());
         }
@@ -22,18 +43,10 @@ pub async fn run(
         None
     };
 
-    // Generate a mock share link (actual API integration comes later)
-    let link_id = format!(
-        "{}-{}-{}-{}-{}",
-        random_seg(3),
-        random_seg(3),
-        random_seg(3),
-        random_seg(3),
-        random_seg(3),
-    );
-
-    let expires_display = expires.as_deref().unwrap_or("24h");
-    let receipt = format!("bbr_{}", &uuid::Uuid::new_v4().to_string()[..12]);
+    let expires_hours = match &expires {
+        Some(s) => Some(parse_hours(s)?),
+        None => None,
+    };
 
     if passphrase_value.is_some() {
         println!(
@@ -42,21 +55,39 @@ pub async fn run(
         );
     }
 
+    let result = api
+        .create_share(
+            &file_id,
+            expires_hours,
+            max_opens,
+            passphrase_value.as_deref(),
+        )
+        .await?;
+
+    let url = result
+        .get("url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(unknown)");
+    let share_id = result
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(unknown)");
+    let expires_at = result
+        .get("expires_at")
+        .and_then(|v| v.as_str())
+        .unwrap_or("never");
+
     println!();
+    println!("  {}", "Link created".truecolor(143, 193, 139));
     println!(
-        "  {}",
-        "✓ Link created".truecolor(143, 193, 139),
-    );
-    println!(
-        "  {} https://bee.beebeeb.io/s/{}",
+        "  {} {}",
         "url       ".truecolor(106, 101, 91),
-        link_id.truecolor(245, 184, 0),
+        url.truecolor(245, 184, 0),
     );
     println!(
-        "  {} {} {}",
+        "  {} {}",
         "expires   ".truecolor(106, 101, 91),
-        expires_display.truecolor(233, 230, 221),
-        "(from now)".truecolor(106, 101, 91),
+        expires_at.truecolor(233, 230, 221),
     );
     if let Some(max) = max_opens {
         println!(
@@ -67,37 +98,111 @@ pub async fn run(
     }
     println!(
         "  {} {}",
-        "region    ".truecolor(106, 101, 91),
-        "frankfurt (pinned · will not replicate)".truecolor(245, 184, 0),
-    );
-    println!(
-        "  {} {}",
-        "receipt   ".truecolor(106, 101, 91),
-        receipt.truecolor(208, 200, 154),
+        "share-id  ".truecolor(106, 101, 91),
+        share_id.truecolor(208, 200, 154),
     );
     println!();
+    if passphrase_value.is_some() {
+        println!(
+            "  {}",
+            "# send the passphrase by a different channel — we will never see it"
+                .truecolor(125, 138, 106),
+        );
+    }
     println!(
         "  {}",
-        "# send the passphrase by a different channel · we will never see it"
-            .truecolor(125, 138, 106),
+        format!("# revoke anytime:  bb unshare {share_id}").truecolor(125, 138, 106),
     );
-    println!(
-        "  {}",
-        format!("# revoke anytime:  bb revoke {}", &receipt)
-            .truecolor(125, 138, 106),
-    );
-
-    // Suppress unused variable warning — path and passphrase_value will be used
-    // once the share API is implemented.
-    let _ = path;
-    let _ = passphrase_value;
 
     Ok(())
 }
 
-fn random_seg(len: usize) -> String {
-    use rand::Rng;
-    let chars: Vec<char> = "abcdefghjkmnpqrstuvwxyz23456789".chars().collect();
-    let mut rng = rand::thread_rng();
-    (0..len).map(|_| chars[rng.gen_range(0..chars.len())]).collect()
+/// `bb shares` — list all active share links.
+pub async fn list() -> Result<(), String> {
+    let api = ApiClient::from_config();
+    api.require_auth()?;
+
+    let result = api.list_shares().await?;
+
+    let shares = result
+        .as_array()
+        .or_else(|| result.get("shares").and_then(|s| s.as_array()));
+
+    let Some(shares) = shares else {
+        println!(
+            "  {}",
+            "no active shares".truecolor(106, 101, 91),
+        );
+        return Ok(());
+    };
+
+    if shares.is_empty() {
+        println!(
+            "  {}",
+            "no active shares".truecolor(106, 101, 91),
+        );
+        return Ok(());
+    }
+
+    println!(
+        "  {}",
+        format!(
+            "{:<36}  {:<40}  {:<20}  {}",
+            "file", "url", "expires", "opens"
+        )
+        .truecolor(106, 101, 91),
+    );
+
+    for share in shares {
+        let file_name = share
+            .get("file_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(unknown)");
+        let url = share
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("-");
+        let expires = share
+            .get("expires_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("never");
+        let opens = share
+            .get("opens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let max_opens = share
+            .get("max_opens")
+            .and_then(|v| v.as_u64());
+
+        let opens_display = match max_opens {
+            Some(max) => format!("{opens}/{max}"),
+            None => format!("{opens}"),
+        };
+
+        println!(
+            "  {:<36}  {:<40}  {:<20}  {}",
+            file_name.truecolor(208, 200, 154),
+            url.truecolor(245, 184, 0),
+            expires.truecolor(106, 101, 91),
+            opens_display.truecolor(233, 230, 221),
+        );
+    }
+
+    Ok(())
+}
+
+/// `bb unshare <share_id>` — revoke a share link.
+pub async fn revoke(share_id: String) -> Result<(), String> {
+    let api = ApiClient::from_config();
+    api.require_auth()?;
+
+    api.delete_share(&share_id).await?;
+
+    println!(
+        "  {} {}",
+        "Revoked".truecolor(143, 193, 139),
+        format!("· share {share_id} is no longer accessible").truecolor(106, 101, 91),
+    );
+
+    Ok(())
 }
