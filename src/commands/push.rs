@@ -42,9 +42,13 @@ pub async fn run(path: PathBuf, parent_id: Option<String>) -> Result<(), String>
     }
 
     if path.is_dir() {
-        return Err("directory upload is not yet supported; push individual files".to_string());
+        return push_directory(&api, &path, parent_id).await;
     }
 
+    push_single_file(&api, &path, parent_id).await
+}
+
+async fn push_single_file(api: &ApiClient, path: &std::path::Path, parent_id: Option<String>) -> Result<(), String> {
     let file_name = path
         .file_name()
         .and_then(|n| n.to_str())
@@ -198,6 +202,150 @@ fn guess_mime_type(filename: &str) -> Option<String> {
         _ => "application/octet-stream",
     };
     Some(mime.to_string())
+}
+
+async fn push_directory(
+    api: &ApiClient,
+    dir_path: &std::path::Path,
+    parent_id: Option<String>,
+) -> Result<(), String> {
+    let master_key = load_master_key()?;
+    let dir_name = dir_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("folder")
+        .to_string();
+
+    println!(
+        "  {} {}",
+        "scanning".truecolor(143, 193, 139),
+        dir_path.display().to_string().truecolor(233, 230, 221),
+    );
+
+    let mut entries: Vec<(PathBuf, bool)> = Vec::new();
+    collect_entries(dir_path, &mut entries)?;
+
+    let file_count = entries.iter().filter(|(_, is_dir)| !*is_dir).count();
+    let folder_count = entries.iter().filter(|(_, is_dir)| *is_dir).count();
+
+    println!(
+        "  {} {}",
+        "found".truecolor(143, 193, 139),
+        format!("{file_count} files, {folder_count} folders").truecolor(106, 101, 91),
+    );
+
+    let folder_id = uuid::Uuid::new_v4();
+    let folder_key = beebeeb_core::kdf::derive_file_key(&master_key, folder_id.as_bytes());
+    let name_blob = beebeeb_core::encrypt::encrypt_metadata(&folder_key, &dir_name)
+        .map_err(|e| format!("failed to encrypt folder name: {e}"))?;
+    let name_encrypted = serde_json::to_string(&name_blob)
+        .map_err(|e| format!("failed to serialize: {e}"))?;
+
+    let parent_uuid = parent_id
+        .as_deref()
+        .map(|p| p.parse::<uuid::Uuid>())
+        .transpose()
+        .map_err(|e| format!("invalid parent ID: {e}"))?;
+
+    let root_folder = api
+        .create_folder(&name_encrypted, parent_uuid, Some(folder_id))
+        .await?;
+    let root_id: uuid::Uuid = root_folder
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or("missing folder id")?
+        .parse()
+        .map_err(|e| format!("invalid folder id: {e}"))?;
+
+    let mut folder_map: std::collections::HashMap<PathBuf, uuid::Uuid> =
+        std::collections::HashMap::new();
+    folder_map.insert(dir_path.to_path_buf(), root_id);
+
+    let pb = ProgressBar::new(entries.len() as u64);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "  {spinner:.yellow} uploading  {pos}/{len}  {bar:24.yellow/dark_gray}  {msg}",
+        )
+        .unwrap()
+        .progress_chars("---"),
+    );
+
+    for (entry_path, is_dir) in &entries {
+        let entry_parent = entry_path.parent().unwrap_or(dir_path);
+        let entry_parent_id = folder_map.get(entry_parent).copied().unwrap_or(root_id);
+
+        if *is_dir {
+            let name = entry_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("folder");
+
+            let sub_id = uuid::Uuid::new_v4();
+            let sub_key = beebeeb_core::kdf::derive_file_key(&master_key, sub_id.as_bytes());
+            let sub_blob = beebeeb_core::encrypt::encrypt_metadata(&sub_key, name)
+                .map_err(|e| format!("failed to encrypt subfolder name: {e}"))?;
+            let sub_enc = serde_json::to_string(&sub_blob)
+                .map_err(|e| format!("serialize error: {e}"))?;
+
+            let result = api
+                .create_folder(&sub_enc, Some(entry_parent_id), Some(sub_id))
+                .await?;
+            let created_id: uuid::Uuid = result
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing folder id")?
+                .parse()
+                .map_err(|e| format!("invalid id: {e}"))?;
+
+            folder_map.insert(entry_path.clone(), created_id);
+            pb.set_message(format!("folder: {name}"));
+        } else {
+            let name = entry_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("file");
+
+            pb.set_message(name.to_string());
+
+            push_single_file(api, entry_path, Some(entry_parent_id.to_string())).await?;
+        }
+        pb.inc(1);
+    }
+
+    pb.finish_and_clear();
+    println!(
+        "  {} {} {} {}",
+        "OK".truecolor(143, 193, 139),
+        dir_name.truecolor(233, 230, 221),
+        "·".truecolor(106, 101, 91),
+        format!("{file_count} files, {folder_count} folders uploaded").truecolor(106, 101, 91),
+    );
+
+    Ok(())
+}
+
+fn collect_entries(dir: &std::path::Path, entries: &mut Vec<(PathBuf, bool)>) -> Result<(), String> {
+    let read_dir = std::fs::read_dir(dir).map_err(|e| format!("failed to read directory: {e}"))?;
+    let mut sorted: Vec<_> = read_dir
+        .filter_map(|e| e.ok())
+        .collect();
+    sorted.sort_by_key(|e| e.file_name());
+
+    for entry in sorted {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+
+        if path.is_dir() {
+            entries.push((path.clone(), true));
+            collect_entries(&path, entries)?;
+        } else {
+            entries.push((path, false));
+        }
+    }
+    Ok(())
 }
 
 fn format_size(bytes: u64) -> String {

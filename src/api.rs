@@ -255,6 +255,31 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    pub async fn create_folder(
+        &self,
+        name_encrypted: &str,
+        parent_id: Option<uuid::Uuid>,
+        folder_id: Option<uuid::Uuid>,
+    ) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let mut body = serde_json::json!({ "name_encrypted": name_encrypted });
+        if let Some(pid) = parent_id {
+            body["parent_id"] = serde_json::json!(pid);
+        }
+        if let Some(fid) = folder_id {
+            body["folder_id"] = serde_json::json!(fid);
+        }
+        let resp = self
+            .client
+            .post(self.url("/api/v1/files/folder"))
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("request failed: {e}"))?;
+        parse_response(resp).await
+    }
+
     /// Download the raw encrypted bytes for a file.
     pub async fn download_file(&self, file_id: &str) -> Result<Vec<u8>, String> {
         let token = self.require_auth()?;
