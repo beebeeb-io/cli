@@ -4,4 +4,5 @@ pub mod ls;
 pub mod pull;
 pub mod push;
 pub mod share;
+pub mod watch;
 pub mod whoami;

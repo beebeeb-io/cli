@@ -87,6 +87,16 @@ enum Commands {
         share_id: String,
     },
 
+    /// Watch a folder and auto-sync changes to your vault
+    Watch {
+        /// Path to the folder to watch
+        path: PathBuf,
+
+        /// Parent folder ID in the vault
+        #[arg(long)]
+        parent: Option<String>,
+    },
+
     /// Rotate your master vault key
     Rotate,
 
@@ -112,6 +122,7 @@ async fn main() {
         } => commands::share::run(file_id, expires, max_opens, passphrase).await,
         Commands::Shares => commands::share::list().await,
         Commands::Unshare { share_id } => commands::share::revoke(share_id).await,
+        Commands::Watch { path, parent } => commands::watch::run(path, parent).await,
         Commands::Rotate => {
             println!(
                 "  {}",

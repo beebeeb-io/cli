@@ -26,6 +26,8 @@ rpassword = "7"
 hostname = "0.4"
 rand = "0.8"
 base64 = "0.22"
+notify = "7"
+notify-debouncer-full = "0.4"
 
 [patch."https://github.com/beebeeb-io/core"]
 beebeeb-core = { path = "../core/beebeeb-core" }
