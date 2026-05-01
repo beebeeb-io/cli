@@ -62,3 +62,8 @@ coverage/
 ios/Pods/
 android/.gradle/
 android/app/build/
+
+# Playwright MCP captures (logs, snapshots) — ignored repo-wide
+.playwright-mcp/
+test-results/
+playwright-report/
