@@ -34,6 +34,12 @@ enum Commands {
     /// Show current session, device, region, quota
     Whoami,
 
+    /// Show connection status, session health, storage usage
+    Status,
+
+    /// Show current configuration (secrets masked)
+    Config,
+
     /// Upload a file or folder to your vault
     Push {
         /// Path to the file or folder to upload
@@ -111,6 +117,8 @@ async fn main() {
     let result = match cli.command {
         Commands::Login => commands::login::run().await,
         Commands::Whoami => commands::whoami::run().await,
+        Commands::Status => commands::status::run().await,
+        Commands::Config => commands::config::run().await,
         Commands::Push { path, parent } => commands::push::run(path, parent).await,
         Commands::Pull { file_id, output } => commands::pull::run(file_id, output).await,
         Commands::Ls { path } => commands::ls::run(path).await,

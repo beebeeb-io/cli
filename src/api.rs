@@ -255,6 +255,32 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    pub async fn get_usage(&self) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .get(self.url("/api/v1/files/usage"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| format!("request failed: {e}"))?;
+
+        parse_response(resp).await
+    }
+
+    pub async fn get_sessions(&self) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .get(self.url("/api/v1/auth/sessions"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| format!("request failed: {e}"))?;
+
+        parse_response(resp).await
+    }
+
     pub async fn create_folder(
         &self,
         name_encrypted: &str,
