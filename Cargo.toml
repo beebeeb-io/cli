@@ -19,7 +19,7 @@ reqwest = { version = "0.12", features = ["json", "multipart"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 indicatif = "0.17"
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 colored = "3"
 dirs = "6"
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -29,6 +29,7 @@ rand = "0.8"
 base64 = "0.22"
 notify = "7"
 notify-debouncer-full = "0.4"
+walkdir = "2"
 
 [patch."https://github.com/beebeeb-io/core"]
 beebeeb-core = { path = "../core/beebeeb-core" }

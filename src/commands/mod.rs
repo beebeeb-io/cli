@@ -6,5 +6,6 @@ pub mod pull;
 pub mod push;
 pub mod share;
 pub mod status;
+pub mod sync;
 pub mod watch;
 pub mod whoami;

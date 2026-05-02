@@ -306,6 +306,20 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    /// Soft-delete (trash) a file by ID.
+    pub async fn trash_file(&self, file_id: &str) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .delete(self.url(&format!("/api/v1/files/{file_id}")))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| format!("request failed: {e}"))?;
+
+        parse_response(resp).await
+    }
+
     /// Download the raw encrypted bytes for a file.
     pub async fn download_file(&self, file_id: &str) -> Result<Vec<u8>, String> {
         let token = self.require_auth()?;

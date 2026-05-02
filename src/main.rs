@@ -103,6 +103,27 @@ enum Commands {
         parent: Option<String>,
     },
 
+    /// Bidirectionally sync a local folder with a remote vault path
+    Sync {
+        /// Local directory to sync
+        local_dir: PathBuf,
+
+        /// Remote vault path (e.g. "/Documents"). If omitted, uses path stored in .bb-sync.json.
+        remote_path: Option<String>,
+
+        /// Show what would change without making any modifications
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Overwrite conflicts with the local copy (local wins)
+        #[arg(long)]
+        force: bool,
+
+        /// Trash remote files that no longer exist locally (use with care)
+        #[arg(long)]
+        delete: bool,
+    },
+
     /// Rotate your master vault key
     Rotate,
 
@@ -131,6 +152,13 @@ async fn main() {
         Commands::Shares => commands::share::list().await,
         Commands::Unshare { share_id } => commands::share::revoke(share_id).await,
         Commands::Watch { path, parent } => commands::watch::run(path, parent).await,
+        Commands::Sync {
+            local_dir,
+            remote_path,
+            dry_run,
+            force,
+            delete,
+        } => commands::sync::run(local_dir, remote_path, dry_run, force, delete).await,
         Commands::Rotate => {
             println!(
                 "  {}",
