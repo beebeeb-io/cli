@@ -90,6 +90,10 @@ enum Commands {
         /// Prompt for a passphrase to protect the link
         #[arg(long)]
         passphrase: bool,
+
+        /// Double-encrypt: client wraps file key so server cannot decrypt
+        #[arg(long)]
+        double_encrypted: bool,
     },
 
     /// List all active share links
@@ -213,7 +217,8 @@ async fn main() {
             expires,
             max_opens,
             passphrase,
-        } => commands::share::run(file_id, expires, max_opens, passphrase).await,
+            double_encrypted,
+        } => commands::share::run(file_id, expires, max_opens, passphrase, double_encrypted).await,
         Commands::Shares => commands::share::list().await,
         Commands::Unshare { share_id } => commands::share::revoke(share_id).await,
         Commands::Watch { path, parent } => commands::watch::run(path, parent).await,

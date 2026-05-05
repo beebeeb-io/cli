@@ -197,12 +197,17 @@ impl ApiClient {
     }
 
     /// Create a share link for a file.
+    ///
+    /// `wrapped_file_key` — if provided, enables double-encrypted mode where
+    /// the server stores an opaque blob it cannot unwrap. The client key K_c
+    /// used to produce this blob goes in the URL fragment.
     pub async fn create_share(
         &self,
         file_id: &str,
         expires_in_hours: Option<u64>,
         max_opens: Option<u32>,
         passphrase: Option<&str>,
+        wrapped_file_key: Option<String>,
     ) -> Result<Value, String> {
         let token = self.require_auth()?;
         let mut body = serde_json::json!({ "file_id": file_id });
@@ -214,6 +219,9 @@ impl ApiClient {
         }
         if let Some(p) = passphrase {
             body["passphrase"] = serde_json::json!(p);
+        }
+        if let Some(wfk) = wrapped_file_key {
+            body["wrapped_file_key"] = serde_json::json!(wfk);
         }
         let resp = self
             .client
