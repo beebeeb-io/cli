@@ -26,6 +26,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use uuid::Uuid;
 
 use axum::body::Body;
 use axum::extract::{Request, State};
@@ -57,6 +58,26 @@ struct CachedDir {
 
 /// Global directory-listing cache keyed by parent path (e.g. `"/"`, `"/Documents"`).
 type DirCache = Mutex<HashMap<String, CachedDir>>;
+
+// ─── Lock store ──────────────────────────────────────────────────────────────
+
+/// An active WebDAV lock.  Stubs only — no distributed coordination.
+/// Exists solely to satisfy Finder/LibreOffice lock expectations.
+#[derive(Clone)]
+struct LockEntry {
+    /// `urn:uuid:<UUID>` token that the client echoes back on writes.
+    token: String,
+    /// Lock owner string (from the request XML, for display only).
+    #[allow(dead_code)]
+    owner: String,
+    /// Whether the lock is exclusive (true) or shared (false).
+    exclusive: bool,
+    /// When the lock expires (Instant).
+    expires_at: Instant,
+}
+
+/// Lock store: path → active lock.
+type LockStore = Mutex<HashMap<String, LockEntry>>;
 
 // ─── CLI entry point ─────────────────────────────────────────────────────────
 
@@ -95,6 +116,7 @@ pub async fn run(port: u16, read_only: bool, cache_ttl: u64, no_cache: bool) -> 
         read_only,
         dir_cache: Mutex::new(HashMap::new()),
         cache_ttl: effective_ttl,
+        locks: Mutex::new(HashMap::new()),
     });
 
     let router = Router::new()
@@ -153,6 +175,8 @@ struct DavState {
     dir_cache: DirCache,
     /// Zero duration = caching disabled.
     cache_ttl: Duration,
+    /// In-memory WebDAV lock store (stub — single-instance only).
+    locks: LockStore,
 }
 
 // ─── Request dispatcher ───────────────────────────────────────────────────────
@@ -176,6 +200,12 @@ async fn handle_webdav(
         return (StatusCode::METHOD_NOT_ALLOWED, "read-only mode — use bb webdav without --read-only").into_response();
     }
 
+    // Extract the If: (<token>) header once (used by PUT/DELETE to verify locks)
+    let if_token = headers
+        .get("if")
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_if_token);
+
     match method {
         Method::OPTIONS => options_response(&state),
         ref m if m.as_str() == "PROPFIND" => {
@@ -192,6 +222,10 @@ async fn handle_webdav(
                 .get("if-match")
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string());
+            // Verify lock if the path is locked and client provides a token
+            if let Err(r) = check_lock(&state, &path, if_token.as_deref()).await {
+                return r;
+            }
             let body_bytes = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
                 Ok(b) => b.to_vec(),
                 Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
@@ -203,6 +237,9 @@ async fn handle_webdav(
                 .get("if-match")
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string());
+            if let Err(r) = check_lock(&state, &path, if_token.as_deref()).await {
+                return r;
+            }
             delete_response(&state, &path, if_match.as_deref()).await
         }
         ref m if m.as_str() == "MKCOL" => mkcol_response(&state, &path).await,
@@ -214,6 +251,22 @@ async fn handle_webdav(
                 .to_string();
             move_response(&state, &path, &destination).await
         }
+        ref m if m.as_str() == "LOCK" => {
+            let timeout_secs = parse_timeout_header(&headers);
+            let body_bytes = axum::body::to_bytes(req.into_body(), 64 * 1024)
+                .await
+                .map(|b| b.to_vec())
+                .unwrap_or_default();
+            lock_response(&state, &path, &body_bytes, timeout_secs).await
+        }
+        ref m if m.as_str() == "UNLOCK" => {
+            let lock_token = headers
+                .get("lock-token")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            unlock_response(&state, &path, &lock_token).await
+        }
         _ => (StatusCode::METHOD_NOT_ALLOWED, "").into_response(),
     }
 }
@@ -222,13 +275,16 @@ async fn handle_webdav(
 
 fn options_response(state: &DavState) -> Response {
     let mut headers = HeaderMap::new();
+    // DAV: 1, 2 — class 2 requires LOCK/UNLOCK, which we stub
     headers.insert("DAV", "1, 2".parse().unwrap());
     let allow = if state.read_only {
-        "OPTIONS, GET, HEAD, PROPFIND"
+        "OPTIONS, GET, HEAD, PROPFIND, LOCK, UNLOCK"
     } else {
-        "OPTIONS, GET, HEAD, PROPFIND, PUT, DELETE, MKCOL, MOVE"
+        "OPTIONS, GET, HEAD, PROPFIND, PUT, DELETE, MKCOL, MOVE, LOCK, UNLOCK"
     };
     headers.insert("Allow", allow.parse().unwrap());
+    // MS-Author-Via tells some clients (Office, SharePoint) this is WebDAV
+    headers.insert("MS-Author-Via", "DAV".parse().unwrap());
     (StatusCode::OK, headers, "").into_response()
 }
 
@@ -775,6 +831,151 @@ async fn move_response(state: &Arc<DavState>, src_path: &str, destination: &str)
             (StatusCode::CREATED, "").into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+// ─── LOCK ─────────────────────────────────────────────────────────────────────
+
+/// Parse the lock scope from the LOCK request XML body.
+/// Returns `(exclusive, owner_string)` — tolerant of malformed bodies.
+fn parse_lock_body(body: &[u8]) -> (bool, String) {
+    let text = std::str::from_utf8(body).unwrap_or("");
+    // Extract exclusivity from the XML (simple string search — no full XML parse)
+    let exclusive = !text.contains("shared");
+    // Try to extract owner from <D:owner><D:href>...</D:href></D:owner>
+    let owner = if let Some(start) = text.find("<D:href>") {
+        let after = &text[start + 8..];
+        if let Some(end) = after.find("</D:href>") {
+            after[..end].trim().to_string()
+        } else {
+            "unknown".to_string()
+        }
+    } else if text.contains("owner") {
+        "client".to_string()
+    } else {
+        "client".to_string()
+    };
+    (exclusive, owner)
+}
+
+/// Parse `Timeout: Second-N` or `Timeout: Infinite` header.
+fn parse_timeout_header(headers: &HeaderMap) -> u64 {
+    headers
+        .get("timeout")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| {
+            if s.starts_with("Second-") {
+                s[7..].parse::<u64>().ok()
+            } else {
+                None // Infinite → use default
+            }
+        })
+        .unwrap_or(300) // 5 minutes default
+}
+
+/// Parse `If: (<urn:uuid:TOKEN>)` header and return the raw token string.
+fn parse_if_token(if_header: &str) -> Option<String> {
+    // Format: (<urn:uuid:...>) or (<urn:uuid:...> [etag])
+    let inner = if_header.trim().trim_start_matches('(').trim_end_matches(')');
+    if inner.is_empty() {
+        return None;
+    }
+    // Take the first bracketed token
+    let token = inner.split_whitespace().next()?;
+    Some(token.trim_matches(|c: char| c == '<' || c == '>').to_string())
+}
+
+/// LOCK /path — issue a synthetic lock token.
+async fn lock_response(state: &Arc<DavState>, path: &str, body: &[u8], timeout_secs: u64) -> Response {
+    let (exclusive, owner) = parse_lock_body(body);
+    let token_uuid = Uuid::new_v4();
+    let token = format!("urn:uuid:{token_uuid}");
+    let scope_label = if exclusive { "exclusive" } else { "shared" };
+
+    // Clean up expired locks lazily
+    {
+        let mut locks = state.locks.lock().await;
+        locks.retain(|_, v| v.expires_at > Instant::now());
+        // Check for conflict: existing exclusive lock on same path
+        if let Some(existing) = locks.get(path) {
+            if existing.expires_at > Instant::now() && existing.exclusive {
+                return (StatusCode::LOCKED, "resource is already exclusively locked").into_response();
+            }
+        }
+        locks.insert(path.to_string(), LockEntry {
+            token: token.clone(),
+            owner: owner.clone(),
+            exclusive,
+            expires_at: Instant::now() + Duration::from_secs(timeout_secs),
+        });
+    }
+
+    let href = xml_escape(path);
+    let owner_escaped = xml_escape(&owner);
+    let body = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <D:prop xmlns:D=\"DAV:\">\n\
+           <D:lockdiscovery>\n\
+             <D:activelock>\n\
+               <D:locktype><D:write/></D:locktype>\n\
+               <D:lockscope><D:{scope_label}/></D:lockscope>\n\
+               <D:depth>0</D:depth>\n\
+               <D:owner><D:href>{owner_escaped}</D:href></D:owner>\n\
+               <D:timeout>Second-{timeout_secs}</D:timeout>\n\
+               <D:locktoken><D:href>{token}</D:href></D:locktoken>\n\
+               <D:lockroot><D:href>{href}</D:href></D:lockroot>\n\
+             </D:activelock>\n\
+           </D:lockdiscovery>\n\
+         </D:prop>"
+    );
+
+    let lock_token_header = format!("<{token}>");
+    let mut headers = HeaderMap::new();
+    headers.insert("Content-Type", "application/xml; charset=utf-8".parse().unwrap());
+    headers.insert("Lock-Token", lock_token_header.parse().unwrap_or_else(|_| "".parse().unwrap()));
+    (StatusCode::OK, headers, body).into_response()
+}
+
+/// UNLOCK /path — remove the lock identified by the Lock-Token header.
+async fn unlock_response(state: &Arc<DavState>, path: &str, lock_token_header: &str) -> Response {
+    // Extract the URN from the angle-bracket wrapper: <urn:uuid:...>
+    let token = lock_token_header.trim().trim_matches(|c| c == '<' || c == '>');
+
+    let mut locks = state.locks.lock().await;
+    if let Some(entry) = locks.get(path) {
+        if entry.token == token {
+            locks.remove(path);
+            return (StatusCode::NO_CONTENT, "").into_response();
+        }
+        // Token mismatch — still return 204 (permissive stub)
+    }
+    // Lock not found — return 204 anyway (idempotent)
+    (StatusCode::NO_CONTENT, "").into_response()
+}
+
+/// Verify that a locked resource's token matches what the client provided.
+///
+/// If the resource is not locked, the request proceeds normally (no lock needed).
+/// If the resource IS locked and the client provides no/wrong token → 423 Locked.
+/// If the resource IS locked and the client provides the correct token → OK.
+///
+/// This is permissive: if the lock has expired, we treat it as unlocked.
+async fn check_lock(state: &Arc<DavState>, path: &str, client_token: Option<&str>) -> Result<(), Response> {
+    let mut locks = state.locks.lock().await;
+    let entry = match locks.get(path) {
+        Some(e) => e.clone(),
+        None => return Ok(()), // not locked
+    };
+
+    if entry.expires_at <= Instant::now() {
+        locks.remove(path); // expired
+        return Ok(());
+    }
+
+    match client_token {
+        Some(tok) if tok == entry.token => Ok(()),
+        Some(_) => Err((StatusCode::LOCKED, "lock token mismatch").into_response()),
+        None => Err((StatusCode::LOCKED, "resource is locked — provide If: (<token>) header").into_response()),
     }
 }
 
