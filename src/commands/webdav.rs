@@ -1,42 +1,31 @@
 //! `bb webdav` — serve the Beebeeb vault as a local WebDAV server.
 //!
-//! # Implemented (Day 1-3)
+//! # Implemented (Day 1-5)
 //!
 //! Read:
 //! - `OPTIONS /` → announces WebDAV class 1 compliance
-//! - `PROPFIND /[path]` + `Depth: 0|1` → list files with decrypted names
-//! - `GET /[path]` → download + decrypt → plaintext response
-//! - `HEAD /[path]` → Content-Length
+//! - `PROPFIND /[path]` + `Depth: 0|1` → list files with decrypted names + ETags
+//! - `GET /[path]` → download + decrypt → plaintext; handles If-None-Match, If-Modified-Since
+//! - `HEAD /[path]` → Content-Length + ETag + Last-Modified
 //!
 //! Write (disabled by `--read-only`):
-//! - `PUT /[path]` → encrypt + upload (replaces existing if path exists)
+//! - `PUT /[path]` → encrypt + upload; handles If-Match optimistic lock
 //! - `MKCOL /[path]` → create encrypted folder
-//! - `DELETE /[path]` → soft-delete (trash)
+//! - `DELETE /[path]` → soft-delete (trash); handles If-Match
 //! - `MOVE /[src]` + `Destination:` header → rename or reparent
 //!
-//! # Planned (Day 4-6)
+//! Performance:
+//! - `DirCache` — in-memory TTL cache (default 30s) keyed by parent path
+//! - Write ops invalidate affected directory cache entries
+//! - `--no-cache` disables caching; `--cache-ttl N` configures TTL
+//!
+//! # Planned (Day 6)
 //!
 //! - LOCK/UNLOCK stubs (Finder requires before writing)
-//! - Path cache (avoid re-listing on every PROPFIND)
-//! - Depth: infinity PROPFIND
-//!
-//! # Architecture
-//!
-//! ```
-//! WebDAV client (Finder/rclone/Cyberduck)
-//!        │  HTTP/WebDAV on localhost:7878
-//!        ▼
-//!  bb webdav handler (this module)
-//!        │  reqwest + session token
-//!        ▼
-//!  Beebeeb API  ─►  decrypt with master_key
-//! ```
-//!
-//! Path resolution walks the vault tree on every request — no cache yet.
-//! Each path segment is decrypted and matched against folder names so
-//! `/Documents/2025/report.pdf` resolves to the file UUID correctly.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::{Request, State};
@@ -47,6 +36,7 @@ use axum::routing::any;
 use base64::Engine as _;
 use beebeeb_types::EncryptedBlob;
 use colored::Colorize;
+use tokio::sync::Mutex;
 
 use crate::api::ApiClient;
 use crate::config::load_config;
@@ -54,9 +44,23 @@ use crate::config::load_config;
 /// 4 MiB chunk size for WebDAV uploads.
 const CHUNK_SIZE: usize = 4 * 1024 * 1024;
 
+// ─── Directory cache ─────────────────────────────────────────────────────────
+
+/// One cached directory listing.
+#[derive(Clone)]
+struct CachedDir {
+    /// Decoded + decrypted entries for this directory.
+    children: Vec<ResolvedEntry>,
+    /// When this entry was populated.
+    cached_at: Instant,
+}
+
+/// Global directory-listing cache keyed by parent path (e.g. `"/"`, `"/Documents"`).
+type DirCache = Mutex<HashMap<String, CachedDir>>;
+
 // ─── CLI entry point ─────────────────────────────────────────────────────────
 
-pub async fn run(port: u16, read_only: bool) -> Result<(), String> {
+pub async fn run(port: u16, read_only: bool, cache_ttl: u64, no_cache: bool) -> Result<(), String> {
     let config = load_config();
 
     if config.session_token.is_none() {
@@ -79,10 +83,18 @@ pub async fn run(port: u16, read_only: bool) -> Result<(), String> {
     arr.copy_from_slice(&mk_bytes);
     let master_key = beebeeb_core::kdf::MasterKey::from_bytes(arr);
 
+    let effective_ttl = if no_cache || cache_ttl == 0 {
+        Duration::ZERO
+    } else {
+        Duration::from_secs(cache_ttl)
+    };
+
     let state = Arc::new(DavState {
         api: ApiClient::from_config(),
         master_key,
         read_only,
+        dir_cache: Mutex::new(HashMap::new()),
+        cache_ttl: effective_ttl,
     });
 
     let router = Router::new()
@@ -96,6 +108,11 @@ pub async fn run(port: u16, read_only: bool) -> Result<(), String> {
         .map_err(|e| format!("failed to bind {addr}: {e}"))?;
 
     let ro_label = if read_only { " read-only" } else { " read-write" };
+    let cache_label = if no_cache || cache_ttl == 0 {
+        "disabled".to_string()
+    } else {
+        format!("{cache_ttl}s TTL")
+    };
     println!(
         "\n  {} {}",
         "◆".truecolor(212, 168, 67),
@@ -105,6 +122,11 @@ pub async fn run(port: u16, read_only: bool) -> Result<(), String> {
         "  {}  {}",
         "url".truecolor(106, 101, 91),
         format!("http://localhost:{port}").truecolor(245, 184, 0),
+    );
+    println!(
+        "  {}  {}",
+        "cache".truecolor(106, 101, 91),
+        cache_label.truecolor(106, 101, 91),
     );
     println!(
         "  {}",
@@ -128,6 +150,9 @@ struct DavState {
     api: ApiClient,
     master_key: beebeeb_core::kdf::MasterKey,
     read_only: bool,
+    dir_cache: DirCache,
+    /// Zero duration = caching disabled.
+    cache_ttl: Duration,
 }
 
 // ─── Request dispatcher ───────────────────────────────────────────────────────
@@ -160,16 +185,26 @@ async fn handle_webdav(
                 .unwrap_or("1");
             propfind_response(&state, &path, depth).await
         }
-        Method::GET => get_response(&state, &path).await,
+        Method::GET => get_response(&state, &path, &headers).await,
         Method::HEAD => head_response(&state, &path).await,
         Method::PUT => {
+            let if_match = headers
+                .get("if-match")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
             let body_bytes = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
                 Ok(b) => b.to_vec(),
                 Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
             };
-            put_response(&state, &path, body_bytes).await
+            put_response(&state, &path, body_bytes, if_match.as_deref()).await
         }
-        Method::DELETE => delete_response(&state, &path).await,
+        Method::DELETE => {
+            let if_match = headers
+                .get("if-match")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            delete_response(&state, &path, if_match.as_deref()).await
+        }
         ref m if m.as_str() == "MKCOL" => mkcol_response(&state, &path).await,
         ref m if m.as_str() == "MOVE" => {
             let destination = headers
@@ -217,26 +252,41 @@ async fn propfind_response(state: &Arc<DavState>, path: &str, depth: &str) -> Re
     // For Depth: 1 on a collection, also list children
     if depth == "1" && resolved.is_collection {
         let parent_id = resolved.file_id.as_deref();
-        match state.api.list_files(parent_id).await {
-            Ok(resp) => {
-                let files = resp
-                    .get("files")
-                    .and_then(|f| f.as_array())
-                    .cloned()
-                    .unwrap_or_default();
+        let cache_key = normalise_cache_key(path);
 
-                for file in &files {
-                    if let Some(entry) = decode_file_entry(file, &state.master_key, path) {
-                        xml_entries.push(prop_entry(
-                            &child_href(path, &entry.display_name, entry.is_collection),
-                            &entry,
-                        ));
-                    }
+        // Try to serve from cache
+        let cached_children = get_from_cache(state, &cache_key).await;
+
+        let children = if let Some(entries) = cached_children {
+            entries
+        } else {
+            // Cache miss — fetch from API and populate
+            let entries = match state.api.list_files(parent_id).await {
+                Ok(resp) => {
+                    let files = resp
+                        .get("files")
+                        .and_then(|f| f.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    files
+                        .iter()
+                        .filter_map(|f| decode_file_entry(f, &state.master_key, path))
+                        .collect::<Vec<_>>()
                 }
-            }
-            Err(e) => {
-                eprintln!("  PROPFIND list error: {e}");
-            }
+                Err(e) => {
+                    eprintln!("  PROPFIND list error: {e}");
+                    vec![]
+                }
+            };
+            store_in_cache(state, cache_key, entries.clone()).await;
+            entries
+        };
+
+        for entry in &children {
+            xml_entries.push(prop_entry(
+                &child_href(path, &entry.display_name, entry.is_collection),
+                entry,
+            ));
         }
     }
 
@@ -255,7 +305,7 @@ async fn propfind_response(state: &Arc<DavState>, path: &str, depth: &str) -> Re
 
 // ─── GET ─────────────────────────────────────────────────────────────────────
 
-async fn get_response(state: &Arc<DavState>, path: &str) -> Response {
+async fn get_response(state: &Arc<DavState>, path: &str, req_headers: &HeaderMap) -> Response {
     let resolved = match resolve_path(state, path).await {
         Ok(r) => r,
         Err(e) => return (StatusCode::NOT_FOUND, e).into_response(),
@@ -269,6 +319,35 @@ async fn get_response(state: &Arc<DavState>, path: &str) -> Response {
         Some(id) => id.clone(),
         None => return (StatusCode::NOT_FOUND, "no file id").into_response(),
     };
+
+    // Build ETag and conditional-request headers
+    let etag = make_etag(&file_id, resolved.modified.as_deref());
+
+    // If-None-Match (for GET caching by client)
+    if let Some(inm) = req_headers.get("if-none-match").and_then(|v| v.to_str().ok()) {
+        if inm == etag || inm == "*" {
+            let mut h = HeaderMap::new();
+            h.insert("ETag", etag.parse().unwrap());
+            return (StatusCode::NOT_MODIFIED, h, "").into_response();
+        }
+    }
+
+    // If-Modified-Since (RFC 7232)
+    let modified_dt = resolved
+        .modified
+        .as_deref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
+    if let Some(ims_val) = req_headers.get("if-modified-since").and_then(|v| v.to_str().ok()) {
+        if let Some(ref mdt) = modified_dt {
+            if let Ok(ims_dt) = chrono::DateTime::parse_from_rfc2822(ims_val) {
+                if mdt <= &ims_dt {
+                    let mut h = HeaderMap::new();
+                    h.insert("ETag", etag.parse().unwrap());
+                    return (StatusCode::NOT_MODIFIED, h, "").into_response();
+                }
+            }
+        }
+    }
 
     // Download encrypted bytes
     let encrypted_bytes = match state.api.download_file(&file_id).await {
@@ -289,15 +368,23 @@ async fn get_response(state: &Arc<DavState>, path: &str) -> Response {
     };
 
     let mut headers = HeaderMap::new();
-    if let Some(mime) = guess_mime(&resolved.display_name) {
-        headers.insert("Content-Type", mime.parse().unwrap_or_else(|_| "application/octet-stream".parse().unwrap()));
+    let mime = resolve_mime(&resolved.display_name);
+    if let Ok(hv) = mime.parse() {
+        headers.insert("Content-Type", hv);
     }
     headers.insert("Content-Length", plaintext.len().to_string().parse().unwrap());
+    headers.insert("ETag", etag.parse().unwrap_or_else(|_| "\"\"".parse().unwrap()));
+    if let Some(ref mdt) = modified_dt {
+        let lm = mdt.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+        if let Ok(hv) = lm.parse() {
+            headers.insert("Last-Modified", hv);
+        }
+    }
     headers.insert(
         "Content-Disposition",
-        format!("attachment; filename=\"{}\"", resolved.display_name)
+        format!("inline; filename=\"{}\"", resolved.display_name)
             .parse()
-            .unwrap_or_else(|_| "attachment".parse().unwrap()),
+            .unwrap_or_else(|_| "inline".parse().unwrap()),
     );
 
     (StatusCode::OK, headers, Body::from(plaintext)).into_response()
@@ -311,11 +398,23 @@ async fn head_response(state: &Arc<DavState>, path: &str) -> Response {
         Err(e) => return (StatusCode::NOT_FOUND, e).into_response(),
     };
 
-    let size_str = resolved.size_bytes.unwrap_or(0).to_string();
+    let file_id = resolved.file_id.as_deref().unwrap_or("");
+    let etag = make_etag(file_id, resolved.modified.as_deref());
+
     let mut headers = HeaderMap::new();
-    headers.insert("Content-Length", size_str.parse().unwrap());
-    if let Some(mime) = guess_mime(&resolved.display_name) {
-        headers.insert("Content-Type", mime.parse().unwrap_or_else(|_| "application/octet-stream".parse().unwrap()));
+    headers.insert("Content-Length", resolved.size_bytes.unwrap_or(0).to_string().parse().unwrap());
+    let mime = resolve_mime(&resolved.display_name);
+    if let Ok(hv) = mime.parse() {
+        headers.insert("Content-Type", hv);
+    }
+    headers.insert("ETag", etag.parse().unwrap_or_else(|_| "\"\"".parse().unwrap()));
+    if let Some(ref m) = resolved.modified {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(m) {
+            let lm = dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+            if let Ok(hv) = lm.parse() {
+                headers.insert("Last-Modified", hv);
+            }
+        }
     }
 
     (StatusCode::OK, headers, "").into_response()
@@ -323,7 +422,7 @@ async fn head_response(state: &Arc<DavState>, path: &str) -> Response {
 
 // ─── PUT (upload / overwrite) ─────────────────────────────────────────────────
 
-async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>) -> Response {
+async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match: Option<&str>) -> Response {
     // Derive filename from the last path segment
     let filename = path
         .trim_end_matches('/')
@@ -359,12 +458,23 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>) -> Respo
         }
     };
 
-    // Check if a file already exists at this path — if so, trash it first (overwrite)
+    // Check if a file already exists at this path — handles overwrite + If-Match
     if let Ok(existing) = resolve_path(state, path).await {
         if let Some(ref eid) = existing.file_id {
+            // If-Match precondition: client must supply current ETag
+            if let Some(im) = if_match {
+                let current_etag = make_etag(eid, existing.modified.as_deref());
+                if im != "*" && im != current_etag {
+                    return (StatusCode::PRECONDITION_FAILED, "ETag mismatch").into_response();
+                }
+            }
             let _ = state.api.trash_file(eid).await;
         }
     }
+
+    // Invalidate parent directory cache so the new file appears immediately
+    let parent_cache_key = normalise_cache_key(parent_path);
+    invalidate_cache(state, &parent_cache_key).await;
 
     // Generate a new file UUID and derive the file key
     let file_uuid = uuid::Uuid::new_v4();
@@ -498,6 +608,8 @@ async fn mkcol_response(state: &Arc<DavState>, path: &str) -> Response {
         .await
     {
         Ok(_) => {
+            // Invalidate parent directory cache
+            invalidate_cache(state, &normalise_cache_key(parent_path)).await;
             let mut headers = HeaderMap::new();
             headers.insert("Location", path.parse().unwrap_or_else(|_| "/".parse().unwrap()));
             (StatusCode::CREATED, headers, "").into_response()
@@ -508,7 +620,7 @@ async fn mkcol_response(state: &Arc<DavState>, path: &str) -> Response {
 
 // ─── DELETE (soft-delete / trash) ────────────────────────────────────────────
 
-async fn delete_response(state: &Arc<DavState>, path: &str) -> Response {
+async fn delete_response(state: &Arc<DavState>, path: &str, if_match: Option<&str>) -> Response {
     let resolved = match resolve_path(state, path).await {
         Ok(r) => r,
         Err(e) => return (StatusCode::NOT_FOUND, e).into_response(),
@@ -518,6 +630,18 @@ async fn delete_response(state: &Arc<DavState>, path: &str) -> Response {
         Some(id) => id.clone(),
         None => return (StatusCode::METHOD_NOT_ALLOWED, "cannot delete root").into_response(),
     };
+
+    // If-Match precondition check
+    if let Some(im) = if_match {
+        let current_etag = make_etag(&file_id, resolved.modified.as_deref());
+        if im != "*" && im != current_etag {
+            return (StatusCode::PRECONDITION_FAILED, "ETag mismatch").into_response();
+        }
+    }
+
+    // Invalidate parent directory in cache
+    let parent_path = parent_of(path);
+    invalidate_cache(state, &normalise_cache_key(parent_path)).await;
 
     match state.api.trash_file(&file_id).await {
         Ok(_) => (StatusCode::NO_CONTENT, "").into_response(),
@@ -644,14 +768,80 @@ async fn move_response(state: &Arc<DavState>, src_path: &str, destination: &str)
         )
         .await
     {
-        Ok(_) => (StatusCode::CREATED, "").into_response(),
+        Ok(_) => {
+            // Invalidate both source and destination parent directories
+            invalidate_cache(state, &normalise_cache_key(src_parent_path)).await;
+            invalidate_cache(state, &normalise_cache_key(dst_parent_path)).await;
+            (StatusCode::CREATED, "").into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+// ─── Path cache helpers ───────────────────────────────────────────────────────
+
+fn normalise_cache_key(path: &str) -> String {
+    let t = path.trim_end_matches('/');
+    if t.is_empty() { "/".to_string() } else { t.to_string() }
+}
+
+fn parent_of(path: &str) -> &str {
+    let trimmed = path.trim_end_matches('/');
+    match trimmed.rfind('/') {
+        Some(i) if i == 0 => "/",
+        Some(i) => &trimmed[..i],
+        None => "/",
+    }
+}
+
+async fn get_from_cache(state: &DavState, key: &str) -> Option<Vec<ResolvedEntry>> {
+    if state.cache_ttl.is_zero() {
+        return None;
+    }
+    let cache = state.dir_cache.lock().await;
+    if let Some(entry) = cache.get(key) {
+        if entry.cached_at.elapsed() < state.cache_ttl {
+            return Some(entry.children.clone());
+        }
+    }
+    None
+}
+
+async fn store_in_cache(state: &DavState, key: String, children: Vec<ResolvedEntry>) {
+    if state.cache_ttl.is_zero() {
+        return;
+    }
+    let mut cache = state.dir_cache.lock().await;
+    cache.insert(key, CachedDir { children, cached_at: Instant::now() });
+}
+
+async fn invalidate_cache(state: &DavState, key: &str) {
+    let mut cache = state.dir_cache.lock().await;
+    cache.remove(key);
+}
+
+// ─── ETag helpers ─────────────────────────────────────────────────────────────
+
+/// Produce a quoted ETag string for a file.
+///
+/// Format: `"<file_id>-<modified_epoch>"` — changes on every overwrite
+/// (new file_id) and also when modified_at changes.
+fn make_etag(file_id: &str, modified: Option<&str>) -> String {
+    let suffix = modified
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.timestamp().to_string())
+        .unwrap_or_default();
+    if suffix.is_empty() {
+        format!("\"{file_id}\"")
+    } else {
+        format!("\"{file_id}-{suffix}\"")
     }
 }
 
 // ─── Path resolution ─────────────────────────────────────────────────────────
 
 /// A resolved vault entry (file or collection).
+#[derive(Clone)]
 struct ResolvedEntry {
     file_id: Option<String>,
     display_name: String,
@@ -848,6 +1038,24 @@ fn prop_entry(href: &str, entry: &ResolvedEntry) -> String {
         })
         .unwrap_or_default();
 
+    // ETag for PROPFIND responses (helps clients detect modifications)
+    let etag_prop = entry
+        .file_id
+        .as_deref()
+        .map(|fid| {
+            let etag = make_etag(fid, entry.modified.as_deref());
+            format!("<D:getetag>{}</D:getetag>", xml_escape(&etag))
+        })
+        .unwrap_or_default();
+
+    // Content-Type for non-folders
+    let content_type = if !entry.is_collection {
+        let mime = resolve_mime(&entry.display_name);
+        format!("<D:getcontenttype>{mime}</D:getcontenttype>")
+    } else {
+        "<D:getcontenttype>httpd/unix-directory</D:getcontenttype>".to_string()
+    };
+
     let href_escaped = xml_escape(href);
 
     format!(
@@ -859,6 +1067,8 @@ fn prop_entry(href: &str, entry: &ResolvedEntry) -> String {
                  {resource_type}\n\
                  {content_length}\n\
                  {last_modified}\n\
+                 {etag_prop}\n\
+                 {content_type}\n\
                </D:prop>\n\
                <D:status>HTTP/1.1 200 OK</D:status>\n\
              </D:propstat>\n\
@@ -872,6 +1082,14 @@ fn xml_escape(s: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
+}
+
+/// Resolve a MIME type for a filename using the mime_guess crate.
+/// Falls back to application/octet-stream for unknown extensions.
+fn resolve_mime(filename: &str) -> String {
+    mime_guess::from_path(filename)
+        .first_or_octet_stream()
+        .to_string()
 }
 
 fn guess_mime(filename: &str) -> Option<&'static str> {

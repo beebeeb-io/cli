@@ -133,6 +133,14 @@ enum Commands {
         /// Block all write operations (PUT, DELETE, MKCOL, MOVE)
         #[arg(long, default_value_t = false)]
         read_only: bool,
+
+        /// Directory listing cache TTL in seconds (0 = disabled)
+        #[arg(long, default_value_t = 30)]
+        cache_ttl: u64,
+
+        /// Disable path cache entirely (useful for debugging)
+        #[arg(long, default_value_t = false)]
+        no_cache: bool,
     },
 
     /// Rotate your master vault key
@@ -170,8 +178,8 @@ async fn main() {
             force,
             delete,
         } => commands::sync::run(local_dir, remote_path, dry_run, force, delete).await,
-        Commands::Webdav { port, read_only } => {
-            commands::webdav::run(port, read_only).await
+        Commands::Webdav { port, read_only, cache_ttl, no_cache } => {
+            commands::webdav::run(port, read_only, cache_ttl, no_cache).await
         }
         Commands::Rotate => {
             println!(

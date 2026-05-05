@@ -247,6 +247,7 @@ dependencies = [
  "dirs",
  "hostname",
  "indicatif",
+ "mime_guess",
  "notify",
  "notify-debouncer-full",
  "rand",
