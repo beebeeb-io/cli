@@ -137,27 +137,27 @@ pub async fn run(port: u16, read_only: bool, cache_ttl: u64, no_cache: bool) -> 
     };
     println!(
         "\n  {} {}",
-        "◆".truecolor(212, 168, 67),
-        format!("WebDAV gateway started{ro_label}").truecolor(208, 200, 154),
+        "◆".custom_color(crate::colors::AMBER_DARK),
+        format!("WebDAV gateway started{ro_label}").custom_color(crate::colors::INK_WARM),
     );
     println!(
         "  {}  {}",
-        "url".truecolor(106, 101, 91),
-        format!("http://localhost:{port}").truecolor(245, 184, 0),
+        "url".custom_color(crate::colors::INK_DIM),
+        format!("http://localhost:{port}").custom_color(crate::colors::AMBER),
     );
     println!(
         "  {}  {}",
-        "cache".truecolor(106, 101, 91),
-        cache_label.truecolor(106, 101, 91),
+        "cache".custom_color(crate::colors::INK_DIM),
+        cache_label.custom_color(crate::colors::INK_DIM),
     );
     println!(
         "  {}",
         "Connect Finder: Go → Connect to Server → http://localhost:7878"
-            .truecolor(106, 101, 91),
+            .custom_color(crate::colors::INK_DIM),
     );
     println!(
         "  {}",
-        "Press Ctrl+C to stop.".truecolor(106, 101, 91),
+        "Press Ctrl+C to stop.".custom_color(crate::colors::INK_DIM),
     );
     println!();
 

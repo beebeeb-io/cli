@@ -160,16 +160,16 @@ async fn push_single_file(api: &ApiClient, path: &std::path::Path, parent_id: Op
     let size_str = format_size(file_size);
     println!(
         "  {} {} {} {}",
-        "OK".truecolor(143, 193, 139),
-        file_name.truecolor(233, 230, 221),
-        "·".truecolor(106, 101, 91),
+        "OK".custom_color(crate::colors::GREEN_OK),
+        file_name.custom_color(crate::colors::INK),
+        "·".custom_color(crate::colors::INK_DIM),
         format!(
             "{size_str} · {} chunk{} · encrypted · {}",
             encrypted_chunks.len(),
             if encrypted_chunks.len() == 1 { "" } else { "s" },
             server_id,
         )
-        .truecolor(106, 101, 91),
+        .custom_color(crate::colors::INK_DIM),
     );
 
     Ok(())
@@ -218,8 +218,8 @@ async fn push_directory(
 
     println!(
         "  {} {}",
-        "scanning".truecolor(143, 193, 139),
-        dir_path.display().to_string().truecolor(233, 230, 221),
+        "scanning".custom_color(crate::colors::GREEN_OK),
+        dir_path.display().to_string().custom_color(crate::colors::INK),
     );
 
     let mut entries: Vec<(PathBuf, bool)> = Vec::new();
@@ -230,8 +230,8 @@ async fn push_directory(
 
     println!(
         "  {} {}",
-        "found".truecolor(143, 193, 139),
-        format!("{file_count} files, {folder_count} folders").truecolor(106, 101, 91),
+        "found".custom_color(crate::colors::GREEN_OK),
+        format!("{file_count} files, {folder_count} folders").custom_color(crate::colors::INK_DIM),
     );
 
     let folder_id = uuid::Uuid::new_v4();
@@ -315,10 +315,10 @@ async fn push_directory(
     pb.finish_and_clear();
     println!(
         "  {} {} {} {}",
-        "OK".truecolor(143, 193, 139),
-        dir_name.truecolor(233, 230, 221),
-        "·".truecolor(106, 101, 91),
-        format!("{file_count} files, {folder_count} folders uploaded").truecolor(106, 101, 91),
+        "OK".custom_color(crate::colors::GREEN_OK),
+        dir_name.custom_color(crate::colors::INK),
+        "·".custom_color(crate::colors::INK_DIM),
+        format!("{file_count} files, {folder_count} folders uploaded").custom_color(crate::colors::INK_DIM),
     );
 
     Ok(())

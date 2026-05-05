@@ -260,12 +260,12 @@ async fn browser_login() -> Result<(), String> {
     println!();
     println!(
         "  {} {}",
-        "◆".truecolor(212, 168, 67),
-        "Waiting for authorization in your browser...".truecolor(208, 200, 154),
+        "◆".custom_color(crate::colors::AMBER_DARK),
+        "Waiting for authorization in your browser...".custom_color(crate::colors::INK_WARM),
     );
     println!(
         "  {}",
-        format!("If the browser didn't open: {auth_url}").truecolor(106, 101, 91),
+        format!("If the browser didn't open: {auth_url}").custom_color(crate::colors::INK_DIM),
     );
 
     // Wait for the callback — 120s timeout
@@ -297,8 +297,8 @@ async fn browser_login() -> Result<(), String> {
     println!();
     println!(
         "  {} {}",
-        "Logged in as".truecolor(143, 193, 139),
-        format!("{} · {region}", payload.email).truecolor(245, 184, 0),
+        "Logged in as".custom_color(crate::colors::GREEN_OK),
+        format!("{} · {region}", payload.email).custom_color(crate::colors::AMBER),
     );
 
     Ok(())
@@ -312,7 +312,7 @@ pub async fn run(browser: bool) -> Result<(), String> {
     }
 
     // Prompt for email
-    print!("{}", "  email: ".truecolor(106, 101, 91));
+    print!("{}", "  email: ".custom_color(crate::colors::INK_DIM));
     io::stdout().flush().map_err(|e| e.to_string())?;
     let mut email = String::new();
     io::stdin()
@@ -327,7 +327,7 @@ pub async fn run(browser: bool) -> Result<(), String> {
     // Prompt for password (hidden)
     let password = rpassword::prompt_password(format!(
         "{}",
-        "  password: ".truecolor(106, 101, 91)
+        "  password: ".custom_color(crate::colors::INK_DIM)
     ))
     .map_err(|e| format!("failed to read password: {e}"))?;
 
@@ -365,8 +365,8 @@ pub async fn run(browser: bool) -> Result<(), String> {
     println!();
     println!(
         "  {} {}",
-        "Logged in as".truecolor(143, 193, 139),
-        format!("{email} · {region}").truecolor(245, 184, 0),
+        "Logged in as".custom_color(crate::colors::GREEN_OK),
+        format!("{email} · {region}").custom_color(crate::colors::AMBER),
     );
 
     Ok(())

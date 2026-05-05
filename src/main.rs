@@ -1,4 +1,5 @@
 mod api;
+mod colors;
 mod commands;
 mod config;
 
@@ -17,7 +18,7 @@ use colored::Colorize;
     after_help = format!(
         "{}\n{}",
         "# docs · beebeeb.io/cli · key fingerprints · beebeeb.io/fingerprints"
-            .truecolor(125, 138, 106),
+            .custom_color(crate::colors::INK_SAGE),
         ""
     ),
 )]
@@ -235,12 +236,12 @@ async fn main() {
         Commands::Rotate => {
             println!(
                 "  {}",
-                "▲ Key rotation is not yet implemented.".truecolor(245, 184, 0),
+                "▲ Key rotation is not yet implemented.".custom_color(crate::colors::AMBER),
             );
             println!(
                 "  {}",
                 "  This will rotate your master vault key and re-wrap all file keys."
-                    .truecolor(106, 101, 91),
+                    .custom_color(crate::colors::INK_DIM),
             );
             Ok(())
         }
@@ -259,8 +260,8 @@ async fn main() {
     if let Err(e) = result {
         eprintln!(
             "  {} {}",
-            "error:".truecolor(224, 122, 106),
-            e.truecolor(233, 230, 221),
+            "error:".custom_color(crate::colors::RED_ERR),
+            e.custom_color(crate::colors::INK),
         );
         std::process::exit(1);
     }

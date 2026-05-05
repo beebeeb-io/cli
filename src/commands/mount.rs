@@ -1159,29 +1159,29 @@ mod fuse_impl {
         println!();
         println!(
             "  {} {}",
-            "◆".truecolor(212, 168, 67),
-            "Vault mounted (read-write)".truecolor(208, 200, 154),
+            "◆".custom_color(crate::colors::AMBER_DARK),
+            "Vault mounted (read-write)".custom_color(crate::colors::INK_WARM),
         );
         println!(
             "  {}  {}",
-            "mountpoint".truecolor(106, 101, 91),
-            mp.display().to_string().truecolor(245, 184, 0)
+            "mountpoint".custom_color(crate::colors::INK_DIM),
+            mp.display().to_string().custom_color(crate::colors::AMBER)
         );
         println!(
             "  {}  {}",
-            "cache     ".truecolor(106, 101, 91),
+            "cache     ".custom_color(crate::colors::INK_DIM),
             if cache_ttl == 0 {
                 "disabled".into()
             } else {
                 format!("{cache_ttl}s TTL")
             }
-            .truecolor(106, 101, 91)
+            .custom_color(crate::colors::INK_DIM)
         );
 
         if foreground {
             println!(
                 "  {}",
-                "Running in foreground — Ctrl+C to unmount.".truecolor(106, 101, 91)
+                "Running in foreground — Ctrl+C to unmount.".custom_color(crate::colors::INK_DIM)
             );
             println!();
             tokio::task::spawn_blocking(move || {
@@ -1192,7 +1192,7 @@ mod fuse_impl {
         } else {
             println!(
                 "  {}",
-                format!("Unmount: bb unmount {}", mp.display()).truecolor(106, 101, 91),
+                format!("Unmount: bb unmount {}", mp.display()).custom_color(crate::colors::INK_DIM),
             );
             println!();
             tokio::task::spawn_blocking(move || {
@@ -1223,8 +1223,8 @@ mod fuse_impl {
             Ok(s) if s.success() => {
                 println!(
                     "  {} {}",
-                    "◆".truecolor(212, 168, 67),
-                    format!("Unmounted {}", mountpoint.display()).truecolor(208, 200, 154),
+                    "◆".custom_color(crate::colors::AMBER_DARK),
+                    format!("Unmounted {}", mountpoint.display()).custom_color(crate::colors::INK_WARM),
                 );
                 Ok(())
             }

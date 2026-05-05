@@ -4,11 +4,11 @@ use crate::config::load_config;
 
 pub async fn run() -> Result<(), String> {
     let config = load_config();
-    let dim = |s: &str| s.truecolor(106, 101, 91);
-    let text = |s: &str| s.truecolor(233, 230, 221);
+    let dim = |s: &str| s.custom_color(crate::colors::INK_DIM);
+    let text = |s: &str| s.custom_color(crate::colors::INK);
 
     println!();
-    println!("  {}", "beebeeb config".truecolor(245, 184, 0));
+    println!("  {}", "beebeeb config".custom_color(crate::colors::AMBER));
     println!();
 
     println!("  {}  {}", dim("api_url      "), text(&config.api_url));
@@ -27,12 +27,12 @@ pub async fn run() -> Result<(), String> {
                 // Show first 8 and last 4 chars, mask the rest
                 if t.len() > 16 {
                     format!("{}...{}", &t[..8], &t[t.len() - 4..])
-                        .truecolor(233, 230, 221)
+                        .custom_color(crate::colors::INK)
                 } else {
-                    "(set)".truecolor(233, 230, 221)
+                    "(set)".custom_color(crate::colors::INK)
                 }
             }
-            None => "(none)".truecolor(106, 101, 91),
+            None => "(none)".custom_color(crate::colors::INK_DIM),
         },
     );
 
@@ -40,8 +40,8 @@ pub async fn run() -> Result<(), String> {
         "  {}  {}",
         dim("master_key   "),
         match &config.master_key {
-            Some(_) => "(set, hidden)".truecolor(143, 193, 139),
-            None => "(none)".truecolor(106, 101, 91),
+            Some(_) => "(set, hidden)".custom_color(crate::colors::GREEN_OK),
+            None => "(none)".custom_color(crate::colors::INK_DIM),
         },
     );
 

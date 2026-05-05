@@ -8,7 +8,7 @@ pub async fn run() -> Result<(), String> {
     if config.session_token.is_none() {
         println!(
             "  {}",
-            "Already logged out.".truecolor(106, 101, 91),
+            "Already logged out.".custom_color(crate::colors::INK_DIM),
         );
         return Ok(());
     }
@@ -23,8 +23,8 @@ pub async fn run() -> Result<(), String> {
     let email = config.email.as_deref().unwrap_or("unknown");
     println!(
         "  {} {}",
-        "Logged out".truecolor(143, 193, 139),
-        format!("· session for {email} ended").truecolor(106, 101, 91),
+        "Logged out".custom_color(crate::colors::GREEN_OK),
+        format!("· session for {email} ended").custom_color(crate::colors::INK_DIM),
     );
 
     Ok(())

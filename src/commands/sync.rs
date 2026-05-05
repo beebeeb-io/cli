@@ -87,19 +87,19 @@ pub async fn run(
 
     println!(
         "  {} {}",
-        "syncing".truecolor(143, 193, 139),
-        local_dir.display().to_string().truecolor(233, 230, 221),
+        "syncing".custom_color(crate::colors::GREEN_OK),
+        local_dir.display().to_string().custom_color(crate::colors::INK),
     );
     println!(
         "  {} {}",
-        "remote".truecolor(106, 101, 91),
-        remote_path.truecolor(233, 230, 221),
+        "remote".custom_color(crate::colors::INK_DIM),
+        remote_path.custom_color(crate::colors::INK),
     );
     if dry_run {
         println!(
             "  {} {}",
-            "mode".truecolor(106, 101, 91),
-            "dry-run (no changes will be written)".truecolor(245, 184, 0),
+            "mode".custom_color(crate::colors::INK_DIM),
+            "dry-run (no changes will be written)".custom_color(crate::colors::AMBER),
         );
     }
     println!();
@@ -138,18 +138,18 @@ pub async fn run(
             if dry_run {
                 println!(
                     "  {} {} {}",
-                    "+".truecolor(143, 193, 139),
-                    "would create remote folder".truecolor(106, 101, 91),
-                    folder_rel.truecolor(233, 230, 221),
+                    "+".custom_color(crate::colors::GREEN_OK),
+                    "would create remote folder".custom_color(crate::colors::INK_DIM),
+                    folder_rel.custom_color(crate::colors::INK),
                 );
             } else {
                 let new_id = create_folder(&api, &master_key, folder_name, parent_id).await?;
                 remote_folders.insert(folder_rel.clone(), new_id);
                 println!(
                     "  {} {} {}",
-                    "+".truecolor(143, 193, 139),
-                    "remote folder".truecolor(106, 101, 91),
-                    folder_rel.truecolor(233, 230, 221),
+                    "+".custom_color(crate::colors::GREEN_OK),
+                    "remote folder".custom_color(crate::colors::INK_DIM),
+                    folder_rel.custom_color(crate::colors::INK),
                 );
             }
         }
@@ -161,9 +161,9 @@ pub async fn run(
             }
             println!(
                 "  {} {} {}",
-                "+".truecolor(143, 193, 139),
-                "local folder".truecolor(106, 101, 91),
-                folder_rel.truecolor(233, 230, 221),
+                "+".custom_color(crate::colors::GREEN_OK),
+                "local folder".custom_color(crate::colors::INK_DIM),
+                folder_rel.custom_color(crate::colors::INK),
             );
         }
     }
@@ -233,10 +233,10 @@ pub async fn run(
                         } else {
                             println!(
                                 "  {} {} {}",
-                                "⚡".truecolor(245, 184, 0),
-                                "conflict".truecolor(245, 184, 0),
+                                "⚡".custom_color(crate::colors::AMBER),
+                                "conflict".custom_color(crate::colors::AMBER),
                                 format!("{rel} (skipped — use --force to overwrite)")
-                                    .truecolor(233, 230, 221),
+                                    .custom_color(crate::colors::INK),
                             );
                             conflicts += 1;
                         }
@@ -262,10 +262,10 @@ pub async fn run(
                 } else {
                     println!(
                         "  {} {} {}",
-                        "⚡".truecolor(245, 184, 0),
-                        "conflict".truecolor(245, 184, 0),
+                        "⚡".custom_color(crate::colors::AMBER),
+                        "conflict".custom_color(crate::colors::AMBER),
                         format!("{rel} (exists both sides, no prior sync — skipped)")
-                            .truecolor(233, 230, 221),
+                            .custom_color(crate::colors::INK),
                     );
                     conflicts += 1;
                 }
@@ -295,18 +295,18 @@ pub async fn run(
                         }
                         println!(
                             "  {} {} {}",
-                            "x".truecolor(224, 122, 106),
-                            "trashing remote".truecolor(224, 122, 106),
-                            rel.truecolor(233, 230, 221),
+                            "x".custom_color(crate::colors::RED_ERR),
+                            "trashing remote".custom_color(crate::colors::RED_ERR),
+                            rel.custom_color(crate::colors::INK),
                         );
                         deletes += 1;
                     } else {
                         println!(
                             "  {} {} {}",
-                            "?".truecolor(106, 101, 91),
-                            "missing locally".truecolor(106, 101, 91),
+                            "?".custom_color(crate::colors::INK_DIM),
+                            "missing locally".custom_color(crate::colors::INK_DIM),
                             format!("{rel} (use --delete to trash from vault)")
-                                .truecolor(106, 101, 91),
+                                .custom_color(crate::colors::INK_DIM),
                         );
                     }
                 } else {
@@ -347,11 +347,11 @@ pub async fn run(
     let total = up_count + down_count + conflicts + deletes + skipped;
     println!(
         "  {} {} {} {}",
-        "OK".truecolor(143, 193, 139),
+        "OK".custom_color(crate::colors::GREEN_OK),
         format!("synced {total} file{}", if total == 1 { "" } else { "s" })
-            .truecolor(233, 230, 221),
-        "·".truecolor(106, 101, 91),
-        summary.truecolor(106, 101, 91),
+            .custom_color(crate::colors::INK),
+        "·".custom_color(crate::colors::INK_DIM),
+        summary.custom_color(crate::colors::INK_DIM),
     );
 
     Ok(())
@@ -523,9 +523,9 @@ async fn resolve_remote_folder(
                 let new_id = create_folder(api, master_key, seg, current_parent).await?;
                 println!(
                     "  {} {} {}",
-                    "+".truecolor(143, 193, 139),
-                    "remote folder".truecolor(106, 101, 91),
-                    seg.truecolor(233, 230, 221),
+                    "+".custom_color(crate::colors::GREEN_OK),
+                    "remote folder".custom_color(crate::colors::INK_DIM),
+                    seg.custom_color(crate::colors::INK),
                 );
                 current_parent = Some(new_id);
             }
@@ -646,9 +646,9 @@ async fn do_upload(
     let size_str = format_size(local.size);
     println!(
         "  {} {} {}",
-        "↑".truecolor(245, 184, 0),
-        "uploading".truecolor(143, 193, 139),
-        format!("{rel} ({size_str})").truecolor(233, 230, 221),
+        "↑".custom_color(crate::colors::AMBER),
+        "uploading".custom_color(crate::colors::GREEN_OK),
+        format!("{rel} ({size_str})").custom_color(crate::colors::INK),
     );
 
     if dry_run {
@@ -693,9 +693,9 @@ async fn do_download(
 ) -> Result<(), String> {
     println!(
         "  {} {} {}",
-        "↓".truecolor(143, 193, 139),
-        "downloading".truecolor(143, 193, 139),
-        rel.truecolor(233, 230, 221),
+        "↓".custom_color(crate::colors::GREEN_OK),
+        "downloading".custom_color(crate::colors::GREEN_OK),
+        rel.custom_color(crate::colors::INK),
     );
 
     if dry_run {

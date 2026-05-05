@@ -166,13 +166,13 @@ pub async fn run(file_id: String, output: Option<PathBuf>) -> Result<(), String>
     let size_str = format_size(plaintext.len() as u64);
     println!(
         "  {} {} {} {}",
-        "OK".truecolor(143, 193, 139),
-        out_path.display().to_string().truecolor(233, 230, 221),
-        "·".truecolor(106, 101, 91),
+        "OK".custom_color(crate::colors::GREEN_OK),
+        out_path.display().to_string().custom_color(crate::colors::INK),
+        "·".custom_color(crate::colors::INK_DIM),
         format!("{size_str} · {chunk_count} chunk{} · decrypted",
             if chunk_count == 1 { "" } else { "s" },
         )
-        .truecolor(106, 101, 91),
+        .custom_color(crate::colors::INK_DIM),
     );
 
     Ok(())
@@ -192,9 +192,9 @@ async fn pull_folder(api: &ApiClient, folder_id: &str, out_dir: &std::path::Path
 
     println!(
         "  {} {} ({})",
-        "pulling".truecolor(143, 193, 139),
-        out_dir.display().to_string().truecolor(233, 230, 221),
-        format!("{} items", files.len()).truecolor(106, 101, 91),
+        "pulling".custom_color(crate::colors::GREEN_OK),
+        out_dir.display().to_string().custom_color(crate::colors::INK),
+        format!("{} items", files.len()).custom_color(crate::colors::INK_DIM),
     );
 
     for item in files {
@@ -261,8 +261,8 @@ async fn pull_single_file(api: &ApiClient, file_id: &str, out_path: &std::path::
     let name = out_path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
     println!(
         "  {} {}",
-        "OK".truecolor(143, 193, 139),
-        name.truecolor(106, 101, 91),
+        "OK".custom_color(crate::colors::GREEN_OK),
+        name.custom_color(crate::colors::INK_DIM),
     );
     Ok(())
 }

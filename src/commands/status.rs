@@ -25,22 +25,22 @@ fn format_bytes(bytes: u64) -> String {
 
 pub async fn run() -> Result<(), String> {
     let config = load_config();
-    let dim = |s: &str| s.truecolor(106, 101, 91);
-    let text = |s: &str| s.truecolor(233, 230, 221);
+    let dim = |s: &str| s.custom_color(crate::colors::INK_DIM);
+    let text = |s: &str| s.custom_color(crate::colors::INK);
 
     // User / server from config
     let email = config.email.as_deref().unwrap_or("not logged in");
     let server = &config.api_url;
 
     println!();
-    println!("  {}", "beebeeb status".truecolor(245, 184, 0));
+    println!("  {}", "beebeeb status".custom_color(crate::colors::AMBER));
     println!();
     println!("  {}  {}", dim("user   "), text(email));
     println!("  {}  {}", dim("server "), text(server));
 
     // Session validity — requires auth
     if config.session_token.is_none() {
-        println!("  {}  {}", dim("session"), "no session".truecolor(224, 122, 106));
+        println!("  {}  {}", dim("session"), "no session".custom_color(crate::colors::RED_ERR));
         println!();
         return Ok(());
     }
@@ -56,12 +56,12 @@ pub async fn run() -> Result<(), String> {
                 Some(exp) => println!(
                     "  {}  {}",
                     dim("session"),
-                    format!("valid ({exp})").truecolor(143, 193, 139),
+                    format!("valid ({exp})").custom_color(crate::colors::GREEN_OK),
                 ),
                 None => println!(
                     "  {}  {}",
                     dim("session"),
-                    "valid".truecolor(143, 193, 139),
+                    "valid".custom_color(crate::colors::GREEN_OK),
                 ),
             }
         }
@@ -69,7 +69,7 @@ pub async fn run() -> Result<(), String> {
             println!(
                 "  {}  {}",
                 dim("session"),
-                "expired or invalid".truecolor(224, 122, 106),
+                "expired or invalid".custom_color(crate::colors::RED_ERR),
             );
             println!();
             return Ok(());

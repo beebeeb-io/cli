@@ -20,19 +20,19 @@ pub async fn run() -> Result<(), String> {
         .or_else(|| count.get("total").and_then(|v| v.as_i64()))
         .unwrap_or(0);
 
-    let dim = |s: &str| s.truecolor(106, 101, 91);
+    let dim = |s: &str| s.custom_color(crate::colors::INK_DIM);
 
     // Color-code the percentage: green <70%, amber 70-90%, red >90%
     let pct_str = if quota_bytes <= 0 {
-        "—".truecolor(106, 101, 91)
+        "—".custom_color(crate::colors::INK_DIM)
     } else {
         let s = format!("{:.2}%", percentage * 100.0);
         if percentage >= 0.90 {
-            s.truecolor(224, 122, 106)  // red
+            s.custom_color(crate::colors::RED_ERR)  // red
         } else if percentage >= 0.70 {
-            s.truecolor(245, 184, 0)    // amber
+            s.custom_color(crate::colors::AMBER)    // amber
         } else {
-            s.truecolor(143, 193, 139)  // green
+            s.custom_color(crate::colors::GREEN_OK)  // green
         }
     };
 
@@ -50,19 +50,19 @@ pub async fn run() -> Result<(), String> {
     };
 
     println!();
-    println!("  {} {}", dim("used    "), used_str.truecolor(233, 230, 221));
-    println!("  {} {}", dim("quota   "), quota_str.truecolor(208, 200, 154));
+    println!("  {} {}", dim("used    "), used_str.custom_color(crate::colors::INK));
+    println!("  {} {}", dim("quota   "), quota_str.custom_color(crate::colors::INK_WARM));
     println!("  {} {}", dim("percent "), pct_str);
-    println!("  {} {}", dim("files   "), files_str.truecolor(106, 101, 91));
+    println!("  {} {}", dim("files   "), files_str.custom_color(crate::colors::INK_DIM));
 
     // Over-quota warning
     if quota_bytes > 0 && used_bytes >= quota_bytes {
         println!();
         println!(
             "  {} {}",
-            "⚠".truecolor(224, 122, 106),
+            "⚠".custom_color(crate::colors::RED_ERR),
             "Over quota — uploads blocked. Upgrade your plan or delete files."
-                .truecolor(224, 122, 106),
+                .custom_color(crate::colors::RED_ERR),
         );
     }
 

@@ -30,7 +30,7 @@ pub async fn run(
     let passphrase_value = if passphrase {
         print!(
             "  {}",
-            "? Passphrase (12+ chars, mixed): ".truecolor(245, 184, 0),
+            "? Passphrase (12+ chars, mixed): ".custom_color(crate::colors::AMBER),
         );
         io::stdout().flush().map_err(|e| e.to_string())?;
         let pass =
@@ -51,7 +51,7 @@ pub async fn run(
     if passphrase_value.is_some() {
         println!(
             "  {}",
-            "wrapping chunk keys with Argon2id(passphrase)".truecolor(106, 101, 91),
+            "wrapping chunk keys with Argon2id(passphrase)".custom_color(crate::colors::INK_DIM),
         );
     }
 
@@ -78,40 +78,40 @@ pub async fn run(
         .unwrap_or("never");
 
     println!();
-    println!("  {}", "Link created".truecolor(143, 193, 139));
+    println!("  {}", "Link created".custom_color(crate::colors::GREEN_OK));
     println!(
         "  {} {}",
-        "url       ".truecolor(106, 101, 91),
-        url.truecolor(245, 184, 0),
+        "url       ".custom_color(crate::colors::INK_DIM),
+        url.custom_color(crate::colors::AMBER),
     );
     println!(
         "  {} {}",
-        "expires   ".truecolor(106, 101, 91),
-        expires_at.truecolor(233, 230, 221),
+        "expires   ".custom_color(crate::colors::INK_DIM),
+        expires_at.custom_color(crate::colors::INK),
     );
     if let Some(max) = max_opens {
         println!(
             "  {} {}",
-            "max-opens ".truecolor(106, 101, 91),
-            max.to_string().truecolor(233, 230, 221),
+            "max-opens ".custom_color(crate::colors::INK_DIM),
+            max.to_string().custom_color(crate::colors::INK),
         );
     }
     println!(
         "  {} {}",
-        "share-id  ".truecolor(106, 101, 91),
-        share_id.truecolor(208, 200, 154),
+        "share-id  ".custom_color(crate::colors::INK_DIM),
+        share_id.custom_color(crate::colors::INK_WARM),
     );
     println!();
     if passphrase_value.is_some() {
         println!(
             "  {}",
             "# send the passphrase by a different channel — we will never see it"
-                .truecolor(125, 138, 106),
+                .custom_color(crate::colors::INK_SAGE),
         );
     }
     println!(
         "  {}",
-        format!("# revoke anytime:  bb unshare {share_id}").truecolor(125, 138, 106),
+        format!("# revoke anytime:  bb unshare {share_id}").custom_color(crate::colors::INK_SAGE),
     );
 
     Ok(())
@@ -131,7 +131,7 @@ pub async fn list() -> Result<(), String> {
     let Some(shares) = shares else {
         println!(
             "  {}",
-            "no active shares".truecolor(106, 101, 91),
+            "no active shares".custom_color(crate::colors::INK_DIM),
         );
         return Ok(());
     };
@@ -139,7 +139,7 @@ pub async fn list() -> Result<(), String> {
     if shares.is_empty() {
         println!(
             "  {}",
-            "no active shares".truecolor(106, 101, 91),
+            "no active shares".custom_color(crate::colors::INK_DIM),
         );
         return Ok(());
     }
@@ -150,7 +150,7 @@ pub async fn list() -> Result<(), String> {
             "{:<36}  {:<40}  {:<20}  {}",
             "file", "url", "expires", "opens"
         )
-        .truecolor(106, 101, 91),
+        .custom_color(crate::colors::INK_DIM),
     );
 
     for share in shares {
@@ -181,10 +181,10 @@ pub async fn list() -> Result<(), String> {
 
         println!(
             "  {:<36}  {:<40}  {:<20}  {}",
-            file_name.truecolor(208, 200, 154),
-            url.truecolor(245, 184, 0),
-            expires.truecolor(106, 101, 91),
-            opens_display.truecolor(233, 230, 221),
+            file_name.custom_color(crate::colors::INK_WARM),
+            url.custom_color(crate::colors::AMBER),
+            expires.custom_color(crate::colors::INK_DIM),
+            opens_display.custom_color(crate::colors::INK),
         );
     }
 
@@ -200,8 +200,8 @@ pub async fn revoke(share_id: String) -> Result<(), String> {
 
     println!(
         "  {} {}",
-        "Revoked".truecolor(143, 193, 139),
-        format!("· share {share_id} is no longer accessible").truecolor(106, 101, 91),
+        "Revoked".custom_color(crate::colors::GREEN_OK),
+        format!("· share {share_id} is no longer accessible").custom_color(crate::colors::INK_DIM),
     );
 
     Ok(())

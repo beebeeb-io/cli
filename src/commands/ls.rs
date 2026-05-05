@@ -15,7 +15,7 @@ pub async fn run(path: Option<String>) -> Result<(), String> {
     let Some(files) = files else {
         println!(
             "  {}",
-            "empty — no files here".truecolor(106, 101, 91),
+            "empty — no files here".custom_color(crate::colors::INK_DIM),
         );
         return Ok(());
     };
@@ -23,7 +23,7 @@ pub async fn run(path: Option<String>) -> Result<(), String> {
     if files.is_empty() {
         println!(
             "  {}",
-            "empty — no files here".truecolor(106, 101, 91),
+            "empty — no files here".custom_color(crate::colors::INK_DIM),
         );
         return Ok(());
     }
@@ -35,7 +35,7 @@ pub async fn run(path: Option<String>) -> Result<(), String> {
             "{:<36}  {:>10}  {:<16}  {}",
             "name", "size", "modified", "type"
         )
-        .truecolor(106, 101, 91),
+        .custom_color(crate::colors::INK_DIM),
     );
 
     for file in files {
@@ -61,17 +61,17 @@ pub async fn run(path: Option<String>) -> Result<(), String> {
         let is_folder = file_type == "folder" || file_type == "directory";
 
         let name_colored = if is_folder {
-            format!("{name}/").truecolor(245, 184, 0)
+            format!("{name}/").custom_color(crate::colors::AMBER)
         } else {
-            name.to_string().truecolor(208, 200, 154)
+            name.to_string().custom_color(crate::colors::INK_WARM)
         };
 
         println!(
             "  {:<36}  {:>10}  {:<16}  {}",
             name_colored,
-            size.truecolor(106, 101, 91),
-            modified.truecolor(106, 101, 91),
-            file_type.truecolor(106, 101, 91),
+            size.custom_color(crate::colors::INK_DIM),
+            modified.custom_color(crate::colors::INK_DIM),
+            file_type.custom_color(crate::colors::INK_DIM),
         );
     }
 

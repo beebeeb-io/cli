@@ -30,17 +30,17 @@ pub async fn run(path: PathBuf, parent_id: Option<String>) -> Result<(), String>
 
     println!(
         "  {} {}",
-        "watching".truecolor(143, 193, 139),
-        watch_path.display().to_string().truecolor(233, 230, 221),
+        "watching".custom_color(crate::colors::GREEN_OK),
+        watch_path.display().to_string().custom_color(crate::colors::INK),
     );
     println!(
         "  {}",
         "local changes will be encrypted and uploaded automatically"
-            .truecolor(106, 101, 91),
+            .custom_color(crate::colors::INK_DIM),
     );
     println!(
         "  {}",
-        "press Ctrl+C to stop".truecolor(106, 101, 91),
+        "press Ctrl+C to stop".custom_color(crate::colors::INK_DIM),
     );
     println!();
 
@@ -67,8 +67,8 @@ pub async fn run(path: PathBuf, parent_id: Option<String>) -> Result<(), String>
             println!();
             println!(
                 "  {} {}",
-                "stopped".truecolor(143, 193, 139),
-                "watch ended gracefully".truecolor(106, 101, 91),
+                "stopped".custom_color(crate::colors::GREEN_OK),
+                "watch ended gracefully".custom_color(crate::colors::INK_DIM),
             );
             break;
         }
@@ -87,8 +87,8 @@ pub async fn run(path: PathBuf, parent_id: Option<String>) -> Result<(), String>
                 Err(e) => {
                     eprintln!(
                         "  {} {}",
-                        "warn:".truecolor(245, 184, 0),
-                        format!("watch error: {e}").truecolor(106, 101, 91),
+                        "warn:".custom_color(crate::colors::AMBER),
+                        format!("watch error: {e}").custom_color(crate::colors::INK_DIM),
                     );
                 }
             }
@@ -151,10 +151,10 @@ fn relevant_paths(event: &Event, watch_root: &Path) -> Option<Vec<PathBuf>> {
                         let rel = p.strip_prefix(watch_root).unwrap_or(p);
                         eprintln!(
                             "  {} {} {}",
-                            "skip".truecolor(106, 101, 91),
-                            rel.display().to_string().truecolor(233, 230, 221),
+                            "skip".custom_color(crate::colors::INK_DIM),
+                            rel.display().to_string().custom_color(crate::colors::INK),
                             "(deleted — server-side delete not yet implemented)"
-                                .truecolor(106, 101, 91),
+                                .custom_color(crate::colors::INK_DIM),
                         );
                     }
                 }
@@ -176,10 +176,10 @@ async fn sync_batch(
 
     println!(
         "  {} {} {}",
-        "sync".truecolor(245, 184, 0),
+        "sync".custom_color(crate::colors::AMBER),
         format!("{count} file{}", if count == 1 { "" } else { "s" })
-            .truecolor(233, 230, 221),
-        timestamp.truecolor(106, 101, 91),
+            .custom_color(crate::colors::INK),
+        timestamp.custom_color(crate::colors::INK_DIM),
     );
 
     for path in paths {
@@ -198,9 +198,9 @@ async fn sync_batch(
             Err(e) => {
                 eprintln!(
                     "  {} {} {}",
-                    "fail".truecolor(224, 122, 106),
-                    rel.display().to_string().truecolor(233, 230, 221),
-                    e.truecolor(106, 101, 91),
+                    "fail".custom_color(crate::colors::RED_ERR),
+                    rel.display().to_string().custom_color(crate::colors::INK),
+                    e.custom_color(crate::colors::INK_DIM),
                 );
             }
         }

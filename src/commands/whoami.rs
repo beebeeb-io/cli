@@ -8,7 +8,7 @@ pub async fn run() -> Result<(), String> {
     if config.session_token.is_none() {
         println!(
             "  {}",
-            "Not logged in. Run `bb login` to authenticate.".truecolor(224, 122, 106),
+            "Not logged in. Run `bb login` to authenticate.".custom_color(crate::colors::RED_ERR),
         );
         return Ok(());
     }
@@ -81,22 +81,22 @@ pub async fn run() -> Result<(), String> {
 
     // ── Print ─────────────────────────────────────────────────────────────────
 
-    let dim = |s: &str| s.truecolor(106, 101, 91);
-    let val = |s: &str| s.truecolor(233, 230, 221);
+    let dim = |s: &str| s.custom_color(crate::colors::INK_DIM);
+    let val = |s: &str| s.custom_color(crate::colors::INK);
 
     println!();
     println!("  {} {}", dim("email   "), {
         let display = if email_verified {
-            email.truecolor(233, 230, 221)
+            email.custom_color(crate::colors::INK)
         } else {
-            email.truecolor(224, 122, 106) // red if unverified
+            email.custom_color(crate::colors::RED_ERR) // red if unverified
         };
         if email_verified { display } else {
             // append unverified note
-            format!("{} {}", email, "(unverified)".truecolor(224, 122, 106)).truecolor(233, 230, 221)
+            format!("{} {}", email, "(unverified)".custom_color(crate::colors::RED_ERR)).custom_color(crate::colors::INK)
         }
     });
-    println!("  {} {}", dim("plan    "), plan_label.truecolor(245, 184, 0));
+    println!("  {} {}", dim("plan    "), plan_label.custom_color(crate::colors::AMBER));
     println!("  {} {}", dim("region  "), val(&region_label));
     println!("  {} {}", dim("auth    "), val(&auth_label));
     println!("  {} {}", dim("session "), val(&expires_label));
