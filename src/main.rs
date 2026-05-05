@@ -128,6 +128,26 @@ enum Commands {
         delete: bool,
     },
 
+    /// Mount vault as a FUSE filesystem (read-only Day 1; requires macFUSE on macOS)
+    Mount {
+        /// Directory to mount the vault at (e.g. ~/Beebeeb)
+        mountpoint: PathBuf,
+
+        /// Stay in foreground (default: daemonize after mount succeeds)
+        #[arg(long, default_value_t = false)]
+        foreground: bool,
+
+        /// Cache TTL for directory listings in seconds (0 = no cache)
+        #[arg(long, default_value_t = 30)]
+        cache_ttl: u64,
+    },
+
+    /// Unmount a previously mounted vault FUSE filesystem
+    Unmount {
+        /// Mountpoint to unmount
+        mountpoint: PathBuf,
+    },
+
     /// Serve vault as a local WebDAV server (mounts in Finder, rclone, Cyberduck)
     Webdav {
         /// TCP port to listen on (default: 7878)
@@ -182,6 +202,12 @@ async fn main() {
             force,
             delete,
         } => commands::sync::run(local_dir, remote_path, dry_run, force, delete).await,
+        Commands::Mount { mountpoint, foreground, cache_ttl } => {
+            commands::mount::run(mountpoint, foreground, cache_ttl).await
+        }
+        Commands::Unmount { mountpoint } => {
+            commands::mount::unmount(mountpoint).await
+        }
         Commands::Webdav { port, read_only, cache_ttl, no_cache } => {
             commands::webdav::run(port, read_only, cache_ttl, no_cache).await
         }

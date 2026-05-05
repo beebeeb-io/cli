@@ -36,6 +36,14 @@ notify-debouncer-full = "0.4"
 walkdir = "2"
 axum = "0.7"
 mime_guess = "2"
+fuser = { version = "0.14", optional = true }
+libc = "0.2"
+
+[features]
+# Enable the FUSE filesystem mount command.
+# Requires macFUSE on macOS: brew install macfuse (reboot required).
+# Requires libfuse3-dev on Linux: apt install libfuse3-dev.
+fuse = ["dep:fuser"]
 
 [patch."https://github.com/beebeeb-io/core"]
 beebeeb-core = { path = "../core/beebeeb-core" }
