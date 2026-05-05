@@ -514,8 +514,10 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
         }
     };
 
-    // Check if a file already exists at this path — handles overwrite + If-Match
-    if let Ok(existing) = resolve_path(state, path).await {
+    // Check if a file already exists at this path — handles overwrite + If-Match.
+    // For versioning: reuse the existing file_id so the server creates a version
+    // entry rather than a new file (keeps share links valid, builds history).
+    let existing_file_id: Option<uuid::Uuid> = if let Ok(existing) = resolve_path(state, path).await {
         if let Some(ref eid) = existing.file_id {
             // If-Match precondition: client must supply current ETag
             if let Some(im) = if_match {
@@ -524,16 +526,21 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
                     return (StatusCode::PRECONDITION_FAILED, "ETag mismatch").into_response();
                 }
             }
-            let _ = state.api.trash_file(eid).await;
+            // Parse existing ID — if valid UUID, reuse for versioning
+            eid.parse::<uuid::Uuid>().ok()
+        } else {
+            None
         }
-    }
+    } else {
+        None
+    };
 
     // Invalidate parent directory cache so the new file appears immediately
     let parent_cache_key = normalise_cache_key(parent_path);
     invalidate_cache(state, &parent_cache_key).await;
 
-    // Generate a new file UUID and derive the file key
-    let file_uuid = uuid::Uuid::new_v4();
+    // Use existing UUID for versioning; generate fresh UUID for new files.
+    let file_uuid = existing_file_id.unwrap_or_else(uuid::Uuid::new_v4);
     let file_key =
         beebeeb_core::kdf::derive_file_key(&state.master_key, file_uuid.as_bytes());
 
@@ -580,12 +587,16 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
     }
 
     let mime = guess_mime(&filename).unwrap_or("application/octet-stream");
-    let metadata = serde_json::json!({
+    let mut metadata = serde_json::json!({
         "name_encrypted": name_encrypted,
         "parent_id":      parent_id.as_deref().and_then(|s| s.parse::<uuid::Uuid>().ok()),
         "mime_type":      mime,
         "size_bytes":     total_encrypted_size,
     });
+    // Tell the server to version over the existing file rather than create new.
+    if let Some(eid) = existing_file_id {
+        metadata["file_id"] = serde_json::json!(eid);
+    }
     let metadata_json = match serde_json::to_string(&metadata) {
         Ok(s) => s,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),

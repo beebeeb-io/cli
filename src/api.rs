@@ -275,6 +275,25 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    /// Return all `{id, name_encrypted}` pairs in a folder so the caller can
+    /// decrypt names locally and detect filename conflicts before uploading.
+    /// `parent_id = None` queries the root folder.
+    pub async fn check_conflict(
+        &self,
+        parent_id: Option<uuid::Uuid>,
+    ) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .post(self.url("/api/v1/files/check-conflict"))
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "parent_id": parent_id }))
+            .send()
+            .await
+            .map_err(|e| format!("request failed: {e}"))?;
+        parse_response(resp).await
+    }
+
     pub async fn get_file_count(&self) -> Result<Value, String> {
         let token = self.require_auth()?;
         let resp = self

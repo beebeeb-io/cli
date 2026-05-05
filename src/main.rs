@@ -56,6 +56,14 @@ enum Commands {
         /// Parent folder ID in the vault
         #[arg(long)]
         parent: Option<String>,
+
+        /// When a file with the same name exists: replace it (creates a new version)
+        #[arg(long, conflicts_with = "keep_both")]
+        replace: bool,
+
+        /// When a file with the same name exists: upload with a numeric suffix
+        #[arg(long, conflicts_with = "replace")]
+        keep_both: bool,
     },
 
     /// Download a file from your vault
@@ -209,7 +217,9 @@ async fn main() {
         Commands::Status => commands::status::run().await,
         Commands::Quota => commands::quota::run().await,
         Commands::Config => commands::config::run().await,
-        Commands::Push { path, parent } => commands::push::run(path, parent).await,
+        Commands::Push { path, parent, replace, keep_both } => {
+            commands::push::run(path, parent, replace, keep_both).await
+        }
         Commands::Pull { file_id, output } => commands::pull::run(file_id, output).await,
         Commands::Ls { path } => commands::ls::run(path).await,
         Commands::Share {

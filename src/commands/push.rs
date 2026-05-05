@@ -1,6 +1,7 @@
 use base64::Engine;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use crate::api::ApiClient;
@@ -33,7 +34,91 @@ fn load_master_key() -> Result<beebeeb_core::kdf::MasterKey, String> {
     Ok(beebeeb_core::kdf::MasterKey::from_bytes(arr))
 }
 
-pub async fn run(path: PathBuf, parent_id: Option<String>) -> Result<(), String> {
+/// How to handle a filename conflict when uploading.
+#[derive(Clone, Copy, PartialEq)]
+pub enum ConflictStrategy {
+    /// Ask interactively (default when a TTY is attached).
+    Prompt,
+    /// Replace the existing file by versioning over it.
+    Replace,
+    /// Keep both — upload under a suffixed name.
+    KeepBoth,
+}
+
+/// Outcome of conflict resolution for a single file.
+enum ConflictResolution {
+    /// Upload, version over the existing file with this server ID.
+    Replace { existing_id: uuid::Uuid },
+    /// Upload under this (possibly modified) filename as a new file.
+    Upload { filename: String },
+    /// Skip this file entirely.
+    Skip,
+}
+
+/// Ask the server for all encrypted names in `parent_id`, decrypt them
+/// locally, and return the existing file's UUID if `filename` matches.
+async fn find_conflict(
+    api: &ApiClient,
+    master_key: &beebeeb_core::kdf::MasterKey,
+    filename: &str,
+    parent_uuid: Option<uuid::Uuid>,
+) -> Option<uuid::Uuid> {
+    let resp = api.check_conflict(parent_uuid).await.ok()?;
+    let files = resp.get("files")?.as_array()?;
+
+    for file in files {
+        let id_str = file.get("id")?.as_str()?;
+        let name_enc_str = file.get("name_encrypted")?.as_str()?;
+        let file_uuid: uuid::Uuid = id_str.parse().ok()?;
+        let file_key = beebeeb_core::kdf::derive_file_key(master_key, file_uuid.as_bytes());
+        let blob: beebeeb_types::EncryptedBlob =
+            serde_json::from_str(name_enc_str).ok()?;
+        if let Ok(decrypted) =
+            beebeeb_core::encrypt::decrypt_metadata(&file_key, &blob)
+        {
+            if decrypted == filename {
+                return Some(file_uuid);
+            }
+        }
+    }
+    None
+}
+
+/// Prompt the user interactively for conflict resolution.
+/// Returns Ok(resolution) or Err if stdin is not interactive.
+fn prompt_conflict(filename: &str) -> ConflictResolution {
+    eprint!(
+        "  {} {} [R]eplace / [K]eep both / [S]kip: ",
+        filename.custom_color(crate::colors::AMBER),
+        "already exists.".custom_color(crate::colors::INK_DIM),
+    );
+    let _ = io::stderr().flush();
+
+    let mut line = String::new();
+    if io::stdin().read_line(&mut line).is_err() {
+        return ConflictResolution::Skip;
+    }
+    match line.trim().to_ascii_lowercase().as_str() {
+        "r" | "replace" => ConflictResolution::Replace { existing_id: uuid::Uuid::nil() }, // filled by caller
+        "k" | "keep" | "keep both" => ConflictResolution::Upload { filename: filename.to_string() },
+        _ => ConflictResolution::Skip,
+    }
+}
+
+pub async fn run(
+    path: PathBuf,
+    parent_id: Option<String>,
+    replace: bool,
+    keep_both: bool,
+) -> Result<(), String> {
+    let strategy = if replace {
+        ConflictStrategy::Replace
+    } else if keep_both {
+        ConflictStrategy::KeepBoth
+    } else {
+        ConflictStrategy::Prompt
+    };
+
     let api = ApiClient::from_config();
     api.require_auth()?;
 
@@ -42,13 +127,18 @@ pub async fn run(path: PathBuf, parent_id: Option<String>) -> Result<(), String>
     }
 
     if path.is_dir() {
-        return push_directory(&api, &path, parent_id).await;
+        return push_directory(&api, &path, parent_id, strategy).await;
     }
 
-    push_single_file(&api, &path, parent_id).await
+    push_single_file(&api, &path, parent_id, strategy).await
 }
 
-async fn push_single_file(api: &ApiClient, path: &std::path::Path, parent_id: Option<String>) -> Result<(), String> {
+async fn push_single_file(
+    api: &ApiClient,
+    path: &std::path::Path,
+    parent_id: Option<String>,
+    strategy: ConflictStrategy,
+) -> Result<(), String> {
     let file_name = path
         .file_name()
         .and_then(|n| n.to_str())
@@ -59,17 +149,86 @@ async fn push_single_file(api: &ApiClient, path: &std::path::Path, parent_id: Op
         std::fs::read(&path).map_err(|e| format!("failed to read file: {e}"))?;
     let file_size = file_bytes.len() as u64;
 
-    // Load master key and derive a per-file key
     let master_key = load_master_key()?;
-    let file_id = uuid::Uuid::new_v4();
-    let file_key =
-        beebeeb_core::kdf::derive_file_key(&master_key, file_id.as_bytes());
+
+    let parent_uuid: Option<uuid::Uuid> = parent_id
+        .as_deref()
+        .and_then(|s| s.parse().ok());
+
+    // ── Conflict detection ────────────────────────────────────────────────────
+    // Decrypt existing filenames in the folder and check for a match.
+    // If found, ask the user (or apply the strategy flag) how to proceed.
+    let (file_id, upload_name, replace_file_id) = {
+        let existing = find_conflict(api, &master_key, &file_name, parent_uuid).await;
+
+        match existing {
+            None => (uuid::Uuid::new_v4(), file_name.clone(), None),
+            Some(existing_id) => {
+                // Determine resolution
+                let resolution = match strategy {
+                    ConflictStrategy::Replace => ConflictResolution::Replace { existing_id },
+                    ConflictStrategy::KeepBoth => {
+                        let (stem, ext) = split_stem_ext(&file_name);
+                        let new_name = if ext.is_empty() {
+                            format!("{stem} (1)")
+                        } else {
+                            format!("{stem} (1).{ext}")
+                        };
+                        ConflictResolution::Upload { filename: new_name }
+                    }
+                    ConflictStrategy::Prompt => {
+                        let r = prompt_conflict(&file_name);
+                        // If user chose Replace, inject the actual existing_id
+                        match r {
+                            ConflictResolution::Replace { .. } => {
+                                ConflictResolution::Replace { existing_id }
+                            }
+                            ConflictResolution::Upload { .. } => {
+                                let (stem, ext) = split_stem_ext(&file_name);
+                                let new_name = if ext.is_empty() {
+                                    format!("{stem} (1)")
+                                } else {
+                                    format!("{stem} (1).{ext}")
+                                };
+                                ConflictResolution::Upload { filename: new_name }
+                            }
+                            ConflictResolution::Skip => {
+                                println!(
+                                    "  {} {}",
+                                    "skip".custom_color(crate::colors::INK_DIM),
+                                    file_name.custom_color(crate::colors::INK_DIM),
+                                );
+                                return Ok(());
+                            }
+                        }
+                    }
+                };
+
+                match resolution {
+                    ConflictResolution::Replace { existing_id } => {
+                        // Re-use the existing UUID so the server auto-versions.
+                        // Key is derived from the existing ID (same as when the
+                        // file was first uploaded).
+                        (existing_id, file_name.clone(), Some(existing_id))
+                    }
+                    ConflictResolution::Upload { filename } => {
+                        (uuid::Uuid::new_v4(), filename, None)
+                    }
+                    ConflictResolution::Skip => return Ok(()),
+                }
+            }
+        }
+    };
+
+    // ── Encrypt name + chunks under the resolved file key ─────────────────────
+    let file_key = beebeeb_core::kdf::derive_file_key(&master_key, file_id.as_bytes());
 
     // Encrypt the filename
-    let name_blob = beebeeb_core::encrypt::encrypt_metadata(&file_key, &file_name)
+    let name_blob = beebeeb_core::encrypt::encrypt_metadata(&file_key, &upload_name)
         .map_err(|e| format!("failed to encrypt filename: {e}"))?;
     let name_encrypted =
         serde_json::to_string(&name_blob).map_err(|e| format!("failed to serialize name blob: {e}"))?;
+    let file_name = upload_name; // use the possibly-suffixed name for display
 
     // Chunk the file and encrypt each chunk
     let total_chunks = if file_bytes.is_empty() {
@@ -122,12 +281,17 @@ async fn push_single_file(api: &ApiClient, path: &std::path::Path, parent_id: Op
         None => None,
     };
 
-    let metadata = serde_json::json!({
+    let mut metadata = serde_json::json!({
         "name_encrypted": name_encrypted,
         "parent_id": parent_uuid,
         "mime_type": guess_mime_type(&file_name),
         "size_bytes": total_encrypted_size,
     });
+    // Explicit file_id tells the server to version over the existing file
+    // rather than look up by name_encrypted ciphertext.
+    if let Some(rid) = replace_file_id {
+        metadata["file_id"] = serde_json::json!(rid);
+    }
     let metadata_json = serde_json::to_string(&metadata)
         .map_err(|e| format!("failed to serialize metadata: {e}"))?;
 
@@ -208,6 +372,7 @@ async fn push_directory(
     api: &ApiClient,
     dir_path: &std::path::Path,
     parent_id: Option<String>,
+    strategy: ConflictStrategy,
 ) -> Result<(), String> {
     let master_key = load_master_key()?;
     let dir_name = dir_path
@@ -307,7 +472,7 @@ async fn push_directory(
 
             pb.set_message(name.to_string());
 
-            push_single_file(api, entry_path, Some(entry_parent_id.to_string())).await?;
+            push_single_file(api, entry_path, Some(entry_parent_id.to_string()), strategy).await?;
         }
         pb.inc(1);
     }
@@ -361,5 +526,13 @@ fn format_size(bytes: u64) -> String {
         format!("{:.1} kB", bytes as f64 / KB as f64)
     } else {
         format!("{bytes} B")
+    }
+}
+
+/// Split "report.pdf" → ("report", "pdf"); "notes" → ("notes", "").
+fn split_stem_ext(filename: &str) -> (&str, &str) {
+    match filename.rfind('.') {
+        Some(i) if i > 0 => (&filename[..i], &filename[i + 1..]),
+        _ => (filename, ""),
     }
 }
