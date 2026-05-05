@@ -1,0 +1,50 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist' — see https://axodotdev.github.io/cargo-dist/
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.31.0"
+
+# CI backend
+ci = "github"
+
+# Installers to generate for each release
+# - shell: install.sh for macOS/Linux (also served at beebeeb.io/install.sh)
+# - homebrew: formula pushed to beebeeb-io/homebrew-tap on release
+installers = ["shell", "homebrew"]
+
+# Target platforms (Rust target-triple syntax)
+targets = [
+  "aarch64-apple-darwin",       # Apple Silicon Mac
+  "x86_64-apple-darwin",        # Intel Mac
+  "x86_64-unknown-linux-gnu",   # Linux x86_64
+  "aarch64-unknown-linux-gnu",  # Linux ARM64
+  "x86_64-pc-windows-msvc",     # Windows x86_64
+]
+
+# Where the shell installer places the binary
+install-path = "CARGO_HOME"
+
+# GitHub Releases hosts release assets
+hosting = "github"
+
+# Homebrew tap: cargo-dist opens a PR here with the updated formula
+# Requires a HOMEBREW_TAP_TOKEN secret in the GitHub repo settings
+# (PAT with contents: write on beebeeb-io/homebrew-tap)
+tap = "beebeeb-io/homebrew-tap"
+
+# Formula name — users run: brew install beebeeb-io/tap/bb
+formula = "bb"
+
+# Publish to Homebrew tap automatically on tag
+publish-jobs = ["homebrew"]
+
+# Don't install cargo-dist's own updater binary
+install-updater = false
+
+# Include SHA-256 checksums for all artifacts
+checksum = "sha256"
+
+# Allow custom modifications to the generated CI file (we add a [patch] removal step)
+allow-dirty = ["ci"]

@@ -5,6 +5,10 @@ version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/beebeeb-io/cli"
+homepage = "https://beebeeb.io"
+documentation = "https://beebeeb.io/cli"
+keywords = ["encryption", "cloud-storage", "e2ee", "privacy", "cli"]
+categories = ["command-line-utilities", "cryptography"]
 
 [[bin]]
 name = "bb"
@@ -36,3 +40,8 @@ mime_guess = "2"
 [patch."https://github.com/beebeeb-io/core"]
 beebeeb-core = { path = "../core/beebeeb-core" }
 beebeeb-types = { path = "../core/beebeeb-types" }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
