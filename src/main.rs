@@ -4,7 +4,7 @@ mod config;
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use colored::Colorize;
 
 /// bb — Beebeeb CLI · end-to-end encrypted vault from the terminal
@@ -172,6 +172,23 @@ enum Commands {
 
     /// End current session
     Logout,
+
+    /// Print shell completion script to stdout
+    ///
+    /// Pipe the output into the correct file for your shell:
+    ///
+    ///   bb completions bash > ~/.local/share/bash-completion/completions/bb
+    ///
+    ///   bb completions zsh > ~/.zfunc/_bb
+    ///
+    ///   bb completions fish > ~/.config/fish/completions/bb.fish
+    ///
+    ///   bb completions powershell > ~/Documents/PowerShell/completions/bb.ps1
+    Completions {
+        /// Target shell
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
 }
 
 #[tokio::main]
@@ -224,6 +241,15 @@ async fn main() {
             Ok(())
         }
         Commands::Logout => commands::logout::run().await,
+        Commands::Completions { shell } => {
+            clap_complete::generate(
+                shell,
+                &mut Cli::command(),
+                "bb",
+                &mut std::io::stdout(),
+            );
+            Ok(())
+        }
     };
 
     if let Err(e) = result {

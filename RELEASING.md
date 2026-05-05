@@ -55,6 +55,34 @@ scoop install bb
 # https://github.com/beebeeb-io/cli/releases/latest
 ```
 
+## Shell completions (add to install docs / post-install note)
+
+After installing `bb`, users can enable tab-completion for their shell:
+
+```bash
+# Bash (add to ~/.bashrc or drop in the completions dir)
+bb completions bash > ~/.local/share/bash-completion/completions/bb
+# or: echo 'eval "$(bb completions bash)"' >> ~/.bashrc
+
+# Zsh (add the directory to fpath first)
+mkdir -p ~/.zfunc
+bb completions zsh > ~/.zfunc/_bb
+# In ~/.zshrc, before compinit: fpath=(~/.zfunc $fpath)
+
+# Fish
+bb completions fish > ~/.config/fish/completions/bb.fish
+
+# PowerShell
+bb completions powershell > ~/Documents/PowerShell/completions/bb.ps1
+# Then source it in $PROFILE: . ~/Documents/PowerShell/completions/bb.ps1
+
+# Homebrew tap users get completions automatically via brew's linkage.
+```
+
+Include this block in:
+- The docs site CLI quick-start article (after the install step)
+- The Homebrew formula's `caveats` string (if added later)
+
 ## Rollback
 
 ```bash
