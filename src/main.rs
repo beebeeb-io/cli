@@ -29,7 +29,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Authenticate with your Beebeeb account
-    Login,
+    Login {
+        /// Open a browser window for OAuth-style login (no password prompt)
+        #[arg(long)]
+        browser: bool,
+    },
 
     /// Show current session, device, region, quota
     Whoami,
@@ -155,7 +159,7 @@ async fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::Login => commands::login::run().await,
+        Commands::Login { browser } => commands::login::run(browser).await,
         Commands::Whoami => commands::whoami::run().await,
         Commands::Status => commands::status::run().await,
         Commands::Config => commands::config::run().await,

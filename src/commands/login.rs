@@ -1,6 +1,15 @@
 use base64::Engine;
 use colored::Colorize;
 use std::io::{self, Write};
+use std::sync::Arc;
+
+use axum::extract::State;
+use axum::http::{HeaderMap, Method, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::any;
+use axum::Router;
+use serde::Deserialize;
+use tokio::sync::{oneshot, Mutex};
 
 use crate::api::ApiClient;
 use crate::config::{load_config, save_config};
@@ -114,7 +123,194 @@ async fn legacy_login(api: &ApiClient, email: &str, password: &str) -> Result<Lo
     })
 }
 
-pub async fn run() -> Result<(), String> {
+// ─── Browser login (--browser flag) ──────────────────────────────────────────
+
+/// JSON body POSTed by the web app to `http://localhost:<port>/callback`.
+#[derive(Deserialize, Clone)]
+struct CallbackPayload {
+    nonce: String,
+    session_token: String,
+    master_key_b64: String,
+    email: String,
+}
+
+/// Shared state for the local callback server.
+struct BrowserState {
+    expected_nonce: String,
+    /// One-shot sender for the callback payload.  Consumed on first valid use.
+    payload_tx: Mutex<Option<oneshot::Sender<CallbackPayload>>>,
+}
+
+async fn handle_callback(
+    State(state): State<Arc<BrowserState>>,
+    req: axum::extract::Request,
+) -> Response {
+    let method = req.method().clone();
+
+    // CORS pre-flight — browsers send this before the actual POST
+    let mut cors_headers = HeaderMap::new();
+    cors_headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
+    cors_headers.insert(
+        "Access-Control-Allow-Headers",
+        "Content-Type".parse().unwrap(),
+    );
+    cors_headers.insert(
+        "Access-Control-Allow-Methods",
+        "POST, OPTIONS".parse().unwrap(),
+    );
+
+    if method == Method::OPTIONS {
+        return (StatusCode::OK, cors_headers, "").into_response();
+    }
+
+    // Parse JSON body
+    let body = match axum::body::to_bytes(req.into_body(), 64 * 1024).await {
+        Ok(b) => b,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, cors_headers, format!("body error: {e}"))
+                .into_response();
+        }
+    };
+    let payload: CallbackPayload = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, cors_headers, format!("invalid JSON: {e}"))
+                .into_response();
+        }
+    };
+
+    // Nonce check — prevents replay and cross-origin token injection
+    if payload.nonce != state.expected_nonce {
+        return (StatusCode::BAD_REQUEST, cors_headers, "nonce mismatch").into_response();
+    }
+
+    // Send payload to the waiting main task (single use — take the sender)
+    if let Some(tx) = state.payload_tx.lock().await.take() {
+        let _ = tx.send(payload);
+    }
+
+    (StatusCode::OK, cors_headers, "authorized").into_response()
+}
+
+/// Open a URL in the system default browser (cross-platform).
+fn open_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    let cmd = std::process::Command::new("open").arg(url).spawn();
+
+    #[cfg(target_os = "linux")]
+    let cmd = std::process::Command::new("xdg-open").arg(url).spawn();
+
+    #[cfg(target_os = "windows")]
+    let cmd = std::process::Command::new("cmd")
+        .args(["/c", "start", url])
+        .spawn();
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    let cmd: Result<_, _> = Err("unsupported platform");
+
+    if let Err(e) = cmd {
+        eprintln!("  Could not open browser automatically: {e}");
+        eprintln!("  Please open this URL manually:\n  {url}");
+    }
+}
+
+/// Browser-based login: spawn a local HTTP callback server, open the web auth
+/// page, wait for the token, then persist credentials.
+async fn browser_login() -> Result<(), String> {
+    let nonce = uuid::Uuid::new_v4().to_string();
+
+    // Channel 1: callback payload from the HTTP handler → main task
+    let (payload_tx, payload_rx) = oneshot::channel::<CallbackPayload>();
+    // Channel 2: shutdown signal from main task → axum server
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
+    let shared = Arc::new(BrowserState {
+        expected_nonce: nonce.clone(),
+        payload_tx: Mutex::new(Some(payload_tx)),
+    });
+
+    // Bind to an OS-assigned port on loopback only
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| format!("failed to bind callback server: {e}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| e.to_string())?
+        .port();
+
+    // Spawn the callback server
+    let app = Router::new()
+        .route("/callback", any(handle_callback))
+        .with_state(shared);
+
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await;
+    });
+
+    // Build the auth URL and open the browser
+    let auth_url = format!(
+        "https://app.beebeeb.io/cli-auth?nonce={nonce}&port={port}"
+    );
+    open_browser(&auth_url);
+
+    println!();
+    println!(
+        "  {} {}",
+        "◆".truecolor(212, 168, 67),
+        "Waiting for authorization in your browser...".truecolor(208, 200, 154),
+    );
+    println!(
+        "  {}",
+        format!("If the browser didn't open: {auth_url}").truecolor(106, 101, 91),
+    );
+
+    // Wait for the callback — 120s timeout
+    let payload =
+        tokio::time::timeout(std::time::Duration::from_secs(120), payload_rx)
+            .await
+            .map_err(|_| "authorization timed out — please run `bb login --browser` again")?
+            .map_err(|_| "callback channel closed unexpectedly")?;
+
+    // Stop the local HTTP server
+    let _ = shutdown_tx.send(());
+
+    // Persist credentials (same format as normal login)
+    let mut config = load_config();
+    config.session_token = Some(payload.session_token);
+    config.email = Some(payload.email.clone());
+    config.master_key = Some(payload.master_key_b64);
+    save_config(&config)?;
+
+    // Fetch region for the success banner
+    let api = ApiClient::from_config();
+    let region = api
+        .get_region()
+        .await
+        .ok()
+        .and_then(|v| v.get("region").and_then(|r| r.as_str()).map(String::from))
+        .unwrap_or_else(|| "unknown".to_string());
+
+    println!();
+    println!(
+        "  {} {}",
+        "Logged in as".truecolor(143, 193, 139),
+        format!("{} · {region}", payload.email).truecolor(245, 184, 0),
+    );
+
+    Ok(())
+}
+
+// ─── Entry point ─────────────────────────────────────────────────────────────
+
+pub async fn run(browser: bool) -> Result<(), String> {
+    if browser {
+        return browser_login().await;
+    }
+
     // Prompt for email
     print!("{}", "  email: ".truecolor(106, 101, 91));
     io::stdout().flush().map_err(|e| e.to_string())?;
