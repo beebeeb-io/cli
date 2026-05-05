@@ -124,6 +124,17 @@ enum Commands {
         delete: bool,
     },
 
+    /// Serve vault as a local WebDAV server (mounts in Finder, rclone, Cyberduck)
+    Webdav {
+        /// TCP port to listen on (default: 7878)
+        #[arg(long, default_value_t = 7878)]
+        port: u16,
+
+        /// Block all write operations (PUT, DELETE, MKCOL)
+        #[arg(long, default_value_t = true)]
+        read_only: bool,
+    },
+
     /// Rotate your master vault key
     Rotate,
 
@@ -159,6 +170,9 @@ async fn main() {
             force,
             delete,
         } => commands::sync::run(local_dir, remote_path, dry_run, force, delete).await,
+        Commands::Webdav { port, read_only } => {
+            commands::webdav::run(port, read_only).await
+        }
         Commands::Rotate => {
             println!(
                 "  {}",

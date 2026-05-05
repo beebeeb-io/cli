@@ -8,4 +8,5 @@ pub mod share;
 pub mod status;
 pub mod sync;
 pub mod watch;
+pub mod webdav;
 pub mod whoami;

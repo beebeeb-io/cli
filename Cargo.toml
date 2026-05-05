@@ -30,6 +30,7 @@ base64 = "0.22"
 notify = "7"
 notify-debouncer-full = "0.4"
 walkdir = "2"
+axum = "0.7"
 
 [patch."https://github.com/beebeeb-io/core"]
 beebeeb-core = { path = "../core/beebeeb-core" }
