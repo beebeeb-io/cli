@@ -255,6 +255,30 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    pub async fn get_subscription(&self) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .get(self.url("/api/v1/billing/subscription"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| format!("request failed: {e}"))?;
+        parse_response(resp).await
+    }
+
+    pub async fn get_file_count(&self) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .get(self.url("/api/v1/files/count"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| format!("request failed: {e}"))?;
+        parse_response(resp).await
+    }
+
     pub async fn get_usage(&self) -> Result<Value, String> {
         let token = self.require_auth()?;
         let resp = self

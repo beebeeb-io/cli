@@ -10,4 +10,5 @@ pub mod sync;
 pub mod mount;
 pub mod watch;
 pub mod webdav;
+pub mod quota;
 pub mod whoami;

@@ -41,6 +41,9 @@ enum Commands {
     /// Show connection status, session health, storage usage
     Status,
 
+    /// Show storage quota: used / total / file count (color-coded)
+    Quota,
+
     /// Show current configuration (secrets masked)
     Config,
 
@@ -199,6 +202,7 @@ async fn main() {
         Commands::Login { browser } => commands::login::run(browser).await,
         Commands::Whoami => commands::whoami::run().await,
         Commands::Status => commands::status::run().await,
+        Commands::Quota => commands::quota::run().await,
         Commands::Config => commands::config::run().await,
         Commands::Push { path, parent } => commands::push::run(path, parent).await,
         Commands::Pull { file_id, output } => commands::pull::run(file_id, output).await,
