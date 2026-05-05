@@ -1,14 +1,24 @@
 //! `bb webdav` — serve the Beebeeb vault as a local WebDAV server.
 //!
-//! # Day 1 scope (read-only)
+//! # Implemented (Day 1-3)
 //!
+//! Read:
 //! - `OPTIONS /` → announces WebDAV class 1 compliance
 //! - `PROPFIND /[path]` + `Depth: 0|1` → list files with decrypted names
 //! - `GET /[path]` → download + decrypt → plaintext response
-//! - `HEAD /[path]` → Content-Length (encrypted blob size → plaintext size approx.)
+//! - `HEAD /[path]` → Content-Length
 //!
-//! Write support (PUT/MKCOL/DELETE/MOVE), locking (LOCK/UNLOCK), and caching
-//! are planned for Day 2–6.
+//! Write (disabled by `--read-only`):
+//! - `PUT /[path]` → encrypt + upload (replaces existing if path exists)
+//! - `MKCOL /[path]` → create encrypted folder
+//! - `DELETE /[path]` → soft-delete (trash)
+//! - `MOVE /[src]` + `Destination:` header → rename or reparent
+//!
+//! # Planned (Day 4-6)
+//!
+//! - LOCK/UNLOCK stubs (Finder requires before writing)
+//! - Path cache (avoid re-listing on every PROPFIND)
+//! - Depth: infinity PROPFIND
 //!
 //! # Architecture
 //!
@@ -41,6 +51,9 @@ use colored::Colorize;
 use crate::api::ApiClient;
 use crate::config::load_config;
 
+/// 4 MiB chunk size for WebDAV uploads.
+const CHUNK_SIZE: usize = 4 * 1024 * 1024;
+
 // ─── CLI entry point ─────────────────────────────────────────────────────────
 
 pub async fn run(port: u16, read_only: bool) -> Result<(), String> {
@@ -69,6 +82,7 @@ pub async fn run(port: u16, read_only: bool) -> Result<(), String> {
     let state = Arc::new(DavState {
         api: ApiClient::from_config(),
         master_key,
+        read_only,
     });
 
     let router = Router::new()
@@ -81,7 +95,7 @@ pub async fn run(port: u16, read_only: bool) -> Result<(), String> {
         .await
         .map_err(|e| format!("failed to bind {addr}: {e}"))?;
 
-    let ro_label = if read_only { " (read-only)" } else { "" };
+    let ro_label = if read_only { " read-only" } else { " read-write" };
     println!(
         "\n  {} {}",
         "◆".truecolor(212, 168, 67),
@@ -113,6 +127,7 @@ pub async fn run(port: u16, read_only: bool) -> Result<(), String> {
 struct DavState {
     api: ApiClient,
     master_key: beebeeb_core::kdf::MasterKey,
+    read_only: bool,
 }
 
 // ─── Request dispatcher ───────────────────────────────────────────────────────
@@ -128,8 +143,16 @@ async fn handle_webdav(
 
     eprintln!("  WebDAV {} {}", method, path);
 
+    // Guard write operations when --read-only is set
+    let is_write = matches!(method, Method::PUT | Method::DELETE)
+        || method.as_str() == "MKCOL"
+        || method.as_str() == "MOVE";
+    if is_write && state.read_only {
+        return (StatusCode::METHOD_NOT_ALLOWED, "read-only mode — use bb webdav without --read-only").into_response();
+    }
+
     match method {
-        Method::OPTIONS => options_response(),
+        Method::OPTIONS => options_response(&state),
         ref m if m.as_str() == "PROPFIND" => {
             let depth = headers
                 .get("depth")
@@ -139,16 +162,38 @@ async fn handle_webdav(
         }
         Method::GET => get_response(&state, &path).await,
         Method::HEAD => head_response(&state, &path).await,
+        Method::PUT => {
+            let body_bytes = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
+                Ok(b) => b.to_vec(),
+                Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+            };
+            put_response(&state, &path, body_bytes).await
+        }
+        Method::DELETE => delete_response(&state, &path).await,
+        ref m if m.as_str() == "MKCOL" => mkcol_response(&state, &path).await,
+        ref m if m.as_str() == "MOVE" => {
+            let destination = headers
+                .get("destination")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            move_response(&state, &path, &destination).await
+        }
         _ => (StatusCode::METHOD_NOT_ALLOWED, "").into_response(),
     }
 }
 
 // ─── OPTIONS ─────────────────────────────────────────────────────────────────
 
-fn options_response() -> Response {
+fn options_response(state: &DavState) -> Response {
     let mut headers = HeaderMap::new();
     headers.insert("DAV", "1, 2".parse().unwrap());
-    headers.insert("Allow", "OPTIONS, GET, HEAD, PROPFIND".parse().unwrap());
+    let allow = if state.read_only {
+        "OPTIONS, GET, HEAD, PROPFIND"
+    } else {
+        "OPTIONS, GET, HEAD, PROPFIND, PUT, DELETE, MKCOL, MOVE"
+    };
+    headers.insert("Allow", allow.parse().unwrap());
     (StatusCode::OK, headers, "").into_response()
 }
 
@@ -274,6 +319,334 @@ async fn head_response(state: &Arc<DavState>, path: &str) -> Response {
     }
 
     (StatusCode::OK, headers, "").into_response()
+}
+
+// ─── PUT (upload / overwrite) ─────────────────────────────────────────────────
+
+async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>) -> Response {
+    // Derive filename from the last path segment
+    let filename = path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("file")
+        .to_string();
+    if filename.is_empty() {
+        return (StatusCode::METHOD_NOT_ALLOWED, "cannot PUT on a collection").into_response();
+    }
+
+    // Resolve the parent directory (everything before the last segment)
+    let parent_path = {
+        let trimmed = path.trim_end_matches('/');
+        match trimmed.rfind('/') {
+            Some(i) if i == 0 => "/",
+            Some(i) => &trimmed[..i],
+            None => "/",
+        }
+    };
+
+    let parent_id: Option<String> = if parent_path == "/" {
+        None
+    } else {
+        match resolve_path(state, parent_path).await {
+            Ok(e) if e.is_collection => e.file_id,
+            Ok(_) => {
+                return (StatusCode::CONFLICT, "parent is not a folder").into_response();
+            }
+            Err(e) => {
+                return (StatusCode::CONFLICT, format!("parent not found: {e}")).into_response();
+            }
+        }
+    };
+
+    // Check if a file already exists at this path — if so, trash it first (overwrite)
+    if let Ok(existing) = resolve_path(state, path).await {
+        if let Some(ref eid) = existing.file_id {
+            let _ = state.api.trash_file(eid).await;
+        }
+    }
+
+    // Generate a new file UUID and derive the file key
+    let file_uuid = uuid::Uuid::new_v4();
+    let file_key =
+        beebeeb_core::kdf::derive_file_key(&state.master_key, file_uuid.as_bytes());
+
+    // Encrypt filename
+    let name_blob = match beebeeb_core::encrypt::encrypt_metadata(&file_key, &filename) {
+        Ok(b) => b,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+    };
+    let name_encrypted = match serde_json::to_string(&name_blob) {
+        Ok(s) => s,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+    };
+
+    // Encrypt body in chunks
+    let chunks_raw: Vec<&[u8]> = if body.is_empty() {
+        vec![&[]]
+    } else {
+        body.chunks(CHUNK_SIZE).collect()
+    };
+
+    let mut encrypted_chunks: Vec<(u32, Vec<u8>)> = Vec::with_capacity(chunks_raw.len());
+    let mut total_encrypted_size: i64 = 0;
+
+    for (i, chunk) in chunks_raw.iter().enumerate() {
+        let blob = match beebeeb_core::encrypt::encrypt_chunk(&file_key, chunk) {
+            Ok(b) => b,
+            Err(e) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, format!("encrypt chunk {i}: {e}"))
+                    .into_response();
+            }
+        };
+        let serialized = match serde_json::to_vec(&blob) {
+            Ok(s) => s,
+            Err(e) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+            }
+        };
+        total_encrypted_size += serialized.len() as i64;
+        encrypted_chunks.push((i as u32, serialized));
+    }
+
+    let mime = guess_mime(&filename).unwrap_or("application/octet-stream");
+    let metadata = serde_json::json!({
+        "name_encrypted": name_encrypted,
+        "parent_id":      parent_id.as_deref().and_then(|s| s.parse::<uuid::Uuid>().ok()),
+        "mime_type":      mime,
+        "size_bytes":     total_encrypted_size,
+    });
+    let metadata_json = match serde_json::to_string(&metadata) {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+
+    match state.api.upload_encrypted(&metadata_json, &encrypted_chunks).await {
+        Ok(_) => {
+            let mut headers = HeaderMap::new();
+            headers.insert("Location", path.parse().unwrap_or_else(|_| "/".parse().unwrap()));
+            (StatusCode::CREATED, headers, "").into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+// ─── MKCOL (create folder) ───────────────────────────────────────────────────
+
+async fn mkcol_response(state: &Arc<DavState>, path: &str) -> Response {
+    let folder_name = path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("folder")
+        .to_string();
+    if folder_name.is_empty() {
+        return (StatusCode::METHOD_NOT_ALLOWED, "cannot MKCOL root").into_response();
+    }
+
+    // Resolve parent
+    let parent_path = {
+        let trimmed = path.trim_end_matches('/');
+        match trimmed.rfind('/') {
+            Some(i) if i == 0 => "/",
+            Some(i) => &trimmed[..i],
+            None => "/",
+        }
+    };
+    let parent_id: Option<uuid::Uuid> = if parent_path == "/" {
+        None
+    } else {
+        match resolve_path(state, parent_path).await {
+            Ok(e) if e.is_collection => {
+                e.file_id.as_deref().and_then(|s| s.parse().ok())
+            }
+            Ok(_) => return (StatusCode::CONFLICT, "parent is not a folder").into_response(),
+            Err(e) => {
+                return (StatusCode::CONFLICT, format!("parent not found: {e}")).into_response();
+            }
+        }
+    };
+
+    // Check folder doesn't already exist
+    if resolve_path(state, path).await.is_ok() {
+        return (StatusCode::METHOD_NOT_ALLOWED, "already exists").into_response();
+    }
+
+    // Encrypt folder name — needs a UUID key. Use nil UUID for folders (consistent
+    // with the server's convention: folder name is encrypted with the folder's own UUID).
+    let folder_uuid = uuid::Uuid::new_v4();
+    let folder_key =
+        beebeeb_core::kdf::derive_file_key(&state.master_key, folder_uuid.as_bytes());
+    let name_blob = match beebeeb_core::encrypt::encrypt_metadata(&folder_key, &folder_name) {
+        Ok(b) => b,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+    };
+    let name_encrypted = match serde_json::to_string(&name_blob) {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+
+    match state
+        .api
+        .create_folder(&name_encrypted, parent_id, Some(folder_uuid))
+        .await
+    {
+        Ok(_) => {
+            let mut headers = HeaderMap::new();
+            headers.insert("Location", path.parse().unwrap_or_else(|_| "/".parse().unwrap()));
+            (StatusCode::CREATED, headers, "").into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+// ─── DELETE (soft-delete / trash) ────────────────────────────────────────────
+
+async fn delete_response(state: &Arc<DavState>, path: &str) -> Response {
+    let resolved = match resolve_path(state, path).await {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::NOT_FOUND, e).into_response(),
+    };
+
+    let file_id = match &resolved.file_id {
+        Some(id) => id.clone(),
+        None => return (StatusCode::METHOD_NOT_ALLOWED, "cannot delete root").into_response(),
+    };
+
+    match state.api.trash_file(&file_id).await {
+        Ok(_) => (StatusCode::NO_CONTENT, "").into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+// ─── MOVE (rename / reparent) ────────────────────────────────────────────────
+
+async fn move_response(state: &Arc<DavState>, src_path: &str, destination: &str) -> Response {
+    // Strip any http://host prefix from the Destination header to get a bare path
+    let dst_path = if let Some(pos) = destination.find("://") {
+        let after_scheme = &destination[pos + 3..];
+        after_scheme
+            .find('/')
+            .map(|i| &after_scheme[i..])
+            .unwrap_or("/")
+    } else {
+        destination
+    };
+
+    let src = match resolve_path(state, src_path).await {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::NOT_FOUND, e).into_response(),
+    };
+    let file_id = match &src.file_id {
+        Some(id) => id.clone(),
+        None => return (StatusCode::FORBIDDEN, "cannot move root").into_response(),
+    };
+
+    // Determine new name and new parent
+    let new_name = dst_path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(&src.display_name)
+        .to_string();
+
+    let dst_parent_path = {
+        let trimmed = dst_path.trim_end_matches('/');
+        match trimmed.rfind('/') {
+            Some(i) if i == 0 => "/",
+            Some(i) => &trimmed[..i],
+            None => "/",
+        }
+    };
+
+    // Resolve source parent for comparison
+    let src_parent_path = {
+        let trimmed = src_path.trim_end_matches('/');
+        match trimmed.rfind('/') {
+            Some(i) if i == 0 => "/",
+            Some(i) => &trimmed[..i],
+            None => "/",
+        }
+    };
+
+    let same_parent = src_parent_path == dst_parent_path;
+
+    // Compute new_name_encrypted if the name changed
+    let file_uuid: uuid::Uuid = match file_id.parse() {
+        Ok(u) => u,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let file_key = beebeeb_core::kdf::derive_file_key(&state.master_key, file_uuid.as_bytes());
+
+    let new_name_encrypted = if new_name != src.display_name {
+        let blob = match beebeeb_core::encrypt::encrypt_metadata(&file_key, &new_name) {
+            Ok(b) => b,
+            Err(e) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+            }
+        };
+        match serde_json::to_string(&blob) {
+            Ok(s) => Some(s),
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        }
+    } else {
+        None
+    };
+
+    // Resolve new parent if moved
+    let new_parent_id: Option<uuid::Uuid> = if !same_parent {
+        if dst_parent_path == "/" {
+            // Moving to root: pass `null` parent.  Server interprets null as root.
+            // We signal "move to root" by passing Some(uuid::Uuid::nil()) — but the
+            // server PATCH endpoint treats parent_id as the new parent.
+            // We'll pass None to the move_file call to set parent_id = null.
+            None // will be handled specially below
+        } else {
+            match resolve_path(state, dst_parent_path).await {
+                Ok(e) if e.is_collection => {
+                    e.file_id.as_deref().and_then(|s| s.parse::<uuid::Uuid>().ok())
+                }
+                Ok(_) => {
+                    return (StatusCode::CONFLICT, "destination parent is not a folder")
+                        .into_response();
+                }
+                Err(e) => {
+                    return (StatusCode::CONFLICT, format!("destination parent not found: {e}"))
+                        .into_response();
+                }
+            }
+        }
+    } else {
+        // Same parent — skip parent_id in the PATCH
+        // We'll only send name_encrypted
+        None
+    };
+
+    // Determine what to send to PATCH
+    let patch_parent = if same_parent {
+        None // don't change parent
+    } else {
+        Some(new_parent_id) // change parent (may be None = root)
+    };
+
+    match state
+        .api
+        .move_file(
+            &file_id,
+            new_name_encrypted.as_deref(),
+            patch_parent.flatten(),
+        )
+        .await
+    {
+        Ok(_) => (StatusCode::CREATED, "").into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
 }
 
 // ─── Path resolution ─────────────────────────────────────────────────────────

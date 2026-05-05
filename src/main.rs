@@ -130,8 +130,8 @@ enum Commands {
         #[arg(long, default_value_t = 7878)]
         port: u16,
 
-        /// Block all write operations (PUT, DELETE, MKCOL)
-        #[arg(long, default_value_t = true)]
+        /// Block all write operations (PUT, DELETE, MKCOL, MOVE)
+        #[arg(long, default_value_t = false)]
         read_only: bool,
     },
 

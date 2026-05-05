@@ -306,6 +306,32 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    /// Rename and/or move a file.  Pass `None` to leave a field unchanged.
+    pub async fn move_file(
+        &self,
+        file_id: &str,
+        new_name_encrypted: Option<&str>,
+        new_parent_id: Option<uuid::Uuid>,
+    ) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let mut body = serde_json::json!({});
+        if let Some(name) = new_name_encrypted {
+            body["name_encrypted"] = serde_json::json!(name);
+        }
+        if let Some(pid) = new_parent_id {
+            body["parent_id"] = serde_json::json!(pid);
+        }
+        let resp = self
+            .client
+            .patch(self.url(&format!("/api/v1/files/{file_id}")))
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("request failed: {e}"))?;
+        parse_response(resp).await
+    }
+
     /// Soft-delete (trash) a file by ID.
     pub async fn trash_file(&self, file_id: &str) -> Result<Value, String> {
         let token = self.require_auth()?;
