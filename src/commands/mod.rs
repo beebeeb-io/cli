@@ -9,6 +9,7 @@ pub mod status;
 pub mod sync;
 pub mod mount;
 pub mod watch;
+pub mod watch_remote;
 pub mod webdav;
 pub mod quota;
 pub mod whoami;

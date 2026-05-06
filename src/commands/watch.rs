@@ -5,8 +5,9 @@ use std::time::{Duration, Instant};
 
 use colored::Colorize;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
+use uuid::Uuid;
 
-use crate::commands::push;
+use crate::commands::{push, watch_remote};
 
 /// Debounce window: batch rapid changes within this period.
 const DEBOUNCE_MS: u64 = 500;
@@ -28,6 +29,17 @@ pub async fn run(path: PathBuf, parent_id: Option<String>) -> Result<(), String>
         ));
     }
 
+    // Parse the optional vault parent UUID up front so the remote-event
+    // consumer can filter to events under this folder. Bad input bails
+    // before we open any connections.
+    let watched_parent: Option<Uuid> = match &parent_id {
+        Some(s) => Some(
+            Uuid::parse_str(s)
+                .map_err(|e| format!("invalid --parent uuid '{s}': {e}"))?,
+        ),
+        None => None,
+    };
+
     println!(
         "  {} {}",
         "watching".custom_color(crate::colors::GREEN_OK),
@@ -35,7 +47,7 @@ pub async fn run(path: PathBuf, parent_id: Option<String>) -> Result<(), String>
     );
     println!(
         "  {}",
-        "local changes will be encrypted and uploaded automatically"
+        "local changes uploaded · remote changes downloaded automatically"
             .custom_color(crate::colors::INK_DIM),
     );
     println!(
@@ -43,6 +55,25 @@ pub async fn run(path: PathBuf, parent_id: Option<String>) -> Result<(), String>
         "press Ctrl+C to stop".custom_color(crate::colors::INK_DIM),
     );
     println!();
+
+    // Spawn the remote-event consumer on a background tokio task. It owns
+    // its own ApiClient (built from the same on-disk config) and exits on
+    // `cancel_tx.send(())`.
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    let remote_handle = {
+        let api = crate::api::ApiClient::from_config();
+        let mirror = watch_path.clone();
+        tokio::spawn(async move {
+            if let Err(e) = watch_remote::run(api, watched_parent, mirror, cancel_rx).await {
+                eprintln!(
+                    "  {} {}",
+                    "warn:".custom_color(crate::colors::AMBER),
+                    format!("remote watcher exited: {e}")
+                        .custom_color(crate::colors::INK_DIM),
+                );
+            }
+        })
+    };
 
     // Set up Ctrl+C handler
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
@@ -70,6 +101,14 @@ pub async fn run(path: PathBuf, parent_id: Option<String>) -> Result<(), String>
                 "stopped".custom_color(crate::colors::GREEN_OK),
                 "watch ended gracefully".custom_color(crate::colors::INK_DIM),
             );
+            // Tell the remote consumer to stop, then wait briefly for it to
+            // close its SSE connection cleanly.
+            let _ = cancel_tx.send(());
+            let _ = tokio::time::timeout(
+                Duration::from_secs(2),
+                remote_handle,
+            )
+            .await;
             break;
         }
 
