@@ -2,6 +2,7 @@ mod api;
 mod colors;
 mod commands;
 mod config;
+mod loopback;
 
 use std::path::PathBuf;
 

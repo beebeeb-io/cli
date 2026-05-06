@@ -397,6 +397,71 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    /// Mint a short-lived (~1h) bearer token for the SSE sync stream. The
+    /// stream cannot use the main session token because SSE auth lives in
+    /// the URL query string (browsers can't set headers on EventSource).
+    pub async fn create_stream_token(&self) -> Result<String, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .post(self.url("/api/v1/sync/stream-token"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| format!("request failed: {e}"))?;
+        let body = parse_response(resp).await?;
+        body.get("stream_token")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .ok_or_else(|| "server did not return a stream_token".to_string())
+    }
+
+    /// Build the absolute URL of the SSE endpoint for a given stream token.
+    pub fn stream_url(&self, stream_token: &str) -> String {
+        // Use a query-string token because SSE doesn't allow custom headers.
+        // URL-encoding is unnecessary — the server-issued token is base64url
+        // (no `+`, `/`, `=`, or other reserved characters).
+        format!("{}/api/v1/sync/stream?token={stream_token}", self.base_url)
+    }
+
+    /// Fetch sync ops with `seq_id > since` so we can catch up after an SSE
+    /// reconnect. The server caps `limit` at 5000.
+    pub async fn list_ops_since(&self, since: i64) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .get(self.url(&format!("/api/v1/sync/ops?since={since}")))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| format!("request failed: {e}"))?;
+        parse_response(resp).await
+    }
+
+    /// Build a streaming SSE response for the sync endpoint. Caller is
+    /// responsible for parsing event frames out of the byte stream.
+    pub async fn open_sync_stream(
+        &self,
+        stream_token: &str,
+    ) -> Result<reqwest::Response, String> {
+        let resp = self
+            .client
+            .get(self.stream_url(stream_token))
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            // SSE connections are long-lived; disable reqwest's default
+            // request timeout for this call only.
+            .timeout(std::time::Duration::from_secs(60 * 60 * 24))
+            .send()
+            .await
+            .map_err(|e| format!("sse connect failed: {e}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("sse handshake failed ({status}): {body}"));
+        }
+        Ok(resp)
+    }
+
     /// Download the raw encrypted bytes for a file.
     pub async fn download_file(&self, file_id: &str) -> Result<Vec<u8>, String> {
         let token = self.require_auth()?;

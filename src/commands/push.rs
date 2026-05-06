@@ -321,6 +321,10 @@ async fn push_single_file(
         .and_then(|v| v.as_str())
         .unwrap_or(&file_id_str);
 
+    // Mark this upload so a `bb watch` remote-event handler in the same
+    // process doesn't redundantly download the file we just sent.
+    crate::loopback::mark_uploaded(server_id);
+
     let size_str = format_size(file_size);
     println!(
         "  {} {} {} {}",
