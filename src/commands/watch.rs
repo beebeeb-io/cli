@@ -116,7 +116,9 @@ pub async fn run(path: PathBuf, parent_id: Option<String>) -> Result<(), String>
         while let Ok(event_result) = fs_rx.try_recv() {
             match event_result {
                 Ok(event) => {
-                    if let Some(paths) = relevant_paths(&event, &watch_path) {
+                    if let Some(paths) =
+                        relevant_paths(&event, &watch_path, parent_id.as_deref())
+                    {
                         for p in paths {
                             pending.insert(p);
                         }
@@ -153,7 +155,15 @@ pub async fn run(path: PathBuf, parent_id: Option<String>) -> Result<(), String>
 }
 
 /// Extract file paths from a notify event, filtering to relevant changes.
-fn relevant_paths(event: &Event, watch_root: &Path) -> Option<Vec<PathBuf>> {
+///
+/// Create/Modify events return paths to be queued for upload. Remove events
+/// are handled inline: we soft-delete the corresponding server file (best
+/// effort, never blocks the watch loop) and return None.
+fn relevant_paths(
+    event: &Event,
+    watch_root: &Path,
+    parent_id: Option<&str>,
+) -> Option<Vec<PathBuf>> {
     match event.kind {
         EventKind::Create(_) | EventKind::Modify(_) => {
             let paths: Vec<PathBuf> = event
@@ -183,19 +193,29 @@ fn relevant_paths(event: &Event, watch_root: &Path) -> Option<Vec<PathBuf>> {
             }
         }
         EventKind::Remove(_) => {
-            // Log deletions but don't act on them (server delete not implemented)
             for p in &event.paths {
                 if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-                    if !name.starts_with('.') {
-                        let rel = p.strip_prefix(watch_root).unwrap_or(p);
-                        eprintln!(
-                            "  {} {} {}",
-                            "skip".custom_color(crate::colors::INK_DIM),
-                            rel.display().to_string().custom_color(crate::colors::INK),
-                            "(deleted — server-side delete not yet implemented)"
-                                .custom_color(crate::colors::INK_DIM),
-                        );
+                    // Skip hidden files / common temp swap files; these match
+                    // the filter for Create/Modify above so we stay symmetric.
+                    if name.starts_with('.') || name.ends_with('~') || name.ends_with(".tmp") {
+                        continue;
                     }
+                    // Soft-delete the server-side file. Build API client and
+                    // master key inside the helper (same approach as sync_batch).
+                    // Failures are logged but never block the watch loop.
+                    let name_owned = name.to_string();
+                    let parent_owned = parent_id.map(|s| s.to_string());
+                    let watch_root_owned = watch_root.to_path_buf();
+                    tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(async {
+                            trash_server_file(
+                                &name_owned,
+                                &watch_root_owned,
+                                parent_owned.as_deref(),
+                            )
+                            .await;
+                        })
+                    });
                 }
             }
             None
@@ -244,6 +264,51 @@ async fn sync_batch(
             }
         }
     }
+}
+
+/// Attempt to soft-delete a file on the server.
+/// Looks up the server file ID from the local filename, then calls trash_file.
+/// Failures are logged but never propagate — the watch loop must keep running.
+async fn trash_server_file(file_name: &str, _watch_root: &Path, parent_id: Option<&str>) {
+    let api = crate::api::ApiClient::from_config();
+    if api.require_auth().is_err() {
+        return;
+    }
+
+    let master_key = match push::load_master_key() {
+        Ok(mk) => mk,
+        Err(_) => return,
+    };
+
+    let parent_uuid = parent_id.and_then(|id| Uuid::parse_str(id).ok());
+
+    // find_conflict decrypts server-side names and matches the local filename.
+    // Returns Some(uuid) if a matching file exists on the server.
+    if let Some(file_uuid) =
+        push::find_conflict(&api, &master_key, file_name, parent_uuid).await
+    {
+        let file_id = file_uuid.to_string();
+        match api.trash_file(&file_id).await {
+            Ok(_) => {
+                println!(
+                    "  {} {} {}",
+                    "del".custom_color(crate::colors::RED_ERR),
+                    file_name.custom_color(crate::colors::INK),
+                    "(trashed on server)".custom_color(crate::colors::INK_DIM),
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "  {} {} {}",
+                    "fail".custom_color(crate::colors::RED_ERR),
+                    file_name.custom_color(crate::colors::INK),
+                    e.custom_color(crate::colors::INK_DIM),
+                );
+            }
+        }
+    }
+    // If no matching file is found on the server (not yet uploaded, or name
+    // mismatch from a prior conflict-resolution rename), silently skip.
 }
 
 /// Simple timestamp for log lines (HH:MM:SS).

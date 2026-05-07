@@ -15,7 +15,7 @@ fn b64() -> base64::engine::GeneralPurpose {
 }
 
 /// Load the master key from config, returning a beebeeb_core MasterKey.
-fn load_master_key() -> Result<beebeeb_core::kdf::MasterKey, String> {
+pub(crate) fn load_master_key() -> Result<beebeeb_core::kdf::MasterKey, String> {
     let config = load_config();
     let mk_b64 = config
         .master_key
@@ -57,7 +57,7 @@ enum ConflictResolution {
 
 /// Ask the server for all encrypted names in `parent_id`, decrypt them
 /// locally, and return the existing file's UUID if `filename` matches.
-async fn find_conflict(
+pub(crate) async fn find_conflict(
     api: &ApiClient,
     master_key: &beebeeb_core::kdf::MasterKey,
     filename: &str,
