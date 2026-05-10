@@ -344,32 +344,12 @@ async fn push_single_file(
 }
 
 fn guess_mime_type(filename: &str) -> Option<String> {
-    let ext = filename.rsplit('.').next()?.to_lowercase();
-    let mime = match ext.as_str() {
-        "txt" => "text/plain",
-        "html" | "htm" => "text/html",
-        "css" => "text/css",
-        "js" => "application/javascript",
-        "json" => "application/json",
-        "xml" => "application/xml",
-        "pdf" => "application/pdf",
-        "zip" => "application/zip",
-        "gz" | "gzip" => "application/gzip",
-        "tar" => "application/x-tar",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "svg" => "image/svg+xml",
-        "webp" => "image/webp",
-        "mp3" => "audio/mpeg",
-        "mp4" => "video/mp4",
-        "webm" => "video/webm",
-        "md" => "text/markdown",
-        "rs" => "text/x-rust",
-        "toml" => "application/toml",
-        _ => "application/octet-stream",
-    };
-    Some(mime.to_string())
+    Some(
+        mime_guess::from_path(filename)
+            .first_or_octet_stream()
+            .essence_str()
+            .to_string(),
+    )
 }
 
 async fn push_directory(

@@ -24,7 +24,7 @@ pub async fn run(path: Option<String>) -> Result<(), String> {
 
     // Load master key for local decryption — ls is a read-only command, but
     // Beebeeb is zero-knowledge so the server always returns name_encrypted.
-    let master_key = load_master_key().ok();
+    let master_key = load_master_key()?;
 
     let result = api.list_files(path.as_deref()).await?;
 
@@ -64,22 +64,12 @@ pub async fn run(path: Option<String>) -> Result<(), String> {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        // Prefer decrypted name; fall back to encrypted blob or raw `name` field.
-        let name: String = match (&master_key, file.get("name_encrypted").and_then(|v| v.as_str())) {
-            (Some(mk), Some(enc)) => {
-                decrypt_name(mk, file_id, enc)
-                    .unwrap_or_else(|| format!("<encrypted:{}>", &enc[..enc.len().min(8)]))
-            }
-            (None, Some(enc)) => {
-                // Not logged in or no master key — show truncated ciphertext
-                format!("<locked:{}>", &enc[..enc.len().min(8)])
-            }
-            _ => file
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string(),
-        };
+        let name_encrypted = file
+            .get("name_encrypted")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("server response missing name_encrypted for file {file_id}"))?;
+        let name = decrypt_name(&master_key, file_id, name_encrypted)
+            .ok_or_else(|| format!("failed to decrypt filename for file {file_id}"))?;
 
         let size = file
             .get("size_bytes")

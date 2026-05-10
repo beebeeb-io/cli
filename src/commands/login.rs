@@ -89,40 +89,6 @@ async fn opaque_login(api: &ApiClient, email: &str, password: &[u8]) -> Result<L
     })
 }
 
-/// Legacy login for pre-OPAQUE accounts. Derives master key from password
-/// using Argon2id with the salt returned by the server.
-async fn legacy_login(api: &ApiClient, email: &str, password: &str) -> Result<LoginResult, String> {
-    let result = api.login(email, password).await?;
-
-    let token = result
-        .get("session_token")
-        .and_then(|v| v.as_str())
-        .ok_or("server did not return a session token")?
-        .to_string();
-
-    let salt_hex = result
-        .get("salt")
-        .and_then(|v| v.as_str())
-        .ok_or("server did not return salt")?;
-
-    // Decode hex salt
-    let salt_bytes: Vec<u8> = (0..salt_hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&salt_hex[i..i + 2], 16))
-        .collect::<Result<Vec<u8>, _>>()
-        .map_err(|e| format!("invalid salt hex: {e}"))?;
-
-    // Derive master key via Argon2id (same as beebeeb-core KDF)
-    let mk = beebeeb_core::kdf::derive_master_key(password, &salt_bytes)
-        .map_err(|e| format!("key derivation failed: {e}"))?;
-    let master_key_b64 = b64().encode(mk.to_bytes());
-
-    Ok(LoginResult {
-        token,
-        master_key_b64,
-    })
-}
-
 // ─── Browser login (--browser flag) ──────────────────────────────────────────
 
 /// JSON body POSTed by the web app to `http://localhost:<port>/callback`.
@@ -338,13 +304,9 @@ pub async fn run(browser: bool) -> Result<(), String> {
     let api = ApiClient::from_config();
     let password_bytes = password.as_bytes();
 
-    // Try OPAQUE first, fall back to legacy for accounts not yet migrated
-    let login_result = match opaque_login(&api, &email, password_bytes).await {
-        Ok(r) => r,
-        Err(_opaque_err) => {
-            legacy_login(&api, &email, &password).await?
-        }
-    };
+    // Password entry feeds only the OPAQUE protocol; do not fall back to
+    // `/auth/login`, because that would bypass the web/iOS auth contract.
+    let login_result = opaque_login(&api, &email, password_bytes).await?;
 
     // Save to config (session token + master key)
     let mut config = load_config();

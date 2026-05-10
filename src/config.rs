@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-const DEFAULT_API_URL: &str = "http://localhost:3001";
+const DEFAULT_API_URL: &str = "https://api.beebeeb.io";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {

@@ -42,18 +42,6 @@ impl ApiClient {
         parse_response(resp).await
     }
 
-    pub async fn login(&self, email: &str, password: &str) -> Result<Value, String> {
-        let resp = self
-            .client
-            .post(self.url("/api/v1/auth/login"))
-            .json(&serde_json::json!({ "email": email, "password": password }))
-            .send()
-            .await
-            .map_err(|e| format!("request failed: {e}"))?;
-
-        parse_response(resp).await
-    }
-
     pub async fn opaque_login_start(
         &self,
         email: &str,
