@@ -53,20 +53,6 @@ libc = "0.2"
 # Requires libfuse3-dev on Linux: apt install libfuse3-dev.
 fuse = ["dep:fuser"]
 
-# cargo-dist release configuration
-[workspace.metadata.dist]
-cargo-dist-version = "0.31.0"
-ci = "github"
-targets = [
-    "aarch64-apple-darwin",
-    "x86_64-apple-darwin",
-    "x86_64-unknown-linux-musl",
-    "aarch64-unknown-linux-musl",
-]
-# No auto-generated installer — we ship our own install.sh via releases.beebeeb.io
-installers = []
-pr-run-mode = "plan"
-
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"

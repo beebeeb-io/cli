@@ -10,17 +10,16 @@ cargo-dist-version = "0.31.0"
 ci = "github"
 
 # Installers to generate for each release
-# - shell: install.sh for macOS/Linux (also served at beebeeb.io/install.sh)
 # - homebrew: formula pushed to beebeeb-io/homebrew-tap on release
-installers = ["shell", "homebrew"]
+# Note: we ship our own install.sh via releases.beebeeb.io (not cargo-dist generated)
+installers = ["homebrew"]
 
-# Target platforms (Rust target-triple syntax)
+# Target platforms — musl for fully static Linux binaries (no glibc dep)
 targets = [
-  "aarch64-apple-darwin",       # Apple Silicon Mac
-  "x86_64-apple-darwin",        # Intel Mac
-  "x86_64-unknown-linux-gnu",   # Linux x86_64
-  "aarch64-unknown-linux-gnu",  # Linux ARM64
-  "x86_64-pc-windows-msvc",     # Windows x86_64
+  "aarch64-apple-darwin",          # Apple Silicon Mac
+  "x86_64-apple-darwin",           # Intel Mac
+  "x86_64-unknown-linux-musl",     # Linux x86_64 (static)
+  "aarch64-unknown-linux-musl",    # Linux ARM64 (static, Graviton/Pi)
 ]
 
 # Where the shell installer places the binary
