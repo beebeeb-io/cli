@@ -108,6 +108,7 @@ fn prompt_conflict(filename: &str) -> ConflictResolution {
 pub async fn run(
     path: PathBuf,
     parent_id: Option<String>,
+    folder: Option<String>,
     replace: bool,
     keep_both: bool,
 ) -> Result<(), String> {
@@ -119,18 +120,89 @@ pub async fn run(
         ConflictStrategy::Prompt
     };
 
-    let api = ApiClient::from_config();
-    api.require_auth()?;
-
     if !path.exists() {
         return Err(format!("file not found: {}", path.display()));
     }
+
+    let api = ApiClient::from_config();
+    api.require_auth()?;
+
+    let parent_id = match (parent_id, folder) {
+        (Some(parent_id), None) => Some(parent_id),
+        (None, Some(folder)) => Some(resolve_upload_folder(&api, &folder).await?),
+        (None, None) => None,
+        (Some(_), Some(_)) => return Err("use either --parent or --folder, not both".to_string()),
+    };
 
     if path.is_dir() {
         return push_directory(&api, &path, parent_id, strategy).await;
     }
 
     push_single_file(&api, &path, parent_id, strategy).await
+}
+
+async fn resolve_upload_folder(api: &ApiClient, folder: &str) -> Result<String, String> {
+    if folder.trim().is_empty() {
+        return Err("--folder must not be empty".to_string());
+    }
+
+    if let Ok(folder_id) = folder.parse::<uuid::Uuid>() {
+        return Ok(folder_id.to_string());
+    }
+
+    let master_key = load_master_key()?;
+    let listing = api.list_files(None).await?;
+    let files = listing
+        .as_array()
+        .or_else(|| listing.get("files").and_then(|f| f.as_array()))
+        .ok_or("invalid file listing response")?;
+
+    for file in files {
+        let is_folder = file
+            .get("is_folder")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !is_folder {
+            continue;
+        }
+
+        let file_id = file
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or("folder response missing id")?;
+        let name_encrypted = file
+            .get("name_encrypted")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("folder response missing name_encrypted for {file_id}"))?;
+        let folder_uuid: uuid::Uuid = file_id
+            .parse()
+            .map_err(|e| format!("invalid folder id from server: {e}"))?;
+        let folder_key = beebeeb_core::kdf::derive_file_key(&master_key, folder_uuid.as_bytes());
+        let blob: beebeeb_types::EncryptedBlob = serde_json::from_str(name_encrypted)
+            .map_err(|e| format!("invalid encrypted folder name for {file_id}: {e}"))?;
+        let name = beebeeb_core::encrypt::decrypt_metadata(&folder_key, &blob)
+            .map_err(|e| format!("failed to decrypt folder name for {file_id}: {e}"))?;
+
+        if name == folder {
+            return Ok(file_id.to_string());
+        }
+    }
+
+    let folder_id = uuid::Uuid::new_v4();
+    let folder_key = beebeeb_core::kdf::derive_file_key(&master_key, folder_id.as_bytes());
+    let name_blob = beebeeb_core::encrypt::encrypt_metadata(&folder_key, folder)
+        .map_err(|e| format!("failed to encrypt folder name: {e}"))?;
+    let name_encrypted =
+        serde_json::to_string(&name_blob).map_err(|e| format!("failed to serialize folder name: {e}"))?;
+
+    let created = api
+        .create_folder(&name_encrypted, None, Some(folder_id))
+        .await?;
+    let created_id = created
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or("server response missing folder id")?;
+    Ok(created_id.to_string())
 }
 
 async fn push_single_file(

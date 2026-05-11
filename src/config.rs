@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 const DEFAULT_API_URL: &str = "https://api.beebeeb.io";
+static API_URL_OVERRIDE: OnceLock<String> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -34,13 +36,29 @@ fn config_path() -> PathBuf {
 
 pub fn load_config() -> Config {
     let path = config_path();
-    if !path.exists() {
-        return Config::default();
+    let mut config = if !path.exists() {
+        Config::default()
+    } else {
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
+            Err(_) => Config::default(),
+        }
+    };
+
+    if let Some(api_url) = API_URL_OVERRIDE.get() {
+        config.api_url = api_url.clone();
     }
-    match std::fs::read_to_string(&path) {
-        Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
-        Err(_) => Config::default(),
+    config
+}
+
+pub fn set_api_url_override(api_url: String) -> Result<(), String> {
+    let api_url = api_url.trim_end_matches('/').to_string();
+    if api_url.is_empty() {
+        return Err("--api must not be empty".to_string());
     }
+    API_URL_OVERRIDE
+        .set(api_url)
+        .map_err(|_| "--api was already configured".to_string())
 }
 
 pub fn save_config(config: &Config) -> Result<(), String> {

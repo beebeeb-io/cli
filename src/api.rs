@@ -1,7 +1,18 @@
 use reqwest::Client;
 use serde_json::Value;
+use std::error::Error;
 
 use crate::config::load_config;
+
+fn format_request_error(error: reqwest::Error) -> String {
+    let mut message = format!("request failed: {error}");
+    let mut source = error.source();
+    while let Some(err) = source {
+        message.push_str(&format!(": {err}"));
+        source = err.source();
+    }
+    message
+}
 
 pub struct ApiClient {
     client: Client,
@@ -37,7 +48,7 @@ impl ApiClient {
             .json(&serde_json::json!({ "email": email, "password": password }))
             .send()
             .await
-            .map_err(|e| format!("request failed: {e}"))?;
+            .map_err(format_request_error)?;
 
         parse_response(resp).await
     }
@@ -56,7 +67,7 @@ impl ApiClient {
             }))
             .send()
             .await
-            .map_err(|e| format!("request failed: {e}"))?;
+            .map_err(format_request_error)?;
 
         parse_response(resp).await
     }
@@ -77,7 +88,7 @@ impl ApiClient {
             }))
             .send()
             .await
-            .map_err(|e| format!("request failed: {e}"))?;
+            .map_err(format_request_error)?;
 
         parse_response(resp).await
     }
@@ -90,7 +101,7 @@ impl ApiClient {
             .bearer_auth(token)
             .send()
             .await
-            .map_err(|e| format!("request failed: {e}"))?;
+            .map_err(format_request_error)?;
 
         parse_response(resp).await
     }
@@ -103,7 +114,7 @@ impl ApiClient {
             .bearer_auth(token)
             .send()
             .await
-            .map_err(|e| format!("request failed: {e}"))?;
+            .map_err(format_request_error)?;
 
         parse_response(resp).await
     }
@@ -114,7 +125,7 @@ impl ApiClient {
             .get(self.url("/api/v1/region"))
             .send()
             .await
-            .map_err(|e| format!("request failed: {e}"))?;
+            .map_err(format_request_error)?;
 
         parse_response(resp).await
     }
@@ -131,7 +142,7 @@ impl ApiClient {
             .bearer_auth(token)
             .send()
             .await
-            .map_err(|e| format!("request failed: {e}"))?;
+            .map_err(format_request_error)?;
 
         parse_response(resp).await
     }
@@ -145,7 +156,7 @@ impl ApiClient {
             .bearer_auth(token)
             .send()
             .await
-            .map_err(|e| format!("request failed: {e}"))?;
+            .map_err(format_request_error)?;
 
         parse_response(resp).await
     }
@@ -179,7 +190,7 @@ impl ApiClient {
             .multipart(form)
             .send()
             .await
-            .map_err(|e| format!("request failed: {e}"))?;
+            .map_err(format_request_error)?;
 
         parse_response(resp).await
     }
@@ -218,7 +229,7 @@ impl ApiClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("request failed: {e}"))?;
+            .map_err(format_request_error)?;
 
         parse_response(resp).await
     }
@@ -232,7 +243,7 @@ impl ApiClient {
             .bearer_auth(token)
             .send()
             .await
-            .map_err(|e| format!("request failed: {e}"))?;
+            .map_err(format_request_error)?;
 
         parse_response(resp).await
     }
@@ -246,7 +257,7 @@ impl ApiClient {
             .bearer_auth(token)
             .send()
             .await
-            .map_err(|e| format!("request failed: {e}"))?;
+            .map_err(format_request_error)?;
 
         parse_response(resp).await
     }
@@ -259,7 +270,7 @@ impl ApiClient {
             .bearer_auth(token)
             .send()
             .await
-            .map_err(|e| format!("request failed: {e}"))?;
+            .map_err(format_request_error)?;
         parse_response(resp).await
     }
 
@@ -278,7 +289,7 @@ impl ApiClient {
             .json(&serde_json::json!({ "parent_id": parent_id }))
             .send()
             .await
-            .map_err(|e| format!("request failed: {e}"))?;
+            .map_err(format_request_error)?;
         parse_response(resp).await
     }
 
@@ -290,7 +301,7 @@ impl ApiClient {
             .bearer_auth(token)
             .send()
             .await
-            .map_err(|e| format!("request failed: {e}"))?;
+            .map_err(format_request_error)?;
         parse_response(resp).await
     }
 
@@ -302,7 +313,7 @@ impl ApiClient {
             .bearer_auth(token)
             .send()
             .await
-            .map_err(|e| format!("request failed: {e}"))?;
+            .map_err(format_request_error)?;
 
         parse_response(resp).await
     }
@@ -315,7 +326,7 @@ impl ApiClient {
             .bearer_auth(token)
             .send()
             .await
-            .map_err(|e| format!("request failed: {e}"))?;
+            .map_err(format_request_error)?;
 
         parse_response(resp).await
     }
@@ -341,7 +352,7 @@ impl ApiClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("request failed: {e}"))?;
+            .map_err(format_request_error)?;
         parse_response(resp).await
     }
 
@@ -367,7 +378,7 @@ impl ApiClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("request failed: {e}"))?;
+            .map_err(format_request_error)?;
         parse_response(resp).await
     }
 
@@ -380,7 +391,7 @@ impl ApiClient {
             .bearer_auth(token)
             .send()
             .await
-            .map_err(|e| format!("request failed: {e}"))?;
+            .map_err(format_request_error)?;
 
         parse_response(resp).await
     }
@@ -396,7 +407,7 @@ impl ApiClient {
             .bearer_auth(token)
             .send()
             .await
-            .map_err(|e| format!("request failed: {e}"))?;
+            .map_err(format_request_error)?;
         let body = parse_response(resp).await?;
         body.get("stream_token")
             .and_then(|v| v.as_str())
@@ -422,7 +433,7 @@ impl ApiClient {
             .bearer_auth(token)
             .send()
             .await
-            .map_err(|e| format!("request failed: {e}"))?;
+            .map_err(format_request_error)?;
         parse_response(resp).await
     }
 
@@ -459,7 +470,7 @@ impl ApiClient {
             .bearer_auth(token)
             .send()
             .await
-            .map_err(|e| format!("request failed: {e}"))?;
+            .map_err(format_request_error)?;
 
         if !resp.status().is_success() {
             let status = resp.status();

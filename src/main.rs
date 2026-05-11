@@ -24,6 +24,10 @@ use colored::Colorize;
     ),
 )]
 struct Cli {
+    /// API base URL to use for this command (login persists it for future commands)
+    #[arg(long, global = true, value_name = "URL")]
+    api: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -46,6 +50,7 @@ enum Commands {
     Config,
 
     /// Upload a file or folder to your vault
+    #[command(alias = "upload")]
     Push {
         /// Path to the file or folder to upload
         path: PathBuf,
@@ -53,6 +58,10 @@ enum Commands {
         /// Parent folder ID in the vault
         #[arg(long)]
         parent: Option<String>,
+
+        /// Root-level folder name or ID to upload into
+        #[arg(long, conflicts_with = "parent")]
+        folder: Option<String>,
 
         /// When a file with the same name exists: replace it (creates a new version)
         #[arg(long, conflicts_with = "keep_both")]
@@ -64,13 +73,17 @@ enum Commands {
     },
 
     /// Download a file from your vault
+    #[command(alias = "download")]
     Pull {
         /// File ID to download
         file_id: String,
 
-        /// Output path (defaults to file ID as filename)
-        #[arg(short, long)]
+        /// Output path (defaults to decrypted filename or file ID)
         output: Option<PathBuf>,
+
+        /// Output path (defaults to decrypted filename or file ID)
+        #[arg(short = 'o', long = "output", value_name = "PATH", conflicts_with = "output")]
+        output_flag: Option<PathBuf>,
     },
 
     /// List files (decrypts names locally)
@@ -208,16 +221,29 @@ enum Commands {
 async fn main() {
     let cli = Cli::parse();
 
+    if let Some(api_url) = cli.api {
+        if let Err(e) = config::set_api_url_override(api_url) {
+            eprintln!(
+                "  {} {}",
+                "error:".custom_color(crate::colors::RED_ERR),
+                e.custom_color(crate::colors::INK),
+            );
+            std::process::exit(1);
+        }
+    }
+
     let result = match cli.command {
         Commands::Login => commands::login::run().await,
         Commands::Whoami => commands::whoami::run().await,
         Commands::Status => commands::status::run().await,
         Commands::Quota => commands::quota::run().await,
         Commands::Config => commands::config::run().await,
-        Commands::Push { path, parent, replace, keep_both } => {
-            commands::push::run(path, parent, replace, keep_both).await
+        Commands::Push { path, parent, folder, replace, keep_both } => {
+            commands::push::run(path, parent, folder, replace, keep_both).await
         }
-        Commands::Pull { file_id, output } => commands::pull::run(file_id, output).await,
+        Commands::Pull { file_id, output, output_flag } => {
+            commands::pull::run(file_id, output.or(output_flag)).await
+        }
         Commands::Ls { path } => commands::ls::run(path).await,
         Commands::Share {
             file_id,

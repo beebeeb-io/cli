@@ -250,7 +250,7 @@ async fn sync_batch(
         }
 
         let parent = parent_id.map(String::from);
-        match push::run(path.clone(), parent, false, false).await {
+        match push::run(path.clone(), parent, None, false, false).await {
             Ok(()) => {
                 // push::run already prints success
             }
