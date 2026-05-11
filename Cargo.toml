@@ -1,7 +1,7 @@
 [package]
 name = "beebeeb-cli"
 description = "bb — Beebeeb CLI for end-to-end encrypted cloud storage"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/beebeeb-io/cli"
@@ -20,7 +20,7 @@ beebeeb-types = { git = "https://github.com/beebeeb-io/core", package = "beebeeb
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "stream", "rustls-tls"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -33,7 +33,7 @@ rpassword = "7"
 hostname = "0.4"
 rand = "0.8"
 base64 = "0.22"
-tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 p256 = { version = "0.13", features = ["ecdh"] }
 aes-gcm = "0.10"
 hkdf = "0.12"
@@ -52,6 +52,20 @@ libc = "0.2"
 # Requires macFUSE on macOS: brew install macfuse (reboot required).
 # Requires libfuse3-dev on Linux: apt install libfuse3-dev.
 fuse = ["dep:fuser"]
+
+# cargo-dist release configuration
+[workspace.metadata.dist]
+cargo-dist-version = "0.31.0"
+ci = "github"
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+]
+# No auto-generated installer — we ship our own install.sh via releases.beebeeb.io
+installers = []
+pr-run-mode = "plan"
 
 # The profile that 'dist' will build with
 [profile.dist]
