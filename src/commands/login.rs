@@ -1,270 +1,183 @@
-use base64::Engine;
 use colored::Colorize;
-use std::io::{self, Write};
-use std::sync::Arc;
 
-use axum::extract::State;
-use axum::http::{HeaderMap, Method, StatusCode};
-use axum::response::{IntoResponse, Response};
-use axum::routing::any;
-use axum::Router;
-use serde::Deserialize;
-use tokio::sync::{oneshot, Mutex};
-
-use crate::api::ApiClient;
 use crate::config::{load_config, save_config};
 
-fn b64() -> base64::engine::GeneralPurpose {
-    base64::engine::general_purpose::STANDARD
-}
+// ─── WebSocket device-auth login ─────────────────────────────────────────────
 
-struct LoginResult {
-    token: String,
-    master_key_b64: String,
-}
-
-/// Try OPAQUE login. Returns Ok(LoginResult) on success, Err on failure.
-/// The OPAQUE export_key is deterministic for the same password and is used
-/// as the master encryption key (first 32 bytes of the 64-byte export_key).
-async fn opaque_login(api: &ApiClient, email: &str, password: &[u8]) -> Result<LoginResult, String> {
-    // Step 1: Client starts OPAQUE login
-    let start =
-        beebeeb_core::opaque_protocol::client_login_start(password).map_err(|e| e.to_string())?;
-
-    let client_message_b64 = b64().encode(&start.message);
-
-    // Step 2: Send to server, get credential response + server state
-    let server_resp = api
-        .opaque_login_start(email, &client_message_b64)
-        .await?;
-
-    let server_message_b64 = server_resp
-        .get("server_message")
-        .and_then(|v| v.as_str())
-        .ok_or("server did not return server_message")?;
-
-    let server_state_b64 = server_resp
-        .get("server_state")
-        .and_then(|v| v.as_str())
-        .ok_or("server did not return server_state")?;
-
-    let server_message = b64()
-        .decode(server_message_b64)
-        .map_err(|e| format!("invalid base64 in server_message: {e}"))?;
-
-    // Step 3: Client finishes OPAQUE login
-    let finish = beebeeb_core::opaque_protocol::client_login_finish(
-        &start.state,
-        password,
-        &server_message,
-    )
-    .map_err(|e| e.to_string())?;
-
-    let client_finish_b64 = b64().encode(&finish.message);
-
-    // Step 4: Send finalization to server, get session token
-    let login_resp = api
-        .opaque_login_finish(email, &client_finish_b64, server_state_b64)
-        .await?;
-
-    let token = login_resp
-        .get("session_token")
-        .and_then(|v| v.as_str())
-        .ok_or("server did not return a session token")?;
-
-    // Derive master key from the OPAQUE export_key (first 32 bytes).
-    // The export_key is deterministic for the same password+registration,
-    // making it ideal as the root of our key hierarchy.
-    let export_key = &finish.export_key;
-    if export_key.len() < 32 {
-        return Err("OPAQUE export key too short".to_string());
-    }
-    let mut mk_bytes = [0u8; 32];
-    mk_bytes.copy_from_slice(&export_key[..32]);
-    let master_key_b64 = b64().encode(mk_bytes);
-
-    Ok(LoginResult {
-        token: token.to_string(),
-        master_key_b64,
-    })
-}
-
-// ─── Browser login (--browser flag) ──────────────────────────────────────────
-
-/// JSON body POSTed by the web app to `http://localhost:<port>/callback`.
-#[derive(Deserialize, Clone)]
-struct CallbackPayload {
-    nonce: String,
-    session_token: String,
-    master_key_b64: String,
-    email: String,
-}
-
-/// Shared state for the local callback server.
-struct BrowserState {
-    expected_nonce: String,
-    /// One-shot sender for the callback payload.  Consumed on first valid use.
-    payload_tx: Mutex<Option<oneshot::Sender<CallbackPayload>>>,
-}
-
-async fn handle_callback(
-    State(state): State<Arc<BrowserState>>,
-    req: axum::extract::Request,
-) -> Response {
-    let method = req.method().clone();
-
-    // CORS pre-flight — browsers send this before the actual POST
-    let mut cors_headers = HeaderMap::new();
-    cors_headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
-    cors_headers.insert(
-        "Access-Control-Allow-Headers",
-        "Content-Type".parse().unwrap(),
-    );
-    cors_headers.insert(
-        "Access-Control-Allow-Methods",
-        "POST, OPTIONS".parse().unwrap(),
-    );
-
-    if method == Method::OPTIONS {
-        return (StatusCode::OK, cors_headers, "").into_response();
-    }
-
-    // Parse JSON body
-    let body = match axum::body::to_bytes(req.into_body(), 64 * 1024).await {
-        Ok(b) => b,
-        Err(e) => {
-            return (StatusCode::BAD_REQUEST, cors_headers, format!("body error: {e}"))
-                .into_response();
-        }
-    };
-    let payload: CallbackPayload = match serde_json::from_slice(&body) {
-        Ok(p) => p,
-        Err(e) => {
-            return (StatusCode::BAD_REQUEST, cors_headers, format!("invalid JSON: {e}"))
-                .into_response();
-        }
-    };
-
-    // Nonce check — prevents replay and cross-origin token injection
-    if payload.nonce != state.expected_nonce {
-        return (StatusCode::BAD_REQUEST, cors_headers, "nonce mismatch").into_response();
-    }
-
-    // Send payload to the waiting main task (single use — take the sender)
-    if let Some(tx) = state.payload_tx.lock().await.take() {
-        let _ = tx.send(payload);
-    }
-
-    (StatusCode::OK, cors_headers, "authorized").into_response()
-}
-
-/// Open a URL in the system default browser (cross-platform).
-fn open_browser(url: &str) {
-    #[cfg(target_os = "macos")]
-    let cmd = std::process::Command::new("open").arg(url).spawn();
-
-    #[cfg(target_os = "linux")]
-    let cmd = std::process::Command::new("xdg-open").arg(url).spawn();
-
-    #[cfg(target_os = "windows")]
-    let cmd = std::process::Command::new("cmd")
-        .args(["/c", "start", url])
-        .spawn();
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    let cmd: Result<_, _> = Err("unsupported platform");
-
-    if let Err(e) = cmd {
-        eprintln!("  Could not open browser automatically: {e}");
-        eprintln!("  Please open this URL manually:\n  {url}");
-    }
-}
-
-/// Browser-based login: spawn a local HTTP callback server, open the web auth
-/// page, wait for the token, then persist credentials.
 async fn browser_login() -> Result<(), String> {
-    let nonce = uuid::Uuid::new_v4().to_string();
+    use aes_gcm::aead::generic_array::GenericArray;
+    use aes_gcm::aead::Aead;
+    use aes_gcm::{Aes256Gcm, KeyInit};
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+    use futures_util::{SinkExt, StreamExt};
+    use p256::ecdh::EphemeralSecret;
+    use p256::elliptic_curve::sec1::ToEncodedPoint;
+    use p256::PublicKey;
+    use rand::rngs::OsRng;
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-    // Channel 1: callback payload from the HTTP handler → main task
-    let (payload_tx, payload_rx) = oneshot::channel::<CallbackPayload>();
-    // Channel 2: shutdown signal from main task → axum server
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    // 1. Generate ephemeral P-256 key pair
+    let secret = EphemeralSecret::random(&mut OsRng);
+    let public_key = secret.public_key();
+    // Serialize as 65-byte uncompressed point (0x04 || x || y) — "raw" format
+    // for Web Crypto API importKey("raw", ..., {name: "ECDH", namedCurve: "P-256"})
+    let pub_key_b64 = B64.encode(public_key.to_encoded_point(false).as_bytes());
 
-    let shared = Arc::new(BrowserState {
-        expected_nonce: nonce.clone(),
-        payload_tx: Mutex::new(Some(payload_tx)),
-    });
+    // 2. Connect WebSocket
+    let config = load_config();
+    let api_url = config.api_url;
+    let ws_url = api_url
+        .replace("https://", "wss://")
+        .replace("http://", "ws://");
+    let ws_url = format!("{ws_url}/api/v1/auth/cli");
 
-    // Bind to an OS-assigned port on loopback only
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .map_err(|e| format!("failed to bind callback server: {e}"))?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| e.to_string())?
-        .port();
-
-    // Spawn the callback server
-    let app = Router::new()
-        .route("/callback", any(handle_callback))
-        .with_state(shared);
-
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                let _ = shutdown_rx.await;
-            })
-            .await;
-    });
-
-    // Build the auth URL and open the browser
-    let auth_url = format!(
-        "https://app.beebeeb.io/cli-auth?nonce={nonce}&port={port}"
+    println!(
+        "  {} Connecting to Beebeeb...",
+        "→".custom_color(crate::colors::AMBER)
     );
-    open_browser(&auth_url);
 
+    let (mut ws_stream, _) = connect_async(&ws_url)
+        .await
+        .map_err(|e| format!("WebSocket connection failed: {e}"))?;
+
+    // 3. Send CLI public key so browser can do ECDH on its end
+    let init_msg = serde_json::json!({ "ecdh_public_key_b64": pub_key_b64 });
+    ws_stream
+        .send(Message::Text(init_msg.to_string().into()))
+        .await
+        .map_err(|e| format!("Send failed: {e}"))?;
+
+    // 4. Receive device code + verification URI from server
+    let msg = ws_stream
+        .next()
+        .await
+        .ok_or("Connection closed before code was received")?
+        .map_err(|e| format!("WS error: {e}"))?;
+    let text = match msg {
+        Message::Text(t) => t,
+        _ => return Err("Unexpected message type (expected text)".into()),
+    };
+    let resp: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("Invalid response: {e}"))?;
+
+    if let Some(err) = resp["error"].as_str() {
+        return Err(format!("Auth error: {err}"));
+    }
+
+    let user_code = resp["user_code"]
+        .as_str()
+        .ok_or("Missing user_code")?
+        .to_string();
+    let verification_uri = resp["verification_uri"]
+        .as_str()
+        .ok_or("Missing verification_uri")?
+        .to_string();
+
+    // 5. Display code and open browser
+    println!();
+    println!(
+        "  {} Opening Beebeeb in your browser...",
+        "→".custom_color(crate::colors::AMBER)
+    );
     println!();
     println!(
         "  {} {}",
-        "◆".custom_color(crate::colors::AMBER_DARK),
-        "Waiting for authorization in your browser...".custom_color(crate::colors::INK_WARM),
+        "Authorization code:".custom_color(crate::colors::INK_SAGE),
+        user_code.bold().custom_color(crate::colors::AMBER)
     );
+    println!(
+        "  {} {}",
+        "URL:".custom_color(crate::colors::INK_SAGE),
+        verification_uri.custom_color(crate::colors::INK_SAGE)
+    );
+    println!();
     println!(
         "  {}",
-        format!("If the browser didn't open: {auth_url}").custom_color(crate::colors::INK_DIM),
+        "Waiting for browser authorization..."
+            .custom_color(crate::colors::INK_SAGE)
     );
 
-    // Wait for the callback — 120s timeout
-    let payload =
-        tokio::time::timeout(std::time::Duration::from_secs(120), payload_rx)
-            .await
-            .map_err(|_| "authorization timed out — please run `bb login --browser` again")?
-            .map_err(|_| "callback channel closed unexpectedly")?;
+    let _ = open::that(&verification_uri);
 
-    // Stop the local HTTP server
-    let _ = shutdown_tx.send(());
+    // 6. Wait up to 5 minutes for the browser to authorize
+    let result_msg = tokio::time::timeout(
+        std::time::Duration::from_secs(300),
+        ws_stream.next(),
+    )
+    .await
+    .map_err(|_| "Timed out waiting for browser authorization (5 min). Run `bb login` again.")?
+    .ok_or("Connection closed before authorization completed")?
+    .map_err(|e| format!("WS error: {e}"))?;
 
-    // Persist credentials (same format as normal login)
+    let result_text = match result_msg {
+        Message::Text(t) => t,
+        _ => return Err("Unexpected message type (expected text)".into()),
+    };
+    let result: serde_json::Value =
+        serde_json::from_str(&result_text).map_err(|e| format!("Invalid result: {e}"))?;
+
+    if let Some(err) = result["error"].as_str() {
+        return Err(format!("Auth error: {err}"));
+    }
+
+    let nonce_b64 = result["nonce_b64"].as_str().ok_or("Missing nonce_b64")?;
+    let payload_b64 = result["encrypted_payload_b64"]
+        .as_str()
+        .ok_or("Missing encrypted_payload_b64")?;
+    let browser_pub_b64 = result["browser_ecdh_public_b64"]
+        .as_str()
+        .ok_or("Missing browser_ecdh_public_b64")?;
+
+    // 7. ECDH key agreement + AES-256-GCM decrypt
+    //    Browser sends its public key as a 65-byte uncompressed P-256 point (raw format).
+    let browser_pub_bytes = B64
+        .decode(browser_pub_b64)
+        .map_err(|e| format!("Invalid browser public key encoding: {e}"))?;
+    let browser_pub_key = PublicKey::from_sec1_bytes(&browser_pub_bytes)
+        .map_err(|e| format!("Invalid browser public key (not on curve): {e}"))?;
+
+    let shared_secret = secret.diffie_hellman(&browser_pub_key);
+    // Use first 32 bytes of the shared secret directly as AES-256 key.
+    // Both sides must agree on this derivation (no HKDF in v1 — keep it simple
+    // and auditable; can upgrade to HKDF in a future protocol version).
+    let shared_bytes = shared_secret.raw_secret_bytes();
+
+    let cipher = Aes256Gcm::new(GenericArray::from_slice(&shared_bytes[..32]));
+    let nonce_bytes = B64
+        .decode(nonce_b64)
+        .map_err(|e| format!("Invalid nonce encoding: {e}"))?;
+    let ciphertext = B64
+        .decode(payload_b64)
+        .map_err(|e| format!("Invalid payload encoding: {e}"))?;
+    let plaintext = cipher
+        .decrypt(GenericArray::from_slice(&nonce_bytes), ciphertext.as_ref())
+        .map_err(|_| "Decryption failed — ECDH key mismatch or corrupted ciphertext")?;
+
+    // 8. Parse credentials and persist
+    let creds: serde_json::Value =
+        serde_json::from_slice(&plaintext).map_err(|e| format!("Invalid credentials JSON: {e}"))?;
+
+    let session_token = creds["session_token"]
+        .as_str()
+        .ok_or("Missing session_token in credentials")?;
+    let master_key_b64 = creds["master_key_b64"]
+        .as_str()
+        .ok_or("Missing master_key_b64 in credentials")?;
+    let email = creds["email"]
+        .as_str()
+        .ok_or("Missing email in credentials")?;
+
     let mut config = load_config();
-    config.session_token = Some(payload.session_token);
-    config.email = Some(payload.email.clone());
-    config.master_key = Some(payload.master_key_b64);
+    config.session_token = Some(session_token.to_string());
+    config.master_key = Some(master_key_b64.to_string());
+    config.email = Some(email.to_string());
     save_config(&config)?;
-
-    // Fetch region for the success banner
-    let api = ApiClient::from_config();
-    let region = api
-        .get_region()
-        .await
-        .ok()
-        .and_then(|v| v.get("region").and_then(|r| r.as_str()).map(String::from))
-        .unwrap_or_else(|| "unknown".to_string());
 
     println!();
     println!(
-        "  {} {}",
-        "Logged in as".custom_color(crate::colors::GREEN_OK),
-        format!("{} · {region}", payload.email).custom_color(crate::colors::AMBER),
+        "  {} Logged in as {}",
+        "✓".green(),
+        email.custom_color(crate::colors::AMBER)
     );
 
     Ok(())
@@ -272,64 +185,38 @@ async fn browser_login() -> Result<(), String> {
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
-pub async fn run(browser: bool) -> Result<(), String> {
-    if browser {
-        return browser_login().await;
+pub async fn run() -> Result<(), String> {
+    // If already logged in with a valid session, say so and return early.
+    let config = load_config();
+    if let Some(email) = &config.email {
+        if config.session_token.is_some() {
+            // Quick /me check to confirm the token is still valid.
+            let api = crate::api::ApiClient::from_config();
+            match api.get_me().await {
+                Ok(_) => {
+                    println!(
+                        "  {} Already logged in as {}",
+                        "✓".green(),
+                        email.custom_color(crate::colors::AMBER)
+                    );
+                    println!(
+                        "  {}",
+                        "Run `bb logout` first to switch accounts."
+                            .custom_color(crate::colors::INK_DIM)
+                    );
+                    return Ok(());
+                }
+                Err(_) => {
+                    // Token expired or revoked — fall through to re-auth.
+                    println!(
+                        "  {}",
+                        "Session expired. Re-authenticating..."
+                            .custom_color(crate::colors::INK_DIM)
+                    );
+                }
+            }
+        }
     }
 
-    // Prompt for email
-    print!("{}", "  email: ".custom_color(crate::colors::INK_DIM));
-    io::stdout().flush().map_err(|e| e.to_string())?;
-    let mut email = String::new();
-    io::stdin()
-        .read_line(&mut email)
-        .map_err(|e| format!("failed to read email: {e}"))?;
-    let email = email.trim().to_string();
-
-    if email.is_empty() {
-        return Err("email cannot be empty".to_string());
-    }
-
-    // Prompt for password (hidden)
-    let password = rpassword::prompt_password(format!(
-        "{}",
-        "  password: ".custom_color(crate::colors::INK_DIM)
-    ))
-    .map_err(|e| format!("failed to read password: {e}"))?;
-
-    if password.is_empty() {
-        return Err("password cannot be empty".to_string());
-    }
-
-    let api = ApiClient::from_config();
-    let password_bytes = password.as_bytes();
-
-    // Password entry feeds only the OPAQUE protocol; do not fall back to
-    // `/auth/login`, because that would bypass the web/iOS auth contract.
-    let login_result = opaque_login(&api, &email, password_bytes).await?;
-
-    // Save to config (session token + master key)
-    let mut config = load_config();
-    config.session_token = Some(login_result.token);
-    config.email = Some(email.clone());
-    config.master_key = Some(login_result.master_key_b64);
-    save_config(&config)?;
-
-    // Fetch region for display (use a new client with the saved token)
-    let api = ApiClient::from_config();
-    let region = api
-        .get_region()
-        .await
-        .ok()
-        .and_then(|v| v.get("region").and_then(|r| r.as_str()).map(String::from))
-        .unwrap_or_else(|| "unknown".to_string());
-
-    println!();
-    println!(
-        "  {} {}",
-        "Logged in as".custom_color(crate::colors::GREEN_OK),
-        format!("{email} · {region}").custom_color(crate::colors::AMBER),
-    );
-
-    Ok(())
+    browser_login().await
 }

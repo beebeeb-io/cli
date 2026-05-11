@@ -33,6 +33,12 @@ rpassword = "7"
 hostname = "0.4"
 rand = "0.8"
 base64 = "0.22"
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+p256 = { version = "0.13", features = ["ecdh"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+open = "5"
 notify = "7"
 notify-debouncer-full = "0.4"
 walkdir = "2"
