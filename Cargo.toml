@@ -53,10 +53,6 @@ libc = "0.2"
 # Requires libfuse3-dev on Linux: apt install libfuse3-dev.
 fuse = ["dep:fuser"]
 
-[patch."https://github.com/beebeeb-io/core"]
-beebeeb-core = { path = "../core/beebeeb-core" }
-beebeeb-types = { path = "../core/beebeeb-types" }
-
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"

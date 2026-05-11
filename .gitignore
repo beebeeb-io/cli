@@ -71,3 +71,4 @@ playwright-report/
 # Graphify local files (not committed)
 graphify-out/.graphify_root
 graphify-out/cache/
+.cargo/config.toml
