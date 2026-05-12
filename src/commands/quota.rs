@@ -13,11 +13,21 @@ pub async fn run() -> Result<(), String> {
     let count = count_res.unwrap_or_default();
 
     let used_bytes = usage.get("used_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
-    let quota_bytes = usage.get("quota_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
-    let percentage = usage.get("percentage").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let quota_bytes = usage
+        .get("quota_bytes")
+        .or_else(|| usage.get("plan_limit_bytes"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let percentage = if quota_bytes > 0 {
+        used_bytes as f64 / quota_bytes as f64
+    } else {
+        0.0
+    };
     let file_count: i64 = count
-        .get("count").and_then(|v| v.as_i64())
-        .or_else(|| count.get("total").and_then(|v| v.as_i64()))
+        .get("total_files")
+        .or_else(|| count.get("count"))
+        .or_else(|| count.get("total"))
+        .and_then(|v| v.as_i64())
         .unwrap_or(0);
 
     let dim = |s: &str| s.custom_color(crate::colors::INK_DIM);

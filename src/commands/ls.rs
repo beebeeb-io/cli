@@ -2,21 +2,7 @@ use colored::Colorize;
 
 use crate::api::ApiClient;
 use crate::commands::push::load_master_key;
-
-/// Decrypt a `name_encrypted` JSON blob using the file's UUID and the master key.
-fn decrypt_name(
-    master_key: &beebeeb_core::kdf::MasterKey,
-    file_id_str: &str,
-    name_encrypted_str: &str,
-) -> Option<String> {
-    let file_uuid: uuid::Uuid = file_id_str.parse().ok()?;
-    let file_key = beebeeb_core::kdf::derive_file_key(master_key, file_uuid.as_bytes());
-
-    // The name blob is a JSON-encoded EncryptedBlob from beebeeb-types.
-    let blob: beebeeb_types::EncryptedBlob =
-        serde_json::from_str(name_encrypted_str).ok()?;
-    beebeeb_core::encrypt::decrypt_metadata(&file_key, &blob).ok()
-}
+use crate::crypto::decrypt_name;
 
 pub async fn run(path: Option<String>) -> Result<(), String> {
     let api = ApiClient::from_config();
@@ -82,12 +68,12 @@ pub async fn run(path: Option<String>) -> Result<(), String> {
             .get("updated_at")
             .or_else(|| file.get("modified"))
             .and_then(|v| v.as_str())
-            .and_then(|s| {
+            .map(|s| {
                 // Show only YYYY-MM-DD HH:MM
                 let s = s.trim_end_matches('Z');
                 let s = s.replace('T', " ");
                 let s = &s[..s.len().min(16)];
-                Some(s.to_string())
+                s.to_string()
             })
             .unwrap_or_else(|| "-".to_string());
 

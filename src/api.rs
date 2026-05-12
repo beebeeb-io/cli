@@ -53,6 +53,7 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    #[allow(dead_code)]
     pub async fn opaque_login_start(
         &self,
         email: &str,
@@ -72,6 +73,7 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    #[allow(dead_code)]
     pub async fn opaque_login_finish(
         &self,
         email: &str,
