@@ -77,7 +77,12 @@ async fn try_update(state: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     write_timestamp(state);
 
     if remote <= local {
-        return Ok(()); // Already up to date.
+        return Ok(()); // Already up to date — print nothing.
+    }
+
+    // Detect if installed via Homebrew and delegate if so.
+    if is_homebrew_install() {
+        return update_via_homebrew(CURRENT_VERSION, remote_ver);
     }
 
     // Find the right asset for this platform.
@@ -123,12 +128,57 @@ async fn try_update(state: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::rename(&temp_path, &current_exe)?;
 
     eprintln!(
-        "  {} Restarting...",
-        "Updated!".custom_color(crate::colors::GREEN_OK),
+        "  {} Updated bb v{} -> v{}",
+        "✓".custom_color(crate::colors::GREEN_OK),
+        CURRENT_VERSION.custom_color(crate::colors::AMBER),
+        remote.to_string().custom_color(crate::colors::AMBER),
     );
 
     // Re-exec with the same arguments — this never returns.
     re_exec(&current_exe)
+}
+
+// ---------------------------------------------------------------------------
+// Homebrew detection and update
+// ---------------------------------------------------------------------------
+
+/// Returns `true` when the current binary lives inside a Homebrew prefix.
+fn is_homebrew_install() -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let path = exe.to_string_lossy();
+    path.contains("/homebrew/") || path.contains("/Cellar/")
+}
+
+/// Update via `brew upgrade` instead of self-replacing.
+fn update_via_homebrew(
+    old_ver: &str,
+    new_ver: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    eprintln!(
+        "  {} bb v{old_ver} -> v{new_ver} via Homebrew...",
+        "Updating".custom_color(crate::colors::AMBER),
+    );
+
+    let status = std::process::Command::new("brew")
+        .args(["upgrade", "beebeeb-io/tap/bb"])
+        .status()?;
+
+    if !status.success() {
+        return Err("brew upgrade failed".into());
+    }
+
+    eprintln!(
+        "  {} Updated bb v{} -> v{}",
+        "✓".custom_color(crate::colors::GREEN_OK),
+        old_ver.custom_color(crate::colors::AMBER),
+        new_ver.custom_color(crate::colors::AMBER),
+    );
+
+    // Re-exec with the user's original command.
+    let exe = std::env::current_exe()?;
+    re_exec(&exe)
 }
 
 /// Extract the `bb` binary from a `.tar.xz` archive.

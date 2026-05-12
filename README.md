@@ -4,27 +4,24 @@
 
 The CLI lets you authenticate from the terminal, upload and download encrypted files, list vault contents, create and revoke share links, run bidirectional folder sync, watch folders for live changes, and expose a local WebDAV view of your vault. All encryption and decryption happens locally -- the server never sees plaintext.
 
-## Installation
+## Install
 
-Release installer:
+### Quick install (recommended)
 
 ```sh
-curl -fsSL https://releases.beebeeb.io/cli/install.sh | sh
+curl -fsSL https://releases.beebeeb.io/beebeeb-cli-installer.sh | sh
 ```
 
-Homebrew:
+### Homebrew (macOS/Linux)
 
 ```sh
 brew install beebeeb-io/tap/bb
 ```
 
-Build from source:
+### From source
 
 ```sh
-git clone https://github.com/beebeeb-io/cli.git
-cd cli
-cargo build --release
-# Binary: target/release/bb
+cargo install --git https://github.com/beebeeb-io/cli
 ```
 
 ## Quick Start

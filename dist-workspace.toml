@@ -10,9 +10,9 @@ cargo-dist-version = "0.31.0"
 ci = "github"
 
 # Installers to generate for each release
+# - shell: generates install.sh that auto-detects platform and installs the binary
 # - homebrew: formula pushed to beebeeb-io/homebrew-tap on release
-# Note: we ship our own install.sh via releases.beebeeb.io (not cargo-dist generated)
-installers = ["homebrew"]
+installers = ["shell", "homebrew"]
 
 # Target platforms — musl for fully static Linux binaries (no glibc dep)
 targets = [
