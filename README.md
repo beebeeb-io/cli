@@ -114,14 +114,12 @@ bb logout
 Standard release build:
 
 ```sh
-cd /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/cli
 cargo build --release
 ```
 
 Optional FUSE-enabled build:
 
 ```sh
-cd /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/cli
 cargo build --release --features fuse
 ```
 
@@ -161,28 +159,24 @@ For local development, edit `api_url` in the config file to point at a local API
 Run tests:
 
 ```sh
-cd /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/cli
 cargo test
 ```
 
 Compile check:
 
 ```sh
-cd /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/cli
 cargo check
 ```
 
 Lint:
 
 ```sh
-cd /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/cli
 cargo clippy -- -D warnings
 ```
 
 Format check:
 
 ```sh
-cd /Users/guuslangelaar/Development/Beebeeb/beebeeb.io/repos/cli
 cargo fmt -- --check
 ```
 
