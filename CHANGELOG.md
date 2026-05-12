@@ -7,10 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Nothing yet.
+
+### Changed
+- Nothing yet.
+
+### Fixed
+- Nothing yet.
+
+### Removed
+- Nothing yet.
+
+### Security
+- Nothing yet.
+
 ## [0.1.2] - 2026-05-13
+
+### Added
+- Nothing yet.
 
 ### Changed
 - Production and open-source readiness improvements
+
+### Fixed
+- Nothing yet.
+
+### Removed
+- Nothing yet.
+
+### Security
+- Nothing yet.
 
 ## [0.1.1] - 2026-05-13
 
@@ -22,6 +49,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `bb share` to create and manage shared links
 - `bb pull` and `bb push` for bidirectional sync
 - WebDAV mount for native filesystem access
+
+### Changed
+- Nothing yet.
+
+### Fixed
+- Nothing yet.
+
+### Removed
+- Nothing yet.
 
 ### Security
 - Session tokens stored in local config file with restricted permissions
