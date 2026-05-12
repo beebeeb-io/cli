@@ -1,7 +1,7 @@
 [package]
 name = "beebeeb-cli"
 description = "bb — Beebeeb CLI for end-to-end encrypted cloud storage"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/beebeeb-io/cli"
