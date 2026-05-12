@@ -7,6 +7,7 @@ pub mod push;
 pub mod quota;
 pub mod repair;
 pub mod share;
+pub mod speedtest;
 pub mod status;
 pub mod sync;
 pub mod mount;

@@ -479,6 +479,60 @@ impl ApiClient {
         Ok(resp)
     }
 
+    /// Generic authenticated GET that returns parsed JSON.
+    #[allow(dead_code)]
+    pub async fn get_json(&self, path: &str) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .get(self.url(path))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(resp).await
+    }
+
+    /// Upload a raw blob to the speedtest endpoint.
+    pub async fn speedtest_upload(&self, data: &[u8]) -> Result<(), String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .post(self.url("/api/v1/speedtest"))
+            .bearer_auth(token)
+            .body(data.to_vec())
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("speedtest upload ({status}): {body}"));
+        }
+        Ok(())
+    }
+
+    /// Download `size` random bytes from the speedtest endpoint.
+    pub async fn speedtest_download(&self, size: usize) -> Result<Vec<u8>, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .get(self.url(&format!("/api/v1/speedtest?size={size}")))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("speedtest download ({status}): {body}"));
+        }
+        resp.bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| format!("speedtest read: {e}"))
+    }
+
     /// Download the raw encrypted bytes for a file.
     pub async fn download_file(&self, file_id: &str) -> Result<Vec<u8>, String> {
         let token = self.require_auth()?;

@@ -208,6 +208,9 @@ enum Commands {
         no_cache: bool,
     },
 
+    /// Benchmark network latency, upload/download throughput, and crypto speed
+    Speedtest,
+
     /// Repair files encrypted with old binary-UUID key derivation (makes them readable in the web app)
     Repair {
         /// Show what would be repaired without making changes
@@ -377,6 +380,7 @@ async fn main() {
         Commands::Webdav { port, read_only, cache_ttl, no_cache } => {
             commands::webdav::run(port, read_only, cache_ttl, no_cache).await
         }
+        Commands::Speedtest => commands::speedtest::run().await,
         Commands::Repair { dry_run } => commands::repair::run(dry_run).await,
         Commands::Rotate => {
             println!(
