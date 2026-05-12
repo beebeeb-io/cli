@@ -218,7 +218,7 @@ async fn push_single_file(
         .to_string();
 
     let file_bytes =
-        std::fs::read(&path).map_err(|e| format!("failed to read file: {e}"))?;
+        std::fs::read(path).map_err(|e| format!("failed to read file: {e}"))?;
     let file_size = file_bytes.len() as u64;
 
     let master_key = load_master_key()?;

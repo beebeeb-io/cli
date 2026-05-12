@@ -43,7 +43,7 @@ async fn browser_login() -> Result<(), String> {
     // 3. Send CLI public key so browser can do ECDH on its end
     let init_msg = serde_json::json!({ "ecdh_public_key_b64": pub_key_b64 });
     ws_stream
-        .send(Message::Text(init_msg.to_string().into()))
+        .send(Message::Text(init_msg.to_string()))
         .await
         .map_err(|e| format!("Send failed: {e}"))?;
 
