@@ -1,5 +1,4 @@
 use colored::Colorize;
-use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
 
 use crate::api::ApiClient;
@@ -10,15 +9,7 @@ pub async fn run(file_id: String, output: Option<PathBuf>) -> Result<(), String>
     api.require_auth()?;
 
     // Step 1: Get file metadata to learn chunk count and encrypted name
-    let metadata_pb = ProgressBar::new_spinner();
-    metadata_pb.set_style(
-        ProgressStyle::with_template("  {spinner:.yellow} fetching metadata")
-            .unwrap(),
-    );
-    metadata_pb.enable_steady_tick(std::time::Duration::from_millis(80));
-
     let file_meta = api.get_file(&file_id).await?;
-    metadata_pb.finish_and_clear();
 
     let chunk_count = file_meta
         .get("chunk_count")
@@ -60,36 +51,22 @@ pub async fn run(file_id: String, output: Option<PathBuf>) -> Result<(), String>
         .as_deref()
         .unwrap_or(&file_id);
 
-    // Step 2: Download encrypted data
-    let dl_pb = ProgressBar::new_spinner();
-    dl_pb.set_style(
-        ProgressStyle::with_template("  {spinner:.yellow} downloading {msg}")
-            .unwrap(),
-    );
-    dl_pb.set_message(display_name.to_string());
-    dl_pb.enable_steady_tick(std::time::Duration::from_millis(80));
-
+    // Step 2: Download encrypted data (timed)
+    let dl_start = std::time::Instant::now();
     let encrypted_bytes = api.download_file(&file_id).await?;
-    dl_pb.finish_and_clear();
+    let dl_elapsed = dl_start.elapsed();
 
-    // Step 3: Decrypt all chunks using the shared helper that handles both
-    // CLI-format (JSON EncryptedBlob) and web-app-format (raw nonce|ciphertext)
-    // chunks, and both UUID key derivation methods (binary and string).
-    let decrypt_pb = ProgressBar::new_spinner();
-    decrypt_pb.set_style(
-        ProgressStyle::with_template("  {spinner:.yellow} decrypting")
-            .unwrap(),
-    );
-    decrypt_pb.enable_steady_tick(std::time::Duration::from_millis(80));
-
+    // Step 3: Decrypt all chunks (timed)
+    // Handles both CLI-format (JSON EncryptedBlob) and web-app-format
+    // (raw nonce|ciphertext) chunks, and both UUID key derivation methods.
+    let dec_start = std::time::Instant::now();
     let plaintext = crate::crypto::decrypt_file_chunks(
         &master_key,
         &file_id,
         &encrypted_bytes,
         chunk_count,
     )?;
-
-    decrypt_pb.finish_and_clear();
+    let dec_elapsed = dec_start.elapsed();
 
     // Step 4: Write to disk
     let out_path = output.unwrap_or_else(|| {
@@ -99,17 +76,37 @@ pub async fn run(file_id: String, output: Option<PathBuf>) -> Result<(), String>
     std::fs::write(&out_path, &plaintext)
         .map_err(|e| format!("failed to write file: {e}"))?;
 
-    let size_str = format_size(plaintext.len() as u64);
-    println!(
-        "  {} {} {} {}",
-        "OK".custom_color(crate::colors::GREEN_OK),
-        out_path.display().to_string().custom_color(crate::colors::INK),
-        "·".custom_color(crate::colors::INK_DIM),
-        format!("{size_str} · {chunk_count} chunk{} · decrypted",
-            if chunk_count == 1 { "" } else { "s" },
-        )
-        .custom_color(crate::colors::INK_DIM),
-    );
+    // Step 5: Output
+    let dl_speed = encrypted_bytes.len() as f64 / dl_elapsed.as_secs_f64();
+
+    if crate::ui::is_json() {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "id": file_id,
+            "name": display_name,
+            "size_bytes": plaintext.len(),
+            "download_speed_bps": dl_speed as u64,
+            "download_ms": dl_elapsed.as_millis() as u64,
+            "decrypt_ms": dec_elapsed.as_millis() as u64,
+            "output": out_path.display().to_string(),
+        })).unwrap());
+        return Ok(());
+    }
+
+    if crate::ui::is_quiet() {
+        println!("{}", out_path.display());
+        return Ok(());
+    }
+
+    // Rich mode (default)
+    println!("  {} {}  {}  {}",
+        "\u{2713}".custom_color(crate::colors::GREEN_OK),
+        display_name.custom_color(crate::colors::INK),
+        crate::ui::human_size(plaintext.len() as u64).custom_color(crate::colors::INK_DIM),
+        crate::ui::human_speed(dl_speed).custom_color(crate::colors::GREEN_OK));
+    println!("    {}",
+        format!("{}ms download \u{00b7} {}ms decrypt",
+            dl_elapsed.as_millis(), dec_elapsed.as_millis())
+            .custom_color(crate::colors::INK_DIM));
 
     Ok(())
 }
@@ -159,14 +156,18 @@ async fn pull_single_file(api: &ApiClient, file_id: &str, out_path: &std::path::
     let file_meta = api.get_file(file_id).await?;
     let chunk_count = file_meta.get("chunk_count").and_then(|v| v.as_i64()).unwrap_or(1) as u32;
 
+    let dl_start = std::time::Instant::now();
     let encrypted_bytes = api.download_file(file_id).await?;
+    let dl_elapsed = dl_start.elapsed();
 
+    let dec_start = std::time::Instant::now();
     let plaintext = crate::crypto::decrypt_file_chunks(
         &master_key,
         file_id,
         &encrypted_bytes,
         chunk_count,
     )?;
+    let dec_elapsed = dec_start.elapsed();
 
     if let Some(parent) = out_path.parent() {
         std::fs::create_dir_all(parent)
@@ -176,26 +177,23 @@ async fn pull_single_file(api: &ApiClient, file_id: &str, out_path: &std::path::
         .map_err(|e| format!("failed to write: {e}"))?;
 
     let name = out_path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-    println!(
-        "  {} {}",
-        "OK".custom_color(crate::colors::GREEN_OK),
-        name.custom_color(crate::colors::INK_DIM),
-    );
+
+    if crate::ui::is_quiet() {
+        println!("{}", out_path.display());
+    } else if crate::ui::is_rich() {
+        let dl_speed = encrypted_bytes.len() as f64 / dl_elapsed.as_secs_f64();
+        println!("    {} {}  {}  {}",
+            "\u{2713}".custom_color(crate::colors::GREEN_OK),
+            name.custom_color(crate::colors::INK),
+            crate::ui::human_size(plaintext.len() as u64).custom_color(crate::colors::INK_DIM),
+            crate::ui::human_speed(dl_speed).custom_color(crate::colors::GREEN_OK));
+        println!("      {}",
+            format!("{}ms download \u{00b7} {}ms decrypt",
+                dl_elapsed.as_millis(), dec_elapsed.as_millis())
+                .custom_color(crate::colors::INK_DIM));
+    }
+    // In JSON mode, the folder pull prints nothing per-file — the caller handles output.
+
     Ok(())
 }
 
-fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * KB;
-    const GB: u64 = 1024 * MB;
-
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} kB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
-    }
-}
