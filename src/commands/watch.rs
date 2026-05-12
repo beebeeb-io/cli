@@ -40,15 +40,27 @@ pub async fn run(path: PathBuf, parent_id: Option<String>) -> Result<(), String>
         None => None,
     };
 
+    // Derive a remote path label for the banner
+    let remote_label = match &parent_id {
+        Some(id) => format!("/{}", &id[..8.min(id.len())]),
+        None => "/".to_string(),
+    };
     println!(
-        "  {} {}",
+        "  {} {} {} {}",
+        "\u{25CF}".custom_color(crate::colors::GREEN_OK),
         "watching".custom_color(crate::colors::GREEN_OK),
         watch_path.display().to_string().custom_color(crate::colors::INK),
+        format!("\u{2192} {remote_label}").custom_color(crate::colors::INK_DIM),
     );
     println!(
-        "  {}",
-        "local changes uploaded · remote changes downloaded automatically"
-            .custom_color(crate::colors::INK_DIM),
+        "  {} {}",
+        "remote:".custom_color(crate::colors::INK_DIM),
+        "SSE stream".custom_color(crate::colors::INK_DIM),
+    );
+    println!(
+        "  {} {}",
+        "local: ".custom_color(crate::colors::INK_DIM),
+        "fsnotify".custom_color(crate::colors::INK_DIM),
     );
     println!(
         "  {}",
@@ -97,7 +109,8 @@ pub async fn run(path: PathBuf, parent_id: Option<String>) -> Result<(), String>
         if shutdown_rx.try_recv().is_ok() {
             println!();
             println!(
-                "  {} {}",
+                "  {} {} {}",
+                "\u{25CB}".custom_color(crate::colors::INK_DIM),
                 "stopped".custom_color(crate::colors::GREEN_OK),
                 "watch ended gracefully".custom_color(crate::colors::INK_DIM),
             );
@@ -234,11 +247,12 @@ async fn sync_batch(
     let timestamp = chrono_now();
 
     println!(
-        "  {} {} {}",
-        "sync".custom_color(crate::colors::AMBER),
+        "  {} {} {} {}",
+        "\u{2191}".custom_color(crate::colors::GREEN_OK),
+        timestamp.custom_color(crate::colors::INK_DIM),
         format!("{count} file{}", if count == 1 { "" } else { "s" })
             .custom_color(crate::colors::INK),
-        timestamp.custom_color(crate::colors::INK_DIM),
+        "uploading".custom_color(crate::colors::INK_DIM),
     );
 
     for path in paths {
@@ -256,14 +270,21 @@ async fn sync_batch(
             }
             Err(e) => {
                 eprintln!(
-                    "  {} {} {}",
-                    "fail".custom_color(crate::colors::RED_ERR),
+                    "  {} {} {} {}",
+                    "\u{2717}".custom_color(crate::colors::RED_ERR),
+                    chrono_now().custom_color(crate::colors::INK_DIM),
                     rel.display().to_string().custom_color(crate::colors::INK),
                     e.custom_color(crate::colors::INK_DIM),
                 );
             }
         }
     }
+
+    // Idle indicator after batch completes
+    println!(
+        "  {}",
+        "\u{00b7} idle \u{00b7} watching for changes...".custom_color(crate::colors::INK_DIM),
+    );
 }
 
 /// Attempt to soft-delete a file on the server.
@@ -291,16 +312,18 @@ async fn trash_server_file(file_name: &str, _watch_root: &Path, parent_id: Optio
         match api.trash_file(&file_id).await {
             Ok(_) => {
                 println!(
-                    "  {} {} {}",
-                    "del".custom_color(crate::colors::RED_ERR),
+                    "  {} {} {} {}",
+                    "\u{2717}".custom_color(crate::colors::RED_ERR),
+                    chrono_now().custom_color(crate::colors::INK_DIM),
                     file_name.custom_color(crate::colors::INK),
                     "(trashed on server)".custom_color(crate::colors::INK_DIM),
                 );
             }
             Err(e) => {
                 eprintln!(
-                    "  {} {} {}",
-                    "fail".custom_color(crate::colors::RED_ERR),
+                    "  {} {} {} {}",
+                    "\u{2717}".custom_color(crate::colors::RED_ERR),
+                    chrono_now().custom_color(crate::colors::INK_DIM),
                     file_name.custom_color(crate::colors::INK),
                     e.custom_color(crate::colors::INK_DIM),
                 );

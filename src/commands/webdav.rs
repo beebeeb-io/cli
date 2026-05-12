@@ -128,35 +128,43 @@ pub async fn run(port: u16, read_only: bool, cache_ttl: u64, no_cache: bool) -> 
         .await
         .map_err(|e| format!("failed to bind {addr}: {e}"))?;
 
-    let ro_label = if read_only { " read-only" } else { " read-write" };
+    let ro_label = if read_only { "read-only" } else { "read-write" };
     let cache_label = if no_cache || cache_ttl == 0 {
         "disabled".to_string()
     } else {
         format!("{cache_ttl}s TTL")
     };
+    println!();
     println!(
-        "\n  {} {}",
-        "◆".custom_color(crate::colors::AMBER_DARK),
-        format!("WebDAV gateway started{ro_label}").custom_color(crate::colors::INK_WARM),
+        "  {} {} {}",
+        "\u{25CF}".custom_color(crate::colors::GREEN_OK),
+        "WebDAV gateway".custom_color(crate::colors::INK_WARM),
+        ro_label.custom_color(crate::colors::INK_DIM),
     );
     println!(
-        "  {}  {}",
-        "url".custom_color(crate::colors::INK_DIM),
+        "  {}    {}",
+        "url  ".custom_color(crate::colors::INK_DIM),
         format!("http://localhost:{port}").custom_color(crate::colors::AMBER),
     );
     println!(
-        "  {}  {}",
+        "  {}    {}",
+        "mode ".custom_color(crate::colors::INK_DIM),
+        ro_label.custom_color(crate::colors::INK),
+    );
+    println!(
+        "  {}    {}",
         "cache".custom_color(crate::colors::INK_DIM),
         cache_label.custom_color(crate::colors::INK_DIM),
     );
+    println!();
     println!(
         "  {}",
-        "Connect Finder: Go → Connect to Server → http://localhost:7878"
-            .custom_color(crate::colors::INK_DIM),
+        "# Finder: Go \u{2192} Connect to Server \u{2192} http://localhost:7878"
+            .custom_color(crate::colors::INK_SAGE),
     );
     println!(
         "  {}",
-        "Press Ctrl+C to stop.".custom_color(crate::colors::INK_DIM),
+        "# press Ctrl+C to stop".custom_color(crate::colors::INK_SAGE),
     );
     println!();
 
@@ -189,11 +197,22 @@ async fn handle_webdav(
     let headers = req.headers().clone();
     let path = uri.path().to_string();
 
-    eprintln!("  WebDAV {} {}", method, path);
+    // Suppress noisy logging for macOS/Windows metadata files (DS_Store,
+    // ._ resource forks, Spotlight indices, etc.)  These generate many
+    // PROPFIND 404s that clutter the console without adding signal.
+    let is_metadata = is_os_metadata_path(&path);
+    if !is_metadata {
+        eprintln!(
+            "  {} {} {}",
+            "WebDAV".custom_color(crate::colors::INK_DIM),
+            method.to_string().custom_color(crate::colors::INK),
+            path.custom_color(crate::colors::INK_DIM),
+        );
+    }
 
     // Reject macOS/Windows metadata files that Finder and Explorer create.
     // These pollute the vault with system junk that users never want stored.
-    if is_os_metadata_path(&path) {
+    if is_metadata {
         let is_propfind = method.as_str() == "PROPFIND";
         if is_propfind {
             // Return an empty 207 so Finder doesn't spam retries.

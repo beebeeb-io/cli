@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use base64::Engine;
 use chrono::{DateTime, Utc};
@@ -11,6 +11,7 @@ use walkdir::WalkDir;
 
 use crate::api::ApiClient;
 use crate::config::load_config;
+use crate::ui;
 
 const STATE_FILE: &str = ".bb-sync.json";
 const CHUNK_SIZE: usize = 1024 * 1024;
@@ -84,24 +85,26 @@ pub async fn run(
 
     let master_key = load_master_key()?;
 
-    println!(
-        "  {} {}",
-        "syncing".custom_color(crate::colors::GREEN_OK),
-        local_dir.display().to_string().custom_color(crate::colors::INK),
-    );
-    println!(
-        "  {} {}",
-        "remote".custom_color(crate::colors::INK_DIM),
-        remote_path.custom_color(crate::colors::INK),
-    );
-    if dry_run {
+    if !ui::is_json() && !ui::is_quiet() {
         println!(
-            "  {} {}",
-            "mode".custom_color(crate::colors::INK_DIM),
-            "dry-run (no changes will be written)".custom_color(crate::colors::AMBER),
+            "  {} {} {} {}",
+            "\u{2713}".custom_color(crate::colors::GREEN_OK),
+            "syncing".custom_color(crate::colors::GREEN_OK),
+            local_dir.display().to_string().custom_color(crate::colors::INK),
+            format!("\u{2192} {remote_path}").custom_color(crate::colors::INK_DIM),
         );
+        if dry_run {
+            println!(
+                "  {} {}",
+                "mode".custom_color(crate::colors::INK_DIM),
+                "dry-run (no changes will be written)".custom_color(crate::colors::AMBER),
+            );
+        }
+        println!();
     }
-    println!();
+
+    let sync_start = Instant::now();
+    let mut total_bytes: u64 = 0;
 
     let remote_folder_id =
         resolve_remote_folder(&api, &master_key, &remote_path, dry_run).await?;
@@ -206,6 +209,7 @@ pub async fn run(
                             dry_run,
                         )
                         .await?;
+                        total_bytes += l.size;
                         up_count += 1;
                     }
                     (false, true) => {
@@ -228,15 +232,18 @@ pub async fn run(
                                 dry_run,
                             )
                             .await?;
+                            total_bytes += l.size;
                             up_count += 1;
                         } else {
-                            println!(
-                                "  {} {} {}",
-                                "⚡".custom_color(crate::colors::AMBER),
-                                "conflict".custom_color(crate::colors::AMBER),
-                                format!("{rel} (skipped — use --force to overwrite)")
-                                    .custom_color(crate::colors::INK),
-                            );
+                            if !ui::is_json() && !ui::is_quiet() {
+                                println!(
+                                    "  {} {} {}",
+                                    "\u{26A1}".custom_color(crate::colors::AMBER),
+                                    "conflict".custom_color(crate::colors::AMBER),
+                                    format!("{rel} (skipped \u{2014} use --force to overwrite)")
+                                        .custom_color(crate::colors::INK),
+                                );
+                            }
                             conflicts += 1;
                         }
                     }
@@ -257,15 +264,18 @@ pub async fn run(
                         dry_run,
                     )
                     .await?;
+                    total_bytes += l.size;
                     up_count += 1;
                 } else {
-                    println!(
-                        "  {} {} {}",
-                        "⚡".custom_color(crate::colors::AMBER),
-                        "conflict".custom_color(crate::colors::AMBER),
-                        format!("{rel} (exists both sides, no prior sync — skipped)")
-                            .custom_color(crate::colors::INK),
-                    );
+                    if !ui::is_json() && !ui::is_quiet() {
+                        println!(
+                            "  {} {} {}",
+                            "\u{26A1}".custom_color(crate::colors::AMBER),
+                            "conflict".custom_color(crate::colors::AMBER),
+                            format!("{rel} (exists both sides, no prior sync \u{2014} skipped)")
+                                .custom_color(crate::colors::INK),
+                        );
+                    }
                     conflicts += 1;
                 }
             }
@@ -283,6 +293,7 @@ pub async fn run(
                     dry_run,
                 )
                 .await?;
+                total_bytes += l.size;
                 up_count += 1;
             }
             (None, Some(r), prior) => {
@@ -292,14 +303,16 @@ pub async fn run(
                             api.trash_file(&r.id.to_string()).await?;
                             state.files.remove(rel);
                         }
-                        println!(
-                            "  {} {} {}",
-                            "x".custom_color(crate::colors::RED_ERR),
-                            "trashing remote".custom_color(crate::colors::RED_ERR),
-                            rel.custom_color(crate::colors::INK),
-                        );
+                        if !ui::is_json() && !ui::is_quiet() {
+                            println!(
+                                "  {} {} {}",
+                                "\u{2717}".custom_color(crate::colors::RED_ERR),
+                                "trashing remote".custom_color(crate::colors::RED_ERR),
+                                rel.custom_color(crate::colors::INK),
+                            );
+                        }
                         deletes += 1;
-                    } else {
+                    } else if !ui::is_json() && !ui::is_quiet() {
                         println!(
                             "  {} {} {}",
                             "?".custom_color(crate::colors::INK_DIM),
@@ -326,31 +339,89 @@ pub async fn run(
             .map_err(|e| format!("write state file: {e}"))?;
     }
 
+    let elapsed = sync_start.elapsed();
+    let elapsed_secs = elapsed.as_secs_f64();
+
+    if ui::is_json() {
+        let json_out = serde_json::json!({
+            "uploaded": up_count,
+            "downloaded": down_count,
+            "conflicts": conflicts,
+            "deleted": deletes,
+            "skipped": skipped,
+            "bytes": total_bytes,
+            "elapsed_secs": elapsed_secs,
+        });
+        println!("{}", serde_json::to_string_pretty(&json_out).unwrap_or_default());
+        return Ok(());
+    }
+
+    if ui::is_quiet() {
+        println!(
+            "{} up {} down {} conflict{}",
+            up_count, down_count, conflicts,
+            if deletes > 0 { format!(" {deletes} del") } else { String::new() },
+        );
+        return Ok(());
+    }
+
     println!();
-    let summary = format!(
-        "{} up, {} down, {} conflicts{}{}",
-        up_count,
-        down_count,
-        conflicts,
-        if deletes > 0 {
-            format!(", {deletes} deleted")
-        } else {
-            String::new()
-        },
-        if skipped > 0 {
-            format!(", {skipped} unchanged")
-        } else {
-            String::new()
-        },
-    );
-    let total = up_count + down_count + conflicts + deletes + skipped;
+    // Rich summary: ✓ synced · 2 ↑ 1 ↓ 1 ⚡ · 3.3 MB · avg 45 MB/s · 1.8s
+    let avg_speed = if elapsed_secs > 0.0 {
+        total_bytes as f64 / elapsed_secs
+    } else {
+        0.0
+    };
+
+    let mut parts: Vec<String> = Vec::new();
+    if up_count > 0 {
+        parts.push(format!(
+            "{}",
+            format!("{up_count} \u{2191}").custom_color(crate::colors::GREEN_OK)
+        ));
+    }
+    if down_count > 0 {
+        parts.push(format!(
+            "{}",
+            format!("{down_count} \u{2193}").custom_color(crate::colors::CYAN)
+        ));
+    }
+    if conflicts > 0 {
+        parts.push(format!(
+            "{}",
+            format!("{conflicts} \u{26A1}").custom_color(crate::colors::AMBER)
+        ));
+    }
+    if deletes > 0 {
+        parts.push(format!(
+            "{}",
+            format!("{deletes} \u{2717}").custom_color(crate::colors::RED_ERR)
+        ));
+    }
+
+    let counts_str = if parts.is_empty() {
+        "no changes".to_string()
+    } else {
+        parts.join(" ")
+    };
+
+    let mut meta_parts: Vec<String> = Vec::new();
+    if total_bytes > 0 {
+        meta_parts.push(ui::human_size(total_bytes));
+    }
+    if avg_speed > 0.0 && total_bytes > 0 {
+        meta_parts.push(format!("avg {}", ui::human_speed(avg_speed)));
+    }
+    meta_parts.push(format!("{:.1}s", elapsed_secs));
+
     println!(
-        "  {} {} {} {}",
-        "OK".custom_color(crate::colors::GREEN_OK),
-        format!("synced {total} file{}", if total == 1 { "" } else { "s" })
-            .custom_color(crate::colors::INK),
-        "·".custom_color(crate::colors::INK_DIM),
-        summary.custom_color(crate::colors::INK_DIM),
+        "  {} {} {} {} {} {}",
+        "\u{2713}".custom_color(crate::colors::GREEN_OK),
+        "synced".custom_color(crate::colors::GREEN_OK),
+        "\u{00b7}".custom_color(crate::colors::INK_DIM),
+        counts_str,
+        "\u{00b7}".custom_color(crate::colors::INK_DIM),
+        meta_parts.join(" \u{00b7} ").custom_color(crate::colors::INK_DIM),
     );
 
     Ok(())
@@ -639,12 +710,14 @@ async fn do_upload(
     dry_run: bool,
 ) -> Result<(), String> {
     let size_str = format_size(local.size);
-    println!(
-        "  {} {} {}",
-        "↑".custom_color(crate::colors::AMBER),
-        "uploading".custom_color(crate::colors::GREEN_OK),
-        format!("{rel} ({size_str})").custom_color(crate::colors::INK),
-    );
+    if !ui::is_json() && !ui::is_quiet() {
+        println!(
+            "  {} {} {}",
+            "\u{2191}".custom_color(crate::colors::GREEN_OK),
+            rel.custom_color(crate::colors::INK),
+            format!("({size_str})").custom_color(crate::colors::INK_DIM),
+        );
+    }
 
     if dry_run {
         return Ok(());
@@ -686,12 +759,13 @@ async fn do_download(
     state: &mut SyncState,
     dry_run: bool,
 ) -> Result<(), String> {
-    println!(
-        "  {} {} {}",
-        "↓".custom_color(crate::colors::GREEN_OK),
-        "downloading".custom_color(crate::colors::GREEN_OK),
-        rel.custom_color(crate::colors::INK),
-    );
+    if !ui::is_json() && !ui::is_quiet() {
+        println!(
+            "  {} {}",
+            "\u{2193}".custom_color(crate::colors::CYAN),
+            rel.custom_color(crate::colors::INK),
+        );
+    }
 
     if dry_run {
         return Ok(());

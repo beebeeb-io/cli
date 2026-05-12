@@ -4,6 +4,7 @@ use std::io::{self, Write};
 
 use crate::api::ApiClient;
 use crate::config::load_config;
+use crate::ui;
 
 /// Parse a human duration like "24h", "7d", "1h" into hours.
 fn parse_hours(s: &str) -> Result<u64, String> {
@@ -40,6 +41,22 @@ pub async fn run(
             rpassword::read_password().map_err(|e| format!("failed to read passphrase: {e}"))?;
         if pass.len() < 12 {
             return Err("passphrase must be at least 12 characters".to_string());
+        }
+        // Rough entropy estimate: ~6.5 bits per character for a decent passphrase
+        if !ui::is_quiet() && !ui::is_json() {
+            let bits = (pass.len() as f64 * 6.5).round() as u32;
+            let (strength, color) = if bits > 60 {
+                ("strong", crate::colors::GREEN_OK)
+            } else if bits >= 40 {
+                ("fair", crate::colors::AMBER)
+            } else {
+                ("weak", crate::colors::RED_ERR)
+            };
+            println!(
+                "  {} {}",
+                "entropy  ".custom_color(crate::colors::INK_DIM),
+                format!("{bits} bits \u{00b7} {strength}").custom_color(color),
+            );
         }
         Some(pass)
     } else {
@@ -121,6 +138,18 @@ pub async fn run(
     let token = result.get("token").and_then(|v| v.as_str()).unwrap_or("(unknown)");
     let expires_at = result.get("expires_at").and_then(|v| v.as_str()).unwrap_or("never");
 
+    // Extract file info from result if available
+    let file_name = result
+        .get("file")
+        .and_then(|f| f.get("name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let file_size = result
+        .get("file")
+        .and_then(|f| f.get("size_bytes"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
     // Build the URL: standard mode uses server-returned URL; double-encrypted
     // builds it locally with K_c in the fragment (server never sees K_c).
     let url = if let Some(ref kc) = client_key_b64 {
@@ -135,27 +164,71 @@ pub async fn run(
             .to_string()
     };
 
+    // JSON mode: emit machine-readable output
+    if ui::is_json() {
+        let json_out = serde_json::json!({
+            "share_id": share_id,
+            "url": url,
+            "expires_at": expires_at,
+            "max_opens": max_opens,
+            "double_encrypted": double_encrypted,
+            "passphrase_protected": passphrase_value.is_some(),
+        });
+        println!("{}", serde_json::to_string_pretty(&json_out).unwrap_or_default());
+        return Ok(());
+    }
+
+    if ui::is_quiet() {
+        println!("{url}");
+        return Ok(());
+    }
+
+    // Rich mode
     println!();
     if double_encrypted {
-        println!("  {}", "Link created (double encrypted)".custom_color(crate::colors::GREEN_OK));
+        println!("  {}", "\u{2713} Link created (double encrypted)".custom_color(crate::colors::GREEN_OK));
     } else {
-        println!("  {}", "Link created".custom_color(crate::colors::GREEN_OK));
+        println!("  {}", "\u{2713} Link created".custom_color(crate::colors::GREEN_OK));
     }
     println!(
         "  {} {}",
         "url       ".custom_color(crate::colors::INK_DIM),
         url.custom_color(crate::colors::AMBER),
     );
+    if !file_name.is_empty() {
+        let size_str = if file_size > 0 {
+            format!(" \u{00b7} {}", ui::human_size(file_size))
+        } else {
+            String::new()
+        };
+        println!(
+            "  {} {}",
+            "file      ".custom_color(crate::colors::INK_DIM),
+            format!("{file_name}{size_str}").custom_color(crate::colors::INK),
+        );
+    }
+    let expires_display = if expires_at == "never" {
+        "never".to_string()
+    } else {
+        ui::relative_time(expires_at)
+    };
     println!(
         "  {} {}",
         "expires   ".custom_color(crate::colors::INK_DIM),
-        expires_at.custom_color(crate::colors::INK),
+        expires_display.custom_color(crate::colors::INK),
     );
     if let Some(max) = max_opens {
         println!(
             "  {} {}",
             "max-opens ".custom_color(crate::colors::INK_DIM),
             max.to_string().custom_color(crate::colors::INK),
+        );
+    }
+    if double_encrypted {
+        println!(
+            "  {} {}",
+            "encryption".custom_color(crate::colors::INK_DIM),
+            "double-encrypted \u{00b7} server blind".custom_color(crate::colors::GREEN_OK),
         );
     }
     println!(
@@ -174,7 +247,7 @@ pub async fn run(
     if passphrase_value.is_some() {
         println!(
             "  {}",
-            "# send the passphrase by a different channel — we will never see it"
+            "# send passphrase by a different channel"
                 .custom_color(crate::colors::INK_SAGE),
         );
     }
@@ -198,25 +271,38 @@ pub async fn list() -> Result<(), String> {
         .or_else(|| result.get("shares").and_then(|s| s.as_array()));
 
     let Some(shares) = shares else {
-        println!(
-            "  {}",
-            "no active shares".custom_color(crate::colors::INK_DIM),
-        );
+        if ui::is_json() {
+            println!("[]");
+        } else if !ui::is_quiet() {
+            println!(
+                "  {}",
+                "no active shares".custom_color(crate::colors::INK_DIM),
+            );
+        }
         return Ok(());
     };
 
     if shares.is_empty() {
-        println!(
-            "  {}",
-            "no active shares".custom_color(crate::colors::INK_DIM),
-        );
+        if ui::is_json() {
+            println!("[]");
+        } else if !ui::is_quiet() {
+            println!(
+                "  {}",
+                "no active shares".custom_color(crate::colors::INK_DIM),
+            );
+        }
+        return Ok(());
+    }
+
+    if ui::is_json() {
+        println!("{}", serde_json::to_string_pretty(shares).unwrap_or_default());
         return Ok(());
     }
 
     println!(
         "  {}",
         format!(
-            "{:<36}  {:<40}  {:<20}  {}",
+            "  {:<36}  {:<40}  {:<20}  {}",
             "file", "url", "expires", "opens"
         )
         .custom_color(crate::colors::INK_DIM),
@@ -243,10 +329,14 @@ pub async fn list() -> Result<(), String> {
             .get("url")
             .and_then(|v| v.as_str())
             .unwrap_or("-");
-        let expires = share
+        let expires_raw = share
             .get("expires_at")
             .and_then(|v| v.as_str())
             .unwrap_or("never");
+        let is_revoked = share
+            .get("revoked")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let opens = share
             .get("open_count")
             .or_else(|| share.get("opens"))
@@ -256,16 +346,40 @@ pub async fn list() -> Result<(), String> {
             .get("max_opens")
             .and_then(|v| v.as_u64());
 
+        // Status indicator: active, expired, or revoked
+        let (status_icon, name_color) = if is_revoked {
+            ("\u{2717}".custom_color(crate::colors::RED_ERR), crate::colors::INK_DIM)
+        } else {
+            // Check if expired by trying to parse the timestamp
+            let is_expired = expires_raw != "never"
+                && chrono::DateTime::parse_from_rfc3339(expires_raw)
+                    .map(|dt| dt < chrono::Utc::now())
+                    .unwrap_or(false);
+            if is_expired {
+                ("\u{25CB}".custom_color(crate::colors::INK_DIM), crate::colors::INK_DIM)
+            } else {
+                ("\u{25CF}".custom_color(crate::colors::GREEN_OK), crate::colors::INK_WARM)
+            }
+        };
+
+        // Relative expiry display
+        let expires_display = if expires_raw == "never" {
+            "never".to_string()
+        } else {
+            ui::relative_time(expires_raw)
+        };
+
         let opens_display = match max_opens {
             Some(max) => format!("{opens}/{max}"),
             None => format!("{opens}"),
         };
 
         println!(
-            "  {:<36}  {:<40}  {:<20}  {}",
-            file_name.custom_color(crate::colors::INK_WARM),
+            "  {} {:<36}  {:<40}  {:<20}  {}",
+            status_icon,
+            file_name.custom_color(name_color),
             url.custom_color(crate::colors::AMBER),
-            expires.custom_color(crate::colors::INK_DIM),
+            expires_display.custom_color(crate::colors::INK_DIM),
             opens_display.custom_color(crate::colors::INK),
         );
     }

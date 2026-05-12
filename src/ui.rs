@@ -100,7 +100,27 @@ pub fn relative_time(iso_str: &str) -> String {
 
     let secs = delta.num_seconds();
     if secs < 0 {
-        return iso_str.to_string(); // future timestamp — return as-is
+        // Future timestamp — show "in Xh", "in 2 days", etc.
+        let future_secs = (-secs) as u64;
+        if future_secs < 60 {
+            return "in <1m".to_string();
+        }
+        let mins = future_secs / 60;
+        if mins < 60 {
+            return format!("in {}m", mins);
+        }
+        let hours = mins / 60;
+        if hours < 24 {
+            return format!("in {}h", hours);
+        }
+        let days = hours / 24;
+        if days == 1 {
+            return "in 1 day".to_string();
+        }
+        if days < 30 {
+            return format!("in {} days", days);
+        }
+        return dt.format("%b %-d").to_string();
     }
     if secs < 60 {
         return "just now".to_string();

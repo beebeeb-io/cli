@@ -2,6 +2,7 @@ use colored::Colorize;
 
 use crate::api::ApiClient;
 use crate::commands::push::load_master_key;
+use crate::ui;
 
 /// 1 MiB chunk size (matches beebeeb_types::CHUNK_SIZE and push.rs)
 const CHUNK_SIZE: usize = 1024 * 1024;
@@ -163,26 +164,26 @@ pub async fn run(dry_run: bool) -> Result<(), String> {
 
     let master_key = load_master_key()?;
 
-    println!(
-        "  {} {}",
-        "repair".custom_color(crate::colors::AMBER),
-        if dry_run {
-            "(dry run) scanning vault for binary-UUID files..."
-                .custom_color(crate::colors::INK_DIM)
-        } else {
-            "scanning vault for binary-UUID files..."
-                .custom_color(crate::colors::INK_DIM)
-        },
-    );
+    if !ui::is_json() && !ui::is_quiet() {
+        let mode = if dry_run { " (dry run)" } else { "" };
+        println!(
+            "  {} {}{}",
+            "repair".custom_color(crate::colors::AMBER),
+            "scanning vault for binary-UUID files...".custom_color(crate::colors::INK_DIM),
+            mode.custom_color(crate::colors::AMBER),
+        );
+    }
 
     // Collect all files recursively
     let all_items = collect_all_files(&api, None).await?;
 
     if all_items.is_empty() {
-        println!(
-            "  {}",
-            "No files in vault.".custom_color(crate::colors::INK_DIM),
-        );
+        if !ui::is_json() && !ui::is_quiet() {
+            println!(
+                "  {}",
+                "No files in vault.".custom_color(crate::colors::INK_DIM),
+            );
+        }
         return Ok(());
     }
 
@@ -215,19 +216,23 @@ pub async fn run(dry_run: bool) -> Result<(), String> {
         let detection = detect_key_derivation(&master_key, file_id, name_encrypted);
 
         match detection {
-            Some((KeyDerivation::StringUuid, _)) | Some((KeyDerivation::Plaintext, _)) => {
+            Some((KeyDerivation::StringUuid, ref name)) | Some((KeyDerivation::Plaintext, ref name)) => {
+                // Optionally show skipped files in verbose mode (not quiet/json)
+                // For now just count them silently to reduce noise.
+                let _ = name;
                 stats.already_correct += 1;
             }
             Some((KeyDerivation::BinaryUuid, decrypted_name)) => {
                 if dry_run {
                     let kind = if is_folder { "folder" } else { "file" };
-                    println!(
-                        "  {} {} {} {}",
-                        "would repair:".custom_color(crate::colors::AMBER),
-                        decrypted_name.custom_color(crate::colors::INK),
-                        format!("({file_id})").custom_color(crate::colors::INK_DIM),
-                        kind.custom_color(crate::colors::INK_SAGE),
-                    );
+                    if !ui::is_json() && !ui::is_quiet() {
+                        println!(
+                            "  {} {} {}",
+                            "\u{00b7}".custom_color(crate::colors::AMBER),
+                            format!("would repair: {decrypted_name}").custom_color(crate::colors::INK),
+                            kind.custom_color(crate::colors::INK_DIM),
+                        );
+                    }
                     if is_folder {
                         stats.folders_repaired += 1;
                     } else {
@@ -241,7 +246,7 @@ pub async fn run(dry_run: bool) -> Result<(), String> {
                         Err(e) => {
                             eprintln!(
                                 "  {} {} {}",
-                                "error:".custom_color(crate::colors::RED_ERR),
+                                "\u{2717}".custom_color(crate::colors::RED_ERR),
                                 decrypted_name.custom_color(crate::colors::INK),
                                 e.custom_color(crate::colors::INK_DIM),
                             );
@@ -264,7 +269,7 @@ pub async fn run(dry_run: bool) -> Result<(), String> {
                         Err(e) => {
                             eprintln!(
                                 "  {} {} {}",
-                                "error:".custom_color(crate::colors::RED_ERR),
+                                "\u{2717}".custom_color(crate::colors::RED_ERR),
                                 decrypted_name.custom_color(crate::colors::INK),
                                 e.custom_color(crate::colors::INK_DIM),
                             );
@@ -279,22 +284,45 @@ pub async fn run(dry_run: bool) -> Result<(), String> {
         }
     }
 
-    // Summary
-    if stats.files_repaired == 0 && stats.folders_repaired == 0 {
-        if stats.skipped > 0 {
+    // JSON output
+    if ui::is_json() {
+        let json_out = serde_json::json!({
+            "files_repaired": stats.files_repaired,
+            "folders_repaired": stats.folders_repaired,
+            "already_correct": stats.already_correct,
+            "skipped": stats.skipped,
+            "errors": stats.errors,
+            "dry_run": dry_run,
+        });
+        println!("{}", serde_json::to_string_pretty(&json_out).unwrap_or_default());
+        return Ok(());
+    }
+
+    if ui::is_quiet() {
+        if stats.files_repaired > 0 || stats.folders_repaired > 0 {
+            let verb = if dry_run { "would repair" } else { "repaired" };
             println!(
-                "  {} ({} skipped — unknown format)",
-                "All files are already compatible."
-                    .custom_color(crate::colors::GREEN_OK),
-                stats.skipped,
-            );
-        } else {
-            println!(
-                "  {}",
-                "All files are already compatible."
-                    .custom_color(crate::colors::GREEN_OK),
+                "{verb} {} files {} folders",
+                stats.files_repaired, stats.folders_repaired,
             );
         }
+        return Ok(());
+    }
+
+    // Rich summary
+    println!();
+    if stats.files_repaired == 0 && stats.folders_repaired == 0 {
+        println!(
+            "  {} {} {}",
+            "\u{2713}".custom_color(crate::colors::GREEN_OK),
+            "All files are already compatible.".custom_color(crate::colors::GREEN_OK),
+            if stats.skipped > 0 {
+                format!("({} skipped \u{2014} unknown format)", stats.skipped)
+                    .custom_color(crate::colors::INK_DIM)
+            } else {
+                "".to_string().custom_color(crate::colors::INK_DIM)
+            },
+        );
     } else {
         let verb = if dry_run { "Would repair" } else { "Repaired" };
         let mut parts = Vec::new();
@@ -312,18 +340,30 @@ pub async fn run(dry_run: bool) -> Result<(), String> {
                 if stats.folders_repaired == 1 { "" } else { "s" }
             ));
         }
-        let mut summary = format!("{verb} {}.", parts.join(", "));
-        summary.push_str(&format!(" {} already correct.", stats.already_correct));
-        if stats.errors > 0 {
-            summary.push_str(&format!(" {} errors.", stats.errors));
-        }
+        let main_summary = format!("{verb} {}.", parts.join(", "));
+        let already = format!("{} already correct.", stats.already_correct);
+        let errors = if stats.errors > 0 {
+            format!(" {} errors.", stats.errors)
+        } else {
+            String::new()
+        };
+
+        let icon = if dry_run {
+            "\u{00b7}".custom_color(crate::colors::AMBER)
+        } else {
+            "\u{2713}".custom_color(crate::colors::GREEN_OK)
+        };
+        let summary_color = if dry_run {
+            crate::colors::AMBER
+        } else {
+            crate::colors::GREEN_OK
+        };
         println!(
-            "  {}",
-            summary.custom_color(if dry_run {
-                crate::colors::AMBER
-            } else {
-                crate::colors::GREEN_OK
-            }),
+            "  {} {} {} {}",
+            icon,
+            main_summary.custom_color(summary_color),
+            already.custom_color(crate::colors::INK_DIM),
+            errors.custom_color(crate::colors::RED_ERR),
         );
     }
 
@@ -381,23 +421,18 @@ async fn repair_folder(
     file_id: &str,
     decrypted_name: &str,
 ) -> Result<(), String> {
-    println!(
-        "  {} {} {}",
-        "repairing:".custom_color(crate::colors::AMBER),
-        decrypted_name.custom_color(crate::colors::INK),
-        format!("({file_id})").custom_color(crate::colors::INK_DIM),
-    );
-
     let new_name_encrypted =
         encrypt_name_with_string_key(master_key, file_id, decrypted_name)?;
     api.move_file(file_id, Some(&new_name_encrypted), None)
         .await?;
 
-    println!(
-        "  {} {}",
-        "repaired:".custom_color(crate::colors::GREEN_OK),
-        decrypted_name.custom_color(crate::colors::INK),
-    );
+    if !ui::is_json() && !ui::is_quiet() {
+        println!(
+            "  {} {}",
+            "\u{2713} repaired:".custom_color(crate::colors::GREEN_OK),
+            decrypted_name.custom_color(crate::colors::INK),
+        );
+    }
 
     Ok(())
 }
@@ -411,12 +446,6 @@ async fn repair_file(
     decrypted_name: &str,
     chunk_count: u32,
 ) -> Result<(), String> {
-    println!(
-        "  {} {} {}",
-        "repairing:".custom_color(crate::colors::AMBER),
-        decrypted_name.custom_color(crate::colors::INK),
-        format!("({file_id})").custom_color(crate::colors::INK_DIM),
-    );
 
     // Get full metadata (need parent_id, mime_type, size)
     let file_meta = api.get_file(file_id).await?;
@@ -474,11 +503,13 @@ async fn repair_file(
 
     api.upload_encrypted(&metadata_json, &new_chunks).await?;
 
-    println!(
-        "  {} {}",
-        "repaired:".custom_color(crate::colors::GREEN_OK),
-        decrypted_name.custom_color(crate::colors::INK),
-    );
+    if !ui::is_json() && !ui::is_quiet() {
+        println!(
+            "  {} {}",
+            "\u{2713} repaired:".custom_color(crate::colors::GREEN_OK),
+            decrypted_name.custom_color(crate::colors::INK),
+        );
+    }
 
     Ok(())
 }
