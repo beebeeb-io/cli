@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use base64::Engine;
-use beebeeb_types::EncryptedBlob;
 use chrono::{DateTime, Utc};
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
@@ -785,28 +784,15 @@ async fn download_to(
     chunk_count: u32,
     out_path: &Path,
 ) -> Result<(), String> {
-    let file_key = beebeeb_core::kdf::derive_file_key(master_key, file_id.as_bytes());
-    let encrypted_bytes = api.download_file(&file_id.to_string()).await?;
+    let file_id_str = file_id.to_string();
+    let encrypted_bytes = api.download_file(&file_id_str).await?;
 
-    let mut plaintext = Vec::new();
-    let mut offset = 0;
-    for i in 0..chunk_count {
-        if offset >= encrypted_bytes.len() {
-            return Err(format!("unexpected end of data at chunk {i}"));
-        }
-        let remaining = &encrypted_bytes[offset..];
-        let mut de = serde_json::Deserializer::from_slice(remaining)
-            .into_iter::<EncryptedBlob>();
-        let blob = match de.next() {
-            Some(Ok(b)) => b,
-            Some(Err(e)) => return Err(format!("parse chunk {i}: {e}")),
-            None => return Err(format!("no data for chunk {i}")),
-        };
-        offset += de.byte_offset();
-        let decrypted = beebeeb_core::encrypt::decrypt_chunk(&file_key, &blob)
-            .map_err(|e| format!("decrypt chunk {i}: {e}"))?;
-        plaintext.extend_from_slice(&decrypted);
-    }
+    let plaintext = crate::crypto::decrypt_file_chunks(
+        master_key,
+        &file_id_str,
+        &encrypted_bytes,
+        chunk_count,
+    )?;
 
     if let Some(parent) = out_path.parent() {
         std::fs::create_dir_all(parent)

@@ -94,7 +94,6 @@ mod fuse_impl {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use base64::Engine as _;
-    use beebeeb_types::EncryptedBlob;
     use colored::Colorize;
     use fuser::{
         FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
@@ -338,13 +337,17 @@ mod fuse_impl {
             let entry = self.inodes.get(&ino).ok_or("inode not found")?;
             let file_id = entry.file_id.as_ref().ok_or("no file_id")?.clone();
             let chunk_count = entry.chunk_count;
-            // Use key_uuid for key derivation (may differ from server file_id
-            // for FUSE-created files).
-            let key_uuid = entry.key_uuid.or_else(|| file_id.parse().ok()).ok_or("no key UUID")?;
-            let file_key = beebeeb_core::kdf::derive_file_key(&self.master_key, key_uuid.as_bytes());
 
             let encrypted = self.rt.block_on(self.api.download_file(&file_id))?;
-            let plaintext = decrypt_chunks(&encrypted, &file_key, chunk_count)?;
+            // Use the shared helper that handles both CLI-format (JSON) and
+            // web-app-format (raw binary) chunks, and both UUID key derivation
+            // methods (binary and string).
+            let plaintext = crate::crypto::decrypt_file_chunks(
+                &self.master_key,
+                &file_id,
+                &encrypted,
+                chunk_count,
+            )?;
 
             if let Some(e) = self.inodes.get_mut(&ino) {
                 e.size = plaintext.len() as u64;
@@ -1098,33 +1101,8 @@ mod fuse_impl {
     // ── Crypto helpers ────────────────────────────────────────────────────────
 
     fn decrypt_name(master_key: &beebeeb_core::kdf::MasterKey, file_id: &str, name_encrypted: &str) -> String {
-        (|| -> Option<String> {
-            let uuid: uuid::Uuid = file_id.parse().ok()?;
-            let fk = beebeeb_core::kdf::derive_file_key(master_key, uuid.as_bytes());
-            let blob: EncryptedBlob = serde_json::from_str(name_encrypted).ok()?;
-            beebeeb_core::encrypt::decrypt_metadata(&fk, &blob).ok()
-        })()
-        .unwrap_or_else(|| format!("[{}]", &file_id[..8.min(file_id.len())]))
-    }
-
-    fn decrypt_chunks(data: &[u8], file_key: &beebeeb_core::kdf::FileKey, chunk_count: u32) -> Result<Vec<u8>, String> {
-        let mut plaintext = Vec::new();
-        let mut offset = 0;
-        for i in 0..chunk_count {
-            if offset >= data.len() {
-                return Err(format!("unexpected end at chunk {i}/{chunk_count}"));
-            }
-            let mut de = serde_json::Deserializer::from_slice(&data[offset..]).into_iter::<EncryptedBlob>();
-            let blob = match de.next() {
-                Some(Ok(b)) => b,
-                Some(Err(e)) => return Err(format!("parse chunk {i}: {e}")),
-                None => return Err(format!("no data for chunk {i}")),
-            };
-            offset += de.byte_offset();
-            let dec = beebeeb_core::encrypt::decrypt_chunk(file_key, &blob).map_err(|e| format!("decrypt {i}: {e}"))?;
-            plaintext.extend_from_slice(&dec);
-        }
-        Ok(plaintext)
+        crate::crypto::decrypt_name(master_key, file_id, name_encrypted)
+            .unwrap_or_else(|| format!("[{}]", &file_id[..8.min(file_id.len())]))
     }
 
     // ── CLI entry points ──────────────────────────────────────────────────────

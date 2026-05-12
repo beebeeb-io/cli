@@ -40,7 +40,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use base64::Engine;
-use beebeeb_types::EncryptedBlob;
 use colored::Colorize;
 use futures_util::StreamExt;
 use serde_json::Value;
@@ -303,11 +302,6 @@ async fn download_to_mirror(
     file_id: &str,
     mirror_root: &Path,
 ) -> Result<(), String> {
-    let file_uuid: Uuid = file_id
-        .parse()
-        .map_err(|e| format!("invalid id: {e}"))?;
-    let file_key = beebeeb_core::kdf::derive_file_key(master_key, file_uuid.as_bytes());
-
     let meta = api.get_file(file_id).await?;
     let chunk_count = meta
         .get("chunk_count")
@@ -327,10 +321,19 @@ async fn download_to_mirror(
     let safe_name = sanitize_filename(&name);
     let out_path = mirror_root.join(&safe_name);
 
+    // Download and decrypt using the shared helper that handles both
+    // CLI-format and web-app-format chunks, and both key derivations.
+    let encrypted_bytes = api.download_file(file_id).await?;
+    let plaintext = crate::crypto::decrypt_file_chunks(
+        master_key,
+        file_id,
+        &encrypted_bytes,
+        chunk_count,
+    )?;
+
     // Skip clobbering if local content already matches: same byte length on
     // disk usually means we already have this file from a prior push or
     // pull. Defensive — protects against any echo not caught by loopback.
-    let plaintext = decrypt_file(api, &file_key, file_id, chunk_count).await?;
     if let Ok(existing) = std::fs::metadata(&out_path) {
         if existing.len() == plaintext.len() as u64 {
             return Ok(()); // already in sync
@@ -388,36 +391,6 @@ async fn unlink_in_mirror(
         );
     }
     Ok(())
-}
-
-/// Pull encrypted bytes for `file_id` and decrypt all chunks.
-/// Logic mirrors `commands::pull::pull_single_file`.
-async fn decrypt_file(
-    api: &ApiClient,
-    file_key: &beebeeb_core::kdf::FileKey,
-    file_id: &str,
-    chunk_count: u32,
-) -> Result<Vec<u8>, String> {
-    let encrypted = api.download_file(file_id).await?;
-    let mut plaintext = Vec::with_capacity(encrypted.len());
-    let mut offset = 0;
-    for i in 0..chunk_count {
-        if offset >= encrypted.len() {
-            return Err(format!("unexpected end of data at chunk {i}"));
-        }
-        let mut de = serde_json::Deserializer::from_slice(&encrypted[offset..])
-            .into_iter::<EncryptedBlob>();
-        let blob = match de.next() {
-            Some(Ok(b)) => b,
-            Some(Err(e)) => return Err(format!("parse chunk {i}: {e}")),
-            None => return Err(format!("no data for chunk {i}")),
-        };
-        offset += de.byte_offset();
-        let decrypted = beebeeb_core::encrypt::decrypt_chunk(file_key, &blob)
-            .map_err(|e| format!("decrypt chunk {i}: {e}"))?;
-        plaintext.extend_from_slice(&decrypted);
-    }
-    Ok(plaintext)
 }
 
 fn load_master_key() -> Result<beebeeb_core::kdf::MasterKey, String> {

@@ -35,7 +35,6 @@ use axum::response::{IntoResponse, Response};
 use axum::Router;
 use axum::routing::any;
 use base64::Engine as _;
-use beebeeb_types::EncryptedBlob;
 use colored::Colorize;
 use tokio::sync::Mutex;
 
@@ -426,14 +425,15 @@ async fn get_response(state: &Arc<DavState>, path: &str, req_headers: &HeaderMap
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
 
-    // Decrypt all chunks
-    let uuid: uuid::Uuid = match file_id.parse() {
-        Ok(u) => u,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
-    let file_key = beebeeb_core::kdf::derive_file_key(&state.master_key, uuid.as_bytes());
-
-    let plaintext = match decrypt_chunks(&encrypted_bytes, &file_key, resolved.chunk_count) {
+    // Decrypt all chunks using the shared helper that handles both
+    // CLI-format (JSON) and web-app-format (raw binary) chunks, and
+    // both UUID key derivation methods (binary and string).
+    let plaintext = match crate::crypto::decrypt_file_chunks(
+        &state.master_key,
+        &file_id,
+        &encrypted_bytes,
+        resolved.chunk_count,
+    ) {
         Ok(p) => p,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
@@ -1202,40 +1202,6 @@ fn decrypt_name(
     crate::crypto::decrypt_name(master_key, file_id, name_encrypted)
 }
 
-fn decrypt_chunks(
-    data: &[u8],
-    file_key: &beebeeb_core::kdf::FileKey,
-    chunk_count: u32,
-) -> Result<Vec<u8>, String> {
-    let mut plaintext = Vec::new();
-    let mut offset = 0;
-
-    for i in 0..chunk_count {
-        if offset >= data.len() {
-            return Err(format!(
-                "unexpected end at chunk {i}/{chunk_count} (offset {offset}, total {})",
-                data.len()
-            ));
-        }
-
-        let remaining = &data[offset..];
-        let mut de = serde_json::Deserializer::from_slice(remaining).into_iter::<EncryptedBlob>();
-
-        let blob = match de.next() {
-            Some(Ok(b)) => b,
-            Some(Err(e)) => return Err(format!("parse error at chunk {i}: {e}")),
-            None => return Err(format!("no data for chunk {i}/{chunk_count}")),
-        };
-
-        offset += de.byte_offset();
-
-        let decrypted = beebeeb_core::encrypt::decrypt_chunk(file_key, &blob)
-            .map_err(|e| format!("decrypt chunk {i}: {e}"))?;
-        plaintext.extend_from_slice(&decrypted);
-    }
-
-    Ok(plaintext)
-}
 
 // ─── XML helpers ─────────────────────────────────────────────────────────────
 
