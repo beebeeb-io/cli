@@ -57,6 +57,10 @@ enum ConflictResolution {
 
 /// Ask the server for all encrypted names in `parent_id`, decrypt them
 /// locally, and return the existing file's UUID if `filename` matches.
+///
+/// Uses the shared `crypto::decrypt_name` which handles all server formats
+/// (Rust EncryptedBlob, web-app base64 blob, plaintext) and both UUID key
+/// derivations (binary and string).
 pub(crate) async fn find_conflict(
     api: &ApiClient,
     master_key: &beebeeb_core::kdf::MasterKey,
@@ -70,12 +74,7 @@ pub(crate) async fn find_conflict(
         let id_str = file.get("id")?.as_str()?;
         let name_enc_str = file.get("name_encrypted")?.as_str()?;
         let file_uuid: uuid::Uuid = id_str.parse().ok()?;
-        let file_key = beebeeb_core::kdf::derive_file_key(master_key, file_uuid.as_bytes());
-        let blob: beebeeb_types::EncryptedBlob =
-            serde_json::from_str(name_enc_str).ok()?;
-        if let Ok(decrypted) =
-            beebeeb_core::encrypt::decrypt_metadata(&file_key, &blob)
-        {
+        if let Some(decrypted) = crate::crypto::decrypt_name(master_key, id_str, name_enc_str) {
             if decrypted == filename {
                 return Some(file_uuid);
             }
@@ -174,14 +173,8 @@ async fn resolve_upload_folder(api: &ApiClient, folder: &str) -> Result<String, 
             .get("name_encrypted")
             .and_then(|v| v.as_str())
             .ok_or_else(|| format!("folder response missing name_encrypted for {file_id}"))?;
-        let folder_uuid: uuid::Uuid = file_id
-            .parse()
-            .map_err(|e| format!("invalid folder id from server: {e}"))?;
-        let folder_key = beebeeb_core::kdf::derive_file_key(&master_key, folder_uuid.as_bytes());
-        let blob: beebeeb_types::EncryptedBlob = serde_json::from_str(name_encrypted)
-            .map_err(|e| format!("invalid encrypted folder name for {file_id}: {e}"))?;
-        let name = beebeeb_core::encrypt::decrypt_metadata(&folder_key, &blob)
-            .map_err(|e| format!("failed to decrypt folder name for {file_id}: {e}"))?;
+        let name = crate::crypto::decrypt_name(&master_key, file_id, name_encrypted)
+            .ok_or_else(|| format!("failed to decrypt folder name for {file_id}"))?;
 
         if name == folder {
             return Ok(file_id.to_string());
