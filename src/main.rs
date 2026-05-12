@@ -239,9 +239,89 @@ enum Commands {
     },
 }
 
+fn print_custom_help() {
+    use crate::{colors, ui};
+
+    // Ensure color system is initialised (ui::init hasn't been called yet).
+    ui::init(false, false, false);
+
+    let version = env!("CARGO_PKG_VERSION");
+    let w = 58;
+
+    println!("{}", ui::box_header("BEEBEEB", w));
+    println!("{}", ui::box_line(
+        &format!("{}",
+            "end-to-end encrypted vault, from the terminal"
+                .custom_color(colors::INK_DIM)),
+        w,
+    ));
+    println!("{}", ui::box_line(
+        &format!("v{} · {} · {}",
+            version.custom_color(colors::INK_DIM),
+            "Falkenstein".custom_color(colors::INK_DIM),
+            "e2ee".custom_color(colors::GREEN_OK)),
+        w,
+    ));
+    println!("{}", ui::box_footer(w));
+    println!();
+
+    println!("  {}", "COMMANDS".custom_color(colors::AMBER));
+    let cmds: &[(&str, &str, &str)] = &[
+        ("ls", "[path]", "list files (decrypts names locally)"),
+        ("push", "<path>", "upload · encrypts on the fly"),
+        ("pull", "<id|path>", "download and decrypt"),
+        ("share", "<id>", "create encrypted link (expiry, passphrase)"),
+        ("sync", "<dir> [remote]", "bidirectional folder sync"),
+        ("watch", "<dir>", "live sync · filesystem events"),
+        ("webdav", "", "mount vault in Finder / Explorer"),
+        ("whoami", "", "session · region · quota"),
+        ("speedtest", "", "benchmark network + crypto speed"),
+        ("repair", "", "fix cross-client encryption"),
+    ];
+    for (name, args, desc) in cmds {
+        println!("  {:<10}{:<18}{}",
+            name.custom_color(colors::GREEN_OK),
+            args.custom_color(colors::PATH),
+            desc.custom_color(colors::INK_DIM));
+    }
+    println!("  {}",
+        "+ login, logout, mount, rotate, shares, unshare, config, quota, status, completions"
+            .custom_color(colors::INK_DIM));
+    println!();
+
+    println!("  {}", "FLAGS".custom_color(colors::AMBER));
+    let flags: &[(&str, &str)] = &[
+        ("--json", "structured JSON output"),
+        ("--quiet", "minimal · no progress"),
+        ("--api <url>", "override API endpoint"),
+    ];
+    for (flag, desc) in flags {
+        println!("  {:<14}{}",
+            flag.custom_color(colors::CYAN),
+            desc.custom_color(colors::INK_DIM));
+    }
+    println!();
+    println!("  {}",
+        "# docs · beebeeb.io/cli · fingerprints · beebeeb.io/fingerprints"
+            .custom_color(colors::INK_SAGE));
+}
+
 #[tokio::main]
 async fn main() {
     update::check_and_update().await;
+
+    // Custom help — intercept before clap's default
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if args.len() == 1 || args.iter().any(|a| a == "--help" || a == "-h") {
+            // Only intercept top-level help, not subcommand help like "bb push --help"
+            let has_subcommand = args.iter().skip(1).any(|a| !a.starts_with('-'));
+            if !has_subcommand && !args.iter().any(|a| a == "--json") {
+                print_custom_help();
+                std::process::exit(0);
+            }
+        }
+    }
 
     let cli = Cli::parse();
 
