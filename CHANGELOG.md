@@ -7,17 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-- Nothing yet.
+## [0.1.3] - 2026-05-13
 
-### Changed
-- Nothing yet.
+### Added
+- OTA self-update: checks GitHub releases on startup, auto-downloads and replaces binary
+- Comprehensive README with full command reference, sync/watch/WebDAV guides, security model
+- CONTRIBUTING.md and CHANGELOG.md
 
 ### Fixed
-- Nothing yet.
-
-### Removed
-- Nothing yet.
+- Filename decryption for web-uploaded files (dual key derivation: binary + string UUID)
+- Chunk content decryption for web-uploaded files (raw binary + JSON format support)
+- `bb push` now sends client-generated file_id so encryption keys match stored file ID
+- `bb shares` decrypts filenames (was showing "unknown" for all entries)
+- `bb quota` shows real plan data instead of "unlimited"
+- WebDAV filters macOS metadata files (.DS_Store, ._, Spotlight, etc.)
+- Push conflict detection works with web-uploaded filenames
+- Watch and sync commands handle web-app file format
 
 ### Security
 - Nothing yet.
