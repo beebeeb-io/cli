@@ -3,6 +3,7 @@ use colored::Colorize;
 use crate::api::ApiClient;
 use crate::commands::push::load_master_key;
 use crate::crypto::decrypt_name;
+use crate::{colors, ui};
 
 pub async fn run(path: Option<String>) -> Result<(), String> {
     let api = ApiClient::from_config();
@@ -19,36 +20,58 @@ pub async fn run(path: Option<String>) -> Result<(), String> {
         .or_else(|| result.get("files").and_then(|f| f.as_array()));
 
     let Some(files) = files else {
-        println!(
-            "  {}",
-            "empty — no files here".custom_color(crate::colors::INK_DIM),
-        );
+        if !ui::is_json() {
+            println!(
+                "  {}",
+                "empty \u{2014} no files here".custom_color(colors::INK_DIM),
+            );
+        } else {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "files": [],
+                    "total_items": 0,
+                    "total_bytes": 0,
+                }))
+                .unwrap()
+            );
+        }
         return Ok(());
     };
 
     if files.is_empty() {
-        println!(
-            "  {}",
-            "empty — no files here".custom_color(crate::colors::INK_DIM),
-        );
+        if !ui::is_json() {
+            println!(
+                "  {}",
+                "empty \u{2014} no files here".custom_color(colors::INK_DIM),
+            );
+        } else {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "files": [],
+                    "total_items": 0,
+                    "total_bytes": 0,
+                }))
+                .unwrap()
+            );
+        }
         return Ok(());
     }
 
-    // Column header
-    println!(
-        "  {}",
-        format!(
-            "{:<40}  {:>10}  {:<16}  {}",
-            "name", "size", "modified", "id"
-        )
-        .custom_color(crate::colors::INK_DIM),
-    );
+    // Decrypt all files upfront so we can iterate for any output mode.
+    struct DecryptedFile {
+        id: String,
+        decrypted_name: String,
+        is_folder: bool,
+        size_bytes: u64,
+        modified: String,
+    }
+
+    let mut decrypted: Vec<DecryptedFile> = Vec::with_capacity(files.len());
 
     for file in files {
-        let file_id = file
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let file_id = file.get("id").and_then(|v| v.as_str()).unwrap_or("");
 
         let name_encrypted = file
             .get("name_encrypted")
@@ -57,66 +80,134 @@ pub async fn run(path: Option<String>) -> Result<(), String> {
         let name = decrypt_name(&master_key, file_id, name_encrypted)
             .ok_or_else(|| format!("failed to decrypt filename for file {file_id}"))?;
 
-        let size = file
-            .get("size_bytes")
-            .or_else(|| file.get("size"))
-            .and_then(|v| v.as_u64())
-            .map(format_size)
-            .unwrap_or_else(|| "-".to_string());
-
-        let modified = file
-            .get("updated_at")
-            .or_else(|| file.get("modified"))
-            .and_then(|v| v.as_str())
-            .map(|s| {
-                // Show only YYYY-MM-DD HH:MM
-                let s = s.trim_end_matches('Z');
-                let s = s.replace('T', " ");
-                let s = &s[..s.len().min(16)];
-                s.to_string()
-            })
-            .unwrap_or_else(|| "-".to_string());
-
         let is_folder = file
             .get("is_folder")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let name_colored = if is_folder {
-            format!("{name}/").custom_color(crate::colors::AMBER)
-        } else {
-            name.to_string().custom_color(crate::colors::INK_WARM)
-        };
+        let size_bytes = file
+            .get("size_bytes")
+            .or_else(|| file.get("size"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
 
-        // Truncate ID to 8 chars for readability (first segment of UUID)
-        let short_id = &file_id[..file_id.len().min(8)];
-        let type_label = if is_folder { "folder" } else { "file" };
+        let modified = file
+            .get("updated_at")
+            .or_else(|| file.get("modified"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        decrypted.push(DecryptedFile {
+            id: file_id.to_string(),
+            decrypted_name: name,
+            is_folder,
+            size_bytes,
+            modified,
+        });
+    }
+
+    // ── JSON mode ────────────────────────────────────────────────────────────
+    if ui::is_json() {
+        let total_bytes: u64 = decrypted
+            .iter()
+            .filter(|f| !f.is_folder)
+            .map(|f| f.size_bytes)
+            .sum();
+        let json_files: Vec<serde_json::Value> = decrypted
+            .iter()
+            .map(|f| {
+                serde_json::json!({
+                    "id": f.id,
+                    "name": f.decrypted_name,
+                    "is_folder": f.is_folder,
+                    "size_bytes": f.size_bytes,
+                    "modified": f.modified,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "files": json_files,
+                "total_items": decrypted.len(),
+                "total_bytes": total_bytes,
+            }))
+            .unwrap()
+        );
+        return Ok(());
+    }
+
+    // ── Rich / quiet mode ────────────────────────────────────────────────────
+
+    // Column header (rich mode only)
+    if !ui::is_quiet() {
+        println!(
+            "  {}",
+            format!(
+                "{:<44}{:>8}  {:<14}{}",
+                "NAME", "SIZE", "MODIFIED", "ID"
+            )
+            .custom_color(colors::INK_DIM),
+        );
+    }
+
+    let mut total_items = 0u64;
+    let mut total_bytes = 0u64;
+
+    for file in &decrypted {
+        total_items += 1;
+        if !file.is_folder {
+            total_bytes += file.size_bytes;
+        }
+
+        // Quiet mode: one filename per line, no decoration
+        if ui::is_quiet() {
+            println!("{}", file.decrypted_name);
+            continue;
+        }
+
+        let icon = ui::file_icon(&file.decrypted_name, file.is_folder);
+        let display_name = if file.is_folder {
+            format!("{}/", file.decrypted_name)
+                .custom_color(colors::PATH)
+                .to_string()
+        } else {
+            file.decrypted_name
+                .custom_color(colors::INK)
+                .to_string()
+        };
+        let size_str = if file.is_folder {
+            "\u{2014}".to_string() // —
+        } else {
+            ui::human_size(file.size_bytes)
+        };
+        let modified = ui::relative_time(&file.modified);
+        let id_short = &file.id[..8.min(file.id.len())];
 
         println!(
-            "  {:<40}  {:>10}  {:<16}  {} {}",
-            name_colored,
-            size.custom_color(crate::colors::INK_DIM),
-            modified.custom_color(crate::colors::INK_DIM),
-            short_id.custom_color(crate::colors::INK_DIM),
-            type_label.custom_color(crate::colors::INK_SAGE),
+            "  {} {:<42}{:>8}  {:<14}{}",
+            icon,
+            display_name,
+            size_str.custom_color(colors::INK_DIM),
+            modified.custom_color(colors::INK_DIM),
+            id_short.custom_color(colors::INK_DIM),
+        );
+    }
+
+    // Summary footer (rich mode only)
+    if !ui::is_quiet() {
+        println!(
+            "\n  {}",
+            format!(
+                "{} items \u{00B7} {} \u{00B7} {}",
+                total_items,
+                ui::human_size(total_bytes),
+                "e2ee".custom_color(colors::GREEN_OK),
+            )
+            .custom_color(colors::INK_DIM),
         );
     }
 
     Ok(())
-}
-
-fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * KB;
-    const GB: u64 = 1024 * MB;
-
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} kB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
-    }
 }
