@@ -222,11 +222,23 @@ pub async fn list() -> Result<(), String> {
         .custom_color(crate::colors::INK_DIM),
     );
 
+    let master_key = crate::commands::push::load_master_key()?;
+
     for share in shares {
-        let file_name = share
-            .get("file_name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("(unknown)");
+        let file_name = {
+            let file_id = share.get("file_id").and_then(|v| v.as_str()).unwrap_or("");
+            let name_enc = share
+                .get("file")
+                .and_then(|f| f.get("name_encrypted"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !file_id.is_empty() && !name_enc.is_empty() {
+                crate::crypto::decrypt_name(&master_key, file_id, name_enc)
+                    .unwrap_or_else(|| "(encrypted)".to_string())
+            } else {
+                "(unknown)".to_string()
+            }
+        };
         let url = share
             .get("url")
             .and_then(|v| v.as_str())
@@ -236,7 +248,8 @@ pub async fn list() -> Result<(), String> {
             .and_then(|v| v.as_str())
             .unwrap_or("never");
         let opens = share
-            .get("opens")
+            .get("open_count")
+            .or_else(|| share.get("opens"))
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
         let max_opens = share
