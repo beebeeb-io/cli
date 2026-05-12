@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-05-13
+
+### Added
+- OTA self-update with colored status message (`Updated bb v0.1.3 → v0.1.4`)
+- Homebrew-aware updates (runs `brew upgrade` when installed via Homebrew)
+- Shell installer: `curl -fsSL https://get.beebeeb.io | sh`
+- `bb shares` now decrypts filenames
+
 ## [0.1.3] - 2026-05-13
 
 ### Added

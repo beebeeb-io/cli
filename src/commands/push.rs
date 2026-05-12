@@ -351,6 +351,7 @@ async fn push_single_file(
         "parent_id": parent_uuid,
         "mime_type": guess_mime_type(&file_name),
         "size_bytes": total_encrypted_size,
+        "file_id": file_id,
     });
     // Explicit file_id tells the server to version over the existing file
     // rather than look up by name_encrypted ciphertext.
