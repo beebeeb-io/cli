@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-13
+
+### Added
+- Custom branded help screen with box-drawn header, colored sections, column alignment
+- `bb speedtest` — network latency, upload/download throughput, crypto benchmarks, effective throughput, tiered verdict with practical estimates
+- File type icons in `bb ls` (📁 folders, 🖼 images, 📄 docs, 🎬 video, 🎵 audio, 📦 archives)
+- Relative timestamps ("2h ago", "yesterday", "3 days ago") in ls and shares
+- Summary footers on ls ("5 items · 3.8 MB · e2ee")
+- Visual quota bar in whoami and quota (color transitions: green → amber → red)
+- Region latency ping in whoami
+- Per-file upload progress with speed metrics in push
+- Download speed + decrypt timing in pull
+- Passphrase entropy display in share
+- Status indicators in shares (● active, ○ expired, ✗ revoked)
+- Directional arrows in sync (↑ upload, ↓ download, ⚡ conflict)
+- Live event log with timestamps in watch
+- `--json` flag on all commands (structured JSON output for scripting)
+- `--quiet` flag on all commands (minimal output, no progress)
+- `--no-color` flag + `NO_COLOR` env var support
+
+### Changed
+- All commands use shared `ui` module for consistent colors and formatting
+- WebDAV suppresses macOS metadata 404 noise (.DS_Store, ._, Spotlight)
+- Cleaner startup banners for webdav and watch
+
 ## [0.1.6] - 2026-05-13
 
 ### Added
