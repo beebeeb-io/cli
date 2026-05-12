@@ -318,10 +318,11 @@ async fn download_to_mirror(
         .and_then(Value::as_str)
         .ok_or("server did not return name_encrypted")?;
 
-    let blob: EncryptedBlob = serde_json::from_str(name_encrypted)
-        .map_err(|e| format!("invalid name_encrypted: {e}"))?;
-    let name = beebeeb_core::encrypt::decrypt_metadata(&file_key, &blob)
-        .map_err(|e| format!("could not decrypt name: {e}"))?;
+    // Use the shared crypto module which handles all server formats
+    // (Rust EncryptedBlob, web-app base64 blob, plaintext) and both
+    // UUID key derivations (binary and string).
+    let name = crate::crypto::decrypt_name(master_key, file_id, name_encrypted)
+        .ok_or_else(|| format!("could not decrypt name for {file_id}"))?;
 
     let safe_name = sanitize_filename(&name);
     let out_path = mirror_root.join(&safe_name);
@@ -359,11 +360,6 @@ async fn unlink_in_mirror(
     file_id: &str,
     mirror_root: &Path,
 ) -> Result<(), String> {
-    let file_uuid: Uuid = file_id
-        .parse()
-        .map_err(|e| format!("invalid id: {e}"))?;
-    let file_key = beebeeb_core::kdf::derive_file_key(master_key, file_uuid.as_bytes());
-
     // Resolve the encrypted name → plaintext to know what to delete locally.
     // After a hard delete the metadata is gone; treat that as "we already
     // can't recover the name" and silently skip.
@@ -375,13 +371,10 @@ async fn unlink_in_mirror(
         Some(n) => n,
         None => return Ok(()),
     };
-    let blob: EncryptedBlob = match serde_json::from_str(name_encrypted) {
-        Ok(b) => b,
-        Err(_) => return Ok(()),
-    };
-    let name = match beebeeb_core::encrypt::decrypt_metadata(&file_key, &blob) {
-        Ok(n) => n,
-        Err(_) => return Ok(()),
+    // Use the shared crypto module which handles all server formats.
+    let name = match crate::crypto::decrypt_name(master_key, file_id, name_encrypted) {
+        Some(n) => n,
+        None => return Ok(()),
     };
 
     let safe_name = sanitize_filename(&name);
