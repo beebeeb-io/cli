@@ -502,10 +502,7 @@ async fn resolve_remote_folder(
                 .get("name_encrypted")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let item_key = beebeeb_core::kdf::derive_file_key(master_key, id.as_bytes());
-            let name = serde_json::from_str::<EncryptedBlob>(name_enc)
-                .ok()
-                .and_then(|b| beebeeb_core::encrypt::decrypt_metadata(&item_key, &b).ok());
+            let name = crate::crypto::decrypt_name(master_key, id_str, name_enc);
             if name.as_deref() == Some(seg) {
                 found = Some(id);
                 break;
@@ -586,11 +583,10 @@ async fn walk_remote(
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        let item_key = beebeeb_core::kdf::derive_file_key(master_key, id.as_bytes());
-        let name = match serde_json::from_str::<EncryptedBlob>(name_enc)
-            .ok()
-            .and_then(|b| beebeeb_core::encrypt::decrypt_metadata(&item_key, &b).ok())
-        {
+        // Use the shared crypto module which handles all server formats
+        // (Rust EncryptedBlob, web-app base64 blob, plaintext) and both
+        // UUID key derivations (binary and string).
+        let name = match crate::crypto::decrypt_name(master_key, id_str, name_enc) {
             Some(n) => n,
             None => continue,
         };
