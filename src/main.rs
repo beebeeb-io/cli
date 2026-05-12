@@ -4,6 +4,7 @@ mod commands;
 mod config;
 mod crypto;
 mod loopback;
+mod update;
 
 use std::path::PathBuf;
 
@@ -220,6 +221,8 @@ enum Commands {
 
 #[tokio::main]
 async fn main() {
+    update::check_and_update().await;
+
     let cli = Cli::parse();
 
     if let Some(api_url) = cli.api {
