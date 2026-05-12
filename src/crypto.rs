@@ -149,7 +149,7 @@ pub fn decrypt_file_chunks(
 
 /// Try to decrypt all chunks with a given file key. Detects the chunk format
 /// from the first byte of the buffer and parses accordingly.
-fn try_decrypt_all_chunks(
+pub fn try_decrypt_all_chunks(
     file_key: &beebeeb_core::kdf::FileKey,
     encrypted_bytes: &[u8],
     chunk_count: u32,
