@@ -38,3 +38,11 @@ pub const INK_DIM: CustomColor = CustomColor { r: 106, g: 101, b: 91 };
 
 /// Sage dimmed text — footer hints, doc comments.
 pub const INK_SAGE: CustomColor = CustomColor { r: 125, g: 138, b: 106 };
+
+// ── Accents ──────────────────────────────────────────────────────────────────
+
+/// Cyan — flags in help, download arrows.
+pub const CYAN: CustomColor = CustomColor { r: 127, g: 184, b: 209 };
+
+/// Path / filenames — warm highlight for paths and arguments.
+pub const PATH: CustomColor = CustomColor { r: 208, g: 200, b: 154 };

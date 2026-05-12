@@ -4,6 +4,7 @@ mod commands;
 mod config;
 mod crypto;
 mod loopback;
+mod ui;
 mod update;
 
 use std::path::PathBuf;
@@ -29,6 +30,18 @@ struct Cli {
     /// API base URL to use for this command (login persists it for future commands)
     #[arg(long, global = true, value_name = "URL")]
     api: Option<String>,
+
+    /// Output structured JSON
+    #[arg(long, global = true)]
+    json: bool,
+
+    /// Minimal output, no progress or colors
+    #[arg(long, global = true)]
+    quiet: bool,
+
+    /// Disable colored output
+    #[arg(long, global = true)]
+    no_color: bool,
 
     #[command(subcommand)]
     command: Commands,
@@ -231,6 +244,8 @@ async fn main() {
     update::check_and_update().await;
 
     let cli = Cli::parse();
+
+    ui::init(cli.json, cli.quiet, cli.no_color);
 
     if let Some(api_url) = cli.api {
         if let Err(e) = config::set_api_url_override(api_url) {
