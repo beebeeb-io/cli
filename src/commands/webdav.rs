@@ -192,6 +192,21 @@ async fn handle_webdav(
 
     eprintln!("  WebDAV {} {}", method, path);
 
+    // Reject macOS/Windows metadata files that Finder and Explorer create.
+    // These pollute the vault with system junk that users never want stored.
+    if is_os_metadata_path(&path) {
+        let is_propfind = method.as_str() == "PROPFIND";
+        if is_propfind {
+            // Return an empty 207 so Finder doesn't spam retries.
+            let body = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+                        <D:multistatus xmlns:D=\"DAV:\"/>";
+            let mut headers = HeaderMap::new();
+            headers.insert("Content-Type", "application/xml; charset=utf-8".parse().unwrap());
+            return (StatusCode::MULTI_STATUS, headers, body).into_response();
+        }
+        return (StatusCode::FORBIDDEN, "OS metadata files are not stored").into_response();
+    }
+
     // Guard write operations when --read-only is set
     let is_write = matches!(method, Method::PUT | Method::DELETE)
         || method.as_str() == "MKCOL"
@@ -494,7 +509,7 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
     let parent_path = {
         let trimmed = path.trim_end_matches('/');
         match trimmed.rfind('/') {
-            Some(i) if i == 0 => "/",
+            Some(0) => "/",
             Some(i) => &trimmed[..i],
             None => "/",
         }
@@ -629,7 +644,7 @@ async fn mkcol_response(state: &Arc<DavState>, path: &str) -> Response {
     let parent_path = {
         let trimmed = path.trim_end_matches('/');
         match trimmed.rfind('/') {
-            Some(i) if i == 0 => "/",
+            Some(0) => "/",
             Some(i) => &trimmed[..i],
             None => "/",
         }
@@ -750,7 +765,7 @@ async fn move_response(state: &Arc<DavState>, src_path: &str, destination: &str)
     let dst_parent_path = {
         let trimmed = dst_path.trim_end_matches('/');
         match trimmed.rfind('/') {
-            Some(i) if i == 0 => "/",
+            Some(0) => "/",
             Some(i) => &trimmed[..i],
             None => "/",
         }
@@ -760,7 +775,7 @@ async fn move_response(state: &Arc<DavState>, src_path: &str, destination: &str)
     let src_parent_path = {
         let trimmed = src_path.trim_end_matches('/');
         match trimmed.rfind('/') {
-            Some(i) if i == 0 => "/",
+            Some(0) => "/",
             Some(i) => &trimmed[..i],
             None => "/",
         }
@@ -861,8 +876,6 @@ fn parse_lock_body(body: &[u8]) -> (bool, String) {
         } else {
             "unknown".to_string()
         }
-    } else if text.contains("owner") {
-        "client".to_string()
     } else {
         "client".to_string()
     };
@@ -875,11 +888,8 @@ fn parse_timeout_header(headers: &HeaderMap) -> u64 {
         .get("timeout")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| {
-            if s.starts_with("Second-") {
-                s[7..].parse::<u64>().ok()
-            } else {
-                None // Infinite → use default
-            }
+            s.strip_prefix("Second-")
+                .and_then(|rest| rest.parse::<u64>().ok())
         })
         .unwrap_or(300) // 5 minutes default
 }
@@ -992,6 +1002,33 @@ async fn check_lock(state: &Arc<DavState>, path: &str, client_token: Option<&str
 
 // ─── Path cache helpers ───────────────────────────────────────────────────────
 
+/// Check whether a WebDAV path targets a macOS/Windows metadata file that
+/// should never be stored in the vault.
+fn is_os_metadata_path(path: &str) -> bool {
+    let filename = path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(path);
+    if filename.is_empty() {
+        return false;
+    }
+    matches!(
+        filename,
+        ".DS_Store"
+            | ".Spotlight-V100"
+            | ".Trashes"
+            | "Thumbs.db"
+            | "desktop.ini"
+            | ".hidden"
+            | ".metadata_never_index"
+            | ".metadata_never_index_unless_rootfs"
+            | ".metadata_direct_scope_only"
+            | ".ql_disablethumbnails"
+            | ".ql_disablecache"
+    ) || filename.starts_with("._")
+}
+
 fn normalise_cache_key(path: &str) -> String {
     let t = path.trim_end_matches('/');
     if t.is_empty() { "/".to_string() } else { t.to_string() }
@@ -1000,7 +1037,7 @@ fn normalise_cache_key(path: &str) -> String {
 fn parent_of(path: &str) -> &str {
     let trimmed = path.trim_end_matches('/');
     match trimmed.rfind('/') {
-        Some(i) if i == 0 => "/",
+        Some(0) => "/",
         Some(i) => &trimmed[..i],
         None => "/",
     }
@@ -1162,10 +1199,7 @@ fn decrypt_name(
     file_id: &str,
     name_encrypted: &str,
 ) -> Option<String> {
-    let uuid: uuid::Uuid = file_id.parse().ok()?;
-    let file_key = beebeeb_core::kdf::derive_file_key(master_key, uuid.as_bytes());
-    let blob: EncryptedBlob = serde_json::from_str(name_encrypted).ok()?;
-    beebeeb_core::encrypt::decrypt_metadata(&file_key, &blob).ok()
+    crate::crypto::decrypt_name(master_key, file_id, name_encrypted)
 }
 
 fn decrypt_chunks(
