@@ -1,18 +1,24 @@
 use colored::Colorize;
 
 use crate::api::ApiClient;
+use crate::ui;
 
 pub async fn run() -> Result<(), String> {
     let api = ApiClient::from_config();
     api.require_auth()?;
 
-    // Fetch usage + file count in parallel
-    let (usage_res, count_res) = tokio::join!(api.get_usage(), api.get_file_count());
+    // Fetch usage, file count, and subscription in parallel
+    let (usage_res, count_res, sub_res) =
+        tokio::join!(api.get_usage(), api.get_file_count(), api.get_subscription());
 
     let usage = usage_res?;
     let count = count_res.unwrap_or_default();
+    let sub = sub_res.unwrap_or_default();
 
-    let used_bytes = usage.get("used_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
+    let used_bytes = usage
+        .get("used_bytes")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
     let quota_bytes = usage
         .get("quota_bytes")
         .or_else(|| usage.get("plan_limit_bytes"))
@@ -30,21 +36,40 @@ pub async fn run() -> Result<(), String> {
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
 
-    let dim = |s: &str| s.custom_color(crate::colors::INK_DIM);
+    let plan_name = sub
+        .get("plan")
+        .and_then(|v| v.as_str())
+        .unwrap_or("free");
 
-    // Color-code the percentage: green <70%, amber 70-90%, red >90%
-    let pct_str = if quota_bytes <= 0 {
-        "—".custom_color(crate::colors::INK_DIM)
-    } else {
-        let s = format!("{:.2}%", percentage * 100.0);
-        if percentage >= 0.90 {
-            s.custom_color(crate::colors::RED_ERR)  // red
-        } else if percentage >= 0.70 {
-            s.custom_color(crate::colors::AMBER)    // amber
-        } else {
-            s.custom_color(crate::colors::GREEN_OK)  // green
-        }
-    };
+    // ── JSON mode ────────────────────────────────────────────────────────────
+
+    if ui::is_json() {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "used_bytes": used_bytes,
+                "quota_bytes": quota_bytes,
+                "percentage": percentage * 100.0,
+                "files": file_count,
+                "plan": plan_name,
+            }))
+            .unwrap()
+        );
+        return Ok(());
+    }
+
+    // ── Quiet mode ───────────────────────────────────────────────────────────
+
+    if ui::is_quiet() {
+        println!("{}", format_bytes(used_bytes));
+        println!("{}", format_bytes(quota_bytes));
+        println!("{:.2}%", percentage * 100.0);
+        return Ok(());
+    }
+
+    // ── Rich mode ────────────────────────────────────────────────────────────
+
+    let dim = |s: &str| s.custom_color(crate::colors::INK_DIM);
 
     let used_str = format_bytes(used_bytes);
     let quota_str = if quota_bytes <= 0 {
@@ -53,31 +78,79 @@ pub async fn run() -> Result<(), String> {
         format_bytes(quota_bytes)
     };
 
+    // Color-code the percentage: green <70%, amber 70-90%, red >90%
+    let pct_str = if quota_bytes <= 0 {
+        "\u{2014}".custom_color(crate::colors::INK_DIM) // —
+    } else {
+        let s = format!("{:.2}%", percentage * 100.0);
+        if percentage >= 0.90 {
+            s.custom_color(crate::colors::RED_ERR)
+        } else if percentage >= 0.70 {
+            s.custom_color(crate::colors::AMBER)
+        } else {
+            s.custom_color(crate::colors::GREEN_OK)
+        }
+    };
+
     let files_str = if file_count > 0 {
         format_number(file_count)
     } else {
-        "—".to_string()
+        "\u{2014}".to_string() // —
     };
 
     println!();
-    println!("  {} {}", dim("used    "), used_str.custom_color(crate::colors::INK));
-    println!("  {} {}", dim("quota   "), quota_str.custom_color(crate::colors::INK_WARM));
+    println!(
+        "  {} {}",
+        dim("used    "),
+        used_str.custom_color(crate::colors::INK)
+    );
+    println!(
+        "  {} {}",
+        dim("quota   "),
+        quota_str.custom_color(crate::colors::INK_WARM)
+    );
+
+    // Visual quota bar
+    println!(
+        "  {} {} {:.1}%",
+        "         ", // align under labels
+        ui::quota_bar(used_bytes.max(0) as u64, quota_bytes.max(0) as u64, 40),
+        percentage * 100.0,
+    );
+
     println!("  {} {}", dim("percent "), pct_str);
-    println!("  {} {}", dim("files   "), files_str.custom_color(crate::colors::INK_DIM));
+    println!(
+        "  {} {}",
+        dim("files   "),
+        files_str.custom_color(crate::colors::INK_DIM)
+    );
+    println!(
+        "  {} {}",
+        dim("plan    "),
+        capitalise(plan_name).custom_color(crate::colors::AMBER)
+    );
 
     // Over-quota warning
     if quota_bytes > 0 && used_bytes >= quota_bytes {
         println!();
         println!(
             "  {} {}",
-            "⚠".custom_color(crate::colors::RED_ERR),
-            "Over quota — uploads blocked. Upgrade your plan or delete files."
+            "!".custom_color(crate::colors::RED_ERR),
+            "Over quota \u{2014} uploads blocked. Upgrade your plan or delete files."
                 .custom_color(crate::colors::RED_ERR),
         );
     }
 
     println!();
     Ok(())
+}
+
+fn capitalise(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        None => String::new(),
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+    }
 }
 
 fn format_bytes(bytes: i64) -> String {
@@ -99,7 +172,7 @@ fn format_bytes(bytes: i64) -> String {
     }
 }
 
-/// Format a number with thousands separators, e.g. 1234 → "1,234".
+/// Format a number with thousands separators, e.g. 1234 -> "1,234".
 fn format_number(n: i64) -> String {
     let s = n.to_string();
     let mut result = String::new();

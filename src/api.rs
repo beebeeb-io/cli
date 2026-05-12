@@ -132,6 +132,22 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    /// Hit the health endpoint and return the round-trip latency in milliseconds.
+    pub async fn ping_health(&self) -> Result<u128, String> {
+        let start = std::time::Instant::now();
+        let resp = self
+            .client
+            .get(self.url("/api/v1/health"))
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        let latency_ms = start.elapsed().as_millis();
+        if !resp.status().is_success() {
+            return Err(format!("health check failed: {}", resp.status()));
+        }
+        Ok(latency_ms)
+    }
+
     pub async fn list_files(&self, parent_id: Option<&str>) -> Result<Value, String> {
         let token = self.require_auth()?;
         let mut url = self.url("/api/v1/files");
