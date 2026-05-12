@@ -62,11 +62,19 @@ use std::path::PathBuf;
 #[cfg(not(feature = "fuse"))]
 pub async fn run(_mountpoint: PathBuf, _foreground: bool, _cache_ttl: u64) -> Result<(), String> {
     Err(concat!(
-        "bb mount requires the `fuse` feature.\n",
-        "\n  macOS:  brew install macfuse  (reboot required, then enable in System Settings)\n",
-        "          cargo build --features fuse\n",
-        "\n  Linux:  apt install libfuse3-dev\n",
-        "          cargo build --features fuse",
+        "bb mount is not enabled in this build.\n",
+        "\n",
+        "macOS:\n",
+        "  1. Install macFUSE:  brew install macfuse\n",
+        "  2. Reboot, then allow the kernel extension in System Settings → Privacy & Security\n",
+        "  3. Install bb with FUSE support:\n",
+        "       cargo install --git https://github.com/beebeeb-io/cli --features fuse\n",
+        "\n",
+        "Linux:\n",
+        "  1. Install libfuse3:  sudo apt install libfuse3-dev   (Debian/Ubuntu)\n",
+        "                         sudo dnf install fuse3-devel    (Fedora)\n",
+        "  2. Install bb with FUSE support:\n",
+        "       cargo install --git https://github.com/beebeeb-io/cli --features fuse\n",
     )
     .to_string())
 }
