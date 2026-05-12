@@ -557,7 +557,7 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
     // Use existing UUID for versioning; generate fresh UUID for new files.
     let file_uuid = existing_file_id.unwrap_or_else(uuid::Uuid::new_v4);
     let file_key =
-        beebeeb_core::kdf::derive_file_key(&state.master_key, file_uuid.as_bytes());
+        beebeeb_core::kdf::derive_file_key(&state.master_key, file_uuid.to_string().as_bytes());
 
     // Encrypt filename
     let name_blob = match beebeeb_core::encrypt::encrypt_metadata(&file_key, &filename) {
@@ -672,7 +672,7 @@ async fn mkcol_response(state: &Arc<DavState>, path: &str) -> Response {
     // with the server's convention: folder name is encrypted with the folder's own UUID).
     let folder_uuid = uuid::Uuid::new_v4();
     let folder_key =
-        beebeeb_core::kdf::derive_file_key(&state.master_key, folder_uuid.as_bytes());
+        beebeeb_core::kdf::derive_file_key(&state.master_key, folder_uuid.to_string().as_bytes());
     let name_blob = match beebeeb_core::encrypt::encrypt_metadata(&folder_key, &folder_name) {
         Ok(b) => b,
         Err(e) => {
@@ -788,7 +788,7 @@ async fn move_response(state: &Arc<DavState>, src_path: &str, destination: &str)
         Ok(u) => u,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
-    let file_key = beebeeb_core::kdf::derive_file_key(&state.master_key, file_uuid.as_bytes());
+    let file_key = beebeeb_core::kdf::derive_file_key(&state.master_key, file_uuid.to_string().as_bytes());
 
     let new_name_encrypted = if new_name != src.display_name {
         let blob = match beebeeb_core::encrypt::encrypt_metadata(&file_key, &new_name) {

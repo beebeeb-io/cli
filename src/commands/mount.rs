@@ -361,7 +361,7 @@ mod fuse_impl {
         fn upload_file(&mut self, ino: u64, name: &str, plaintext: Vec<u8>, parent_ino: u64) -> Result<(), String> {
             // Generate a stable UUID for this file. Key derivation uses this UUID.
             let key_uuid = uuid::Uuid::new_v4();
-            let file_key = beebeeb_core::kdf::derive_file_key(&self.master_key, key_uuid.as_bytes());
+            let file_key = beebeeb_core::kdf::derive_file_key(&self.master_key, key_uuid.to_string().as_bytes());
 
             // Encrypt the filename.
             let name_blob =
@@ -802,7 +802,7 @@ mod fuse_impl {
 
             // Generate a UUID for key derivation and folder identity.
             let folder_uuid = uuid::Uuid::new_v4();
-            let folder_key = beebeeb_core::kdf::derive_file_key(&self.master_key, folder_uuid.as_bytes());
+            let folder_key = beebeeb_core::kdf::derive_file_key(&self.master_key, folder_uuid.to_string().as_bytes());
 
             let name_blob = match beebeeb_core::encrypt::encrypt_metadata(&folder_key, &name_str) {
                 Ok(b) => b,
@@ -1030,7 +1030,7 @@ mod fuse_impl {
                 let ku = key_uuid
                     .or_else(|| file_id.parse().ok())
                     .unwrap_or_else(uuid::Uuid::new_v4);
-                let fk = beebeeb_core::kdf::derive_file_key(&self.master_key, ku.as_bytes());
+                let fk = beebeeb_core::kdf::derive_file_key(&self.master_key, ku.to_string().as_bytes());
                 match beebeeb_core::encrypt::encrypt_metadata(&fk, &newname_str) {
                     Ok(blob) => match serde_json::to_string(&blob) {
                         Ok(s) => Some(s),

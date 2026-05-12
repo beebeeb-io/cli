@@ -85,7 +85,7 @@ pub async fn run(
             .map_err(|_| format!("invalid file id (expected UUID): {file_id}"))?;
 
         // Derive the real per-file encryption key
-        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, file_uuid.as_bytes());
+        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, file_uuid.to_string().as_bytes());
 
         // Generate client key K_c (random 32 bytes)
         let client_key: [u8; 32] = rand::random();
@@ -93,7 +93,7 @@ pub async fn run(
         // Derive a wrap key from K_c: treat it as a MasterKey + HKDF over file_uuid
         // so the wrap key is file-specific (recipient can only decrypt THIS file).
         let client_mk = beebeeb_core::kdf::MasterKey::from_bytes(client_key);
-        let wrap_key = beebeeb_core::kdf::derive_file_key(&client_mk, file_uuid.as_bytes());
+        let wrap_key = beebeeb_core::kdf::derive_file_key(&client_mk, file_uuid.to_string().as_bytes());
 
         // Encrypt file_key.as_bytes() under wrap_key using AES-256-GCM
         let blob = beebeeb_core::encrypt::encrypt_chunk(&wrap_key, file_key.as_bytes())

@@ -538,7 +538,7 @@ async fn create_folder(
     parent_id: Option<Uuid>,
 ) -> Result<Uuid, String> {
     let new_id = Uuid::new_v4();
-    let folder_key = beebeeb_core::kdf::derive_file_key(master_key, new_id.as_bytes());
+    let folder_key = beebeeb_core::kdf::derive_file_key(master_key, new_id.to_string().as_bytes());
     let blob = beebeeb_core::encrypt::encrypt_metadata(&folder_key, name)
         .map_err(|e| format!("encrypt folder name: {e}"))?;
     let name_enc = serde_json::to_string(&blob)
@@ -733,7 +733,7 @@ async fn upload_file_to(
         std::fs::read(file_path).map_err(|e| format!("read {}: {e}", file_path.display()))?;
 
     let file_id = Uuid::new_v4();
-    let file_key = beebeeb_core::kdf::derive_file_key(master_key, file_id.as_bytes());
+    let file_key = beebeeb_core::kdf::derive_file_key(master_key, file_id.to_string().as_bytes());
 
     let name_blob = beebeeb_core::encrypt::encrypt_metadata(&file_key, file_name)
         .map_err(|e| format!("encrypt name: {e}"))?;
