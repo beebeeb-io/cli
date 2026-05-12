@@ -1,4 +1,3 @@
-use base64::Engine;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
@@ -6,31 +5,7 @@ use std::path::PathBuf;
 use beebeeb_types::EncryptedBlob;
 
 use crate::api::ApiClient;
-use crate::config::load_config;
-
-fn b64() -> base64::engine::GeneralPurpose {
-    base64::engine::general_purpose::STANDARD
-}
-
-/// Load the master key from config, returning a beebeeb_core MasterKey.
-fn load_master_key() -> Result<beebeeb_core::kdf::MasterKey, String> {
-    let config = load_config();
-    let mk_b64 = config
-        .master_key
-        .ok_or("No master key found. Run `bb login` first.")?;
-    let mk_bytes = b64()
-        .decode(&mk_b64)
-        .map_err(|e| format!("invalid master key in config: {e}"))?;
-    if mk_bytes.len() != 32 {
-        return Err(format!(
-            "master key must be 32 bytes, got {}",
-            mk_bytes.len()
-        ));
-    }
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&mk_bytes);
-    Ok(beebeeb_core::kdf::MasterKey::from_bytes(arr))
-}
+use crate::commands::push::load_master_key;
 
 pub async fn run(file_id: String, output: Option<PathBuf>) -> Result<(), String> {
     let api = ApiClient::from_config();
@@ -67,10 +42,15 @@ pub async fn run(file_id: String, output: Option<PathBuf>) -> Result<(), String>
     let file_key =
         beebeeb_core::kdf::derive_file_key(&master_key, file_uuid.as_bytes());
 
-    // Try to decrypt the filename for display and default output path
-    let decrypted_name = serde_json::from_str::<EncryptedBlob>(name_encrypted_str)
-        .ok()
-        .and_then(|blob| beebeeb_core::encrypt::decrypt_metadata(&file_key, &blob).ok());
+    // Try to decrypt the filename for display and default output path.
+    // Uses the shared crypto module which handles all server formats
+    // (Rust EncryptedBlob, web-app base64 blob, plaintext) and both
+    // UUID key derivations (binary and string).
+    let decrypted_name = crate::crypto::decrypt_name(
+        &master_key,
+        &file_id,
+        name_encrypted_str,
+    );
 
     let is_folder = file_meta
         .get("is_folder")
@@ -202,12 +182,7 @@ async fn pull_folder(api: &ApiClient, folder_id: &str, out_dir: &std::path::Path
         let is_subfolder = item.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
         let name_enc = item.get("name_encrypted").and_then(|v| v.as_str()).unwrap_or("");
 
-        let item_uuid: uuid::Uuid = item_id.parse().map_err(|e| format!("invalid id: {e}"))?;
-        let item_key = beebeeb_core::kdf::derive_file_key(&master_key, item_uuid.as_bytes());
-
-        let decrypted_name = serde_json::from_str::<EncryptedBlob>(name_enc)
-            .ok()
-            .and_then(|blob| beebeeb_core::encrypt::decrypt_metadata(&item_key, &blob).ok())
+        let decrypted_name = crate::crypto::decrypt_name(&master_key, item_id, name_enc)
             .unwrap_or_else(|| item_id.to_string());
 
         if is_subfolder {
