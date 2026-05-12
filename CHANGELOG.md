@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-05-13
+
+### Fixed
+- Key derivation now uses string UUID (matches web app) — files uploaded via CLI are decryptable in the web app and vice versa
+- All commands (push, sync, watch, webdav, share, mount) use consistent key derivation
+
 ## [0.1.4] - 2026-05-13
 
 ### Added
