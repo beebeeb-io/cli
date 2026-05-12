@@ -1,11 +1,11 @@
 use base64::Engine;
 use colored::Colorize;
-use indicatif::{ProgressBar, ProgressStyle};
 use std::io::{self, Write};
 use std::path::PathBuf;
 
 use crate::api::ApiClient;
 use crate::config::load_config;
+use crate::ui;
 
 /// 1 MiB chunk size (matches beebeeb_types::CHUNK_SIZE)
 const CHUNK_SIZE: usize = 1024 * 1024;
@@ -137,7 +137,74 @@ pub async fn run(
         return push_directory(&api, &path, parent_id, strategy).await;
     }
 
-    push_single_file(&api, &path, parent_id, strategy).await
+    // ── Resolve line (single file) ──────────────────────────────────────────
+    let file_size = std::fs::metadata(&path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    if ui::is_rich() {
+        println!(
+            "  {}",
+            format!(
+                "1 file \u{00B7} {} \u{00B7} encrypting with AES-256-GCM",
+                ui::human_size(file_size),
+            )
+            .custom_color(crate::colors::INK_DIM),
+        );
+    }
+
+    let total_start = std::time::Instant::now();
+    let result = push_single_file(&api, &path, parent_id, strategy, false).await?;
+    let total_elapsed = total_start.elapsed();
+
+    match result {
+        Some(ur) => {
+            if ui::is_json() {
+                let speed = ur.speed_bps();
+                let json = serde_json::json!({
+                    "files": [{
+                        "name": ur.name,
+                        "id": ur.id,
+                        "size_bytes": ur.size_bytes,
+                        "speed_bps": speed as u64,
+                        "duration_ms": ur.duration.as_millis() as u64,
+                    }],
+                    "total_files": 1,
+                    "total_bytes": ur.encrypted_bytes,
+                    "avg_speed_bps": speed as u64,
+                    "total_duration_ms": total_elapsed.as_millis() as u64,
+                });
+                println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            } else if ui::is_rich() {
+                let speed = ur.speed_bps();
+                println!(
+                    "  {} {}",
+                    "\u{2713}".custom_color(crate::colors::GREEN_OK),
+                    format!(
+                        "1 file uploaded \u{00B7} {} \u{00B7} avg {} \u{00B7} {:.1}s total",
+                        ui::human_size(ur.encrypted_bytes),
+                        ui::human_speed(speed),
+                        total_elapsed.as_secs_f64(),
+                    )
+                    .custom_color(crate::colors::INK_DIM),
+                );
+            }
+        }
+        None => {
+            // File was skipped (conflict resolution)
+            if ui::is_json() {
+                let json = serde_json::json!({
+                    "files": [],
+                    "total_files": 0,
+                    "total_bytes": 0,
+                    "avg_speed_bps": 0,
+                    "total_duration_ms": total_elapsed.as_millis() as u64,
+                });
+                println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            }
+        }
+    }
+
+    Ok(())
 }
 
 async fn resolve_upload_folder(api: &ApiClient, folder: &str) -> Result<String, String> {
@@ -198,12 +265,35 @@ async fn resolve_upload_folder(api: &ApiClient, folder: &str) -> Result<String, 
     Ok(created_id.to_string())
 }
 
+/// Result data from a single file upload, used for summary + JSON output.
+struct UploadResult {
+    name: String,
+    id: String,
+    size_bytes: u64,
+    encrypted_bytes: u64,
+    duration: std::time::Duration,
+}
+
+impl UploadResult {
+    fn speed_bps(&self) -> f64 {
+        let secs = self.duration.as_secs_f64();
+        if secs > 0.0 {
+            self.encrypted_bytes as f64 / secs
+        } else {
+            0.0
+        }
+    }
+}
+
+/// Upload a single file. When `suppress_output` is true, no per-file line is
+/// printed (the caller handles display — used by `push_directory`).
 async fn push_single_file(
     api: &ApiClient,
     path: &std::path::Path,
     parent_id: Option<String>,
     strategy: ConflictStrategy,
-) -> Result<(), String> {
+    suppress_output: bool,
+) -> Result<Option<UploadResult>, String> {
     let file_name = path
         .file_name()
         .and_then(|n| n.to_str())
@@ -258,12 +348,14 @@ async fn push_single_file(
                                 ConflictResolution::Upload { filename: new_name }
                             }
                             ConflictResolution::Skip => {
-                                println!(
-                                    "  {} {}",
-                                    "skip".custom_color(crate::colors::INK_DIM),
-                                    file_name.custom_color(crate::colors::INK_DIM),
-                                );
-                                return Ok(());
+                                if ui::is_rich() {
+                                    println!(
+                                        "  {} {}",
+                                        "skip".custom_color(crate::colors::INK_DIM),
+                                        file_name.custom_color(crate::colors::INK_DIM),
+                                    );
+                                }
+                                return Ok(None);
                             }
                         }
                     }
@@ -279,7 +371,7 @@ async fn push_single_file(
                     ConflictResolution::Upload { filename } => {
                         (uuid::Uuid::new_v4(), filename, None)
                     }
-                    ConflictResolution::Skip => return Ok(()),
+                    ConflictResolution::Skip => return Ok(None),
                 }
             }
         }
@@ -302,17 +394,11 @@ async fn push_single_file(
         file_bytes.len().div_ceil(CHUNK_SIZE)
     };
 
-    let pb = ProgressBar::new(total_chunks as u64);
-    pb.set_style(
-        ProgressStyle::with_template(
-            "  {spinner:.yellow} encrypting  {pos}/{len} chunks  {bar:24.yellow/dark_gray}",
-        )
-        .unwrap()
-        .progress_chars("---"),
-    );
-
     let mut encrypted_chunks: Vec<(u32, Vec<u8>)> = Vec::with_capacity(total_chunks);
     let mut total_encrypted_size: i64 = 0;
+
+    // ── Time the encrypt + upload together ────────────────────────────────────
+    let file_start = std::time::Instant::now();
 
     if file_bytes.is_empty() {
         // Encrypt an empty chunk
@@ -322,7 +408,6 @@ async fn push_single_file(
             serde_json::to_vec(&blob).map_err(|e| format!("failed to serialize chunk: {e}"))?;
         total_encrypted_size += serialized.len() as i64;
         encrypted_chunks.push((0, serialized));
-        pb.inc(1);
     } else {
         for (i, chunk) in file_bytes.chunks(CHUNK_SIZE).enumerate() {
             let blob = beebeeb_core::encrypt::encrypt_chunk(&file_key, chunk)
@@ -331,10 +416,8 @@ async fn push_single_file(
                 .map_err(|e| format!("failed to serialize chunk {i}: {e}"))?;
             total_encrypted_size += serialized.len() as i64;
             encrypted_chunks.push((i as u32, serialized));
-            pb.inc(1);
         }
     }
-    pb.finish_and_clear();
 
     // Build metadata JSON matching the server's UploadMetadata struct
     let parent_uuid = match &parent_id {
@@ -362,51 +445,53 @@ async fn push_single_file(
         .map_err(|e| format!("failed to serialize metadata: {e}"))?;
 
     // Upload
-    let upload_pb = ProgressBar::new_spinner();
-    upload_pb.set_style(
-        ProgressStyle::with_template("  {spinner:.yellow} uploading {msg}")
-            .unwrap(),
-    );
-    upload_pb.set_message(format!(
-        "{} ({} chunk{})",
-        file_name,
-        encrypted_chunks.len(),
-        if encrypted_chunks.len() == 1 { "" } else { "s" },
-    ));
-    upload_pb.enable_steady_tick(std::time::Duration::from_millis(80));
-
     let result = api
         .upload_encrypted(&metadata_json, &encrypted_chunks)
         .await?;
 
-    upload_pb.finish_and_clear();
+    let file_elapsed = file_start.elapsed();
 
     let file_id_str = file_id.to_string();
     let server_id = result
         .get("id")
         .and_then(|v| v.as_str())
-        .unwrap_or(&file_id_str);
+        .unwrap_or(&file_id_str)
+        .to_string();
 
     // Mark this upload so a `bb watch` remote-event handler in the same
     // process doesn't redundantly download the file we just sent.
-    crate::loopback::mark_uploaded(server_id);
+    crate::loopback::mark_uploaded(&server_id);
 
-    let size_str = format_size(file_size);
-    println!(
-        "  {} {} {} {}",
-        "OK".custom_color(crate::colors::GREEN_OK),
-        file_name.custom_color(crate::colors::INK),
-        "·".custom_color(crate::colors::INK_DIM),
-        format!(
-            "{size_str} · {} chunk{} · encrypted · {}",
-            encrypted_chunks.len(),
-            if encrypted_chunks.len() == 1 { "" } else { "s" },
-            server_id,
-        )
-        .custom_color(crate::colors::INK_DIM),
-    );
+    let upload_result = UploadResult {
+        name: file_name.clone(),
+        id: server_id.clone(),
+        size_bytes: file_size,
+        encrypted_bytes: total_encrypted_size as u64,
+        duration: file_elapsed,
+    };
 
-    Ok(())
+    // ── Per-file output (only when not suppressed by directory caller) ────
+    if !suppress_output {
+        if ui::is_quiet() {
+            println!("{}", server_id);
+        } else if ui::is_rich() {
+            let speed = upload_result.speed_bps();
+            println!(
+                "  {} {:<36}{:>8}  {:>10}  {}",
+                "\u{2713}".custom_color(crate::colors::GREEN_OK),
+                file_name.custom_color(crate::colors::INK),
+                ui::human_size(total_encrypted_size as u64).custom_color(crate::colors::INK_DIM),
+                ui::human_speed(speed).custom_color(crate::colors::GREEN_OK),
+                format!("{}ms", file_elapsed.as_millis()).custom_color(crate::colors::INK_DIM),
+            );
+        }
+        // JSON mode: no per-file output; caller collects results
+    } else if ui::is_quiet() {
+        // Even in directory mode, quiet still prints IDs
+        println!("{}", server_id);
+    }
+
+    Ok(Some(upload_result))
 }
 
 fn guess_mime_type(filename: &str) -> Option<String> {
@@ -431,23 +516,29 @@ async fn push_directory(
         .unwrap_or("folder")
         .to_string();
 
-    println!(
-        "  {} {}",
-        "scanning".custom_color(crate::colors::GREEN_OK),
-        dir_path.display().to_string().custom_color(crate::colors::INK),
-    );
-
     let mut entries: Vec<(PathBuf, bool)> = Vec::new();
     collect_entries(dir_path, &mut entries)?;
 
     let file_count = entries.iter().filter(|(_, is_dir)| !*is_dir).count();
-    let folder_count = entries.iter().filter(|(_, is_dir)| *is_dir).count();
+    let _folder_count = entries.iter().filter(|(_, is_dir)| *is_dir).count();
+    let total_file_size: u64 = entries
+        .iter()
+        .filter(|(_, is_dir)| !*is_dir)
+        .filter_map(|(p, _)| std::fs::metadata(p).ok())
+        .map(|m| m.len())
+        .sum();
 
-    println!(
-        "  {} {}",
-        "found".custom_color(crate::colors::GREEN_OK),
-        format!("{file_count} files, {folder_count} folders").custom_color(crate::colors::INK_DIM),
-    );
+    // ── Resolve line ────────────────────────────────────────────────────────
+    if ui::is_rich() {
+        println!(
+            "  {}",
+            format!(
+                "{file_count} files \u{00B7} {} \u{00B7} encrypting with AES-256-GCM",
+                ui::human_size(total_file_size),
+            )
+            .custom_color(crate::colors::INK_DIM),
+        );
+    }
 
     let folder_id = uuid::Uuid::new_v4();
     let folder_key = beebeeb_core::kdf::derive_file_key(&master_key, folder_id.to_string().as_bytes());
@@ -476,14 +567,8 @@ async fn push_directory(
         std::collections::HashMap::new();
     folder_map.insert(dir_path.to_path_buf(), root_id);
 
-    let pb = ProgressBar::new(entries.len() as u64);
-    pb.set_style(
-        ProgressStyle::with_template(
-            "  {spinner:.yellow} uploading  {pos}/{len}  {bar:24.yellow/dark_gray}  {msg}",
-        )
-        .unwrap()
-        .progress_chars("---"),
-    );
+    let total_start = std::time::Instant::now();
+    let mut upload_results: Vec<UploadResult> = Vec::new();
 
     for (entry_path, is_dir) in &entries {
         let entry_parent = entry_path.parent().unwrap_or(dir_path);
@@ -513,28 +598,79 @@ async fn push_directory(
                 .map_err(|e| format!("invalid id: {e}"))?;
 
             folder_map.insert(entry_path.clone(), created_id);
-            pb.set_message(format!("folder: {name}"));
         } else {
-            let name = entry_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("file");
+            let ur = push_single_file(api, entry_path, Some(entry_parent_id.to_string()), strategy, true).await?;
 
-            pb.set_message(name.to_string());
-
-            push_single_file(api, entry_path, Some(entry_parent_id.to_string()), strategy).await?;
+            if let Some(ur) = ur {
+                if ui::is_rich() {
+                    let speed = ur.speed_bps();
+                    let name = &ur.name;
+                    let elapsed = ur.duration;
+                    let enc_size = ur.encrypted_bytes;
+                    println!(
+                        "  {} {:<36}{:>8}  {:>10}  {}",
+                        "\u{2713}".custom_color(crate::colors::GREEN_OK),
+                        name.custom_color(crate::colors::INK),
+                        ui::human_size(enc_size).custom_color(crate::colors::INK_DIM),
+                        ui::human_speed(speed).custom_color(crate::colors::GREEN_OK),
+                        format!("{}ms", elapsed.as_millis()).custom_color(crate::colors::INK_DIM),
+                    );
+                }
+                // quiet mode: push_single_file already printed the ID
+                upload_results.push(ur);
+            }
         }
-        pb.inc(1);
     }
 
-    pb.finish_and_clear();
-    println!(
-        "  {} {} {} {}",
-        "OK".custom_color(crate::colors::GREEN_OK),
-        dir_name.custom_color(crate::colors::INK),
-        "·".custom_color(crate::colors::INK_DIM),
-        format!("{file_count} files, {folder_count} folders uploaded").custom_color(crate::colors::INK_DIM),
-    );
+    let total_elapsed = total_start.elapsed();
+    let total_bytes: u64 = upload_results.iter().map(|r| r.encrypted_bytes).sum();
+    let uploaded_count = upload_results.len();
+
+    // ── Summary ─────────────────────────────────────────────────────────────
+    if ui::is_json() {
+        let files_json: Vec<serde_json::Value> = upload_results
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "name": r.name,
+                    "id": r.id,
+                    "size_bytes": r.size_bytes,
+                    "speed_bps": r.speed_bps() as u64,
+                    "duration_ms": r.duration.as_millis() as u64,
+                })
+            })
+            .collect();
+        let avg_speed = if total_elapsed.as_secs_f64() > 0.0 {
+            total_bytes as f64 / total_elapsed.as_secs_f64()
+        } else {
+            0.0
+        };
+        let json = serde_json::json!({
+            "files": files_json,
+            "total_files": uploaded_count,
+            "total_bytes": total_bytes,
+            "avg_speed_bps": avg_speed as u64,
+            "total_duration_ms": total_elapsed.as_millis() as u64,
+        });
+        println!("{}", serde_json::to_string_pretty(&json).unwrap());
+    } else if ui::is_rich() {
+        let avg_speed = if total_elapsed.as_secs_f64() > 0.0 {
+            total_bytes as f64 / total_elapsed.as_secs_f64()
+        } else {
+            0.0
+        };
+        println!(
+            "  {} {}",
+            "\u{2713}".custom_color(crate::colors::GREEN_OK),
+            format!(
+                "{uploaded_count} files uploaded \u{00B7} {} \u{00B7} avg {} \u{00B7} {:.1}s total",
+                ui::human_size(total_bytes),
+                ui::human_speed(avg_speed),
+                total_elapsed.as_secs_f64(),
+            )
+            .custom_color(crate::colors::INK_DIM),
+        );
+    }
 
     Ok(())
 }
@@ -561,22 +697,6 @@ fn collect_entries(dir: &std::path::Path, entries: &mut Vec<(PathBuf, bool)>) ->
         }
     }
     Ok(())
-}
-
-fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * KB;
-    const GB: u64 = 1024 * MB;
-
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} kB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
-    }
 }
 
 /// Split "report.pdf" → ("report", "pdf"); "notes" → ("notes", "").
