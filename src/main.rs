@@ -4,6 +4,7 @@ mod commands;
 mod config;
 mod crypto;
 mod loopback;
+mod path;
 mod ui;
 mod update;
 
