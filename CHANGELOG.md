@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-05-13
+
+### Added
+- Parallel file uploads in sync — default 4 concurrent, configurable with `--concurrency N`
+- Content-hash dedup (SHA-256) — `touch` no longer triggers unnecessary re-uploads
+- Upload throttle limits shown in `bb whoami` (per plan: 5-100 GB/hr)
+- `bb pull` accepts short ID prefixes (e.g., `bb pull 3e15382b`)
+- `--json` support for `bb config`
+- Encryption performance transparency page (`docs/encryption-performance.md`)
+- Repo badges (CI, version, license, tech stack)
+
 ## [0.3.1] - 2026-05-13
 
 ### Added
