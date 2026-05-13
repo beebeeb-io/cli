@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
 use base64::Engine;
@@ -15,6 +17,81 @@ use crate::ui;
 
 const STATE_FILE: &str = ".bb-sync.json";
 const CHUNK_SIZE: usize = 1024 * 1024;
+
+struct SyncDashboard {
+    local_path: String,
+    remote_path: String,
+    file_count: AtomicU64,
+    total_bytes: AtomicU64,
+    is_synced: AtomicBool,
+}
+
+fn print_dashboard(dash: &SyncDashboard) {
+    let w = 50;
+    let status = if dash.is_synced.load(Ordering::Relaxed) {
+        format!(
+            "{} synced \u{00b7} watching",
+            "\u{25CF}".custom_color(crate::colors::GREEN_OK)
+        )
+    } else {
+        format!(
+            "{} syncing",
+            "\u{25CF}".custom_color(crate::colors::AMBER)
+        )
+    };
+    let files = dash.file_count.load(Ordering::Relaxed);
+    let bytes = dash.total_bytes.load(Ordering::Relaxed);
+
+    println!("{}", crate::ui::box_header("SYNC", w));
+    println!(
+        "{}",
+        crate::ui::box_line(
+            &format!(
+                "  {:<10}{} \u{2194} {}",
+                "folder".custom_color(crate::colors::INK_DIM),
+                dash.local_path,
+                dash.remote_path
+            ),
+            w,
+        )
+    );
+    println!(
+        "{}",
+        crate::ui::box_line(
+            &format!(
+                "  {:<10}{}",
+                "status".custom_color(crate::colors::INK_DIM),
+                status
+            ),
+            w,
+        )
+    );
+    println!(
+        "{}",
+        crate::ui::box_line(
+            &format!(
+                "  {:<10}{} tracked \u{00b7} {}",
+                "files".custom_color(crate::colors::INK_DIM),
+                files,
+                crate::ui::human_size(bytes)
+            ),
+            w,
+        )
+    );
+    println!("{}", crate::ui::box_footer(w));
+    println!();
+}
+
+fn is_ignored_path(path: &Path) -> bool {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    name == ".DS_Store"
+        || name.starts_with("._")
+        || name == ".bb-sync.json"
+        || name == "Thumbs.db"
+        || name.starts_with(".Spotlight-")
+        || name == ".Trashes"
+        || name == ".fseventsd"
+}
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 struct SyncState {
@@ -52,7 +129,17 @@ pub async fn run(
     dry_run: bool,
     force: bool,
     delete_remote: bool,
+    once: bool,
+    daemon: bool,
+    stop: bool,
 ) -> Result<(), String> {
+    if stop {
+        return uninstall_launchagent();
+    }
+    if daemon {
+        return install_launchagent(&local_dir, remote_path_arg.as_deref());
+    }
+
     let api = ApiClient::from_config();
     api.require_auth()?;
 
@@ -423,6 +510,175 @@ pub async fn run(
         "\u{00b7}".custom_color(crate::colors::INK_DIM),
         meta_parts.join(" \u{00b7} ").custom_color(crate::colors::INK_DIM),
     );
+
+    // ── Continuous watch mode ───────────────────────────────────────────────
+    if !once && !dry_run {
+        let local_display = local_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| local_dir.display().to_string());
+
+        let dashboard = Arc::new(SyncDashboard {
+            local_path: local_display,
+            remote_path: remote_path.clone(),
+            file_count: AtomicU64::new(local_files.len() as u64),
+            total_bytes: AtomicU64::new(total_bytes),
+            is_synced: AtomicBool::new(true),
+        });
+
+        println!();
+        print_dashboard(&dashboard);
+
+        use notify::RecursiveMode;
+        use notify_debouncer_full::new_debouncer;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut debouncer = new_debouncer(
+            std::time::Duration::from_millis(500),
+            None,
+            tx,
+        )
+        .map_err(|e| format!("watcher: {e}"))?;
+
+        debouncer
+            .watch(&local_dir, RecursiveMode::Recursive)
+            .map_err(|e| format!("watch: {e}"))?;
+
+        eprintln!(
+            "  {} watching for changes \u{00b7} press Ctrl+C to stop",
+            "\u{00b7}".custom_color(crate::colors::INK_DIM)
+        );
+
+        loop {
+            match rx.recv() {
+                Ok(Ok(events)) => {
+                    let changed: Vec<_> = events
+                        .iter()
+                        .filter_map(|e| e.paths.first().cloned())
+                        .filter(|p| !is_ignored_path(p))
+                        .collect();
+
+                    if !changed.is_empty() {
+                        dashboard.is_synced.store(false, Ordering::Relaxed);
+                        let now = chrono::Local::now().format("%H:%M:%S");
+                        for path in &changed {
+                            let name = path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_default();
+                            eprintln!(
+                                "  {} {} {}",
+                                now.to_string().custom_color(crate::colors::INK_DIM),
+                                "\u{2191}".custom_color(crate::colors::GREEN_OK),
+                                name.custom_color(crate::colors::INK),
+                            );
+                        }
+
+                        // Re-run the sync to upload changes
+                        let resync_api = ApiClient::from_config();
+                        let resync_master = load_master_key()?;
+                        let resync_local = walk_local_files(&local_dir)?;
+                        let resync_folders = walk_local_folders(&local_dir)?;
+                        let mut resync_remote_files: HashMap<String, RemoteFile> = HashMap::new();
+                        let mut resync_remote_folders: HashMap<String, Uuid> = HashMap::new();
+                        walk_remote(
+                            &resync_api,
+                            &resync_master,
+                            remote_folder_id,
+                            "",
+                            &mut resync_remote_files,
+                            &mut resync_remote_folders,
+                        )
+                        .await?;
+
+                        // Ensure remote folders exist
+                        let mut all_dirs: HashSet<String> = HashSet::new();
+                        all_dirs.extend(resync_folders.iter().cloned());
+                        all_dirs.extend(resync_remote_folders.keys().cloned());
+                        let mut sorted_dirs: Vec<String> = all_dirs.into_iter().collect();
+                        sorted_dirs.sort_by_key(|s| s.matches('/').count());
+                        for folder_rel in &sorted_dirs {
+                            if !resync_remote_folders.contains_key(folder_rel) {
+                                let pid = parent_remote_id(
+                                    folder_rel,
+                                    &resync_remote_folders,
+                                    remote_folder_id,
+                                );
+                                let fname = folder_rel
+                                    .rsplit('/')
+                                    .next()
+                                    .unwrap_or(folder_rel);
+                                let new_id = create_folder(
+                                    &resync_api,
+                                    &resync_master,
+                                    fname,
+                                    pid,
+                                )
+                                .await?;
+                                resync_remote_folders.insert(folder_rel.clone(), new_id);
+                            }
+                        }
+
+                        // Upload changed files
+                        let mut resync_bytes: u64 = 0;
+                        for rel in resync_local.keys() {
+                            let local = resync_local.get(rel).cloned();
+                            let remote = resync_remote_files.get(rel).cloned();
+                            let prior = state.files.get(rel).cloned();
+
+                            if let Some(l) = local {
+                                let local_changed = match &prior {
+                                    Some(p) => l.mtime != p.last_mtime || l.size != p.last_size,
+                                    None => remote.is_none(),
+                                };
+                                if local_changed {
+                                    do_upload(
+                                        &resync_api,
+                                        &resync_master,
+                                        &local_dir,
+                                        rel,
+                                        &l,
+                                        remote.map(|r| r.id),
+                                        remote_folder_id,
+                                        &resync_remote_folders,
+                                        &mut state,
+                                        false,
+                                    )
+                                    .await?;
+                                    resync_bytes += l.size;
+                                }
+                            }
+                        }
+
+                        // Save state
+                        state.last_sync = Some(Utc::now());
+                        let data = serde_json::to_vec_pretty(&state)
+                            .map_err(|e| format!("serialize state: {e}"))?;
+                        std::fs::write(&state_path, data)
+                            .map_err(|e| format!("write state file: {e}"))?;
+
+                        // Update dashboard
+                        let new_local = walk_local_files(&local_dir)?;
+                        dashboard
+                            .file_count
+                            .store(new_local.len() as u64, Ordering::Relaxed);
+                        dashboard.total_bytes.fetch_add(resync_bytes, Ordering::Relaxed);
+                        dashboard.is_synced.store(true, Ordering::Relaxed);
+                    }
+                }
+                Ok(Err(errs)) => {
+                    for e in errs {
+                        eprintln!(
+                            "  {} watch error: {}",
+                            "!".custom_color(crate::colors::RED_ERR),
+                            e
+                        );
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    }
 
     Ok(())
 }
@@ -920,4 +1176,104 @@ fn format_size(bytes: u64) -> String {
     } else {
         format!("{bytes} B")
     }
+}
+
+// ── LaunchAgent daemon ──────────────────────────────────────────────────────
+
+fn install_launchagent(local_dir: &Path, remote_path: Option<&str>) -> Result<(), String> {
+    let plist_dir = dirs::home_dir()
+        .ok_or("cannot find home directory")?
+        .join("Library/LaunchAgents");
+    std::fs::create_dir_all(&plist_dir).map_err(|e| format!("create dir: {e}"))?;
+    let plist_path = plist_dir.join("io.beebeeb.sync.plist");
+
+    let bb_path = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut args = vec![
+        bb_path.to_string_lossy().to_string(),
+        "sync".to_string(),
+        local_dir.to_string_lossy().to_string(),
+    ];
+    if let Some(rp) = remote_path {
+        args.push(rp.to_string());
+    }
+
+    let args_xml: String = args
+        .iter()
+        .map(|a| format!("        <string>{}</string>", a))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.beebeeb.sync</string>
+    <key>ProgramArguments</key>
+    <array>
+{args_xml}
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/beebeeb-sync.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/beebeeb-sync.err</string>
+</dict>
+</plist>"#
+    );
+
+    std::fs::write(&plist_path, plist).map_err(|e| format!("write plist: {e}"))?;
+
+    let status = std::process::Command::new("launchctl")
+        .args(["load", &plist_path.to_string_lossy()])
+        .status()
+        .map_err(|e| format!("launchctl: {e}"))?;
+
+    if !status.success() {
+        return Err("launchctl load failed".to_string());
+    }
+
+    println!(
+        "  {} sync daemon installed \u{00b7} starts on login",
+        "\u{2713}".custom_color(crate::colors::GREEN_OK)
+    );
+    println!(
+        "  {} {}",
+        "folder".custom_color(crate::colors::INK_DIM),
+        local_dir
+            .display()
+            .to_string()
+            .custom_color(crate::colors::INK),
+    );
+    println!(
+        "  {} bb sync --stop",
+        "stop".custom_color(crate::colors::INK_DIM)
+    );
+    Ok(())
+}
+
+fn uninstall_launchagent() -> Result<(), String> {
+    let plist_path = dirs::home_dir()
+        .ok_or("cannot find home directory")?
+        .join("Library/LaunchAgents/io.beebeeb.sync.plist");
+
+    if !plist_path.exists() {
+        return Err("no sync daemon installed".to_string());
+    }
+
+    let _ = std::process::Command::new("launchctl")
+        .args(["unload", &plist_path.to_string_lossy()])
+        .status();
+
+    std::fs::remove_file(&plist_path).map_err(|e| format!("remove plist: {e}"))?;
+
+    println!(
+        "  {} sync daemon removed",
+        "\u{2713}".custom_color(crate::colors::GREEN_OK)
+    );
+    Ok(())
 }

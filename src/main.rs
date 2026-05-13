@@ -168,6 +168,18 @@ enum Commands {
         /// Trash remote files that no longer exist locally (use with care)
         #[arg(long)]
         delete: bool,
+
+        /// One-shot sync then exit (default is continuous watch after sync)
+        #[arg(long)]
+        once: bool,
+
+        /// Install as macOS LaunchAgent (auto-start on login)
+        #[arg(long)]
+        daemon: bool,
+
+        /// Uninstall the sync LaunchAgent
+        #[arg(long)]
+        stop: bool,
     },
 
     /// Mount vault as a FUSE filesystem (read-only Day 1; requires macFUSE on macOS)
@@ -275,8 +287,7 @@ fn print_custom_help() {
         ("push", "<path>", "upload · encrypts on the fly"),
         ("pull", "<id|path>", "download and decrypt"),
         ("share", "<id>", "create encrypted link (expiry, passphrase)"),
-        ("sync", "<dir> [remote]", "bidirectional folder sync"),
-        ("watch", "<dir>", "live sync · filesystem events"),
+        ("sync", "<dir> [remote]", "sync + watch · continuous by default"),
         ("webdav", "", "mount vault in Finder / Explorer"),
         ("whoami", "", "user · plan · region · quota · session"),
         ("speedtest", "", "benchmark network + crypto speed"),
@@ -364,14 +375,20 @@ async fn main() {
         } => commands::share::run(file_id, expires, max_opens, passphrase, double_encrypted).await,
         Commands::Shares => commands::share::list().await,
         Commands::Unshare { share_id } => commands::share::revoke(share_id).await,
-        Commands::Watch { path, parent } => commands::watch::run(path, parent).await,
+        Commands::Watch { path, parent } => {
+            eprintln!("  {} bb watch is now bb sync. Redirecting...", "note".custom_color(crate::colors::INK_DIM));
+            commands::sync::run(path, parent, false, false, false, false, false, false).await
+        }
         Commands::Sync {
             local_dir,
             remote_path,
             dry_run,
             force,
             delete,
-        } => commands::sync::run(local_dir, remote_path, dry_run, force, delete).await,
+            once,
+            daemon,
+            stop,
+        } => commands::sync::run(local_dir, remote_path, dry_run, force, delete, once, daemon, stop).await,
         Commands::Mount { mountpoint, foreground, cache_ttl } => {
             commands::mount::run(mountpoint, foreground, cache_ttl).await
         }
