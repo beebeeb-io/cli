@@ -95,8 +95,13 @@ pub async fn run(path: Option<String>) -> Result<(), String> {
             .get("name_encrypted")
             .and_then(|v| v.as_str())
             .ok_or_else(|| format!("server response missing name_encrypted for file {file_id}"))?;
-        let name = decrypt_name(&master_key, file_id, name_encrypted)
-            .ok_or_else(|| format!("failed to decrypt filename for file {file_id}"))?;
+        let name = match decrypt_name(&master_key, file_id, name_encrypted) {
+            Some(n) => n,
+            None => {
+                // Old binary-UUID key derivation — show encrypted ID instead of failing
+                format!("(encrypted) {}", &file_id[..8.min(file_id.len())])
+            }
+        };
 
         let is_folder = file
             .get("is_folder")
