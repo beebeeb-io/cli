@@ -117,18 +117,14 @@ fn encrypt_chunks_with_string_key(
     let mut encrypted_chunks = Vec::new();
 
     if plaintext.is_empty() {
-        let blob = beebeeb_core::encrypt::encrypt_chunk(&file_key, &[])
-            .map_err(|e| format!("failed to encrypt empty chunk: {e}"))?;
-        let serialized = serde_json::to_vec(&blob)
-            .map_err(|e| format!("failed to serialize chunk: {e}"))?;
-        encrypted_chunks.push((0, serialized));
+        let bytes = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, &[])
+            .map_err(|e| format!("encrypt empty chunk: {e}"))?;
+        encrypted_chunks.push((0, bytes));
     } else {
         for (i, chunk) in plaintext.chunks(CHUNK_SIZE).enumerate() {
-            let blob = beebeeb_core::encrypt::encrypt_chunk(&file_key, chunk)
-                .map_err(|e| format!("failed to encrypt chunk {i}: {e}"))?;
-            let serialized = serde_json::to_vec(&blob)
-                .map_err(|e| format!("failed to serialize chunk {i}: {e}"))?;
-            encrypted_chunks.push((i as u32, serialized));
+            let bytes = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, chunk)
+                .map_err(|e| format!("encrypt chunk {i}: {e}"))?;
+            encrypted_chunks.push((i as u32, bytes));
         }
     }
 

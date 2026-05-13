@@ -379,9 +379,9 @@ async fn push_single_file(
     let file_key = beebeeb_core::kdf::derive_file_key(&master_key, file_id.to_string().as_bytes());
 
     // Encrypt the filename (MIME type is now part of the encrypted envelope)
-    let mime = guess_mime_type(&upload_name);
+    let mime = beebeeb_core::media::guess_mime_type(&upload_name);
     let name_encrypted =
-        beebeeb_core::encrypt::encrypt_name(&master_key, &file_id.to_string(), &upload_name, mime.as_deref())
+        beebeeb_core::encrypt::encrypt_name(&master_key, &file_id.to_string(), &upload_name, mime)
             .map_err(|e| format!("failed to encrypt filename: {e}"))?;
     let file_name = upload_name; // use the possibly-suffixed name for display
 
@@ -400,20 +400,16 @@ async fn push_single_file(
 
     if file_bytes.is_empty() {
         // Encrypt an empty chunk
-        let blob = beebeeb_core::encrypt::encrypt_chunk(&file_key, &[])
-            .map_err(|e| format!("failed to encrypt chunk: {e}"))?;
-        let serialized =
-            serde_json::to_vec(&blob).map_err(|e| format!("failed to serialize chunk: {e}"))?;
-        total_encrypted_size += serialized.len() as i64;
-        encrypted_chunks.push((0, serialized));
+        let bytes = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, &[])
+            .map_err(|e| format!("encrypt chunk: {e}"))?;
+        total_encrypted_size += bytes.len() as i64;
+        encrypted_chunks.push((0, bytes));
     } else {
         for (i, chunk) in file_bytes.chunks(CHUNK_SIZE).enumerate() {
-            let blob = beebeeb_core::encrypt::encrypt_chunk(&file_key, chunk)
-                .map_err(|e| format!("failed to encrypt chunk {i}: {e}"))?;
-            let serialized = serde_json::to_vec(&blob)
-                .map_err(|e| format!("failed to serialize chunk {i}: {e}"))?;
-            total_encrypted_size += serialized.len() as i64;
-            encrypted_chunks.push((i as u32, serialized));
+            let bytes = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, chunk)
+                .map_err(|e| format!("encrypt chunk {i}: {e}"))?;
+            total_encrypted_size += bytes.len() as i64;
+            encrypted_chunks.push((i as u32, bytes));
         }
     }
 
@@ -433,6 +429,7 @@ async fn push_single_file(
         "mime_type": serde_json::Value::Null,
         "size_bytes": total_encrypted_size,
         "file_id": file_id,
+        "is_media": beebeeb_core::media::is_media(mime),
     });
     // Explicit file_id tells the server to version over the existing file
     // rather than look up by name_encrypted ciphertext.
@@ -490,15 +487,6 @@ async fn push_single_file(
     }
 
     Ok(Some(upload_result))
-}
-
-fn guess_mime_type(filename: &str) -> Option<String> {
-    Some(
-        mime_guess::from_path(filename)
-            .first_or_octet_stream()
-            .essence_str()
-            .to_string(),
-    )
 }
 
 async fn push_directory(

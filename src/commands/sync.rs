@@ -1193,26 +1193,23 @@ async fn upload_file_to(
     let file_id = Uuid::new_v4();
     let file_key = beebeeb_core::kdf::derive_file_key(master_key, file_id.to_string().as_bytes());
 
-    let mime = guess_mime_type(file_name);
+    let mime = beebeeb_core::media::guess_mime_type(file_name);
     let name_encrypted =
-        beebeeb_core::encrypt::encrypt_name(master_key, &file_id.to_string(), file_name, mime.as_deref())
+        beebeeb_core::encrypt::encrypt_name(master_key, &file_id.to_string(), file_name, mime)
             .map_err(|e| format!("encrypt name: {e}"))?;
 
     let mut chunks: Vec<(u32, Vec<u8>)> = Vec::new();
     let mut total_enc: i64 = 0;
 
     if file_bytes.is_empty() {
-        let blob = beebeeb_core::encrypt::encrypt_chunk(&file_key, &[])
+        let bytes = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, &[])
             .map_err(|e| format!("encrypt chunk: {e}"))?;
-        let bytes = serde_json::to_vec(&blob).map_err(|e| format!("serialize chunk: {e}"))?;
         total_enc += bytes.len() as i64;
         chunks.push((0, bytes));
     } else {
         for (i, chunk) in file_bytes.chunks(CHUNK_SIZE).enumerate() {
-            let blob = beebeeb_core::encrypt::encrypt_chunk(&file_key, chunk)
+            let bytes = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, chunk)
                 .map_err(|e| format!("encrypt chunk {i}: {e}"))?;
-            let bytes = serde_json::to_vec(&blob)
-                .map_err(|e| format!("serialize chunk {i}: {e}"))?;
             total_enc += bytes.len() as i64;
             chunks.push((i as u32, bytes));
         }
@@ -1224,6 +1221,7 @@ async fn upload_file_to(
         "file_id": file_id,
         "mime_type": serde_json::Value::Null,
         "size_bytes": total_enc,
+        "is_media": beebeeb_core::media::is_media(mime),
     });
     let metadata_json =
         serde_json::to_string(&metadata).map_err(|e| format!("serialize metadata: {e}"))?;
@@ -1263,34 +1261,6 @@ async fn download_to(
     Ok(())
 }
 
-fn guess_mime_type(filename: &str) -> Option<String> {
-    let ext = filename.rsplit('.').next()?.to_lowercase();
-    let mime = match ext.as_str() {
-        "txt" => "text/plain",
-        "html" | "htm" => "text/html",
-        "css" => "text/css",
-        "js" => "application/javascript",
-        "json" => "application/json",
-        "xml" => "application/xml",
-        "pdf" => "application/pdf",
-        "zip" => "application/zip",
-        "gz" | "gzip" => "application/gzip",
-        "tar" => "application/x-tar",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "svg" => "image/svg+xml",
-        "webp" => "image/webp",
-        "mp3" => "audio/mpeg",
-        "mp4" => "video/mp4",
-        "webm" => "video/webm",
-        "md" => "text/markdown",
-        "rs" => "text/x-rust",
-        "toml" => "application/toml",
-        _ => "application/octet-stream",
-    };
-    Some(mime.to_string())
-}
 
 fn format_size(bytes: u64) -> String {
     const KB: u64 = 1024;

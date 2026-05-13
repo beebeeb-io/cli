@@ -364,14 +364,12 @@ mod fuse_impl {
             let file_key = beebeeb_core::kdf::derive_file_key(&self.master_key, key_uuid.to_string().as_bytes());
 
             // Encrypt the filename (MIME type is now part of the encrypted envelope).
-            let mime = mime_guess::from_path(name)
-                .first_raw()
-                .unwrap_or("application/octet-stream");
+            let mime = beebeeb_core::media::guess_mime_type(name);
             let name_enc = beebeeb_core::encrypt::encrypt_name(
                 &self.master_key,
                 &key_uuid.to_string(),
                 name,
-                Some(mime),
+                mime,
             )
             .map_err(|e| format!("encrypt name: {e}"))?;
 
@@ -384,9 +382,8 @@ mod fuse_impl {
             };
 
             for (i, chunk) in chunks.iter().enumerate() {
-                let blob = beebeeb_core::encrypt::encrypt_chunk(&file_key, chunk)
+                let bytes = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, chunk)
                     .map_err(|e| format!("encrypt chunk {i}: {e}"))?;
-                let bytes = serde_json::to_vec(&blob).map_err(|e| format!("serialize chunk {i}: {e}"))?;
                 encrypted_chunks.push((i as u32, bytes));
             }
 
@@ -407,6 +404,7 @@ mod fuse_impl {
                 "parent_id": parent_file_id,
                 "mime_type": serde_json::Value::Null,
                 "size_bytes": encrypted_size,
+                "is_media": beebeeb_core::media::is_media(mime),
             });
             let meta_str = serde_json::to_string(&meta).map_err(|e| format!("meta json: {e}"))?;
 

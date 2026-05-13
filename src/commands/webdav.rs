@@ -603,12 +603,12 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
         beebeeb_core::kdf::derive_file_key(&state.master_key, file_uuid.to_string().as_bytes());
 
     // Encrypt filename (MIME type is now part of the encrypted envelope)
-    let mime = guess_mime(&filename).unwrap_or("application/octet-stream");
+    let mime = beebeeb_core::media::guess_mime_type(&filename);
     let name_encrypted = match beebeeb_core::encrypt::encrypt_name(
         &state.master_key,
         &file_uuid.to_string(),
         &filename,
-        Some(mime),
+        mime,
     ) {
         Ok(s) => s,
         Err(e) => {
@@ -627,21 +627,15 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
     let mut total_encrypted_size: i64 = 0;
 
     for (i, chunk) in chunks_raw.iter().enumerate() {
-        let blob = match beebeeb_core::encrypt::encrypt_chunk(&file_key, chunk) {
+        let bytes = match beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, chunk) {
             Ok(b) => b,
             Err(e) => {
                 return (StatusCode::INTERNAL_SERVER_ERROR, format!("encrypt chunk {i}: {e}"))
                     .into_response();
             }
         };
-        let serialized = match serde_json::to_vec(&blob) {
-            Ok(s) => s,
-            Err(e) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-            }
-        };
-        total_encrypted_size += serialized.len() as i64;
-        encrypted_chunks.push((i as u32, serialized));
+        total_encrypted_size += bytes.len() as i64;
+        encrypted_chunks.push((i as u32, bytes));
     }
 
     let mut metadata = serde_json::json!({
@@ -649,6 +643,7 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
         "parent_id":      parent_id.as_deref().and_then(|s| s.parse::<uuid::Uuid>().ok()),
         "mime_type":      serde_json::Value::Null,
         "size_bytes":     total_encrypted_size,
+        "is_media":       beebeeb_core::media::is_media(mime),
     });
     // Tell the server to version over the existing file rather than create new.
     if let Some(eid) = existing_file_id {
@@ -829,7 +824,7 @@ async fn move_response(state: &Arc<DavState>, src_path: &str, destination: &str)
         let mime_for_rename = if src.is_collection {
             None
         } else {
-            guess_mime(&new_name)
+            beebeeb_core::media::guess_mime_type(&new_name)
         };
         match beebeeb_core::encrypt::encrypt_name(&state.master_key, &file_id, &new_name, mime_for_rename) {
             Ok(s) => Some(s),
@@ -1341,22 +1336,3 @@ fn resolve_mime(filename: &str) -> String {
         .to_string()
 }
 
-fn guess_mime(filename: &str) -> Option<&'static str> {
-    let ext = filename.rsplit('.').next()?.to_lowercase();
-    Some(match ext.as_str() {
-        "pdf" => "application/pdf",
-        "txt" | "md" | "rs" | "toml" | "yaml" | "yml" | "json" => "text/plain",
-        "html" | "htm" => "text/html",
-        "css" => "text/css",
-        "js" | "mjs" | "ts" => "application/javascript",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "svg" => "image/svg+xml",
-        "mp4" => "video/mp4",
-        "mp3" => "audio/mpeg",
-        "zip" => "application/zip",
-        "gz" | "tar" => "application/x-tar",
-        _ => "application/octet-stream",
-    })
-}
