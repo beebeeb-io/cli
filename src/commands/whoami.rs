@@ -17,24 +17,21 @@ pub async fn run() -> Result<(), String> {
     let api = ApiClient::from_config();
 
     // Fetch everything in parallel
-    let (me_res, sub_res, region_res, sessions_res, usage_res, count_res, latency_res) =
-        tokio::join!(
-            api.get_me(),
-            api.get_subscription(),
-            api.get_region(),
-            api.get_sessions(),
-            api.get_usage(),
-            api.get_file_count(),
-            api.ping_health(),
-        );
+    let (me_res, sub_res, my_region_res, sessions_res, usage_res, count_res) = tokio::join!(
+        api.get_me(),
+        api.get_subscription(),
+        api.get_my_region(),
+        api.get_sessions(),
+        api.get_usage(),
+        api.get_file_count(),
+    );
 
     let me = me_res.unwrap_or_default();
     let sub = sub_res.unwrap_or_default();
-    let region = region_res.unwrap_or_default();
+    let my_region = my_region_res.unwrap_or_default();
     let sessions = sessions_res.unwrap_or_default();
     let usage = usage_res.unwrap_or_default();
     let count = count_res.unwrap_or_default();
-    let latency_ms = latency_res.unwrap_or(0);
 
     // ── Parse fields ─────────────────────────────────────────────────────────
 
@@ -53,17 +50,11 @@ pub async fn run() -> Result<(), String> {
         .unwrap_or(0);
     let plan_label = format!("{} ({})", capitalise(plan), format_bytes(quota_bytes));
 
-    let city = region
-        .get("city")
+    let region_label = my_region
+        .get("preferred_region")
         .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    let provider = region
-        .get("provider")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    let region_label = format!(
-        "{city} \u{00b7} {provider} \u{00b7} {latency_ms}ms"
-    );
+        .map(|s| capitalise(s))
+        .unwrap_or_else(|| "Europe".to_string());
 
     let used_bytes = usage
         .get("used_bytes")
@@ -145,8 +136,7 @@ pub async fn run() -> Result<(), String> {
                 "storage_used": used_bytes,
                 "storage_total": total_bytes,
                 "files": file_count,
-                "region": format!("{city} \u{00b7} {provider}"),
-                "latency_ms": latency_ms,
+                "region": region_label,
                 "session_expires": expires_str,
             }))
             .unwrap()

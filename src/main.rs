@@ -274,7 +274,7 @@ fn print_custom_help() {
         ("sync", "<dir> [remote]", "bidirectional folder sync"),
         ("watch", "<dir>", "live sync · filesystem events"),
         ("webdav", "", "mount vault in Finder / Explorer"),
-        ("whoami", "", "session · region · quota"),
+        ("whoami", "", "user · plan · region · quota · session"),
         ("speedtest", "", "benchmark network + crypto speed"),
         ("repair", "", "fix cross-client encryption"),
     ];
