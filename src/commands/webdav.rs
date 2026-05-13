@@ -603,13 +603,11 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
         beebeeb_core::kdf::derive_file_key(&state.master_key, file_uuid.to_string().as_bytes());
 
     // Encrypt filename
-    let name_blob = match beebeeb_core::encrypt::encrypt_metadata(&file_key, &filename) {
-        Ok(b) => b,
-        Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-        }
-    };
-    let name_encrypted = match serde_json::to_string(&name_blob) {
+    let name_encrypted = match beebeeb_core::encrypt::encrypt_name(
+        &state.master_key,
+        &file_uuid.to_string(),
+        &filename,
+    ) {
         Ok(s) => s,
         Err(e) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
@@ -714,17 +712,15 @@ async fn mkcol_response(state: &Arc<DavState>, path: &str) -> Response {
     // Encrypt folder name — needs a UUID key. Use nil UUID for folders (consistent
     // with the server's convention: folder name is encrypted with the folder's own UUID).
     let folder_uuid = uuid::Uuid::new_v4();
-    let folder_key =
-        beebeeb_core::kdf::derive_file_key(&state.master_key, folder_uuid.to_string().as_bytes());
-    let name_blob = match beebeeb_core::encrypt::encrypt_metadata(&folder_key, &folder_name) {
-        Ok(b) => b,
+    let name_encrypted = match beebeeb_core::encrypt::encrypt_name(
+        &state.master_key,
+        &folder_uuid.to_string(),
+        &folder_name,
+    ) {
+        Ok(s) => s,
         Err(e) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
         }
-    };
-    let name_encrypted = match serde_json::to_string(&name_blob) {
-        Ok(s) => s,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
 
     match state
@@ -827,22 +823,12 @@ async fn move_response(state: &Arc<DavState>, src_path: &str, destination: &str)
     let same_parent = src_parent_path == dst_parent_path;
 
     // Compute new_name_encrypted if the name changed
-    let file_uuid: uuid::Uuid = match file_id.parse() {
-        Ok(u) => u,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
-    let file_key = beebeeb_core::kdf::derive_file_key(&state.master_key, file_uuid.to_string().as_bytes());
-
     let new_name_encrypted = if new_name != src.display_name {
-        let blob = match beebeeb_core::encrypt::encrypt_metadata(&file_key, &new_name) {
-            Ok(b) => b,
+        match beebeeb_core::encrypt::encrypt_name(&state.master_key, &file_id, &new_name) {
+            Ok(s) => Some(s),
             Err(e) => {
                 return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
             }
-        };
-        match serde_json::to_string(&blob) {
-            Ok(s) => Some(s),
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
         }
     } else {
         None

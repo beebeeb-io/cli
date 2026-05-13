@@ -992,11 +992,9 @@ async fn create_folder(
     parent_id: Option<Uuid>,
 ) -> Result<Uuid, String> {
     let new_id = Uuid::new_v4();
-    let folder_key = beebeeb_core::kdf::derive_file_key(master_key, new_id.to_string().as_bytes());
-    let blob = beebeeb_core::encrypt::encrypt_metadata(&folder_key, name)
-        .map_err(|e| format!("encrypt folder name: {e}"))?;
-    let name_enc = serde_json::to_string(&blob)
-        .map_err(|e| format!("serialize name: {e}"))?;
+    let name_enc =
+        beebeeb_core::encrypt::encrypt_name(master_key, &new_id.to_string(), name)
+            .map_err(|e| format!("encrypt folder name: {e}"))?;
     let result = api
         .create_folder(&name_enc, parent_id, Some(new_id))
         .await?;
@@ -1195,10 +1193,9 @@ async fn upload_file_to(
     let file_id = Uuid::new_v4();
     let file_key = beebeeb_core::kdf::derive_file_key(master_key, file_id.to_string().as_bytes());
 
-    let name_blob = beebeeb_core::encrypt::encrypt_metadata(&file_key, file_name)
-        .map_err(|e| format!("encrypt name: {e}"))?;
     let name_encrypted =
-        serde_json::to_string(&name_blob).map_err(|e| format!("serialize name: {e}"))?;
+        beebeeb_core::encrypt::encrypt_name(master_key, &file_id.to_string(), file_name)
+            .map_err(|e| format!("encrypt name: {e}"))?;
 
     let mut chunks: Vec<(u32, Vec<u8>)> = Vec::new();
     let mut total_enc: i64 = 0;

@@ -249,11 +249,9 @@ async fn resolve_upload_folder(api: &ApiClient, folder: &str) -> Result<String, 
     }
 
     let folder_id = uuid::Uuid::new_v4();
-    let folder_key = beebeeb_core::kdf::derive_file_key(&master_key, folder_id.to_string().as_bytes());
-    let name_blob = beebeeb_core::encrypt::encrypt_metadata(&folder_key, folder)
-        .map_err(|e| format!("failed to encrypt folder name: {e}"))?;
     let name_encrypted =
-        serde_json::to_string(&name_blob).map_err(|e| format!("failed to serialize folder name: {e}"))?;
+        beebeeb_core::encrypt::encrypt_name(&master_key, &folder_id.to_string(), folder)
+            .map_err(|e| format!("failed to encrypt folder name: {e}"))?;
 
     let created = api
         .create_folder(&name_encrypted, None, Some(folder_id))
@@ -381,10 +379,9 @@ async fn push_single_file(
     let file_key = beebeeb_core::kdf::derive_file_key(&master_key, file_id.to_string().as_bytes());
 
     // Encrypt the filename
-    let name_blob = beebeeb_core::encrypt::encrypt_metadata(&file_key, &upload_name)
-        .map_err(|e| format!("failed to encrypt filename: {e}"))?;
     let name_encrypted =
-        serde_json::to_string(&name_blob).map_err(|e| format!("failed to serialize name blob: {e}"))?;
+        beebeeb_core::encrypt::encrypt_name(&master_key, &file_id.to_string(), &upload_name)
+            .map_err(|e| format!("failed to encrypt filename: {e}"))?;
     let file_name = upload_name; // use the possibly-suffixed name for display
 
     // Chunk the file and encrypt each chunk
@@ -541,11 +538,9 @@ async fn push_directory(
     }
 
     let folder_id = uuid::Uuid::new_v4();
-    let folder_key = beebeeb_core::kdf::derive_file_key(&master_key, folder_id.to_string().as_bytes());
-    let name_blob = beebeeb_core::encrypt::encrypt_metadata(&folder_key, &dir_name)
-        .map_err(|e| format!("failed to encrypt folder name: {e}"))?;
-    let name_encrypted = serde_json::to_string(&name_blob)
-        .map_err(|e| format!("failed to serialize: {e}"))?;
+    let name_encrypted =
+        beebeeb_core::encrypt::encrypt_name(&master_key, &folder_id.to_string(), &dir_name)
+            .map_err(|e| format!("failed to encrypt folder name: {e}"))?;
 
     let parent_uuid = parent_id
         .as_deref()
@@ -581,11 +576,9 @@ async fn push_directory(
                 .unwrap_or("folder");
 
             let sub_id = uuid::Uuid::new_v4();
-            let sub_key = beebeeb_core::kdf::derive_file_key(&master_key, sub_id.to_string().as_bytes());
-            let sub_blob = beebeeb_core::encrypt::encrypt_metadata(&sub_key, name)
-                .map_err(|e| format!("failed to encrypt subfolder name: {e}"))?;
-            let sub_enc = serde_json::to_string(&sub_blob)
-                .map_err(|e| format!("serialize error: {e}"))?;
+            let sub_enc =
+                beebeeb_core::encrypt::encrypt_name(&master_key, &sub_id.to_string(), name)
+                    .map_err(|e| format!("failed to encrypt subfolder name: {e}"))?;
 
             let result = api
                 .create_folder(&sub_enc, Some(entry_parent_id), Some(sub_id))
