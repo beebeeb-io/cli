@@ -142,13 +142,25 @@ async fn try_update(state: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 // Homebrew detection and update
 // ---------------------------------------------------------------------------
 
-/// Returns `true` when the current binary lives inside a Homebrew prefix.
+/// Returns `true` when the binary was installed via Homebrew — either a
+/// symlink into the Cellar or a direct file under /opt/homebrew/bin/ (which
+/// happens when a previous OTA update overwrote the symlink).
 fn is_homebrew_install() -> bool {
     let Ok(exe) = std::env::current_exe() else {
         return false;
     };
     let path = exe.to_string_lossy();
-    path.contains("/homebrew/") || path.contains("/Cellar/")
+    if path.contains("/Cellar/") {
+        return true;
+    }
+    if path.contains("/homebrew/bin/") {
+        // Check if Homebrew actually manages this formula
+        let output = std::process::Command::new("brew")
+            .args(["list", "--formula", "beebeeb-io/tap/bb"])
+            .output();
+        return output.map(|o| o.status.success()).unwrap_or(false);
+    }
+    false
 }
 
 /// Update via `brew upgrade` instead of self-replacing.
@@ -169,6 +181,13 @@ fn update_via_homebrew(
         return Err("brew upgrade failed".into());
     }
 
+    // Restore the symlink in case a previous OTA update overwrote it with a
+    // direct binary. Without this, brew upgrades the Cellar but the bin path
+    // stays stale.
+    let _ = std::process::Command::new("brew")
+        .args(["link", "--overwrite", "beebeeb-io/tap/bb"])
+        .status();
+
     eprintln!(
         "  {} Updated bb v{} -> v{}",
         "✓".custom_color(crate::colors::GREEN_OK),
@@ -176,8 +195,10 @@ fn update_via_homebrew(
         new_ver.custom_color(crate::colors::AMBER),
     );
 
-    // Re-exec with the user's original command.
-    let exe = std::env::current_exe()?;
+    // Re-exec from the Homebrew-linked path, not current_exe() which may be
+    // a stale direct binary from a previous OTA overwrite.
+    let brew_bin = PathBuf::from("/opt/homebrew/bin/bb");
+    let exe = if brew_bin.exists() { brew_bin } else { std::env::current_exe()? };
     re_exec(&exe)
 }
 
