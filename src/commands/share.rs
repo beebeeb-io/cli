@@ -2,6 +2,9 @@ use base64::Engine as _;
 use colored::Colorize;
 use std::io::{self, Write};
 
+use crossterm::event::{self, Event, KeyCode};
+use crossterm::terminal;
+
 use crate::api::ApiClient;
 use crate::config::load_config;
 use crate::ui;
@@ -387,18 +390,275 @@ pub async fn list() -> Result<(), String> {
     Ok(())
 }
 
-/// `bb unshare <share_id>` — revoke a share link.
-pub async fn revoke(share_id: String) -> Result<(), String> {
+/// `bb unshare [share_id]` — revoke a share link.
+///
+/// When called without arguments, shows an interactive arrow-key picker of
+/// active shares. When called with an ID, revokes directly (for scripting).
+pub async fn revoke(share_id: Option<String>) -> Result<(), String> {
     let api = ApiClient::from_config();
     api.require_auth()?;
 
-    api.delete_share(&share_id).await?;
+    let resolved_id = match share_id {
+        Some(id) => id,
+        None => pick_share_interactively(&api).await?,
+    };
+
+    api.delete_share(&resolved_id).await?;
 
     println!(
         "  {} {}",
         "Revoked".custom_color(crate::colors::GREEN_OK),
-        format!("· share {share_id} is no longer accessible").custom_color(crate::colors::INK_DIM),
+        format!("· share {resolved_id} is no longer accessible")
+            .custom_color(crate::colors::INK_DIM),
     );
 
+    Ok(())
+}
+
+/// A share entry parsed from the API response, ready for display.
+struct ShareEntry {
+    id: String,
+    file_name: String,
+    expires_display: String,
+    open_count: u64,
+    is_revoked: bool,
+    is_expired: bool,
+}
+
+/// Fetch shares from the API and present an interactive terminal picker.
+/// Returns the selected share ID, or an error if cancelled / no shares.
+async fn pick_share_interactively(api: &ApiClient) -> Result<String, String> {
+    let result = api.list_shares().await?;
+
+    let shares_json = result
+        .as_array()
+        .or_else(|| result.get("shares").and_then(|s| s.as_array()));
+
+    let Some(shares_json) = shares_json else {
+        return Err("no active shares".to_string());
+    };
+
+    if shares_json.is_empty() {
+        return Err("no active shares".to_string());
+    }
+
+    let master_key = crate::commands::push::load_master_key()?;
+
+    let entries: Vec<ShareEntry> = shares_json
+        .iter()
+        .map(|share| {
+            let id = share
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let file_id = share.get("file_id").and_then(|v| v.as_str()).unwrap_or("");
+            let name_enc = share
+                .get("file")
+                .and_then(|f| f.get("name_encrypted"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let file_name = if !file_id.is_empty() && !name_enc.is_empty() {
+                crate::crypto::decrypt_name(&master_key, file_id, name_enc)
+                    .unwrap_or_else(|| "(encrypted)".to_string())
+            } else {
+                "(unknown)".to_string()
+            };
+            let expires_raw = share
+                .get("expires_at")
+                .and_then(|v| v.as_str())
+                .unwrap_or("never");
+            let is_revoked = share
+                .get("revoked")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let is_expired = !is_revoked
+                && expires_raw != "never"
+                && chrono::DateTime::parse_from_rfc3339(expires_raw)
+                    .map(|dt| dt < chrono::Utc::now())
+                    .unwrap_or(false);
+            let open_count = share
+                .get("open_count")
+                .or_else(|| share.get("opens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let expires_display = if expires_raw == "never" {
+                "never".to_string()
+            } else {
+                ui::relative_time(expires_raw)
+            };
+
+            ShareEntry {
+                id,
+                file_name,
+                expires_display,
+                open_count,
+                is_revoked,
+                is_expired,
+            }
+        })
+        .collect();
+
+    if entries.is_empty() {
+        return Err("no shares found".to_string());
+    }
+
+    // Enter raw mode for the interactive picker.
+    terminal::enable_raw_mode().map_err(|e| format!("failed to enable raw mode: {e}"))?;
+
+    let result = run_picker(&entries);
+
+    // Always restore the terminal, even on error.
+    let _ = terminal::disable_raw_mode();
+
+    let selected_idx = result?;
+    let selected = &entries[selected_idx];
+
+    // Confirm before revoking.
+    print!(
+        "  {} ",
+        format!("Revoke share for {}? (y/N)", selected.file_name)
+            .custom_color(crate::colors::AMBER),
+    );
+    io::stdout().flush().map_err(|e| e.to_string())?;
+
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .map_err(|e| format!("failed to read input: {e}"))?;
+
+    if !answer.trim().eq_ignore_ascii_case("y") {
+        return Err("cancelled".to_string());
+    }
+
+    Ok(selected.id.clone())
+}
+
+/// Drive the arrow-key picker loop. Returns the index of the selected entry.
+fn run_picker(entries: &[ShareEntry]) -> Result<usize, String> {
+    use crossterm::cursor;
+    use crossterm::terminal::{Clear, ClearType};
+    use std::io::Write;
+
+    let mut selected: usize = 0;
+    let mut stdout = io::stdout();
+
+    // Hide cursor while picking.
+    crossterm::execute!(stdout, cursor::Hide).map_err(|e| e.to_string())?;
+
+    // Draw the initial list.
+    draw_picker(&mut stdout, entries, selected)?;
+
+    loop {
+        // Block until an event arrives (100ms poll interval to keep responsive).
+        if !event::poll(std::time::Duration::from_millis(100))
+            .map_err(|e| e.to_string())?
+        {
+            continue;
+        }
+
+        let ev = event::read().map_err(|e| e.to_string())?;
+
+        match ev {
+            Event::Key(key_event) => match key_event.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if selected > 0 {
+                        selected -= 1;
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if selected + 1 < entries.len() {
+                        selected += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    // Restore cursor and clear picker area before returning.
+                    crossterm::execute!(stdout, cursor::Show).map_err(|e| e.to_string())?;
+                    // Move below the list so subsequent output is clean.
+                    write!(stdout, "\r\n").map_err(|e| e.to_string())?;
+                    stdout.flush().map_err(|e| e.to_string())?;
+                    return Ok(selected);
+                }
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    crossterm::execute!(stdout, cursor::Show).map_err(|e| e.to_string())?;
+                    write!(stdout, "\r\n").map_err(|e| e.to_string())?;
+                    stdout.flush().map_err(|e| e.to_string())?;
+                    return Err("cancelled".to_string());
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+
+        // Redraw: move cursor up to overwrite previous list, then draw again.
+        // Move up by `entries.len() + 1` lines (list + header).
+        let lines_up = entries.len() as u16 + 1;
+        crossterm::execute!(
+            stdout,
+            cursor::MoveUp(lines_up),
+            Clear(ClearType::FromCursorDown)
+        )
+        .map_err(|e| e.to_string())?;
+
+        draw_picker(&mut stdout, entries, selected)?;
+    }
+}
+
+/// Render the share list to the terminal.
+fn draw_picker(
+    stdout: &mut io::Stdout,
+    entries: &[ShareEntry],
+    selected: usize,
+) -> Result<(), String> {
+    use std::io::Write;
+
+    // Header
+    write!(
+        stdout,
+        "  {}\r\n",
+        "Select a share to revoke (arrow keys / j/k, Enter to confirm, q/Esc to cancel)"
+            .custom_color(crate::colors::INK_DIM)
+    )
+    .map_err(|e| e.to_string())?;
+
+    for (i, entry) in entries.iter().enumerate() {
+        let pointer = if i == selected { ">" } else { " " };
+
+        // Status indicator
+        let status = if entry.is_revoked {
+            "\u{2717}".custom_color(crate::colors::RED_ERR) // ✗
+        } else if entry.is_expired {
+            "\u{25CB}".custom_color(crate::colors::INK_DIM) // ○
+        } else {
+            "\u{25CF}".custom_color(crate::colors::GREEN_OK) // ●
+        };
+
+        let name_color = if i == selected {
+            crate::colors::AMBER
+        } else if entry.is_revoked || entry.is_expired {
+            crate::colors::INK_DIM
+        } else {
+            crate::colors::INK_WARM
+        };
+
+        let pointer_display = if i == selected {
+            pointer.custom_color(crate::colors::AMBER)
+        } else {
+            pointer.custom_color(crate::colors::INK_DIM)
+        };
+
+        write!(
+            stdout,
+            "  {} {} {:<36}  {:<20}  {}\r\n",
+            pointer_display,
+            status,
+            entry.file_name.custom_color(name_color),
+            entry.expires_display.custom_color(crate::colors::INK_DIM),
+            format!("{} opens", entry.open_count).custom_color(crate::colors::INK_DIM),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    stdout.flush().map_err(|e| e.to_string())?;
     Ok(())
 }

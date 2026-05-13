@@ -135,8 +135,8 @@ enum Commands {
 
     /// Revoke a share link
     Unshare {
-        /// Share ID to revoke
-        share_id: String,
+        /// Share ID to revoke (omit for interactive picker)
+        share_id: Option<String>,
     },
 
     /// Watch a folder and auto-sync changes to your vault
