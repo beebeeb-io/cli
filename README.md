@@ -1,5 +1,11 @@
 # Beebeeb CLI
 
+[![CI](https://github.com/beebeeb-io/cli/actions/workflows/release.yml/badge.svg)](https://github.com/beebeeb-io/cli/actions/workflows/release.yml)
+[![Latest Release](https://img.shields.io/github/v/release/beebeeb-io/cli?label=version)](https://github.com/beebeeb-io/cli/releases/latest)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
+![Rust](https://img.shields.io/badge/rust-2024-orange)
+[![Install](https://img.shields.io/badge/install-get.beebeeb.io-f5b800)](https://get.beebeeb.io)
+
 `bb` is the command-line client for [Beebeeb](https://beebeeb.io), an end-to-end encrypted, zero-knowledge cloud storage product made in Europe and operated by Initlabs B.V. (KvK 95157565), Wijchen, Netherlands.
 
 The CLI lets you authenticate from the terminal, upload and download encrypted files, list vault contents, create and revoke share links, run bidirectional folder sync, watch folders for live changes, and expose a local WebDAV view of your vault. All encryption and decryption happens locally -- the server never sees plaintext.
