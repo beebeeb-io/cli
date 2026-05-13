@@ -132,6 +132,7 @@ pub async fn run(
     once: bool,
     daemon: bool,
     stop: bool,
+    concurrency: usize,
 ) -> Result<(), String> {
     if stop {
         return uninstall_launchagent();
@@ -269,6 +270,32 @@ pub async fn run(
     let mut deletes = 0u32;
     let mut skipped = 0u32;
 
+    // ── Phase 1: classify each file into an action ─────────────────────────
+    enum SyncAction {
+        Upload {
+            rel: String,
+            local: LocalFile,
+            replace_id: Option<Uuid>,
+        },
+        Download {
+            rel: String,
+            remote: RemoteFile,
+        },
+        Conflict {
+            msg: String,
+        },
+        Delete {
+            rel: String,
+            remote: RemoteFile,
+        },
+        MissingLocal {
+            rel: String,
+        },
+        Skip,
+    }
+
+    let mut actions: Vec<SyncAction> = Vec::with_capacity(sorted_files.len());
+
     for rel in &sorted_files {
         let local = local_files.get(rel).cloned();
         let remote = remote_files.get(rel).cloned();
@@ -280,142 +307,224 @@ pub async fn run(
                 let remote_changed = r.updated_at > p.last_sync + chrono::Duration::seconds(1);
                 match (local_changed, remote_changed) {
                     (false, false) => {
-                        skipped += 1;
+                        actions.push(SyncAction::Skip);
                     }
                     (true, false) => {
-                        do_upload(
-                            &api,
-                            &master_key,
-                            &local_dir,
-                            rel,
-                            &l,
-                            Some(r.id),
-                            remote_folder_id,
-                            &remote_folders,
-                            &mut state,
-                            dry_run,
-                        )
-                        .await?;
-                        total_bytes += l.size;
-                        up_count += 1;
+                        actions.push(SyncAction::Upload {
+                            rel: rel.clone(),
+                            local: l,
+                            replace_id: Some(r.id),
+                        });
                     }
                     (false, true) => {
-                        do_download(&api, &master_key, &local_dir, rel, &r, &mut state, dry_run)
-                            .await?;
-                        down_count += 1;
+                        actions.push(SyncAction::Download {
+                            rel: rel.clone(),
+                            remote: r,
+                        });
                     }
                     (true, true) => {
                         if force {
-                            do_upload(
-                                &api,
-                                &master_key,
-                                &local_dir,
-                                rel,
-                                &l,
-                                Some(r.id),
-                                remote_folder_id,
-                                &remote_folders,
-                                &mut state,
-                                dry_run,
-                            )
-                            .await?;
-                            total_bytes += l.size;
-                            up_count += 1;
+                            actions.push(SyncAction::Upload {
+                                rel: rel.clone(),
+                                local: l,
+                                replace_id: Some(r.id),
+                            });
                         } else {
-                            if !ui::is_json() && !ui::is_quiet() {
-                                println!(
-                                    "  {} {} {}",
-                                    "\u{26A1}".custom_color(crate::colors::AMBER),
-                                    "conflict".custom_color(crate::colors::AMBER),
-                                    format!("{rel} (skipped \u{2014} use --force to overwrite)")
-                                        .custom_color(crate::colors::INK),
-                                );
-                            }
-                            conflicts += 1;
+                            actions.push(SyncAction::Conflict {
+                                msg: format!("{rel} (skipped \u{2014} use --force to overwrite)"),
+                            });
                         }
                     }
                 }
             }
             (Some(l), Some(r), None) => {
                 if force {
-                    do_upload(
-                        &api,
-                        &master_key,
-                        &local_dir,
-                        rel,
-                        &l,
-                        Some(r.id),
-                        remote_folder_id,
-                        &remote_folders,
-                        &mut state,
-                        dry_run,
-                    )
-                    .await?;
-                    total_bytes += l.size;
-                    up_count += 1;
+                    actions.push(SyncAction::Upload {
+                        rel: rel.clone(),
+                        local: l,
+                        replace_id: Some(r.id),
+                    });
                 } else {
-                    if !ui::is_json() && !ui::is_quiet() {
-                        println!(
-                            "  {} {} {}",
-                            "\u{26A1}".custom_color(crate::colors::AMBER),
-                            "conflict".custom_color(crate::colors::AMBER),
-                            format!("{rel} (exists both sides, no prior sync \u{2014} skipped)")
-                                .custom_color(crate::colors::INK),
-                        );
-                    }
-                    conflicts += 1;
+                    actions.push(SyncAction::Conflict {
+                        msg: format!("{rel} (exists both sides, no prior sync \u{2014} skipped)"),
+                    });
                 }
             }
             (Some(l), None, _) => {
-                do_upload(
-                    &api,
-                    &master_key,
-                    &local_dir,
-                    rel,
-                    &l,
-                    None,
-                    remote_folder_id,
-                    &remote_folders,
-                    &mut state,
-                    dry_run,
-                )
-                .await?;
-                total_bytes += l.size;
-                up_count += 1;
+                actions.push(SyncAction::Upload {
+                    rel: rel.clone(),
+                    local: l,
+                    replace_id: None,
+                });
             }
             (None, Some(r), prior) => {
                 if prior.is_some() {
                     if delete_remote {
-                        if !dry_run {
-                            api.trash_file(&r.id.to_string()).await?;
-                            state.files.remove(rel);
-                        }
-                        if !ui::is_json() && !ui::is_quiet() {
-                            println!(
-                                "  {} {} {}",
-                                "\u{2717}".custom_color(crate::colors::RED_ERR),
-                                "trashing remote".custom_color(crate::colors::RED_ERR),
-                                rel.custom_color(crate::colors::INK),
-                            );
-                        }
-                        deletes += 1;
-                    } else if !ui::is_json() && !ui::is_quiet() {
-                        println!(
-                            "  {} {} {}",
-                            "?".custom_color(crate::colors::INK_DIM),
-                            "missing locally".custom_color(crate::colors::INK_DIM),
-                            format!("{rel} (use --delete to trash from vault)")
-                                .custom_color(crate::colors::INK_DIM),
-                        );
+                        actions.push(SyncAction::Delete {
+                            rel: rel.clone(),
+                            remote: r,
+                        });
+                    } else {
+                        actions.push(SyncAction::MissingLocal { rel: rel.clone() });
                     }
                 } else {
-                    do_download(&api, &master_key, &local_dir, rel, &r, &mut state, dry_run)
-                        .await?;
-                    down_count += 1;
+                    actions.push(SyncAction::Download {
+                        rel: rel.clone(),
+                        remote: r,
+                    });
                 }
             }
-            (None, None, _) => {}
+            (None, None, _) => {
+                actions.push(SyncAction::Skip);
+            }
         }
+    }
+
+    // ── Phase 2: print conflicts/skips, collect uploads, execute downloads ─
+    // Handle conflicts, missing-local, and skips immediately (no I/O)
+    let mut pending_uploads: Vec<(String, LocalFile, Option<Uuid>)> = Vec::new();
+    let mut pending_downloads: Vec<(String, RemoteFile)> = Vec::new();
+    let mut pending_deletes: Vec<(String, RemoteFile)> = Vec::new();
+
+    for action in actions {
+        match action {
+            SyncAction::Skip => {
+                skipped += 1;
+            }
+            SyncAction::Conflict { msg } => {
+                if !ui::is_json() && !ui::is_quiet() {
+                    println!(
+                        "  {} {} {}",
+                        "\u{26A1}".custom_color(crate::colors::AMBER),
+                        "conflict".custom_color(crate::colors::AMBER),
+                        msg.custom_color(crate::colors::INK),
+                    );
+                }
+                conflicts += 1;
+            }
+            SyncAction::MissingLocal { rel } => {
+                if !ui::is_json() && !ui::is_quiet() {
+                    println!(
+                        "  {} {} {}",
+                        "?".custom_color(crate::colors::INK_DIM),
+                        "missing locally".custom_color(crate::colors::INK_DIM),
+                        format!("{rel} (use --delete to trash from vault)")
+                            .custom_color(crate::colors::INK_DIM),
+                    );
+                }
+            }
+            SyncAction::Upload { rel, local, replace_id } => {
+                pending_uploads.push((rel, local, replace_id));
+            }
+            SyncAction::Download { rel, remote } => {
+                pending_downloads.push((rel, remote));
+            }
+            SyncAction::Delete { rel, remote } => {
+                pending_deletes.push((rel, remote));
+            }
+        }
+    }
+
+    // ── Phase 3: parallel uploads ──────────────────────────────────────────
+    {
+        use futures_util::stream::{self, StreamExt};
+
+        let upload_results: Vec<Result<(String, FileEntry, u64), String>> = stream::iter(
+            pending_uploads.into_iter().map(|(rel, local, replace_id)| {
+                let api = &api;
+                let master_key = &master_key;
+                let local_dir = &local_dir;
+                let remote_folders = &remote_folders;
+                async move {
+                    let size_str = format_size(local.size);
+                    if !ui::is_json() && !ui::is_quiet() {
+                        println!(
+                            "  {} {} {}",
+                            "\u{2191}".custom_color(crate::colors::GREEN_OK),
+                            rel.custom_color(crate::colors::INK),
+                            format!("({size_str})").custom_color(crate::colors::INK_DIM),
+                        );
+                    }
+
+                    if dry_run {
+                        return Ok((rel, FileEntry {
+                            remote_id: Uuid::nil(),
+                            last_mtime: local.mtime,
+                            last_size: local.size,
+                            last_sync: Utc::now(),
+                        }, local.size));
+                    }
+
+                    if let Some(old_id) = replace_id {
+                        let _ = api.trash_file(&old_id.to_string()).await;
+                    }
+
+                    let parent_id = match rel.rsplit_once('/') {
+                        Some((parent_rel, _)) => remote_folders.get(parent_rel).copied(),
+                        None => Some(remote_folder_id),
+                    }
+                    .or(Some(remote_folder_id));
+
+                    let file_name = rel.rsplit('/').next().unwrap_or(&rel);
+                    let local_path = local_dir.join(&rel);
+                    let new_id = upload_file_to(api, master_key, &local_path, file_name, parent_id).await?;
+
+                    let entry = FileEntry {
+                        remote_id: new_id,
+                        last_mtime: local.mtime,
+                        last_size: local.size,
+                        last_sync: Utc::now(),
+                    };
+                    Ok((rel, entry, local.size))
+                }
+            }),
+        )
+        .buffer_unordered(concurrency)
+        .collect()
+        .await;
+
+        for result in upload_results {
+            match result {
+                Ok((rel, entry, size)) => {
+                    if !dry_run {
+                        state.files.insert(rel, entry);
+                    }
+                    total_bytes += size;
+                    up_count += 1;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "  {} upload failed: {}",
+                        "!".custom_color(crate::colors::RED_ERR),
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    // ── Phase 4: sequential downloads ──────────────────────────────────────
+    for (rel, remote) in &pending_downloads {
+        do_download(&api, &master_key, &local_dir, rel, remote, &mut state, dry_run)
+            .await?;
+        down_count += 1;
+    }
+
+    // ── Phase 5: sequential deletes ────────────────────────────────────────
+    for (rel, remote) in &pending_deletes {
+        if !dry_run {
+            api.trash_file(&remote.id.to_string()).await?;
+            state.files.remove(rel);
+        }
+        if !ui::is_json() && !ui::is_quiet() {
+            println!(
+                "  {} {} {}",
+                "\u{2717}".custom_color(crate::colors::RED_ERR),
+                "trashing remote".custom_color(crate::colors::RED_ERR),
+                rel.custom_color(crate::colors::INK),
+            );
+        }
+        deletes += 1;
     }
 
     state.last_sync = Some(Utc::now());

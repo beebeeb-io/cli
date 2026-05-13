@@ -180,6 +180,10 @@ enum Commands {
         /// Uninstall the sync LaunchAgent
         #[arg(long)]
         stop: bool,
+
+        /// Number of parallel uploads (default: 4)
+        #[arg(long, default_value_t = 4)]
+        concurrency: usize,
     },
 
     /// Mount vault as a FUSE filesystem (read-only Day 1; requires macFUSE on macOS)
@@ -377,7 +381,7 @@ async fn main() {
         Commands::Unshare { share_id } => commands::share::revoke(share_id).await,
         Commands::Watch { path, parent } => {
             eprintln!("  {} bb watch is now bb sync. Redirecting...", "note".custom_color(crate::colors::INK_DIM));
-            commands::sync::run(path, parent, false, false, false, false, false, false).await
+            commands::sync::run(path, parent, false, false, false, false, false, false, 4).await
         }
         Commands::Sync {
             local_dir,
@@ -388,7 +392,8 @@ async fn main() {
             once,
             daemon,
             stop,
-        } => commands::sync::run(local_dir, remote_path, dry_run, force, delete, once, daemon, stop).await,
+            concurrency,
+        } => commands::sync::run(local_dir, remote_path, dry_run, force, delete, once, daemon, stop, concurrency).await,
         Commands::Mount { mountpoint, foreground, cache_ttl } => {
             commands::mount::run(mountpoint, foreground, cache_ttl).await
         }
