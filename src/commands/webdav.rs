@@ -602,11 +602,13 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
     let file_key =
         beebeeb_core::kdf::derive_file_key(&state.master_key, file_uuid.to_string().as_bytes());
 
-    // Encrypt filename
+    // Encrypt filename (MIME type is now part of the encrypted envelope)
+    let mime = guess_mime(&filename).unwrap_or("application/octet-stream");
     let name_encrypted = match beebeeb_core::encrypt::encrypt_name(
         &state.master_key,
         &file_uuid.to_string(),
         &filename,
+        Some(mime),
     ) {
         Ok(s) => s,
         Err(e) => {
@@ -642,11 +644,10 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
         encrypted_chunks.push((i as u32, serialized));
     }
 
-    let mime = guess_mime(&filename).unwrap_or("application/octet-stream");
     let mut metadata = serde_json::json!({
         "name_encrypted": name_encrypted,
         "parent_id":      parent_id.as_deref().and_then(|s| s.parse::<uuid::Uuid>().ok()),
-        "mime_type":      mime,
+        "mime_type":      serde_json::Value::Null,
         "size_bytes":     total_encrypted_size,
     });
     // Tell the server to version over the existing file rather than create new.
@@ -716,6 +717,7 @@ async fn mkcol_response(state: &Arc<DavState>, path: &str) -> Response {
         &state.master_key,
         &folder_uuid.to_string(),
         &folder_name,
+        None,
     ) {
         Ok(s) => s,
         Err(e) => {
@@ -824,7 +826,12 @@ async fn move_response(state: &Arc<DavState>, src_path: &str, destination: &str)
 
     // Compute new_name_encrypted if the name changed
     let new_name_encrypted = if new_name != src.display_name {
-        match beebeeb_core::encrypt::encrypt_name(&state.master_key, &file_id, &new_name) {
+        let mime_for_rename = if src.is_collection {
+            None
+        } else {
+            guess_mime(&new_name)
+        };
+        match beebeeb_core::encrypt::encrypt_name(&state.master_key, &file_id, &new_name, mime_for_rename) {
             Ok(s) => Some(s),
             Err(e) => {
                 return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();

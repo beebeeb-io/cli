@@ -250,7 +250,7 @@ async fn resolve_upload_folder(api: &ApiClient, folder: &str) -> Result<String, 
 
     let folder_id = uuid::Uuid::new_v4();
     let name_encrypted =
-        beebeeb_core::encrypt::encrypt_name(&master_key, &folder_id.to_string(), folder)
+        beebeeb_core::encrypt::encrypt_name(&master_key, &folder_id.to_string(), folder, None)
             .map_err(|e| format!("failed to encrypt folder name: {e}"))?;
 
     let created = api
@@ -378,9 +378,10 @@ async fn push_single_file(
     // ── Encrypt name + chunks under the resolved file key ─────────────────────
     let file_key = beebeeb_core::kdf::derive_file_key(&master_key, file_id.to_string().as_bytes());
 
-    // Encrypt the filename
+    // Encrypt the filename (MIME type is now part of the encrypted envelope)
+    let mime = guess_mime_type(&upload_name);
     let name_encrypted =
-        beebeeb_core::encrypt::encrypt_name(&master_key, &file_id.to_string(), &upload_name)
+        beebeeb_core::encrypt::encrypt_name(&master_key, &file_id.to_string(), &upload_name, mime.as_deref())
             .map_err(|e| format!("failed to encrypt filename: {e}"))?;
     let file_name = upload_name; // use the possibly-suffixed name for display
 
@@ -429,7 +430,7 @@ async fn push_single_file(
     let mut metadata = serde_json::json!({
         "name_encrypted": name_encrypted,
         "parent_id": parent_uuid,
-        "mime_type": guess_mime_type(&file_name),
+        "mime_type": serde_json::Value::Null,
         "size_bytes": total_encrypted_size,
         "file_id": file_id,
     });
@@ -539,7 +540,7 @@ async fn push_directory(
 
     let folder_id = uuid::Uuid::new_v4();
     let name_encrypted =
-        beebeeb_core::encrypt::encrypt_name(&master_key, &folder_id.to_string(), &dir_name)
+        beebeeb_core::encrypt::encrypt_name(&master_key, &folder_id.to_string(), &dir_name, None)
             .map_err(|e| format!("failed to encrypt folder name: {e}"))?;
 
     let parent_uuid = parent_id
@@ -577,7 +578,7 @@ async fn push_directory(
 
             let sub_id = uuid::Uuid::new_v4();
             let sub_enc =
-                beebeeb_core::encrypt::encrypt_name(&master_key, &sub_id.to_string(), name)
+                beebeeb_core::encrypt::encrypt_name(&master_key, &sub_id.to_string(), name, None)
                     .map_err(|e| format!("failed to encrypt subfolder name: {e}"))?;
 
             let result = api

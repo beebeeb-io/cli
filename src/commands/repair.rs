@@ -135,18 +135,15 @@ fn encrypt_chunks_with_string_key(
     Ok(encrypted_chunks)
 }
 
-/// Encrypt a filename with the string-UUID key.
+/// Encrypt a filename with the string-UUID key (includes MIME type in envelope).
 fn encrypt_name_with_string_key(
     master_key: &beebeeb_core::kdf::MasterKey,
     file_id_str: &str,
     name: &str,
+    mime_type: Option<&str>,
 ) -> Result<String, String> {
-    let file_key =
-        beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes());
-    let blob = beebeeb_core::encrypt::encrypt_metadata(&file_key, name)
-        .map_err(|e| format!("failed to encrypt name: {e}"))?;
-    serde_json::to_string(&blob)
-        .map_err(|e| format!("failed to serialize name blob: {e}"))
+    beebeeb_core::encrypt::encrypt_name(master_key, file_id_str, name, mime_type)
+        .map_err(|e| format!("failed to encrypt name: {e}"))
 }
 
 /// Counters for the summary line.
@@ -422,7 +419,7 @@ async fn repair_folder(
     decrypted_name: &str,
 ) -> Result<(), String> {
     let new_name_encrypted =
-        encrypt_name_with_string_key(master_key, file_id, decrypted_name)?;
+        encrypt_name_with_string_key(master_key, file_id, decrypted_name, None)?;
     api.move_file(file_id, Some(&new_name_encrypted), None)
         .await?;
 
@@ -467,7 +464,7 @@ async fn repair_file(
 
     // Step 3: Re-encrypt name + chunks with string-UUID key
     let new_name_encrypted =
-        encrypt_name_with_string_key(master_key, file_id, decrypted_name)?;
+        encrypt_name_with_string_key(master_key, file_id, decrypted_name, mime_type.as_deref())?;
     let new_chunks =
         encrypt_chunks_with_string_key(master_key, file_id, &plaintext)?;
 
@@ -494,9 +491,8 @@ async fn repair_file(
             metadata["parent_id"] = serde_json::json!(parent_uuid);
         }
     }
-    if let Some(mime) = &mime_type {
-        metadata["mime_type"] = serde_json::json!(mime);
-    }
+    // MIME type is now encrypted inside name_encrypted — do not leak in plaintext.
+    metadata["mime_type"] = serde_json::Value::Null;
 
     let metadata_json = serde_json::to_string(&metadata)
         .map_err(|e| format!("failed to serialize metadata: {e}"))?;

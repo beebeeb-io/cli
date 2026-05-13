@@ -363,10 +363,17 @@ mod fuse_impl {
             let key_uuid = uuid::Uuid::new_v4();
             let file_key = beebeeb_core::kdf::derive_file_key(&self.master_key, key_uuid.to_string().as_bytes());
 
-            // Encrypt the filename.
-            let name_blob =
-                beebeeb_core::encrypt::encrypt_metadata(&file_key, name).map_err(|e| format!("encrypt name: {e}"))?;
-            let name_enc = serde_json::to_string(&name_blob).map_err(|e| format!("serialize name: {e}"))?;
+            // Encrypt the filename (MIME type is now part of the encrypted envelope).
+            let mime = mime_guess::from_path(name)
+                .first_raw()
+                .unwrap_or("application/octet-stream");
+            let name_enc = beebeeb_core::encrypt::encrypt_name(
+                &self.master_key,
+                &key_uuid.to_string(),
+                name,
+                Some(mime),
+            )
+            .map_err(|e| format!("encrypt name: {e}"))?;
 
             // Encrypt content in 1 MiB chunks.
             let mut encrypted_chunks: Vec<(u32, Vec<u8>)> = Vec::new();
@@ -394,13 +401,11 @@ mod fuse_impl {
             let encrypted_size: usize = encrypted_chunks.iter().map(|(_, b)| b.len()).sum();
 
             // Build metadata JSON matching the server's UploadMetadata struct.
-            let mime = mime_guess::from_path(name)
-                .first_raw()
-                .unwrap_or("application/octet-stream");
+            // MIME type is encrypted inside name_encrypted — do not leak in plaintext.
             let meta = serde_json::json!({
                 "name_encrypted": name_enc,
                 "parent_id": parent_file_id,
-                "mime_type": mime,
+                "mime_type": serde_json::Value::Null,
                 "size_bytes": encrypted_size,
             });
             let meta_str = serde_json::to_string(&meta).map_err(|e| format!("meta json: {e}"))?;

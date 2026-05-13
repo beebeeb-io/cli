@@ -993,7 +993,7 @@ async fn create_folder(
 ) -> Result<Uuid, String> {
     let new_id = Uuid::new_v4();
     let name_enc =
-        beebeeb_core::encrypt::encrypt_name(master_key, &new_id.to_string(), name)
+        beebeeb_core::encrypt::encrypt_name(master_key, &new_id.to_string(), name, None)
             .map_err(|e| format!("encrypt folder name: {e}"))?;
     let result = api
         .create_folder(&name_enc, parent_id, Some(new_id))
@@ -1193,8 +1193,9 @@ async fn upload_file_to(
     let file_id = Uuid::new_v4();
     let file_key = beebeeb_core::kdf::derive_file_key(master_key, file_id.to_string().as_bytes());
 
+    let mime = guess_mime_type(file_name);
     let name_encrypted =
-        beebeeb_core::encrypt::encrypt_name(master_key, &file_id.to_string(), file_name)
+        beebeeb_core::encrypt::encrypt_name(master_key, &file_id.to_string(), file_name, mime.as_deref())
             .map_err(|e| format!("encrypt name: {e}"))?;
 
     let mut chunks: Vec<(u32, Vec<u8>)> = Vec::new();
@@ -1221,7 +1222,7 @@ async fn upload_file_to(
         "name_encrypted": name_encrypted,
         "parent_id": parent_id,
         "file_id": file_id,
-        "mime_type": guess_mime_type(file_name),
+        "mime_type": serde_json::Value::Null,
         "size_bytes": total_enc,
     });
     let metadata_json =
