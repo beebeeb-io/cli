@@ -100,6 +100,10 @@ enum Commands {
         /// Output path (defaults to decrypted filename or file ID)
         #[arg(short = 'o', long = "output", value_name = "PATH", conflicts_with = "output")]
         output_flag: Option<PathBuf>,
+
+        /// Download an entire folder as a zip archive
+        #[arg(long)]
+        zip: bool,
     },
 
     /// List files (decrypts names locally)
@@ -366,8 +370,8 @@ async fn main() {
         Commands::Push { path, parent, folder, replace, keep_both } => {
             commands::push::run(path, parent, folder, replace, keep_both).await
         }
-        Commands::Pull { file_id, output, output_flag } => {
-            commands::pull::run(file_id, output.or(output_flag)).await
+        Commands::Pull { file_id, output, output_flag, zip } => {
+            commands::pull::run(file_id, output.or(output_flag), zip).await
         }
         Commands::Ls { path } => commands::ls::run(path).await,
         Commands::Share {
