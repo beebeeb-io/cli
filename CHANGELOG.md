@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-05-13
+
+### Added
+- `bb pull` accepts plaintext file paths (e.g., `bb pull Music/notes.md`) in addition to UUIDs
+
+### Fixed
+- `bb sync` now sends `file_id` in upload metadata — filenames are correctly decryptable after sync
+- `bb ls` gracefully shows `(encrypted)` for files with undecryptable names instead of crashing
+- Share URLs now use `https://app.beebeeb.io` instead of `localhost:5173` (server APP_URL config)
+
 ## [0.3.0] - 2026-05-13
 
 ### Added
