@@ -13,7 +13,25 @@ pub async fn run(path: Option<String>) -> Result<(), String> {
     // Beebeeb is zero-knowledge so the server always returns name_encrypted.
     let master_key = load_master_key()?;
 
-    let result = api.list_files(path.as_deref()).await?;
+    // Resolve plaintext folder paths to UUIDs. If the argument is already a
+    // valid UUID we pass it through directly; otherwise we walk the encrypted
+    // tree via the shared path module.
+    let parent_id = match &path {
+        Some(p) if uuid::Uuid::parse_str(p).is_err() => {
+            let resolved = crate::path::resolve_path(&api, &master_key, p).await?;
+            if !resolved.is_folder {
+                return Err(format!(
+                    "'{}' is a file, not a folder. Use `bb pull` to download it.",
+                    resolved.name
+                ));
+            }
+            resolved.file_id
+        }
+        Some(p) => Some(p.clone()),
+        None => None,
+    };
+
+    let result = api.list_files(parent_id.as_deref()).await?;
 
     let files = result
         .as_array()
