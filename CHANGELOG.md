@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-05-13
+
+### Fixed
+- Homebrew upgrade now restores the bin symlink — `bb --version` correctly shows the new version after `brew upgrade`
+- Improved Homebrew install detection for the broken-symlink edge case
+
 ## [0.2.0] - 2026-05-13
 
 ### Added
