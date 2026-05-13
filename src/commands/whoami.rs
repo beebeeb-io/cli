@@ -136,6 +136,7 @@ pub async fn run() -> Result<(), String> {
                 "storage_used": used_bytes,
                 "storage_total": total_bytes,
                 "files": file_count,
+                "upload_limit": upload_limit_for_plan(plan),
                 "region": region_label,
                 "session_expires": expires_str,
             }))
@@ -173,6 +174,13 @@ pub async fn run() -> Result<(), String> {
         "         ", // align under "storage"
         ui::quota_bar(used_bytes.max(0) as u64, total_bytes.max(0) as u64, 40),
         percentage * 100.0,
+    );
+
+    // Upload limit
+    println!(
+        "  {} {}",
+        dim("upload  "),
+        format!("up to {} \u{00b7} {} parallel", upload_limit_for_plan(plan), "4 connections").custom_color(crate::colors::INK),
     );
 
     // File count
@@ -223,6 +231,16 @@ fn format_bytes(bytes: i64) -> String {
         format!("{:.1} TB", bytes as f64 / TB as f64)
     } else {
         format!("{:.0} GB", bytes as f64 / GB as f64)
+    }
+}
+
+fn upload_limit_for_plan(plan: &str) -> &'static str {
+    match plan.to_lowercase().as_str() {
+        "free" => "5 GB/hr",
+        "starter" | "basic" => "20 GB/hr",
+        "pro" | "professional" | "team" => "50 GB/hr",
+        "business" => "100 GB/hr",
+        _ => "20 GB/hr",
     }
 }
 
