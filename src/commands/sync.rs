@@ -1093,6 +1093,7 @@ async fn upload_file_to(
     let metadata = serde_json::json!({
         "name_encrypted": name_encrypted,
         "parent_id": parent_id,
+        "file_id": file_id,
         "mime_type": guess_mime_type(file_name),
         "size_bytes": total_enc,
     });
