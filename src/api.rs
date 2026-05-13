@@ -545,6 +545,47 @@ impl ApiClient {
             .map_err(|e| format!("speedtest read: {e}"))
     }
 
+    /// Search all user files (root + one level of subfolders) for a file
+    /// whose UUID starts with the given hex prefix. Returns the full UUID if
+    /// exactly one match is found, `None` for zero matches, and an error for
+    /// ambiguous (multiple) matches.
+    pub async fn find_file_by_id_prefix(&self, prefix: &str) -> Result<Option<String>, String> {
+        let root = self.list_files(None).await?;
+        let root_files = root.get("files").and_then(|v| v.as_array());
+
+        let mut all_ids: Vec<String> = Vec::new();
+        if let Some(files) = root_files {
+            for f in files {
+                if let Some(id) = f.get("id").and_then(|v| v.as_str()) {
+                    all_ids.push(id.to_string());
+                    let is_folder = f.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
+                    if is_folder {
+                        if let Ok(children) = self.list_files(Some(id)).await {
+                            if let Some(child_files) = children.get("files").and_then(|v| v.as_array()) {
+                                for cf in child_files {
+                                    if let Some(cid) = cf.get("id").and_then(|v| v.as_str()) {
+                                        all_ids.push(cid.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let matches: Vec<&String> = all_ids.iter().filter(|id| id.starts_with(prefix)).collect();
+        match matches.len() {
+            0 => Ok(None),
+            1 => Ok(Some(matches[0].clone())),
+            _ => Err(format!(
+                "ambiguous prefix '{}' matches {} files — use more characters",
+                prefix,
+                matches.len()
+            )),
+        }
+    }
+
     /// Download the raw encrypted bytes for a file.
     pub async fn download_file(&self, file_id: &str) -> Result<Vec<u8>, String> {
         let token = self.require_auth()?;

@@ -8,26 +8,24 @@ pub async fn run(file_id: String, output: Option<PathBuf>) -> Result<(), String>
     let api = ApiClient::from_config();
     api.require_auth()?;
 
-    // Detect whether the argument is a UUID or a plaintext path.
+    // Detect whether the argument is a UUID, a short ID prefix, or a
+    // plaintext path.
     let (file_id, resolved_name) = if uuid::Uuid::parse_str(&file_id).is_ok() {
-        // Already a UUID — use it directly.
+        // Already a full UUID — use it directly.
         (file_id, None)
+    } else if looks_like_id_prefix(&file_id) {
+        // Looks like a hex prefix (e.g. "3e15382b" from `bb ls` output).
+        // Try to resolve it to a full UUID.
+        match api.find_file_by_id_prefix(&file_id).await? {
+            Some(full_id) => (full_id, None),
+            None => {
+                // No match by prefix — fall through to path resolution.
+                resolve_as_path(&api, &file_id).await?
+            }
+        }
     } else {
         // Treat as a plaintext path and resolve it.
-        let master_key = load_master_key()?;
-        let resolved = crate::path::resolve_path(&api, &master_key, &file_id).await?;
-
-        if resolved.file_id.is_none() {
-            return Err("cannot download the vault root".to_string());
-        }
-        if resolved.is_folder {
-            return Err(format!(
-                "'{}' is a folder. Use `bb ls` to list its contents.",
-                resolved.name,
-            ));
-        }
-
-        (resolved.file_id.unwrap(), Some(resolved.name))
+        resolve_as_path(&api, &file_id).await?
     };
 
     // If no --output was given and we resolved a path, use the resolved name.
@@ -134,6 +132,36 @@ pub async fn run(file_id: String, output: Option<PathBuf>) -> Result<(), String>
             .custom_color(crate::colors::INK_DIM));
 
     Ok(())
+}
+
+/// Returns `true` if the string looks like a UUID prefix: 8-36 hex chars
+/// (with optional hyphens). This covers the 8-char short IDs shown by
+/// `bb ls` as well as longer partial UUIDs.
+fn looks_like_id_prefix(s: &str) -> bool {
+    let len = s.len();
+    len >= 8
+        && len <= 36
+        && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+        && s.chars().any(|c| c.is_ascii_hexdigit())
+}
+
+/// Resolve a plaintext vault path (e.g. "/Documents/report.pdf") into a
+/// `(file_id, Some(name))` pair.
+async fn resolve_as_path(api: &ApiClient, path: &str) -> Result<(String, Option<String>), String> {
+    let master_key = load_master_key()?;
+    let resolved = crate::path::resolve_path(api, &master_key, path).await?;
+
+    if resolved.file_id.is_none() {
+        return Err("cannot download the vault root".to_string());
+    }
+    if resolved.is_folder {
+        return Err(format!(
+            "'{}' is a folder. Use `bb ls` to list its contents.",
+            resolved.name,
+        ));
+    }
+
+    Ok((resolved.file_id.unwrap(), Some(resolved.name)))
 }
 
 async fn pull_folder(api: &ApiClient, folder_id: &str, out_dir: &std::path::Path) -> Result<(), String> {

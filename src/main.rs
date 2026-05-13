@@ -88,10 +88,10 @@ enum Commands {
         keep_both: bool,
     },
 
-    /// Download a file from your vault
+    /// Download a file by UUID, short ID, or path
     #[command(alias = "download")]
     Pull {
-        /// File ID to download
+        /// File UUID, short ID prefix (e.g. 3e15382b), or vault path
         file_id: String,
 
         /// Output path (defaults to decrypted filename or file ID)
