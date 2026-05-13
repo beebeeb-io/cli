@@ -9,7 +9,7 @@ The CLI lets you authenticate from the terminal, upload and download encrypted f
 ### Quick install (recommended)
 
 ```sh
-curl -fsSL https://releases.beebeeb.io/beebeeb-cli-installer.sh | sh
+curl -fsSL https://get.beebeeb.io | sh
 ```
 
 ### Homebrew (macOS/Linux)
@@ -30,9 +30,9 @@ cargo install --git https://github.com/beebeeb-io/cli
 bb login                          # Opens browser for secure handoff
 bb push ./report.pdf              # Encrypt and upload
 bb ls                             # List vault contents (names decrypted locally)
-bb pull <file-id> -o ./report.pdf # Download and decrypt
+bb pull Music/notes.md              # Download by path (resolves encrypted names)
 bb share <file-id>                # Create a share link
-bb sync ~/vault /Documents        # Bidirectional folder sync
+bb sync ~/vault /Documents        # Sync then watch continuously
 bb webdav                         # Mount vault in Finder via WebDAV
 bb logout                         # End session
 ```
@@ -69,11 +69,7 @@ bb whoami
 
 #### `bb status`
 
-Show connection status, session health, and storage usage.
-
-```sh
-bb status
-```
+Alias for `bb whoami`.
 
 #### `bb quota`
 
@@ -120,11 +116,10 @@ bb push ./report.pdf --replace
 
 #### `bb pull`
 
-Download and decrypt a file from your vault.
+Download and decrypt a file from your vault. Accepts a vault path or a file UUID.
 
 ```sh
-bb pull <file-id> [output-path]
-bb pull <file-id> -o <output-path>
+bb pull <path-or-id> [-o <output-path>]
 ```
 
 If no output path is specified, the file is saved with its decrypted original filename in the current directory.
@@ -134,8 +129,10 @@ Aliases: `bb download`
 Examples:
 
 ```sh
-bb pull 5c3fdcf1-3b0c-4d85-9985-04a8bd3eed93
-bb pull 5c3fdcf1-3b0c-4d85-9985-04a8bd3eed93 -o ./report.pdf
+bb pull Music/notes.md                        # Download by path
+bb pull "Music/Old/My Playlist/track.flac"    # Deep nested path
+bb pull 5c3fdcf1-3b0c-4d85-9985-04a8bd3eed93 # By UUID
+bb pull 5c3fdcf1-... -o ./report.pdf          # Custom output path
 ```
 
 #### `bb ls`
@@ -152,8 +149,9 @@ Examples:
 
 ```sh
 bb ls                    # List root
-bb ls /Documents         # List a folder by path
-bb ls 6c71debc-...       # List a folder by UUID
+bb ls Music/             # List by folder name
+bb ls Music/Old          # Nested path
+bb ls 6c71debc-...       # By UUID
 ```
 
 ### Sharing
@@ -189,31 +187,28 @@ bb shares
 
 #### `bb unshare`
 
-Revoke a share link. The link becomes immediately inaccessible.
+Revoke a share link. Without arguments, shows an interactive picker.
 
 ```sh
-bb unshare <share-id>
+bb unshare               # Interactive: arrow keys to select, Enter to confirm
+bb unshare <share-id>    # Direct revocation by ID (for scripting)
 ```
 
-### Sync and Watch
-
-Beebeeb offers two approaches to keeping a local folder in sync with your vault:
-
-- **`bb sync`** -- one-shot bidirectional sync (run manually or via cron)
-- **`bb watch`** -- long-running daemon with filesystem notifications and remote event streaming
-
-Both use a `.bb-sync.json` state file in the local folder to track which files have been synced, their last modification time, and their remote UUIDs. This file is created automatically on first sync.
+### Sync
 
 #### `bb sync`
 
-Bidirectionally sync a local folder with a remote vault path.
+Bidirectionally sync a local folder with a remote vault path. By default, after the initial sync completes, `bb sync` continues watching for changes in real time (filesystem notifications + SSE remote events).
 
 ```sh
-bb sync <local-dir> <remote-path> [--dry-run] [--force] [--delete]
+bb sync <local-dir> <remote-path> [--once] [--daemon] [--stop] [--dry-run] [--force] [--delete]
 ```
 
 - `<remote-path>` -- vault path like `/Documents` or `/Work/Reports`. Created automatically if it does not exist. After first sync, the remote path is stored in `.bb-sync.json` and can be omitted.
-- `--dry-run` -- show what would change without making any modifications. Requires the remote folder to already exist.
+- `--once` -- run a single sync pass and exit (no continuous watching)
+- `--daemon` -- install as a login daemon (launchd on macOS, systemd on Linux) and exit
+- `--stop` -- remove a previously installed daemon
+- `--dry-run` -- show what would change without making any modifications
 - `--force` -- resolve conflicts by overwriting the remote copy with the local one (local wins)
 - `--delete` -- trash remote files that no longer exist locally. Without this flag, remotely-orphaned files are reported but not deleted.
 
@@ -224,87 +219,38 @@ Sync logic:
 - Files changed on both sides since last sync are flagged as conflicts and skipped unless `--force` is used.
 - Hidden files (names starting with `.`) are excluded.
 
+Uses a `.bb-sync.json` state file in the local folder to track which files have been synced, their last modification time, and their remote UUIDs. This file is created automatically on first sync.
+
 Examples:
 
 ```sh
-bb sync ~/Documents/vault /Documents
-bb sync ~/Documents/vault /Documents --dry-run
-bb sync ~/Documents/vault              # Uses remote path from .bb-sync.json
+bb sync ~/Documents /Documents           # Sync then watch continuously
+bb sync ~/Documents /Documents --once    # One-shot sync, then exit
+bb sync ~/Documents --dry-run            # Preview changes
+bb sync --daemon ~/Documents /Documents  # Install as login daemon
+bb sync --stop                           # Remove the daemon
 bb sync ~/work /Work --force --delete
 ```
 
-Setting up periodic sync with cron:
+Press Ctrl+C to stop continuous mode.
 
-```sh
-# Every 15 minutes
-*/15 * * * * /usr/local/bin/bb sync ~/Documents/vault /Documents >> /tmp/bb-sync.log 2>&1
-```
+#### `bb watch` (deprecated)
 
-#### `bb watch`
-
-Watch a local folder and automatically sync changes to your vault in real time. Also subscribes to remote change events via SSE and downloads changes made by other clients.
-
-```sh
-bb watch <path> [--parent <folder-id>]
-```
-
-- `--parent <id>` -- upload new files into a specific vault folder
-
-The watcher uses filesystem notifications (FSEvents on macOS, inotify on Linux) with a 500ms debounce window to batch rapid changes. It handles file creation, modification, and deletion:
-
-- New/modified files are encrypted and uploaded automatically.
-- Deleted files are soft-deleted (trashed) on the server.
-- Remote changes from other clients are downloaded to the local folder.
-- Hidden files, temp files (`*.tmp`, `*~`), and dotfiles are excluded.
-
-Press Ctrl+C to stop.
-
-For continuous background sync, run `bb watch` as a launchd service on macOS:
-
-```xml
-<!-- ~/Library/LaunchAgents/io.beebeeb.watch.plist -->
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>io.beebeeb.watch</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/usr/local/bin/bb</string>
-    <string>watch</string>
-    <string>/Users/you/Documents/vault</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>StandardOutPath</key>
-  <string>/tmp/bb-watch.log</string>
-  <key>StandardErrorPath</key>
-  <string>/tmp/bb-watch.log</string>
-</dict>
-</plist>
-```
-
-Load it with:
-
-```sh
-launchctl load ~/Library/LaunchAgents/io.beebeeb.watch.plist
-```
+Alias for `bb sync`. Use `bb sync` instead.
 
 ### WebDAV
 
 Serve your vault as a local WebDAV server. This lets you browse and edit encrypted files through Finder, Explorer, rclone, Cyberduck, or any WebDAV client -- files are decrypted in memory on the fly, never written to disk in plaintext.
 
 ```sh
-bb webdav [--port <port>] [--read-only] [--cache-ttl <seconds>] [--no-cache]
+bb webdav [--port <port>] [--read-only] [--cache-ttl <seconds>] [--no-cache] [--verbose]
 ```
 
 - `--port <port>` -- TCP port to listen on (default: 7878)
 - `--read-only` -- block all write operations (PUT, DELETE, MKCOL, MOVE)
 - `--cache-ttl <seconds>` -- directory listing cache TTL (default: 30)
 - `--no-cache` -- disable the directory listing cache entirely
+- `--verbose` -- log every WebDAV request (method, path, status, duration)
 
 Supported WebDAV methods:
 
@@ -354,14 +300,6 @@ cargo build --release --features fuse
 ```
 
 ### Utilities
-
-#### `bb rotate`
-
-Rotate your master vault key and re-wrap all file keys. Not yet implemented -- prints a notice.
-
-```sh
-bb rotate
-```
 
 #### `bb completions`
 
@@ -503,6 +441,9 @@ cargo fmt -- --check
 | `src/config.rs` | Config file: load, save, clear, defaults |
 | `src/api.rs` | HTTP and streaming API client |
 | `src/crypto.rs` | Cross-client decryption (CLI + web app formats) |
+| `src/path.rs` | Shared path resolution with LRU cache |
+| `src/ui.rs` | Terminal UI helpers (colors, bars, boxes) |
+| `src/update.rs` | OTA self-update with Homebrew support |
 | `src/colors.rs` | Terminal color constants (amber, green, red) |
 | `src/loopback.rs` | Localhost loopback utilities |
 | `src/commands/login.rs` | Browser-based CLI authorization flow |
