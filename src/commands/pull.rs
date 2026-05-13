@@ -8,6 +8,31 @@ pub async fn run(file_id: String, output: Option<PathBuf>) -> Result<(), String>
     let api = ApiClient::from_config();
     api.require_auth()?;
 
+    // Detect whether the argument is a UUID or a plaintext path.
+    let (file_id, resolved_name) = if uuid::Uuid::parse_str(&file_id).is_ok() {
+        // Already a UUID — use it directly.
+        (file_id, None)
+    } else {
+        // Treat as a plaintext path and resolve it.
+        let master_key = load_master_key()?;
+        let resolved = crate::path::resolve_path(&api, &master_key, &file_id).await?;
+
+        if resolved.file_id.is_none() {
+            return Err("cannot download the vault root".to_string());
+        }
+        if resolved.is_folder {
+            return Err(format!(
+                "'{}' is a folder. Use `bb ls` to list its contents.",
+                resolved.name,
+            ));
+        }
+
+        (resolved.file_id.unwrap(), Some(resolved.name))
+    };
+
+    // If no --output was given and we resolved a path, use the resolved name.
+    let output = output.or_else(|| resolved_name.as_deref().map(PathBuf::from));
+
     // Step 1: Get file metadata to learn chunk count and encrypted name
     let file_meta = api.get_file(&file_id).await?;
 
