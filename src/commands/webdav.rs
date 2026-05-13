@@ -80,7 +80,7 @@ type LockStore = Mutex<HashMap<String, LockEntry>>;
 
 // ─── CLI entry point ─────────────────────────────────────────────────────────
 
-pub async fn run(port: u16, read_only: bool, cache_ttl: u64, no_cache: bool) -> Result<(), String> {
+pub async fn run(port: u16, read_only: bool, cache_ttl: u64, no_cache: bool, verbose: bool) -> Result<(), String> {
     let config = load_config();
 
     if config.session_token.is_none() {
@@ -116,6 +116,9 @@ pub async fn run(port: u16, read_only: bool, cache_ttl: u64, no_cache: bool) -> 
         dir_cache: Mutex::new(HashMap::new()),
         cache_ttl: effective_ttl,
         locks: Mutex::new(HashMap::new()),
+        request_count: std::sync::atomic::AtomicU64::new(0),
+        error_count: std::sync::atomic::AtomicU64::new(0),
+        verbose,
     });
 
     let router = Router::new()
@@ -156,6 +159,13 @@ pub async fn run(port: u16, read_only: bool, cache_ttl: u64, no_cache: bool) -> 
         "cache".custom_color(crate::colors::INK_DIM),
         cache_label.custom_color(crate::colors::INK_DIM),
     );
+    if !verbose {
+        println!(
+            "  {}  {}",
+            "logging".custom_color(crate::colors::INK_DIM),
+            "compact (use --verbose for full request log)".custom_color(crate::colors::INK_DIM),
+        );
+    }
     println!();
     println!(
         "  {}",
@@ -184,6 +194,12 @@ struct DavState {
     cache_ttl: Duration,
     /// In-memory WebDAV lock store (stub — single-instance only).
     locks: LockStore,
+    /// Total requests served (atomic for lock-free increment).
+    request_count: std::sync::atomic::AtomicU64,
+    /// Total error responses (atomic for lock-free increment).
+    error_count: std::sync::atomic::AtomicU64,
+    /// Log every request (--verbose).
+    verbose: bool,
 }
 
 // ─── Request dispatcher ───────────────────────────────────────────────────────
@@ -201,7 +217,8 @@ async fn handle_webdav(
     // ._ resource forks, Spotlight indices, etc.)  These generate many
     // PROPFIND 404s that clutter the console without adding signal.
     let is_metadata = is_os_metadata_path(&path);
-    if !is_metadata {
+    state.request_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if state.verbose && !is_metadata {
         eprintln!(
             "  {} {} {}",
             "WebDAV".custom_color(crate::colors::INK_DIM),
@@ -239,7 +256,7 @@ async fn handle_webdav(
         .and_then(|v| v.to_str().ok())
         .and_then(parse_if_token);
 
-    match method {
+    let response = match method {
         Method::OPTIONS => options_response(&state),
         ref m if m.as_str() == "PROPFIND" => {
             let depth = headers
@@ -301,7 +318,14 @@ async fn handle_webdav(
             unlock_response(&state, &path, &lock_token).await
         }
         _ => (StatusCode::METHOD_NOT_ALLOWED, "").into_response(),
+    };
+
+    // Track errors for compact logging
+    if response.status().is_client_error() || response.status().is_server_error() {
+        state.error_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
+
+    response
 }
 
 // ─── OPTIONS ─────────────────────────────────────────────────────────────────
@@ -1188,7 +1212,8 @@ async fn resolve_path(state: &Arc<DavState>, path: &str) -> Result<ResolvedEntry
         let mut matched: Option<ResolvedEntry> = None;
         for file in files {
             if let Some(entry) = decode_file_entry(file, &state.master_key, "") {
-                if entry.display_name.to_lowercase() == segment.to_lowercase() {
+                let decoded_segment = crate::path::percent_decode(segment);
+                if entry.display_name.to_lowercase() == decoded_segment.to_lowercase() {
                     matched = Some(entry);
                     break;
                 }

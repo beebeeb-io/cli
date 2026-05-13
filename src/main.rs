@@ -207,6 +207,10 @@ enum Commands {
         /// Disable path cache entirely (useful for debugging)
         #[arg(long, default_value_t = false)]
         no_cache: bool,
+
+        /// Log every request (default: compact activity counters)
+        #[arg(long, default_value_t = false)]
+        verbose: bool,
     },
 
     /// Benchmark network latency, upload/download throughput, and crypto speed
@@ -374,8 +378,8 @@ async fn main() {
         Commands::Unmount { mountpoint } => {
             commands::mount::unmount(mountpoint).await
         }
-        Commands::Webdav { port, read_only, cache_ttl, no_cache } => {
-            commands::webdav::run(port, read_only, cache_ttl, no_cache).await
+        Commands::Webdav { port, read_only, cache_ttl, no_cache, verbose } => {
+            commands::webdav::run(port, read_only, cache_ttl, no_cache, verbose).await
         }
         Commands::Speedtest => commands::speedtest::run().await,
         Commands::Repair { dry_run } => commands::repair::run(dry_run).await,
