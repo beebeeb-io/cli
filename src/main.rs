@@ -218,9 +218,6 @@ enum Commands {
         dry_run: bool,
     },
 
-    /// Rotate your master vault key
-    Rotate,
-
     /// End current session
     Logout,
 
@@ -259,9 +256,8 @@ fn print_custom_help() {
         w,
     ));
     println!("{}", ui::box_line(
-        &format!("v{} · {} · {}",
+        &format!("v{} · {}",
             version.custom_color(colors::INK_DIM),
-            "Falkenstein".custom_color(colors::INK_DIM),
             "e2ee".custom_color(colors::GREEN_OK)),
         w,
     ));
@@ -288,7 +284,7 @@ fn print_custom_help() {
             desc.custom_color(colors::INK_DIM));
     }
     println!("  {}",
-        "+ login, logout, mount, rotate, shares, unshare, config, quota, status, completions"
+        "+ login, logout, mount, shares, unshare, config, quota, status, completions"
             .custom_color(colors::INK_DIM));
     println!();
 
@@ -382,18 +378,6 @@ async fn main() {
         }
         Commands::Speedtest => commands::speedtest::run().await,
         Commands::Repair { dry_run } => commands::repair::run(dry_run).await,
-        Commands::Rotate => {
-            println!(
-                "  {}",
-                "▲ Key rotation is not yet implemented.".custom_color(crate::colors::AMBER),
-            );
-            println!(
-                "  {}",
-                "  This will rotate your master vault key and re-wrap all file keys."
-                    .custom_color(crate::colors::INK_DIM),
-            );
-            Ok(())
-        }
         Commands::Logout => commands::logout::run().await,
         Commands::Completions { shell } => {
             clap_complete::generate(
