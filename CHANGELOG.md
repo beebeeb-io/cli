@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-13
+
+### Added
+- Interactive share picker for `bb unshare` — arrow keys to select, Enter to confirm
+- `bb sync` now does continuous watch after initial sync (merges old `bb watch`)
+- `bb sync --daemon` installs a macOS LaunchAgent for auto-start on login
+- `bb sync --stop` removes the daemon
+- `bb sync --once` for one-shot mode (old default behavior)
+- Shared path resolution module — `bb ls Music/` works with plaintext folder names
+- Compact WebDAV activity logging (request counter instead of per-request lines, `--verbose` for full log)
+- Dashboard UI for sync with box-drawn panel showing status, file count, and speed
+
+### Changed
+- `bb status` is now an alias for `bb whoami`
+- `bb watch` is now an alias for `bb sync` (with deprecation notice)
+- Region display shows user's selected region ("Europe") instead of DC details
+- Provider name ("Hetzner") removed from all CLI output
+- WebDAV handles URL-encoded paths correctly (no more PROPFIND 404 spam)
+- Help screen updated with cleaner layout
+
+### Removed
+- `bb rotate` stub (key rotation will be designed separately)
+
 ## [0.2.1] - 2026-05-13
 
 ### Fixed
