@@ -132,6 +132,18 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    pub async fn get_my_region(&self) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .get(self.url("/api/v1/me/region"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(resp).await
+    }
+
     /// Hit the health endpoint and return the round-trip latency in milliseconds.
     pub async fn ping_health(&self) -> Result<u128, String> {
         let start = std::time::Instant::now();

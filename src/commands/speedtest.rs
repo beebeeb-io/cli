@@ -3,6 +3,14 @@ use std::time::Instant;
 
 use crate::{api::ApiClient, colors, ui};
 
+fn capitalise(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        None => String::new(),
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+    }
+}
+
 pub async fn run() -> Result<(), String> {
     let api = ApiClient::from_config();
     api.require_auth()?;
@@ -14,26 +22,21 @@ pub async fn run() -> Result<(), String> {
     let w = 58;
     println!("{}", ui::box_header("SPEEDTEST", w));
 
-    // Get region info from /api/v1/region
-    let region_info = api.get_region().await.ok();
+    // Get user's preferred region
+    let region_info = api.get_my_region().await.ok();
     let region = region_info
         .as_ref()
-        .and_then(|r| r.get("city"))
+        .and_then(|r| r.get("preferred_region"))
         .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    let provider = region_info
-        .as_ref()
-        .and_then(|r| r.get("provider"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
+        .map(|s| capitalise(s))
+        .unwrap_or_else(|| "Europe".to_string());
     println!(
         "{}",
         ui::box_line(
             &format!(
-                "{:<12}{} \u{00B7} {}",
+                "{:<12}{}",
                 "region".custom_color(colors::INK_DIM),
                 region,
-                provider
             ),
             w,
         )
@@ -280,19 +283,13 @@ pub async fn run() -> Result<(), String> {
 
 async fn run_json(api: &ApiClient) -> Result<(), String> {
     // Region
-    let region_info = api.get_region().await.ok();
+    let region_info = api.get_my_region().await.ok();
     let region = region_info
         .as_ref()
-        .and_then(|r| r.get("city"))
+        .and_then(|r| r.get("preferred_region"))
         .and_then(|v| v.as_str())
-        .unwrap_or("unknown")
-        .to_string();
-    let provider = region_info
-        .as_ref()
-        .and_then(|r| r.get("provider"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown")
-        .to_string();
+        .map(|s| capitalise(s))
+        .unwrap_or_else(|| "Europe".to_string());
 
     // Latency
     let mut latencies = Vec::new();
@@ -379,7 +376,6 @@ async fn run_json(api: &ApiClient) -> Result<(), String> {
 
     let json = serde_json::json!({
         "region": region,
-        "provider": provider,
         "latency": {
             "min_ms": min_lat,
             "avg_ms": avg_lat,
