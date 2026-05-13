@@ -108,12 +108,23 @@ struct FileEntry {
     last_mtime: i64,
     last_size: u64,
     last_sync: DateTime<Utc>,
+    #[serde(default)]
+    content_hash: Option<String>,
 }
 
 #[derive(Clone)]
 struct LocalFile {
     mtime: i64,
     size: u64,
+    content_hash: String,
+}
+
+fn compute_file_hash(path: &Path) -> Result<String, String> {
+    use sha2::{Sha256, Digest};
+    let mut file = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher).map_err(|e| format!("read {}: {e}", path.display()))?;
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 #[derive(Clone)]
@@ -303,7 +314,10 @@ pub async fn run(
 
         match (local, remote, prior) {
             (Some(l), Some(r), Some(p)) => {
-                let local_changed = l.mtime != p.last_mtime || l.size != p.last_size;
+                let local_changed = match &p.content_hash {
+                    Some(h) => *h != l.content_hash,
+                    None => l.mtime != p.last_mtime || l.size != p.last_size,
+                };
                 let remote_changed = r.updated_at > p.last_sync + chrono::Duration::seconds(1);
                 match (local_changed, remote_changed) {
                     (false, false) => {
@@ -452,6 +466,7 @@ pub async fn run(
                             last_mtime: local.mtime,
                             last_size: local.size,
                             last_sync: Utc::now(),
+                            content_hash: Some(local.content_hash.clone()),
                         }, local.size));
                     }
 
@@ -474,6 +489,7 @@ pub async fn run(
                         last_mtime: local.mtime,
                         last_size: local.size,
                         last_sync: Utc::now(),
+                        content_hash: Some(local.content_hash.clone()),
                     };
                     Ok((rel, entry, local.size))
                 }
@@ -847,11 +863,13 @@ fn walk_local_files(root: &Path) -> Result<HashMap<String, LocalFile>, String> {
             .and_then(|m| m.duration_since(SystemTime::UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
+        let content_hash = compute_file_hash(path)?;
         out.insert(
             rel_path_str(rel),
             LocalFile {
                 mtime,
                 size: meta.len(),
+                content_hash,
             },
         );
     }
@@ -1109,6 +1127,7 @@ async fn do_upload(
             last_mtime: local.mtime,
             last_size: local.size,
             last_sync: Utc::now(),
+            content_hash: Some(local.content_hash.clone()),
         },
     );
 
@@ -1148,6 +1167,7 @@ async fn do_download(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
+    let content_hash = compute_file_hash(&out_path).ok();
     state.files.insert(
         rel.to_string(),
         FileEntry {
@@ -1155,6 +1175,7 @@ async fn do_download(
             last_mtime: mtime,
             last_size: meta.len(),
             last_sync: Utc::now(),
+            content_hash,
         },
     );
 
