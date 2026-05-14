@@ -7,8 +7,8 @@ use crate::api::ApiClient;
 use crate::config::load_config;
 use crate::ui;
 
-/// 1 MiB chunk size (matches beebeeb_types::CHUNK_SIZE)
-const CHUNK_SIZE: usize = 1024 * 1024;
+// Chunk size is now computed dynamically via beebeeb_types::plan_chunks().
+// See the adaptive chunk-size ladder in beebeeb-types/src/chunk.rs.
 
 fn b64() -> base64::engine::GeneralPurpose {
     base64::engine::general_purpose::STANDARD
@@ -385,12 +385,10 @@ async fn push_single_file(
             .map_err(|e| format!("failed to encrypt filename: {e}"))?;
     let file_name = upload_name; // use the possibly-suffixed name for display
 
-    // Chunk the file and encrypt each chunk
-    let total_chunks = if file_bytes.is_empty() {
-        1 // at least one chunk for empty files
-    } else {
-        file_bytes.len().div_ceil(CHUNK_SIZE)
-    };
+    // Chunk the file using the adaptive chunk-size ladder
+    let plan = beebeeb_types::plan_chunks(file_size, beebeeb_types::ChunkProfile::Desktop);
+    let chunk_size = plan.chunk_size_bytes as usize;
+    let total_chunks = plan.chunk_count as usize;
 
     let mut encrypted_chunks: Vec<(u32, Vec<u8>)> = Vec::with_capacity(total_chunks);
     let mut total_encrypted_size: i64 = 0;
@@ -405,7 +403,7 @@ async fn push_single_file(
         total_encrypted_size += bytes.len() as i64;
         encrypted_chunks.push((0, bytes));
     } else {
-        for (i, chunk) in file_bytes.chunks(CHUNK_SIZE).enumerate() {
+        for (i, chunk) in file_bytes.chunks(chunk_size).enumerate() {
             let bytes = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, chunk)
                 .map_err(|e| format!("encrypt chunk {i}: {e}"))?;
             total_encrypted_size += bytes.len() as i64;

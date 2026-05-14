@@ -107,8 +107,8 @@ mod fuse_impl {
 
     const ROOT_INO: u64 = 1;
     const ATTR_TTL: Duration = Duration::from_secs(5);
-    /// 1 MiB — matches `bb push` chunk size.
-    const CHUNK_SIZE: usize = 1024 * 1024;
+    // Chunk size is now computed dynamically via beebeeb_types::plan_chunks().
+    // See the adaptive chunk-size ladder in beebeeb-types/src/chunk.rs.
 
     // ── Inode table entry ─────────────────────────────────────────────────────
 
@@ -373,12 +373,15 @@ mod fuse_impl {
             )
             .map_err(|e| format!("encrypt name: {e}"))?;
 
-            // Encrypt content in 1 MiB chunks.
+            // Encrypt content using the adaptive chunk-size ladder.
+            let plan = beebeeb_types::plan_chunks(plaintext.len() as u64, beebeeb_types::ChunkProfile::Desktop);
+            let chunk_size = plan.chunk_size_bytes as usize;
+
             let mut encrypted_chunks: Vec<(u32, Vec<u8>)> = Vec::new();
             let chunks: Vec<&[u8]> = if plaintext.is_empty() {
                 vec![&[]] // at least one (empty) chunk
             } else {
-                plaintext.chunks(CHUNK_SIZE).collect()
+                plaintext.chunks(chunk_size).collect()
             };
 
             for (i, chunk) in chunks.iter().enumerate() {

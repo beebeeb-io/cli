@@ -16,7 +16,8 @@ use crate::config::load_config;
 use crate::ui;
 
 const STATE_FILE: &str = ".bb-sync.json";
-const CHUNK_SIZE: usize = 1024 * 1024;
+// Chunk size is now computed dynamically via beebeeb_types::plan_chunks().
+// See the adaptive chunk-size ladder in beebeeb-types/src/chunk.rs.
 
 struct SyncDashboard {
     local_path: String,
@@ -1198,6 +1199,9 @@ async fn upload_file_to(
         beebeeb_core::encrypt::encrypt_name(master_key, &file_id.to_string(), file_name, mime)
             .map_err(|e| format!("encrypt name: {e}"))?;
 
+    let plan = beebeeb_types::plan_chunks(file_bytes.len() as u64, beebeeb_types::ChunkProfile::Desktop);
+    let chunk_size = plan.chunk_size_bytes as usize;
+
     let mut chunks: Vec<(u32, Vec<u8>)> = Vec::new();
     let mut total_enc: i64 = 0;
 
@@ -1207,7 +1211,7 @@ async fn upload_file_to(
         total_enc += bytes.len() as i64;
         chunks.push((0, bytes));
     } else {
-        for (i, chunk) in file_bytes.chunks(CHUNK_SIZE).enumerate() {
+        for (i, chunk) in file_bytes.chunks(chunk_size).enumerate() {
             let bytes = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, chunk)
                 .map_err(|e| format!("encrypt chunk {i}: {e}"))?;
             total_enc += bytes.len() as i64;

@@ -4,8 +4,8 @@ use crate::api::ApiClient;
 use crate::commands::push::load_master_key;
 use crate::ui;
 
-/// 1 MiB chunk size (matches beebeeb_types::CHUNK_SIZE and push.rs)
-const CHUNK_SIZE: usize = 1024 * 1024;
+// Chunk size is now computed dynamically via beebeeb_types::plan_chunks().
+// See the adaptive chunk-size ladder in beebeeb-types/src/chunk.rs.
 
 /// Which UUID key derivation a file's name_encrypted was encrypted with.
 #[derive(Debug, PartialEq)]
@@ -114,6 +114,9 @@ fn encrypt_chunks_with_string_key(
     let file_key =
         beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes());
 
+    let plan = beebeeb_types::plan_chunks(plaintext.len() as u64, beebeeb_types::ChunkProfile::Desktop);
+    let chunk_size = plan.chunk_size_bytes as usize;
+
     let mut encrypted_chunks = Vec::new();
 
     if plaintext.is_empty() {
@@ -121,7 +124,7 @@ fn encrypt_chunks_with_string_key(
             .map_err(|e| format!("encrypt empty chunk: {e}"))?;
         encrypted_chunks.push((0, bytes));
     } else {
-        for (i, chunk) in plaintext.chunks(CHUNK_SIZE).enumerate() {
+        for (i, chunk) in plaintext.chunks(chunk_size).enumerate() {
             let bytes = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, chunk)
                 .map_err(|e| format!("encrypt chunk {i}: {e}"))?;
             encrypted_chunks.push((i as u32, bytes));
