@@ -1,3 +1,4 @@
+use beebeeb_types::quota::{effective_quota, format_storage_si, Plan};
 use colored::Colorize;
 
 use crate::api::ApiClient;
@@ -19,11 +20,22 @@ pub async fn run() -> Result<(), String> {
         .get("used_bytes")
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
-    let quota_bytes = usage
-        .get("quota_bytes")
-        .or_else(|| usage.get("plan_limit_bytes"))
+
+    let plan_slug = sub
+        .get("plan")
+        .and_then(|v| v.as_str())
+        .unwrap_or("free");
+    let plan = Plan::from_slug(plan_slug);
+    let extra_tb = sub
+        .get("extra_storage_tb")
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
+    let bonus_bytes = sub
+        .get("bonus_bytes")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let quota_bytes = effective_quota(plan, extra_tb, bonus_bytes);
+
     let percentage = if quota_bytes > 0 {
         used_bytes as f64 / quota_bytes as f64
     } else {
@@ -36,10 +48,8 @@ pub async fn run() -> Result<(), String> {
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
 
-    let plan_name = sub
-        .get("plan")
-        .and_then(|v| v.as_str())
-        .unwrap_or("free");
+    // Build the plan label: "Pro — 8.0 TB (5 TB base + 3 TB extra)"
+    let plan_label = build_plan_label(plan, extra_tb, bonus_bytes);
 
     // ── JSON mode ────────────────────────────────────────────────────────────
 
@@ -51,7 +61,9 @@ pub async fn run() -> Result<(), String> {
                 "quota_bytes": quota_bytes,
                 "percentage": percentage * 100.0,
                 "files": file_count,
-                "plan": plan_name,
+                "plan": plan.slug(),
+                "extra_storage_tb": extra_tb,
+                "bonus_bytes": bonus_bytes,
             }))
             .unwrap()
         );
@@ -61,8 +73,8 @@ pub async fn run() -> Result<(), String> {
     // ── Quiet mode ───────────────────────────────────────────────────────────
 
     if ui::is_quiet() {
-        println!("{}", format_bytes(used_bytes));
-        println!("{}", format_bytes(quota_bytes));
+        println!("{}", format_storage_si(used_bytes));
+        println!("{}", format_storage_si(quota_bytes));
         println!("{:.2}%", percentage * 100.0);
         return Ok(());
     }
@@ -71,12 +83,8 @@ pub async fn run() -> Result<(), String> {
 
     let dim = |s: &str| s.custom_color(crate::colors::INK_DIM);
 
-    let used_str = format_bytes(used_bytes);
-    let quota_str = if quota_bytes <= 0 {
-        "unlimited".to_string()
-    } else {
-        format_bytes(quota_bytes)
-    };
+    let used_str = format_storage_si(used_bytes);
+    let quota_str = format_storage_si(quota_bytes);
 
     // Color-code the percentage: green <70%, amber 70-90%, red >90%
     let pct_str = if quota_bytes <= 0 {
@@ -101,13 +109,13 @@ pub async fn run() -> Result<(), String> {
     println!();
     println!(
         "  {} {}",
-        dim("used    "),
-        used_str.custom_color(crate::colors::INK)
+        dim("plan    "),
+        plan_label.custom_color(crate::colors::AMBER)
     );
     println!(
         "  {} {}",
-        dim("quota   "),
-        quota_str.custom_color(crate::colors::INK_WARM)
+        dim("used    "),
+        format!("{} / {}", used_str, quota_str).custom_color(crate::colors::INK)
     );
 
     // Visual quota bar
@@ -124,20 +132,19 @@ pub async fn run() -> Result<(), String> {
         dim("files   "),
         files_str.custom_color(crate::colors::INK_DIM)
     );
-    println!(
-        "  {} {}",
-        dim("plan    "),
-        capitalise(plan_name).custom_color(crate::colors::AMBER)
-    );
 
     // Over-quota warning
     if quota_bytes > 0 && used_bytes >= quota_bytes {
         println!();
+        let msg = if plan.can_add_storage() {
+            "Over quota \u{2014} uploads blocked. Add more storage at app.beebeeb.io/billing or delete files."
+        } else {
+            "Over quota \u{2014} uploads blocked. Upgrade your plan or delete files."
+        };
         println!(
             "  {} {}",
             "!".custom_color(crate::colors::RED_ERR),
-            "Over quota \u{2014} uploads blocked. Upgrade your plan or delete files."
-                .custom_color(crate::colors::RED_ERR),
+            msg.custom_color(crate::colors::RED_ERR),
         );
     }
 
@@ -145,30 +152,39 @@ pub async fn run() -> Result<(), String> {
     Ok(())
 }
 
+/// Build a descriptive plan label like "Pro — 8.0 TB (5.0 TB base + 3.0 TB extra)".
+fn build_plan_label(plan: Plan, extra_tb: i64, bonus_bytes: i64) -> String {
+    let name = capitalise(plan.slug());
+    let total = effective_quota(plan, extra_tb, bonus_bytes);
+    let base = plan.base_storage_bytes();
+
+    if extra_tb > 0 || bonus_bytes > 0 {
+        let mut parts = vec![format!("{} base", format_storage_si(base))];
+        if extra_tb > 0 {
+            parts.push(format!(
+                "{} extra",
+                format_storage_si(extra_tb * beebeeb_types::quota::ONE_TB)
+            ));
+        }
+        if bonus_bytes > 0 {
+            parts.push(format!("{} bonus", format_storage_si(bonus_bytes)));
+        }
+        format!(
+            "{} \u{2014} {} ({})",
+            name,
+            format_storage_si(total),
+            parts.join(" + "),
+        )
+    } else {
+        format!("{} \u{2014} {}", name, format_storage_si(total))
+    }
+}
+
 fn capitalise(s: &str) -> String {
     let mut c = s.chars();
     match c.next() {
         None => String::new(),
         Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-    }
-}
-
-fn format_bytes(bytes: i64) -> String {
-    const TB: i64 = 1_099_511_627_776;
-    const GB: i64 = 1_073_741_824;
-    const MB: i64 = 1_048_576;
-    const KB: i64 = 1_024;
-
-    if bytes >= TB {
-        format!("{:.1} TB", bytes as f64 / TB as f64)
-    } else if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} kB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
     }
 }
 

@@ -1,3 +1,4 @@
+use beebeeb_types::quota::{effective_quota, format_storage_si, Plan};
 use colored::Colorize;
 
 use crate::api::ApiClient;
@@ -40,15 +41,21 @@ pub async fn run() -> Result<(), String> {
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
 
-    let plan = sub
+    let plan_slug = sub
         .get("plan")
         .and_then(|v| v.as_str())
         .unwrap_or("free");
-    let quota_bytes = sub
-        .get("quota_bytes")
+    let plan = Plan::from_slug(plan_slug);
+    let extra_tb = sub
+        .get("extra_storage_tb")
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
-    let plan_label = format!("{} ({})", capitalise(plan), format_bytes(quota_bytes));
+    let bonus_bytes = sub
+        .get("bonus_bytes")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let total_bytes = effective_quota(plan, extra_tb, bonus_bytes);
+    let plan_label = build_plan_label(plan, extra_tb, bonus_bytes);
 
     let region_label = my_region
         .get("preferred_region")
@@ -60,11 +67,6 @@ pub async fn run() -> Result<(), String> {
         .get("used_bytes")
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
-    let total_bytes = usage
-        .get("quota_bytes")
-        .or_else(|| usage.get("plan_limit_bytes"))
-        .and_then(|v| v.as_i64())
-        .unwrap_or(quota_bytes); // fall back to subscription quota
     let percentage = if total_bytes > 0 {
         used_bytes as f64 / total_bytes as f64
     } else {
@@ -72,8 +74,8 @@ pub async fn run() -> Result<(), String> {
     };
     let storage_label = format!(
         "{} / {} ({:.1}%)",
-        ui::human_size(used_bytes.max(0) as u64),
-        format_bytes(total_bytes),
+        format_storage_si(used_bytes),
+        format_storage_si(total_bytes),
         percentage * 100.0,
     );
 
@@ -132,7 +134,9 @@ pub async fn run() -> Result<(), String> {
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "email": email,
-                "plan": plan,
+                "plan": plan.slug(),
+                "extra_storage_tb": extra_tb,
+                "bonus_bytes": bonus_bytes,
                 "storage_used": used_bytes,
                 "storage_total": total_bytes,
                 "files": file_count,
@@ -213,6 +217,34 @@ pub async fn run() -> Result<(), String> {
     Ok(())
 }
 
+/// Build a descriptive plan label like "Pro — 8.0 TB (5.0 TB base + 3.0 TB extra)".
+fn build_plan_label(plan: Plan, extra_tb: i64, bonus_bytes: i64) -> String {
+    let name = capitalise(plan.slug());
+    let total = effective_quota(plan, extra_tb, bonus_bytes);
+    let base = plan.base_storage_bytes();
+
+    if extra_tb > 0 || bonus_bytes > 0 {
+        let mut parts = vec![format!("{} base", format_storage_si(base))];
+        if extra_tb > 0 {
+            parts.push(format!(
+                "{} extra",
+                format_storage_si(extra_tb * beebeeb_types::quota::ONE_TB)
+            ));
+        }
+        if bonus_bytes > 0 {
+            parts.push(format!("{} bonus", format_storage_si(bonus_bytes)));
+        }
+        format!(
+            "{} \u{2014} {} ({})",
+            name,
+            format_storage_si(total),
+            parts.join(" + "),
+        )
+    } else {
+        format!("{} \u{2014} {}", name, format_storage_si(total))
+    }
+}
+
 fn capitalise(s: &str) -> String {
     let mut c = s.chars();
     match c.next() {
@@ -221,26 +253,12 @@ fn capitalise(s: &str) -> String {
     }
 }
 
-fn format_bytes(bytes: i64) -> String {
-    const TB: i64 = 1_099_511_627_776;
-    const GB: i64 = 1_073_741_824;
-    if bytes <= 0 {
-        return "unlimited".to_string();
-    }
-    if bytes >= TB {
-        format!("{:.1} TB", bytes as f64 / TB as f64)
-    } else {
-        format!("{:.0} GB", bytes as f64 / GB as f64)
-    }
-}
-
-fn upload_limit_for_plan(plan: &str) -> &'static str {
-    match plan.to_lowercase().as_str() {
-        "free" => "5 GB/hr",
-        "starter" | "basic" => "20 GB/hr",
-        "pro" | "professional" | "team" => "50 GB/hr",
-        "business" => "100 GB/hr",
-        _ => "20 GB/hr",
+fn upload_limit_for_plan(plan: Plan) -> &'static str {
+    match plan {
+        Plan::Free => "5 GB/hr",
+        Plan::Basic => "20 GB/hr",
+        Plan::Pro => "50 GB/hr",
+        Plan::Business => "100 GB/hr",
     }
 }
 

@@ -1,4 +1,5 @@
 use base64::Engine;
+use beebeeb_types::quota::{effective_quota, format_storage_si, Plan};
 use colored::Colorize;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -125,6 +126,15 @@ pub async fn run(
 
     let api = ApiClient::from_config();
     api.require_auth()?;
+
+    // ── Quota pre-check ────────────────────────────────────────────────────
+    // Compute total size of the upload, then check against the user's quota.
+    let upload_size = if path.is_dir() {
+        dir_total_size(&path)
+    } else {
+        std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+    };
+    check_quota(&api, upload_size).await?;
 
     let parent_id = match (parent_id, folder) {
         (Some(parent_id), None) => Some(parent_id),
@@ -685,4 +695,59 @@ fn split_stem_ext(filename: &str) -> (&str, &str) {
         Some(i) if i > 0 => (&filename[..i], &filename[i + 1..]),
         _ => (filename, ""),
     }
+}
+
+/// Recursively compute the total size of all files in a directory.
+fn dir_total_size(dir: &std::path::Path) -> u64 {
+    walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter_map(|e| e.metadata().ok())
+        .map(|m| m.len())
+        .sum()
+}
+
+/// Fetch the user's subscription and usage, then reject the upload if
+/// `used_bytes + upload_size` exceeds the effective quota.
+async fn check_quota(api: &ApiClient, upload_size: u64) -> Result<(), String> {
+    let (usage_res, sub_res) = tokio::join!(api.get_usage(), api.get_subscription());
+
+    let usage = usage_res.unwrap_or_default();
+    let sub = sub_res.unwrap_or_default();
+
+    let used_bytes = usage
+        .get("used_bytes")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    let plan_slug = sub
+        .get("plan")
+        .and_then(|v| v.as_str())
+        .unwrap_or("free");
+    let plan = Plan::from_slug(plan_slug);
+    let extra_tb = sub
+        .get("extra_storage_tb")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let bonus_bytes = sub
+        .get("bonus_bytes")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let quota = effective_quota(plan, extra_tb, bonus_bytes);
+
+    if quota > 0 && used_bytes + upload_size as i64 > quota {
+        let used_str = format_storage_si(used_bytes);
+        let quota_str = format_storage_si(quota);
+        let extra_hint = if plan.can_add_storage() {
+            " Add more storage at app.beebeeb.io/billing"
+        } else {
+            ""
+        };
+        return Err(format!(
+            "Storage full ({used_str} / {quota_str}).{extra_hint}"
+        ));
+    }
+
+    Ok(())
 }
