@@ -1,12 +1,12 @@
 # Graph Report - cli  (2026-05-23)
 
 ## Corpus Check
-- 27 files · ~39,408 words
+- 28 files · ~40,132 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 284 nodes · 722 edges · 11 communities detected
-- Extraction: 72% EXTRACTED · 28% INFERRED · 0% AMBIGUOUS · INFERRED: 204 edges (avg confidence: 0.8)
+- 299 nodes · 746 edges · 12 communities detected
+- Extraction: 72% EXTRACTED · 28% INFERRED · 0% AMBIGUOUS · INFERRED: 206 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Community Hubs (Navigation)
@@ -21,6 +21,7 @@
 - [[_COMMUNITY_Community 8|Community 8]]
 - [[_COMMUNITY_Community 9|Community 9]]
 - [[_COMMUNITY_Community 10|Community 10]]
+- [[_COMMUNITY_Community 11|Community 11]]
 
 ## God Nodes (most connected - your core abstractions)
 1. `ApiClient` - 35 edges
@@ -35,62 +36,66 @@
 10. `handle_webdav()` - 15 edges
 
 ## Surprising Connections (you probably didn't know these)
+- `set_api_url_override()` --calls--> `main()`  [INFERRED]
+  config.rs → main.rs
 - `mark_uploaded()` --calls--> `push_single_file()`  [INFERRED]
   loopback.rs → commands/push.rs
-- `run()` --calls--> `is_json()`  [INFERRED]
-  commands/ls.rs → ui.rs
-- `run()` --calls--> `is_json()`  [INFERRED]
-  commands/quota.rs → ui.rs
-- `run()` --calls--> `is_json()`  [INFERRED]
-  commands/config.rs → ui.rs
-- `run()` --calls--> `is_json()`  [INFERRED]
-  commands/sync.rs → ui.rs
+- `is_json()` --calls--> `run()`  [INFERRED]
+  ui.rs → commands/ls.rs
+- `is_json()` --calls--> `run()`  [INFERRED]
+  ui.rs → commands/quota.rs
+- `is_json()` --calls--> `run()`  [INFERRED]
+  ui.rs → commands/config.rs
 
 ## Communities
 
 ### Community 0 - "Community 0"
 Cohesion: 0.11
-Nodes (38): decrypt_name(), collect_zip_entries(), looks_like_id_prefix(), pull_folder(), pull_single_file(), resolve_as_path(), run(), run_zip() (+30 more)
+Nodes (33): draw_picker(), list(), parse_hours(), run(), run_picker(), ShareEntry, b64(), compute_file_hash() (+25 more)
 
 ### Community 1 - "Community 1"
 Cohesion: 0.17
 Nodes (2): ApiClient, parse_response()
 
 ### Community 2 - "Community 2"
-Cohesion: 0.11
-Nodes (32): b64(), compute_file_hash(), create_folder(), do_download(), do_upload(), download_to(), FileEntry, format_size() (+24 more)
+Cohesion: 0.12
+Nodes (32): decrypt_name(), collect_zip_entries(), looks_like_id_prefix(), pull_folder(), pull_single_file(), resolve_as_path(), run(), run_zip() (+24 more)
 
 ### Community 3 - "Community 3"
-Cohesion: 0.09
-Nodes (24): run(), draw_picker(), parse_hours(), pick_share_interactively(), revoke(), run(), run_picker(), ShareEntry (+16 more)
-
-### Community 4 - "Community 4"
 Cohesion: 0.14
 Nodes (32): CachedDir, check_lock(), child_href(), DavState, decode_file_entry(), decrypt_name(), delete_response(), get_from_cache() (+24 more)
 
+### Community 4 - "Community 4"
+Cohesion: 0.11
+Nodes (23): run(), browser_login(), run(), run(), run(), run(), chrono_now(), ctrlc_channel() (+15 more)
+
 ### Community 5 - "Community 5"
-Cohesion: 0.12
-Nodes (22): run(), browser_login(), run(), run(), run(), run(), chrono_now(), ctrlc_channel() (+14 more)
+Cohesion: 0.16
+Nodes (21): build_plan_label(), capitalise(), format_number(), run(), capitalise(), run(), run_json(), speed_verdict() (+13 more)
 
 ### Community 6 - "Community 6"
-Cohesion: 0.17
+Cohesion: 0.18
 Nodes (5): BeebeebFs, CachedDir, InodeEntry, PendingCreate, unmount()
 
 ### Community 7 - "Community 7"
-Cohesion: 0.25
-Nodes (13): check_and_update(), cooldown_elapsed(), current_target(), extract_binary_from_tarball(), GitHubAsset, GitHubRelease, is_dev_build(), is_homebrew_install() (+5 more)
+Cohesion: 0.12
+Nodes (13): run(), revoke(), Cli, Commands, main(), print_custom_help(), box_line(), file_icon() (+5 more)
 
 ### Community 8 - "Community 8"
+Cohesion: 0.21
+Nodes (10): EnvSnapshot, explicit_override_always_wins(), explicit_override_zero_is_not_a_yes(), is_headless(), is_headless_with(), snap(), ssh_tty_alone_counts_as_ssh(), ssh_with_x_forwarding_is_not_headless() (+2 more)
+
+### Community 9 - "Community 9"
 Cohesion: 0.24
 Nodes (12): download_to_mirror(), extract_data(), handle_event(), load_master_key(), next_backoff(), run(), sanitize_filename(), unlink_in_mirror() (+4 more)
 
-### Community 9 - "Community 9"
-Cohesion: 0.33
-Nodes (7): CacheEntry, hex_val(), list_children_names(), list_files_cached(), percent_decode(), resolve_path(), ResolvedPath
-
 ### Community 10 - "Community 10"
-Cohesion: 0.7
-Nodes (4): build_plan_label(), capitalise(), format_number(), run()
+Cohesion: 0.3
+Nodes (11): collect_all_files(), decrypt_chunks_with_binary_key(), detect_key_derivation(), encrypt_chunks_with_string_key(), encrypt_name_with_string_key(), KeyDerivation, repair_file(), repair_folder() (+3 more)
+
+### Community 11 - "Community 11"
+Cohesion: 0.33
+Nodes (7): decrypt_file_chunks(), decrypt_json_chunks(), decrypt_name(), decrypt_raw_chunks(), try_decrypt_all_chunks(), unwrap_metadata_json(), WebAppBlob
 
 ## Knowledge Gaps
 - **24 isolated node(s):** `OutputMode`, `GitHubRelease`, `GitHubAsset`, `CacheEntry`, `ResolvedPath` (+19 more)
@@ -101,12 +106,12 @@ Nodes (4): build_plan_label(), capitalise(), format_number(), run()
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `ApiClient` connect `Community 1` to `Community 5`?**
-  _High betweenness centrality (0.165) - this node is a cross-community bridge._
-- **Why does `run()` connect `Community 2` to `Community 0`, `Community 3`, `Community 5`, `Community 7`?**
-  _High betweenness centrality (0.084) - this node is a cross-community bridge._
-- **Why does `decrypt_name()` connect `Community 0` to `Community 2`, `Community 3`, `Community 4`, `Community 6`, `Community 8`, `Community 9`?**
-  _High betweenness centrality (0.078) - this node is a cross-community bridge._
+- **Why does `ApiClient` connect `Community 1` to `Community 4`?**
+  _High betweenness centrality (0.160) - this node is a cross-community bridge._
+- **Why does `run()` connect `Community 0` to `Community 4`, `Community 5`, `Community 7`?**
+  _High betweenness centrality (0.124) - this node is a cross-community bridge._
+- **Why does `decrypt_name()` connect `Community 2` to `Community 0`, `Community 3`, `Community 6`, `Community 7`, `Community 9`?**
+  _High betweenness centrality (0.074) - this node is a cross-community bridge._
 - **Are the 8 inferred relationships involving `run()` (e.g. with `.from_config()` and `.read()`) actually correct?**
   _`run()` has 8 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 17 inferred relationships involving `is_json()` (e.g. with `run()` and `run()`) actually correct?**
