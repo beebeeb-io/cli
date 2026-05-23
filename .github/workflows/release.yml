@@ -339,7 +339,7 @@ jobs:
           # Write and read notes from a file to avoid quoting breaking things
           echo "$ANNOUNCEMENT_BODY" > "$RUNNER_TEMP/notes.txt"
 
-          # C3: RELEASE_TAG comes from an env var, not direct ${{ }} interpolation
+          # C3: RELEASE_TAG comes from an env var, not direct expression interpolation
           # shellcheck disable=SC2086
           gh release create "$RELEASE_TAG" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
       - name: Update Scoop manifest
