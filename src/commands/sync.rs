@@ -10,6 +10,7 @@ use colored::Colorize;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use walkdir::WalkDir;
+use zeroize::Zeroizing;
 
 use crate::api::ApiClient;
 use crate::config::load_config;
@@ -818,9 +819,11 @@ fn load_master_key() -> Result<beebeeb_core::kdf::MasterKey, String> {
     let mk_b64 = config
         .master_key
         .ok_or("No master key found. Run `bb login` first.")?;
-    let mk_bytes = b64()
-        .decode(&mk_b64)
-        .map_err(|e| format!("invalid master key in config: {e}"))?;
+    let mk_bytes: Zeroizing<Vec<u8>> = Zeroizing::new(
+        b64()
+            .decode(&mk_b64)
+            .map_err(|e| format!("invalid master key in config: {e}"))?,
+    );
     if mk_bytes.len() != 32 {
         return Err(format!(
             "master key must be 32 bytes, got {}",
@@ -1285,6 +1288,17 @@ fn format_size(bytes: u64) -> String {
 
 // ── LaunchAgent daemon ──────────────────────────────────────────────────────
 
+/// Escape user-controllable text for inclusion inside an XML element/attribute
+/// in a launchd plist. Paths may legitimately contain `&` or `'`, and a
+/// malicious filename could contain `<`/`>` that would corrupt the plist.
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
 fn install_launchagent(local_dir: &Path, remote_path: Option<&str>) -> Result<(), String> {
     let plist_dir = dirs::home_dir()
         .ok_or("cannot find home directory")?
@@ -1304,7 +1318,7 @@ fn install_launchagent(local_dir: &Path, remote_path: Option<&str>) -> Result<()
 
     let args_xml: String = args
         .iter()
-        .map(|a| format!("        <string>{}</string>", a))
+        .map(|a| format!("        <string>{}</string>", xml_escape(a)))
         .collect::<Vec<_>>()
         .join("\n");
 

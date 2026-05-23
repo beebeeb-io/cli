@@ -3,6 +3,7 @@ use beebeeb_types::quota::{effective_quota, format_storage_si, Plan};
 use colored::Colorize;
 use std::io::{self, Write};
 use std::path::PathBuf;
+use zeroize::Zeroizing;
 
 use crate::api::ApiClient;
 use crate::config::load_config;
@@ -21,9 +22,11 @@ pub(crate) fn load_master_key() -> Result<beebeeb_core::kdf::MasterKey, String> 
     let mk_b64 = config
         .master_key
         .ok_or("No master key found. Run `bb login` first.")?;
-    let mk_bytes = b64()
-        .decode(&mk_b64)
-        .map_err(|e| format!("invalid master key in config: {e}"))?;
+    let mk_bytes: Zeroizing<Vec<u8>> = Zeroizing::new(
+        b64()
+            .decode(&mk_b64)
+            .map_err(|e| format!("invalid master key in config: {e}"))?,
+    );
     if mk_bytes.len() != 32 {
         return Err(format!(
             "master key must be 32 bytes, got {}",

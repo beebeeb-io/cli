@@ -1,6 +1,7 @@
 use base64::Engine as _;
 use colored::Colorize;
 use std::io::{self, Write};
+use zeroize::Zeroizing;
 
 use crossterm::event::{self, Event, KeyCode};
 use crossterm::terminal;
@@ -89,9 +90,11 @@ pub async fn run(
     let (wrapped_file_key, client_key_b64) = if double_encrypted {
         let config = load_config();
         let mk_b64 = config.master_key.ok_or("No master key. Run `bb login`.")?;
-        let mk_bytes = base64::engine::general_purpose::STANDARD
-            .decode(&mk_b64)
-            .map_err(|e| format!("invalid master key: {e}"))?;
+        let mk_bytes: Zeroizing<Vec<u8>> = Zeroizing::new(
+            base64::engine::general_purpose::STANDARD
+                .decode(&mk_b64)
+                .map_err(|e| format!("invalid master key: {e}"))?,
+        );
         if mk_bytes.len() != 32 {
             return Err(format!("master key must be 32 bytes, got {}", mk_bytes.len()));
         }

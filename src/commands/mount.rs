@@ -99,6 +99,7 @@ mod fuse_impl {
         FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
         ReplyOpen, Request,
     };
+    use zeroize::Zeroizing;
 
     use crate::api::ApiClient;
     use crate::config::load_config;
@@ -1119,9 +1120,11 @@ mod fuse_impl {
             return Err("Not logged in. Run `bb login` first.".to_string());
         }
         let mk_b64 = config.master_key.ok_or("No master key. Run `bb login`.")?;
-        let mk_bytes = base64::engine::general_purpose::STANDARD
-            .decode(&mk_b64)
-            .map_err(|e| format!("invalid master key: {e}"))?;
+        let mk_bytes: Zeroizing<Vec<u8>> = Zeroizing::new(
+            base64::engine::general_purpose::STANDARD
+                .decode(&mk_b64)
+                .map_err(|e| format!("invalid master key: {e}"))?,
+        );
         if mk_bytes.len() != 32 {
             return Err(format!("master key must be 32 bytes, got {}", mk_bytes.len()));
         }

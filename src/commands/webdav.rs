@@ -36,7 +36,9 @@ use axum::Router;
 use axum::routing::any;
 use base64::Engine as _;
 use colored::Colorize;
+use percent_encoding::{percent_encode, NON_ALPHANUMERIC};
 use tokio::sync::Mutex;
+use zeroize::Zeroizing;
 
 use crate::api::ApiClient;
 use crate::config::load_config;
@@ -90,9 +92,11 @@ pub async fn run(port: u16, read_only: bool, cache_ttl: u64, no_cache: bool, ver
     let mk_b64 = config
         .master_key
         .ok_or("No master key found. Run `bb login` first.")?;
-    let mk_bytes = base64::engine::general_purpose::STANDARD
-        .decode(&mk_b64)
-        .map_err(|e| format!("invalid master key in config: {e}"))?;
+    let mk_bytes: Zeroizing<Vec<u8>> = Zeroizing::new(
+        base64::engine::general_purpose::STANDARD
+            .decode(&mk_b64)
+            .map_err(|e| format!("invalid master key in config: {e}"))?,
+    );
     if mk_bytes.len() != 32 {
         return Err(format!(
             "master key must be 32 bytes, got {}",
@@ -494,9 +498,29 @@ async fn get_response(state: &Arc<DavState>, path: &str, req_headers: &HeaderMap
             headers.insert("Last-Modified", hv);
         }
     }
+    // RFC 6266: percent-encode the filename to protect against injection of
+    // `"`, `\r`, `\n`, or other characters that would break the header.
+    // `filename=` carries an ASCII fallback (non-ASCII → `_`); `filename*=`
+    // carries the full Unicode name percent-encoded as UTF-8.
+    let ascii_fallback: String = resolved
+        .display_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii() && c != '"' && c != '\\' && c != '\r' && c != '\n' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let encoded = percent_encode(resolved.display_name.as_bytes(), NON_ALPHANUMERIC).to_string();
+    let header_value = format!(
+        "inline; filename=\"{}\"; filename*=UTF-8''{}",
+        ascii_fallback, encoded
+    );
     headers.insert(
         "Content-Disposition",
-        format!("inline; filename=\"{}\"", resolved.display_name)
+        header_value
             .parse()
             .unwrap_or_else(|_| "inline".parse().unwrap()),
     );

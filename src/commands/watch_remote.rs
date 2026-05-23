@@ -44,6 +44,7 @@ use colored::Colorize;
 use futures_util::StreamExt;
 use serde_json::Value;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::api::ApiClient;
 use crate::config::load_config;
@@ -398,9 +399,11 @@ fn load_master_key() -> Result<beebeeb_core::kdf::MasterKey, String> {
     let mk_b64 = cfg
         .master_key
         .ok_or("No master key found. Run `bb login` first.")?;
-    let mk = base64::engine::general_purpose::STANDARD
-        .decode(&mk_b64)
-        .map_err(|e| format!("invalid master key in config: {e}"))?;
+    let mk: Zeroizing<Vec<u8>> = Zeroizing::new(
+        base64::engine::general_purpose::STANDARD
+            .decode(&mk_b64)
+            .map_err(|e| format!("invalid master key in config: {e}"))?,
+    );
     if mk.len() != 32 {
         return Err(format!("master key must be 32 bytes, got {}", mk.len()));
     }

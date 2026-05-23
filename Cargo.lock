@@ -277,6 +277,7 @@ dependencies = [
  "notify-debouncer-full",
  "open",
  "p256",
+ "percent-encoding",
  "qrcode",
  "rand 0.8.6",
  "reqwest",
@@ -291,6 +292,7 @@ dependencies = [
  "uuid",
  "walkdir",
  "xz2",
+ "zeroize",
 ]
 
 [[package]]
