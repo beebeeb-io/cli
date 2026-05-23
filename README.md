@@ -12,16 +12,38 @@ The CLI lets you authenticate from the terminal, upload and download encrypted f
 
 ## Install
 
-### Quick install (recommended)
+### Homebrew (macOS / Linux)
+
+```sh
+brew install beebeeb-io/tap/bb
+```
+
+This is the recommended channel. Homebrew handles updates automatically with `brew upgrade bb`.
+
+### Quick install (Linux, macOS)
 
 ```sh
 curl -fsSL https://get.beebeeb.io | sh
 ```
 
-### Homebrew (macOS/Linux)
+Downloads the latest release tarball, verifies the SHA-256 checksum, and installs `bb` into `$CARGO_HOME/bin` (defaults to `~/.cargo/bin`). Re-run the command to upgrade.
 
-```sh
-brew install beebeeb-io/tap/bb
+### Direct download (all platforms)
+
+Grab the appropriate archive from [the latest GitHub release](https://github.com/beebeeb-io/cli/releases/latest) and extract `bb` (or `bb.exe`) into a directory on your `PATH`. Available targets:
+
+| Platform | Artifact |
+| --- | --- |
+| macOS Apple Silicon | `beebeeb-cli-aarch64-apple-darwin.tar.xz` |
+| macOS Intel | `beebeeb-cli-x86_64-apple-darwin.tar.xz` |
+| Linux x86_64 (musl) | `beebeeb-cli-x86_64-unknown-linux-musl.tar.xz` |
+| Linux aarch64 (musl) | `beebeeb-cli-aarch64-unknown-linux-musl.tar.xz` |
+| Windows x64 | `beebeeb-cli-x86_64-pc-windows-msvc.zip` |
+
+### Windows (Scoop)
+
+```powershell
+scoop install https://raw.githubusercontent.com/beebeeb-io/cli/main/scoop/bb.json
 ```
 
 ### From source
@@ -29,6 +51,8 @@ brew install beebeeb-io/tap/bb
 ```sh
 cargo install --git https://github.com/beebeeb-io/cli
 ```
+
+Useful for hacking on `bb` itself. Not the recommended install path — the tarball/Homebrew channels are signed via GitHub Releases and don't require a working Rust toolchain.
 
 ## Quick Start
 
