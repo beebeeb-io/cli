@@ -40,14 +40,23 @@ try {
   // We are unauthenticated → expect to be on /login.
   await page.waitForURL(/\/login/);
 
-  await page.getByLabel(/email/i).fill(TEST_EMAIL);
-  await page.getByLabel(/password/i).fill(TEST_PASSWORD);
-  await page.getByRole('button', { name: /sign in|log in/i }).click();
+  // Email input is rendered via BBInput which properly associates id + label.
+  await page.getByLabel(/^email/i).fill(TEST_EMAIL);
+  // Password input has a bare <label>Password</label> NOT associated by
+  // htmlFor/id, so getByLabel() can't find it. Use the autocomplete hint
+  // which is unique on this form.
+  await page.locator('input[autocomplete="current-password"]').fill(TEST_PASSWORD);
+  // Exact "Sign in" — the alt button is "Sign in with passkey" which also matches /sign in/i.
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
 
-  // TOTP prompt.
+  // TOTP prompt — the 6-digit form auto-submits on fill (see
+  // two-factor-prompt.tsx handleChange). Hidden input uses
+  // autocomplete="one-time-code" and aria-label="6-digit verification code".
+  // No explicit "Verify" click needed.
   const otp = authenticator.generate(TEST_TOTP_SECRET);
-  await page.getByLabel(/code|two-factor|2fa|totp/i).fill(otp);
-  await page.getByRole('button', { name: /verify|continue/i }).click();
+  await page
+    .locator('input[autocomplete="one-time-code"]')
+    .fill(otp, { force: true });
 
   // Back to /cli-auth?code=...
   await page.waitForURL(new RegExp(`/cli-auth\\?code=${USER_CODE}`));
