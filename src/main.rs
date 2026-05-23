@@ -3,6 +3,7 @@ mod colors;
 mod commands;
 mod config;
 mod crypto;
+mod env_detect;
 mod loopback;
 mod path;
 mod ui;
