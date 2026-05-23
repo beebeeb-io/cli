@@ -371,6 +371,8 @@ jobs:
           git config user.email "admin+bot@axo.dev"
           git add scoop/bb.json
           git commit -m "release: update scoop manifest to v$VERSION"
+          # The host job's checkout uses persist-credentials: false (C1 hardening),
+          # so we set the remote URL with a token before pushing back.
           # Push back to the same branch the tag was cut from. On a tag push,
           # github.ref_name is the tag, so we resolve the branch via the
           # commit's parent ref.
@@ -378,6 +380,7 @@ jobs:
           if [[ "$BRANCH" == "HEAD" ]]; then
             BRANCH="main"
           fi
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git push origin "HEAD:$BRANCH"
 
   publish-homebrew-formula:
