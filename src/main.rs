@@ -252,6 +252,12 @@ enum Commands {
         dry_run: bool,
     },
 
+    /// View billing info (read-only — manage plans on the web)
+    Billing {
+        #[command(subcommand)]
+        action: BillingAction,
+    },
+
     /// End current session
     Logout,
 
@@ -270,6 +276,16 @@ enum Commands {
         /// Target shell
         #[arg(value_enum)]
         shell: clap_complete::Shell,
+    },
+}
+
+#[derive(Subcommand)]
+enum BillingAction {
+    /// Show plan, storage usage, renewal date, and pending changes
+    Show {
+        /// Output the raw API merge as JSON (use with jq)
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -418,6 +434,9 @@ async fn main() {
         }
         Commands::Speedtest => commands::speedtest::run().await,
         Commands::Repair { dry_run } => commands::repair::run(dry_run).await,
+        Commands::Billing { action } => match action {
+            BillingAction::Show { json } => commands::billing::show(json).await,
+        },
         Commands::Logout => commands::logout::run().await,
         Commands::Completions { shell } => {
             clap_complete::generate(

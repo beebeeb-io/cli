@@ -304,6 +304,19 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    /// Alias of `get_subscription` for use from `bb billing show`. The Spec 2
+    /// billing tree will move to a dedicated `/api/v1/billing/*` namespace, so
+    /// keep the call sites pointed at a billing-named function from day one.
+    pub async fn get_billing_subscription(&self) -> Result<Value, String> {
+        self.get_subscription().await
+    }
+
+    /// Same idea — billing-named alias so `bb billing show` doesn't reach into
+    /// the files API directly.
+    pub async fn get_billing_usage(&self) -> Result<Value, String> {
+        self.get_usage().await
+    }
+
     /// Return all `{id, name_encrypted}` pairs in a folder so the caller can
     /// decrypt names locally and detect filename conflicts before uploading.
     /// `parent_id = None` queries the root folder.
