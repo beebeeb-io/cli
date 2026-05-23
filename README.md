@@ -371,7 +371,7 @@ Beebeeb uses a zero-knowledge architecture. The server stores only ciphertext --
 ~/.config/beebeeb/config.json                        # Linux
 ```
 
-This file is sensitive -- treat it like an SSH private key. Sessions expire after 30 days.
+This file is sensitive -- guard it like an SSH identity file. Sessions expire after 30 days.
 
 **Share links.** Standard share links include the file key in the URL. Double-encrypted shares (`--double-encrypted`) generate a client-side key K_c, wrap the file key under it, and place K_c in the URL fragment (after `#`), which is never sent to the server. Passphrase-protected shares wrap the file key with Argon2id-derived key material.
 
