@@ -304,6 +304,45 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    /// GET /api/v1/account/security-score (note: under /account, not /auth/account)
+    pub async fn security_score(&self) -> Result<serde_json::Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .get(self.url("/api/v1/account/security-score"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(resp).await
+    }
+
+    /// GET /api/v1/account/sessions (newer shape with device_kind, country_code).
+    pub async fn list_sessions_v2(&self) -> Result<serde_json::Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .get(self.url("/api/v1/account/sessions"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(resp).await
+    }
+
+    /// GET /api/v1/auth/passkeys
+    pub async fn list_passkeys(&self) -> Result<serde_json::Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .get(self.url("/api/v1/auth/passkeys"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(resp).await
+    }
+
     /// Step-up re-auth: POST /api/v1/auth/confirm.
     /// Returns the raw confirmation token. Caller is responsible for attaching
     /// it as `X-Confirm-Token` on the protected call within 5 minutes.

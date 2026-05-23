@@ -261,6 +261,10 @@ enum Commands {
     /// End current session
     Logout,
 
+    /// Manage your Beebeeb account — profile, plan, security, export, delete
+    #[command(subcommand)]
+    Account(AccountCmd),
+
     /// Print shell completion script to stdout
     ///
     /// Pipe the output into the correct file for your shell:
@@ -276,6 +280,42 @@ enum Commands {
         /// Target shell
         #[arg(value_enum)]
         shell: clap_complete::Shell,
+    },
+}
+
+#[derive(Subcommand)]
+enum AccountCmd {
+    /// Show profile, plan, security, sessions, passkeys
+    Show,
+    /// Change email address (verification sent to the new inbox)
+    Update {
+        /// New email address
+        #[arg(long)]
+        email: String,
+    },
+    /// GDPR data export — initiate, poll, or download
+    #[command(subcommand)]
+    Export(AccountExportCmd),
+    /// Permanently delete account (irreversible)
+    Delete {
+        /// Your current email address (must match exactly)
+        #[arg(long)]
+        confirm: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AccountExportCmd {
+    /// Queue a new export (rate-limited to 1 per 24h)
+    Start,
+    /// Check the status of an export job
+    Status { job_id: String },
+    /// Download a completed export
+    Download {
+        job_id: String,
+        /// Destination path (default: ./beebeeb-export-<date>.zip)
+        #[arg(short = 'o', long = "output")]
+        output: Option<std::path::PathBuf>,
     },
 }
 
@@ -436,6 +476,18 @@ async fn main() {
         Commands::Repair { dry_run } => commands::repair::run(dry_run).await,
         Commands::Billing { action } => match action {
             BillingAction::Show { json } => commands::billing::show(json).await,
+        },
+        Commands::Account(cmd) => match cmd {
+            AccountCmd::Show => commands::account::show().await,
+            AccountCmd::Update { email } => commands::account::update_email(email).await,
+            AccountCmd::Export(sub) => match sub {
+                AccountExportCmd::Start => commands::account::export_start().await,
+                AccountExportCmd::Status { job_id } => commands::account::export_status(job_id).await,
+                AccountExportCmd::Download { job_id, output } => {
+                    commands::account::export_download(job_id, output).await
+                }
+            },
+            AccountCmd::Delete { confirm } => commands::account::delete(confirm).await,
         },
         Commands::Logout => commands::logout::run().await,
         Commands::Completions { shell } => {
