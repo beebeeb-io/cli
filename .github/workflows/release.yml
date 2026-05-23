@@ -404,10 +404,11 @@ jobs:
       - plan
       - host
       - publish-homebrew-formula
+      - smoke-test-2fa
     # use "always() && ..." to allow us to wait for all publish jobs while
     # still allowing individual publish jobs to skip themselves (for prereleases).
     # "host" however must run to completion, no skipping allowed!
-    if: ${{ always() && needs.host.result == 'success' && (needs.publish-homebrew-formula.result == 'skipped' || needs.publish-homebrew-formula.result == 'success') }}
+    if: ${{ always() && needs.host.result == 'success' && (needs.publish-homebrew-formula.result == 'skipped' || needs.publish-homebrew-formula.result == 'success') && (needs.smoke-test-2fa.result == 'skipped' || needs.smoke-test-2fa.result == 'success') }}
     runs-on: "ubuntu-22.04"
     permissions:
       contents: read
@@ -418,3 +419,55 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+
+  smoke-test-2fa:
+    needs:
+      - host
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    if: ${{ !github.event.pull_request }}
+    env:
+      CLI_AUTH_TEST_EMAIL: ${{ secrets.CLI_AUTH_TEST_EMAIL }}
+      CLI_AUTH_TEST_PASSWORD: ${{ secrets.CLI_AUTH_TEST_PASSWORD }}
+      CLI_AUTH_TEST_TOTP_SECRET: ${{ secrets.CLI_AUTH_TEST_TOTP_SECRET }}
+      API_BASE_URL: https://api.beebeeb.io
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Download released bb binary
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p bin
+          gh release download "$TAG" \
+            --pattern 'beebeeb-cli-x86_64-unknown-linux-musl.tar.xz' \
+            --dir bin
+          tar -xJf bin/beebeeb-cli-x86_64-unknown-linux-musl.tar.xz -C bin --strip-components=1
+          chmod +x bin/bb
+          echo "$PWD/bin" >> "$GITHUB_PATH"
+      - name: Setup bun
+        uses: oven-sh/setup-bun@v1
+      - name: Install playwright + otplib in scripts/
+        working-directory: scripts
+        run: |
+          set -euo pipefail
+          bun add playwright otplib
+          bunx playwright install --with-deps chromium
+      - name: Run 2FA smoke test
+        if: ${{ env.CLI_AUTH_TEST_EMAIL != '' }}
+        run: bash scripts/test-2fa-login.sh
+      - name: Skip with loud warning if secrets missing
+        if: ${{ env.CLI_AUTH_TEST_EMAIL == '' }}
+        run: |
+          echo "::warning::2FA smoke test SKIPPED — CLI_AUTH_TEST_EMAIL/PASSWORD/TOTP_SECRET secrets are unset."
+          echo "::warning::Set them on beebeeb-io/cli to gate releases on a real end-to-end run."
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: 2fa-smoke-test-evidence
+          path: test-2fa-evidence/

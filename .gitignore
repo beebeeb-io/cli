@@ -72,3 +72,5 @@ playwright-report/
 graphify-out/.graphify_root
 graphify-out/cache/
 .cargo/config.toml
+scripts/node_modules/
+test-2fa-evidence/
