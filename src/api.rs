@@ -304,6 +304,26 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    /// Step-up re-auth: POST /api/v1/auth/confirm.
+    /// Returns the raw confirmation token. Caller is responsible for attaching
+    /// it as `X-Confirm-Token` on the protected call within 5 minutes.
+    pub async fn confirm_password(&self, password: &str) -> Result<String, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .post(self.url("/api/v1/auth/confirm"))
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "password": password }))
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        let body = parse_response(resp).await?;
+        body.get("confirmation_token")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .ok_or_else(|| "server did not return a confirmation_token".to_string())
+    }
+
     /// Alias of `get_subscription` for use from `bb billing show`. The Spec 2
     /// billing tree will move to a dedicated `/api/v1/billing/*` namespace, so
     /// keep the call sites pointed at a billing-named function from day one.
