@@ -253,7 +253,7 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "beebeeb-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aes-gcm",
  "axum",
@@ -1762,6 +1762,7 @@ version = "4.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ded22991b43cd15561b62b2e1cf9ace1344a8534eebec96202d5c96a77a6616a"
 dependencies = [
+ "argon2",
  "curve25519-dalek",
  "derive-where",
  "digest",

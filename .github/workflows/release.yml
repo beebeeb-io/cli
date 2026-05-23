@@ -342,6 +342,43 @@ jobs:
           # C3: RELEASE_TAG comes from an env var, not direct ${{ }} interpolation
           # shellcheck disable=SC2086
           gh release create "$RELEASE_TAG" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+      - name: Update Scoop manifest
+        env:
+          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # The windows artifact lives in artifacts/ now (the previous Download
+          # step glob-pulled everything).
+          ART="artifacts/beebeeb-cli-x86_64-pc-windows-msvc.zip"
+          if [[ ! -f "$ART" ]]; then
+            echo "::warning::Windows artifact not produced — skipping Scoop manifest update"
+            exit 0
+          fi
+          SHA="$(shasum -a 256 "$ART" | awk '{print $1}')"
+          VERSION="${RELEASE_TAG#v}"
+
+          # Use the helper for consistency.
+          echo "$SHA" > /tmp/win.sha256
+          bash scripts/update-scoop-manifest.sh "$VERSION" /tmp/win.sha256
+
+          if git diff --quiet scoop/bb.json; then
+            echo "scoop/bb.json unchanged"
+            exit 0
+          fi
+
+          git config user.name "axo bot"
+          git config user.email "admin+bot@axo.dev"
+          git add scoop/bb.json
+          git commit -m "release: update scoop manifest to v$VERSION"
+          # Push back to the same branch the tag was cut from. On a tag push,
+          # github.ref_name is the tag, so we resolve the branch via the
+          # commit's parent ref.
+          BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+          if [[ "$BRANCH" == "HEAD" ]]; then
+            BRANCH="main"
+          fi
+          git push origin "HEAD:$BRANCH"
 
   publish-homebrew-formula:
     needs:
