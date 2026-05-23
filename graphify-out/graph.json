@@ -9,7 +9,7 @@
       "source_file": "scripts/test-2fa-driver.mjs",
       "source_location": "L1",
       "id": "scripts_test_2fa_driver_mjs",
-      "community": 13,
+      "community": 14,
       "norm_label": "test-2fa-driver.mjs"
     },
     {
@@ -18,7 +18,7 @@
       "source_file": "src/loopback.rs",
       "source_location": "L1",
       "id": "src_loopback_rs",
-      "community": 2,
+      "community": 9,
       "norm_label": "loopback.rs"
     },
     {
@@ -27,7 +27,7 @@
       "source_file": "src/loopback.rs",
       "source_location": "L29",
       "id": "src_loopback_registry",
-      "community": 2,
+      "community": 9,
       "norm_label": "registry()"
     },
     {
@@ -36,7 +36,7 @@
       "source_file": "src/loopback.rs",
       "source_location": "L36",
       "id": "src_loopback_mark_uploaded",
-      "community": 2,
+      "community": 9,
       "norm_label": "mark_uploaded()"
     },
     {
@@ -45,7 +45,7 @@
       "source_file": "src/loopback.rs",
       "source_location": "L50",
       "id": "src_loopback_was_recently_uploaded",
-      "community": 2,
+      "community": 9,
       "norm_label": "was_recently_uploaded()"
     },
     {
@@ -54,7 +54,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L1",
       "id": "src_ui_rs",
-      "community": 4,
+      "community": 0,
       "norm_label": "ui.rs"
     },
     {
@@ -63,7 +63,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L15",
       "id": "src_ui_outputmode",
-      "community": 4,
+      "community": 0,
       "norm_label": "outputmode"
     },
     {
@@ -72,7 +72,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L31",
       "id": "src_ui_init",
-      "community": 4,
+      "community": 7,
       "norm_label": "init()"
     },
     {
@@ -81,7 +81,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L48",
       "id": "src_ui_is_rich",
-      "community": 2,
+      "community": 5,
       "norm_label": "is_rich()"
     },
     {
@@ -90,7 +90,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L53",
       "id": "src_ui_is_json",
-      "community": 2,
+      "community": 0,
       "norm_label": "is_json()"
     },
     {
@@ -99,7 +99,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L58",
       "id": "src_ui_is_quiet",
-      "community": 5,
+      "community": 0,
       "norm_label": "is_quiet()"
     },
     {
@@ -108,7 +108,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L65",
       "id": "src_ui_box_header",
-      "community": 4,
+      "community": 0,
       "norm_label": "box_header()"
     },
     {
@@ -117,7 +117,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L74",
       "id": "src_ui_box_line",
-      "community": 4,
+      "community": 0,
       "norm_label": "box_line()"
     },
     {
@@ -126,7 +126,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L83",
       "id": "src_ui_box_footer",
-      "community": 4,
+      "community": 0,
       "norm_label": "box_footer()"
     },
     {
@@ -135,7 +135,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L94",
       "id": "src_ui_relative_time",
-      "community": 4,
+      "community": 0,
       "norm_label": "relative_time()"
     },
     {
@@ -144,7 +144,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L154",
       "id": "src_ui_file_icon",
-      "community": 4,
+      "community": 0,
       "norm_label": "file_icon()"
     },
     {
@@ -153,7 +153,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L192",
       "id": "src_ui_human_size",
-      "community": 4,
+      "community": 0,
       "norm_label": "human_size()"
     },
     {
@@ -162,7 +162,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L215",
       "id": "src_ui_human_speed",
-      "community": 4,
+      "community": 0,
       "norm_label": "human_speed()"
     },
     {
@@ -171,7 +171,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L236",
       "id": "src_ui_speed_bar",
-      "community": 4,
+      "community": 0,
       "norm_label": "speed_bar()"
     },
     {
@@ -180,7 +180,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L252",
       "id": "src_ui_quota_bar",
-      "community": 4,
+      "community": 0,
       "norm_label": "quota_bar()"
     },
     {
@@ -189,7 +189,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L279",
       "id": "src_ui_speed_verdict",
-      "community": 6,
+      "community": 0,
       "norm_label": "speed_verdict()"
     },
     {
@@ -198,7 +198,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L294",
       "id": "src_ui_strip_ansi",
-      "community": 4,
+      "community": 0,
       "norm_label": "strip_ansi()"
     },
     {
@@ -207,7 +207,7 @@
       "source_file": "src/config.rs",
       "source_location": "L1",
       "id": "src_config_rs",
-      "community": 3,
+      "community": 4,
       "norm_label": "config.rs"
     },
     {
@@ -216,7 +216,7 @@
       "source_file": "src/config.rs",
       "source_location": "L9",
       "id": "src_config_config",
-      "community": 3,
+      "community": 4,
       "norm_label": "config"
     },
     {
@@ -225,7 +225,7 @@
       "source_file": "src/config.rs",
       "source_location": "L20",
       "id": "src_config_config_default",
-      "community": 3,
+      "community": 4,
       "norm_label": ".default()"
     },
     {
@@ -234,7 +234,7 @@
       "source_file": "src/config.rs",
       "source_location": "L30",
       "id": "src_config_config_path",
-      "community": 3,
+      "community": 4,
       "norm_label": "config_path()"
     },
     {
@@ -243,7 +243,7 @@
       "source_file": "src/config.rs",
       "source_location": "L37",
       "id": "src_config_load_config",
-      "community": 3,
+      "community": 4,
       "norm_label": "load_config()"
     },
     {
@@ -252,7 +252,7 @@
       "source_file": "src/config.rs",
       "source_location": "L54",
       "id": "src_config_set_api_url_override",
-      "community": 4,
+      "community": 7,
       "norm_label": "set_api_url_override()"
     },
     {
@@ -261,7 +261,7 @@
       "source_file": "src/config.rs",
       "source_location": "L64",
       "id": "src_config_save_config",
-      "community": 3,
+      "community": 4,
       "norm_label": "save_config()"
     },
     {
@@ -270,7 +270,7 @@
       "source_file": "src/config.rs",
       "source_location": "L82",
       "id": "src_config_clear_config",
-      "community": 3,
+      "community": 4,
       "norm_label": "clear_config()"
     },
     {
@@ -279,7 +279,7 @@
       "source_file": "src/update.rs",
       "source_location": "L1",
       "id": "src_update_rs",
-      "community": 6,
+      "community": 7,
       "norm_label": "update.rs"
     },
     {
@@ -288,7 +288,7 @@
       "source_file": "src/update.rs",
       "source_location": "L29",
       "id": "src_update_check_and_update",
-      "community": 6,
+      "community": 7,
       "norm_label": "check_and_update()"
     },
     {
@@ -297,7 +297,7 @@
       "source_file": "src/update.rs",
       "source_location": "L58",
       "id": "src_update_try_update",
-      "community": 6,
+      "community": 7,
       "norm_label": "try_update()"
     },
     {
@@ -306,7 +306,7 @@
       "source_file": "src/update.rs",
       "source_location": "L148",
       "id": "src_update_is_homebrew_install",
-      "community": 6,
+      "community": 7,
       "norm_label": "is_homebrew_install()"
     },
     {
@@ -315,7 +315,7 @@
       "source_file": "src/update.rs",
       "source_location": "L167",
       "id": "src_update_update_via_homebrew",
-      "community": 6,
+      "community": 7,
       "norm_label": "update_via_homebrew()"
     },
     {
@@ -324,7 +324,7 @@
       "source_file": "src/update.rs",
       "source_location": "L206",
       "id": "src_update_extract_binary_from_tarball",
-      "community": 6,
+      "community": 7,
       "norm_label": "extract_binary_from_tarball()"
     },
     {
@@ -333,7 +333,7 @@
       "source_file": "src/update.rs",
       "source_location": "L231",
       "id": "src_update_re_exec",
-      "community": 6,
+      "community": 7,
       "norm_label": "re_exec()"
     },
     {
@@ -342,7 +342,7 @@
       "source_file": "src/update.rs",
       "source_location": "L261",
       "id": "src_update_current_target",
-      "community": 6,
+      "community": 7,
       "norm_label": "current_target()"
     },
     {
@@ -351,7 +351,7 @@
       "source_file": "src/update.rs",
       "source_location": "L286",
       "id": "src_update_is_dev_build",
-      "community": 6,
+      "community": 7,
       "norm_label": "is_dev_build()"
     },
     {
@@ -360,7 +360,7 @@
       "source_file": "src/update.rs",
       "source_location": "L298",
       "id": "src_update_state_file",
-      "community": 6,
+      "community": 7,
       "norm_label": "state_file()"
     },
     {
@@ -369,7 +369,7 @@
       "source_file": "src/update.rs",
       "source_location": "L306",
       "id": "src_update_cooldown_elapsed",
-      "community": 6,
+      "community": 7,
       "norm_label": "cooldown_elapsed()"
     },
     {
@@ -378,7 +378,7 @@
       "source_file": "src/update.rs",
       "source_location": "L320",
       "id": "src_update_write_timestamp",
-      "community": 6,
+      "community": 7,
       "norm_label": "write_timestamp()"
     },
     {
@@ -387,7 +387,7 @@
       "source_file": "src/update.rs",
       "source_location": "L336",
       "id": "src_update_githubrelease",
-      "community": 6,
+      "community": 7,
       "norm_label": "githubrelease"
     },
     {
@@ -396,7 +396,7 @@
       "source_file": "src/update.rs",
       "source_location": "L342",
       "id": "src_update_githubasset",
-      "community": 6,
+      "community": 7,
       "norm_label": "githubasset"
     },
     {
@@ -405,7 +405,7 @@
       "source_file": "src/path.rs",
       "source_location": "L1",
       "id": "src_path_rs",
-      "community": 9,
+      "community": 10,
       "norm_label": "path.rs"
     },
     {
@@ -414,7 +414,7 @@
       "source_file": "src/path.rs",
       "source_location": "L22",
       "id": "src_path_cacheentry",
-      "community": 9,
+      "community": 10,
       "norm_label": "cacheentry"
     },
     {
@@ -423,7 +423,7 @@
       "source_file": "src/path.rs",
       "source_location": "L35",
       "id": "src_path_list_files_cached",
-      "community": 9,
+      "community": 10,
       "norm_label": "list_files_cached()"
     },
     {
@@ -432,7 +432,7 @@
       "source_file": "src/path.rs",
       "source_location": "L66",
       "id": "src_path_invalidate_cache",
-      "community": 9,
+      "community": 10,
       "norm_label": "invalidate_cache()"
     },
     {
@@ -441,7 +441,7 @@
       "source_file": "src/path.rs",
       "source_location": "L77",
       "id": "src_path_percent_decode",
-      "community": 9,
+      "community": 10,
       "norm_label": "percent_decode()"
     },
     {
@@ -450,7 +450,7 @@
       "source_file": "src/path.rs",
       "source_location": "L100",
       "id": "src_path_hex_val",
-      "community": 9,
+      "community": 10,
       "norm_label": "hex_val()"
     },
     {
@@ -459,7 +459,7 @@
       "source_file": "src/path.rs",
       "source_location": "L115",
       "id": "src_path_resolvedpath",
-      "community": 9,
+      "community": 10,
       "norm_label": "resolvedpath"
     },
     {
@@ -468,7 +468,7 @@
       "source_file": "src/path.rs",
       "source_location": "L130",
       "id": "src_path_resolve_path",
-      "community": 9,
+      "community": 10,
       "norm_label": "resolve_path()"
     },
     {
@@ -477,7 +477,7 @@
       "source_file": "src/path.rs",
       "source_location": "L208",
       "id": "src_path_list_children_names",
-      "community": 9,
+      "community": 10,
       "norm_label": "list_children_names()"
     },
     {
@@ -486,7 +486,7 @@
       "source_file": "src/colors.rs",
       "source_location": "L1",
       "id": "src_colors_rs",
-      "community": 14,
+      "community": 15,
       "norm_label": "colors.rs"
     },
     {
@@ -495,7 +495,7 @@
       "source_file": "src/main.rs",
       "source_location": "L1",
       "id": "src_main_rs",
-      "community": 4,
+      "community": 7,
       "norm_label": "main.rs"
     },
     {
@@ -504,7 +504,7 @@
       "source_file": "src/main.rs",
       "source_location": "L31",
       "id": "src_main_cli",
-      "community": 4,
+      "community": 7,
       "norm_label": "cli"
     },
     {
@@ -513,7 +513,7 @@
       "source_file": "src/main.rs",
       "source_location": "L53",
       "id": "src_main_commands",
-      "community": 4,
+      "community": 7,
       "norm_label": "commands"
     },
     {
@@ -522,7 +522,7 @@
       "source_file": "src/main.rs",
       "source_location": "L283",
       "id": "src_main_billingaction",
-      "community": 4,
+      "community": 7,
       "norm_label": "billingaction"
     },
     {
@@ -531,7 +531,7 @@
       "source_file": "src/main.rs",
       "source_location": "L292",
       "id": "src_main_print_custom_help",
-      "community": 4,
+      "community": 7,
       "norm_label": "print_custom_help()"
     },
     {
@@ -540,7 +540,7 @@
       "source_file": "src/main.rs",
       "source_location": "L358",
       "id": "src_main_main",
-      "community": 4,
+      "community": 7,
       "norm_label": "main()"
     },
     {
@@ -549,7 +549,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1",
       "id": "src_api_rs",
-      "community": 0,
+      "community": 1,
       "norm_label": "api.rs"
     },
     {
@@ -558,7 +558,7 @@
       "source_file": "src/api.rs",
       "source_location": "L7",
       "id": "src_api_format_request_error",
-      "community": 0,
+      "community": 1,
       "norm_label": "format_request_error()"
     },
     {
@@ -567,7 +567,7 @@
       "source_file": "src/api.rs",
       "source_location": "L17",
       "id": "src_api_apiclient",
-      "community": 0,
+      "community": 1,
       "norm_label": "apiclient"
     },
     {
@@ -576,7 +576,7 @@
       "source_file": "src/api.rs",
       "source_location": "L24",
       "id": "src_api_apiclient_from_config",
-      "community": 3,
+      "community": 4,
       "norm_label": ".from_config()"
     },
     {
@@ -585,7 +585,7 @@
       "source_file": "src/api.rs",
       "source_location": "L33",
       "id": "src_api_apiclient_require_auth",
-      "community": 0,
+      "community": 1,
       "norm_label": ".require_auth()"
     },
     {
@@ -594,7 +594,7 @@
       "source_file": "src/api.rs",
       "source_location": "L39",
       "id": "src_api_apiclient_url",
-      "community": 0,
+      "community": 1,
       "norm_label": ".url()"
     },
     {
@@ -603,7 +603,7 @@
       "source_file": "src/api.rs",
       "source_location": "L44",
       "id": "src_api_apiclient_signup",
-      "community": 0,
+      "community": 1,
       "norm_label": ".signup()"
     },
     {
@@ -612,7 +612,7 @@
       "source_file": "src/api.rs",
       "source_location": "L57",
       "id": "src_api_apiclient_opaque_login_start",
-      "community": 0,
+      "community": 1,
       "norm_label": ".opaque_login_start()"
     },
     {
@@ -621,7 +621,7 @@
       "source_file": "src/api.rs",
       "source_location": "L77",
       "id": "src_api_apiclient_opaque_login_finish",
-      "community": 0,
+      "community": 1,
       "norm_label": ".opaque_login_finish()"
     },
     {
@@ -630,7 +630,7 @@
       "source_file": "src/api.rs",
       "source_location": "L98",
       "id": "src_api_apiclient_logout",
-      "community": 0,
+      "community": 1,
       "norm_label": ".logout()"
     },
     {
@@ -639,7 +639,7 @@
       "source_file": "src/api.rs",
       "source_location": "L111",
       "id": "src_api_apiclient_get_me",
-      "community": 0,
+      "community": 1,
       "norm_label": ".get_me()"
     },
     {
@@ -648,7 +648,7 @@
       "source_file": "src/api.rs",
       "source_location": "L124",
       "id": "src_api_apiclient_get_region",
-      "community": 0,
+      "community": 1,
       "norm_label": ".get_region()"
     },
     {
@@ -657,7 +657,7 @@
       "source_file": "src/api.rs",
       "source_location": "L135",
       "id": "src_api_apiclient_get_my_region",
-      "community": 0,
+      "community": 1,
       "norm_label": ".get_my_region()"
     },
     {
@@ -666,7 +666,7 @@
       "source_file": "src/api.rs",
       "source_location": "L148",
       "id": "src_api_apiclient_ping_health",
-      "community": 0,
+      "community": 1,
       "norm_label": ".ping_health()"
     },
     {
@@ -675,7 +675,7 @@
       "source_file": "src/api.rs",
       "source_location": "L163",
       "id": "src_api_apiclient_list_files",
-      "community": 0,
+      "community": 1,
       "norm_label": ".list_files()"
     },
     {
@@ -684,7 +684,7 @@
       "source_file": "src/api.rs",
       "source_location": "L181",
       "id": "src_api_apiclient_get_file",
-      "community": 0,
+      "community": 1,
       "norm_label": ".get_file()"
     },
     {
@@ -693,7 +693,7 @@
       "source_file": "src/api.rs",
       "source_location": "L199",
       "id": "src_api_apiclient_upload_encrypted",
-      "community": 0,
+      "community": 1,
       "norm_label": ".upload_encrypted()"
     },
     {
@@ -702,7 +702,7 @@
       "source_file": "src/api.rs",
       "source_location": "L233",
       "id": "src_api_apiclient_create_share",
-      "community": 0,
+      "community": 1,
       "norm_label": ".create_share()"
     },
     {
@@ -711,7 +711,7 @@
       "source_file": "src/api.rs",
       "source_location": "L268",
       "id": "src_api_apiclient_list_shares",
-      "community": 0,
+      "community": 1,
       "norm_label": ".list_shares()"
     },
     {
@@ -720,7 +720,7 @@
       "source_file": "src/api.rs",
       "source_location": "L282",
       "id": "src_api_apiclient_delete_share",
-      "community": 0,
+      "community": 1,
       "norm_label": ".delete_share()"
     },
     {
@@ -729,7 +729,7 @@
       "source_file": "src/api.rs",
       "source_location": "L295",
       "id": "src_api_apiclient_get_subscription",
-      "community": 0,
+      "community": 1,
       "norm_label": ".get_subscription()"
     },
     {
@@ -738,7 +738,7 @@
       "source_file": "src/api.rs",
       "source_location": "L310",
       "id": "src_api_apiclient_confirm_password",
-      "community": 0,
+      "community": 1,
       "norm_label": ".confirm_password()"
     },
     {
@@ -747,7 +747,7 @@
       "source_file": "src/api.rs",
       "source_location": "L330",
       "id": "src_api_apiclient_get_billing_subscription",
-      "community": 0,
+      "community": 1,
       "norm_label": ".get_billing_subscription()"
     },
     {
@@ -756,7 +756,7 @@
       "source_file": "src/api.rs",
       "source_location": "L336",
       "id": "src_api_apiclient_get_billing_usage",
-      "community": 0,
+      "community": 1,
       "norm_label": ".get_billing_usage()"
     },
     {
@@ -765,7 +765,7 @@
       "source_file": "src/api.rs",
       "source_location": "L343",
       "id": "src_api_apiclient_check_conflict",
-      "community": 0,
+      "community": 1,
       "norm_label": ".check_conflict()"
     },
     {
@@ -774,7 +774,7 @@
       "source_file": "src/api.rs",
       "source_location": "L359",
       "id": "src_api_apiclient_get_file_count",
-      "community": 0,
+      "community": 1,
       "norm_label": ".get_file_count()"
     },
     {
@@ -783,7 +783,7 @@
       "source_file": "src/api.rs",
       "source_location": "L371",
       "id": "src_api_apiclient_get_usage",
-      "community": 0,
+      "community": 1,
       "norm_label": ".get_usage()"
     },
     {
@@ -792,7 +792,7 @@
       "source_file": "src/api.rs",
       "source_location": "L384",
       "id": "src_api_apiclient_get_sessions",
-      "community": 0,
+      "community": 1,
       "norm_label": ".get_sessions()"
     },
     {
@@ -801,7 +801,7 @@
       "source_file": "src/api.rs",
       "source_location": "L397",
       "id": "src_api_apiclient_create_folder",
-      "community": 0,
+      "community": 1,
       "norm_label": ".create_folder()"
     },
     {
@@ -810,7 +810,7 @@
       "source_file": "src/api.rs",
       "source_location": "L423",
       "id": "src_api_apiclient_move_file",
-      "community": 0,
+      "community": 1,
       "norm_label": ".move_file()"
     },
     {
@@ -819,7 +819,7 @@
       "source_file": "src/api.rs",
       "source_location": "L449",
       "id": "src_api_apiclient_trash_file",
-      "community": 0,
+      "community": 1,
       "norm_label": ".trash_file()"
     },
     {
@@ -828,7 +828,7 @@
       "source_file": "src/api.rs",
       "source_location": "L465",
       "id": "src_api_apiclient_create_stream_token",
-      "community": 0,
+      "community": 1,
       "norm_label": ".create_stream_token()"
     },
     {
@@ -837,7 +837,7 @@
       "source_file": "src/api.rs",
       "source_location": "L482",
       "id": "src_api_apiclient_stream_url",
-      "community": 0,
+      "community": 1,
       "norm_label": ".stream_url()"
     },
     {
@@ -846,7 +846,7 @@
       "source_file": "src/api.rs",
       "source_location": "L491",
       "id": "src_api_apiclient_list_ops_since",
-      "community": 0,
+      "community": 1,
       "norm_label": ".list_ops_since()"
     },
     {
@@ -855,7 +855,7 @@
       "source_file": "src/api.rs",
       "source_location": "L505",
       "id": "src_api_apiclient_open_sync_stream",
-      "community": 0,
+      "community": 1,
       "norm_label": ".open_sync_stream()"
     },
     {
@@ -864,7 +864,7 @@
       "source_file": "src/api.rs",
       "source_location": "L529",
       "id": "src_api_apiclient_get_json",
-      "community": 0,
+      "community": 1,
       "norm_label": ".get_json()"
     },
     {
@@ -873,7 +873,7 @@
       "source_file": "src/api.rs",
       "source_location": "L542",
       "id": "src_api_apiclient_speedtest_upload",
-      "community": 0,
+      "community": 1,
       "norm_label": ".speedtest_upload()"
     },
     {
@@ -882,7 +882,7 @@
       "source_file": "src/api.rs",
       "source_location": "L561",
       "id": "src_api_apiclient_speedtest_download",
-      "community": 0,
+      "community": 1,
       "norm_label": ".speedtest_download()"
     },
     {
@@ -891,7 +891,7 @@
       "source_file": "src/api.rs",
       "source_location": "L585",
       "id": "src_api_apiclient_find_file_by_id_prefix",
-      "community": 0,
+      "community": 1,
       "norm_label": ".find_file_by_id_prefix()"
     },
     {
@@ -900,7 +900,7 @@
       "source_file": "src/api.rs",
       "source_location": "L623",
       "id": "src_api_apiclient_download_file",
-      "community": 0,
+      "community": 1,
       "norm_label": ".download_file()"
     },
     {
@@ -909,7 +909,7 @@
       "source_file": "src/api.rs",
       "source_location": "L646",
       "id": "src_api_parse_response",
-      "community": 0,
+      "community": 1,
       "norm_label": "parse_response()"
     },
     {
@@ -918,7 +918,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L1",
       "id": "src_env_detect_rs",
-      "community": 10,
+      "community": 8,
       "norm_label": "env_detect.rs"
     },
     {
@@ -927,7 +927,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L20",
       "id": "src_env_detect_is_headless",
-      "community": 10,
+      "community": 8,
       "norm_label": "is_headless()"
     },
     {
@@ -936,7 +936,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L26",
       "id": "src_env_detect_is_headless_with",
-      "community": 10,
+      "community": 8,
       "norm_label": "is_headless_with()"
     },
     {
@@ -945,7 +945,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L54",
       "id": "src_env_detect_envsnapshot",
-      "community": 10,
+      "community": 8,
       "norm_label": "envsnapshot"
     },
     {
@@ -954,7 +954,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L63",
       "id": "src_env_detect_envsnapshot_current",
-      "community": 10,
+      "community": 8,
       "norm_label": ".current()"
     },
     {
@@ -963,7 +963,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L78",
       "id": "src_env_detect_snap",
-      "community": 10,
+      "community": 8,
       "norm_label": "snap()"
     },
     {
@@ -972,7 +972,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L83",
       "id": "src_env_detect_empty_env_is_not_headless_on_macos",
-      "community": 10,
+      "community": 8,
       "norm_label": "empty_env_is_not_headless_on_macos()"
     },
     {
@@ -981,7 +981,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L92",
       "id": "src_env_detect_empty_env_is_headless_on_linux",
-      "community": 10,
+      "community": 8,
       "norm_label": "empty_env_is_headless_on_linux()"
     },
     {
@@ -990,7 +990,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L100",
       "id": "src_env_detect_empty_env_is_not_headless_on_windows",
-      "community": 10,
+      "community": 8,
       "norm_label": "empty_env_is_not_headless_on_windows()"
     },
     {
@@ -999,7 +999,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L107",
       "id": "src_env_detect_explicit_override_always_wins",
-      "community": 10,
+      "community": 8,
       "norm_label": "explicit_override_always_wins()"
     },
     {
@@ -1008,7 +1008,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L115",
       "id": "src_env_detect_explicit_override_zero_is_not_a_yes",
-      "community": 10,
+      "community": 8,
       "norm_label": "explicit_override_zero_is_not_a_yes()"
     },
     {
@@ -1017,7 +1017,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L129",
       "id": "src_env_detect_ssh_without_display_is_headless",
-      "community": 10,
+      "community": 8,
       "norm_label": "ssh_without_display_is_headless()"
     },
     {
@@ -1026,7 +1026,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L139",
       "id": "src_env_detect_ssh_with_x_forwarding_is_not_headless",
-      "community": 10,
+      "community": 8,
       "norm_label": "ssh_with_x_forwarding_is_not_headless()"
     },
     {
@@ -1035,7 +1035,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L148",
       "id": "src_env_detect_ssh_tty_alone_counts_as_ssh",
-      "community": 10,
+      "community": 8,
       "norm_label": "ssh_tty_alone_counts_as_ssh()"
     },
     {
@@ -1044,7 +1044,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L157",
       "id": "src_env_detect_wayland_display_counts_as_a_display",
-      "community": 10,
+      "community": 8,
       "norm_label": "wayland_display_counts_as_a_display()"
     },
     {
@@ -1053,7 +1053,7 @@
       "source_file": "src/crypto.rs",
       "source_location": "L1",
       "id": "src_crypto_rs",
-      "community": 8,
+      "community": 2,
       "norm_label": "crypto.rs"
     },
     {
@@ -1062,7 +1062,7 @@
       "source_file": "src/crypto.rs",
       "source_location": "L36",
       "id": "src_crypto_webappblob",
-      "community": 8,
+      "community": 2,
       "norm_label": "webappblob"
     },
     {
@@ -1071,7 +1071,7 @@
       "source_file": "src/crypto.rs",
       "source_location": "L46",
       "id": "src_crypto_decrypt_name",
-      "community": 8,
+      "community": 2,
       "norm_label": "decrypt_name()"
     },
     {
@@ -1080,7 +1080,7 @@
       "source_file": "src/crypto.rs",
       "source_location": "L99",
       "id": "src_crypto_unwrap_metadata_json",
-      "community": 8,
+      "community": 2,
       "norm_label": "unwrap_metadata_json()"
     },
     {
@@ -1089,7 +1089,7 @@
       "source_file": "src/crypto.rs",
       "source_location": "L123",
       "id": "src_crypto_decrypt_file_chunks",
-      "community": 8,
+      "community": 2,
       "norm_label": "decrypt_file_chunks()"
     },
     {
@@ -1098,7 +1098,7 @@
       "source_file": "src/crypto.rs",
       "source_location": "L152",
       "id": "src_crypto_try_decrypt_all_chunks",
-      "community": 8,
+      "community": 2,
       "norm_label": "try_decrypt_all_chunks()"
     },
     {
@@ -1107,7 +1107,7 @@
       "source_file": "src/crypto.rs",
       "source_location": "L173",
       "id": "src_crypto_decrypt_json_chunks",
-      "community": 8,
+      "community": 2,
       "norm_label": "decrypt_json_chunks()"
     },
     {
@@ -1116,7 +1116,7 @@
       "source_file": "src/crypto.rs",
       "source_location": "L215",
       "id": "src_crypto_decrypt_raw_chunks",
-      "community": 8,
+      "community": 2,
       "norm_label": "decrypt_raw_chunks()"
     },
     {
@@ -1125,7 +1125,7 @@
       "source_file": "src/commands/ls.rs",
       "source_location": "L1",
       "id": "src_commands_ls_rs",
-      "community": 4,
+      "community": 0,
       "norm_label": "ls.rs"
     },
     {
@@ -1134,7 +1134,7 @@
       "source_file": "src/commands/ls.rs",
       "source_location": "L8",
       "id": "commands_ls_run",
-      "community": 4,
+      "community": 0,
       "norm_label": "run()"
     },
     {
@@ -1233,7 +1233,7 @@
       "source_file": "src/commands/quota.rs",
       "source_location": "L1",
       "id": "src_commands_quota_rs",
-      "community": 6,
+      "community": 0,
       "norm_label": "quota.rs"
     },
     {
@@ -1242,7 +1242,7 @@
       "source_file": "src/commands/quota.rs",
       "source_location": "L7",
       "id": "commands_quota_run",
-      "community": 6,
+      "community": 0,
       "norm_label": "run()"
     },
     {
@@ -1251,7 +1251,7 @@
       "source_file": "src/commands/quota.rs",
       "source_location": "L156",
       "id": "commands_quota_build_plan_label",
-      "community": 6,
+      "community": 0,
       "norm_label": "build_plan_label()"
     },
     {
@@ -1260,7 +1260,7 @@
       "source_file": "src/commands/quota.rs",
       "source_location": "L183",
       "id": "commands_quota_capitalise",
-      "community": 6,
+      "community": 0,
       "norm_label": "capitalise()"
     },
     {
@@ -1269,7 +1269,7 @@
       "source_file": "src/commands/quota.rs",
       "source_location": "L192",
       "id": "commands_quota_format_number",
-      "community": 6,
+      "community": 0,
       "norm_label": "format_number()"
     },
     {
@@ -1350,7 +1350,7 @@
       "source_file": "src/commands/config.rs",
       "source_location": "L1",
       "id": "src_commands_config_rs",
-      "community": 2,
+      "community": 0,
       "norm_label": "config.rs"
     },
     {
@@ -1359,7 +1359,7 @@
       "source_file": "src/commands/config.rs",
       "source_location": "L5",
       "id": "commands_config_run",
-      "community": 2,
+      "community": 0,
       "norm_label": "run()"
     },
     {
@@ -1368,7 +1368,7 @@
       "source_file": "src/commands/pull.rs",
       "source_location": "L1",
       "id": "src_commands_pull_rs",
-      "community": 2,
+      "community": 5,
       "norm_label": "pull.rs"
     },
     {
@@ -1377,7 +1377,7 @@
       "source_file": "src/commands/pull.rs",
       "source_location": "L9",
       "id": "commands_pull_run",
-      "community": 2,
+      "community": 5,
       "norm_label": "run()"
     },
     {
@@ -1386,7 +1386,7 @@
       "source_file": "src/commands/pull.rs",
       "source_location": "L147",
       "id": "commands_pull_looks_like_id_prefix",
-      "community": 2,
+      "community": 5,
       "norm_label": "looks_like_id_prefix()"
     },
     {
@@ -1395,7 +1395,7 @@
       "source_file": "src/commands/pull.rs",
       "source_location": "L157",
       "id": "commands_pull_resolve_as_path",
-      "community": 2,
+      "community": 5,
       "norm_label": "resolve_as_path()"
     },
     {
@@ -1404,7 +1404,7 @@
       "source_file": "src/commands/pull.rs",
       "source_location": "L174",
       "id": "commands_pull_pull_folder",
-      "community": 2,
+      "community": 5,
       "norm_label": "pull_folder()"
     },
     {
@@ -1413,7 +1413,7 @@
       "source_file": "src/commands/pull.rs",
       "source_location": "L213",
       "id": "commands_pull_pull_single_file",
-      "community": 2,
+      "community": 5,
       "norm_label": "pull_single_file()"
     },
     {
@@ -1422,7 +1422,7 @@
       "source_file": "src/commands/pull.rs",
       "source_location": "L265",
       "id": "commands_pull_run_zip",
-      "community": 2,
+      "community": 5,
       "norm_label": "run_zip()"
     },
     {
@@ -1431,7 +1431,7 @@
       "source_file": "src/commands/pull.rs",
       "source_location": "L460",
       "id": "commands_pull_collect_zip_entries",
-      "community": 2,
+      "community": 5,
       "norm_label": "collect_zip_entries()"
     },
     {
@@ -1440,7 +1440,7 @@
       "source_file": "src/commands/sync.rs",
       "source_location": "L1",
       "id": "src_commands_sync_rs",
-      "community": 5,
+      "community": 2,
       "norm_label": "sync.rs"
     },
     {
@@ -1449,7 +1449,7 @@
       "source_file": "src/commands/sync.rs",
       "source_location": "L22",
       "id": "commands_sync_syncdashboard",
-      "community": 5,
+      "community": 2,
       "norm_label": "syncdashboard"
     },
     {
@@ -1458,7 +1458,7 @@
       "source_file": "src/commands/sync.rs",
       "source_location": "L30",
       "id": "commands_sync_print_dashboard",
-      "community": 5,
+      "community": 2,
       "norm_label": "print_dashboard()"
     },
     {
@@ -1467,7 +1467,7 @@
       "source_file": "src/commands/sync.rs",
       "source_location": "L86",
       "id": "commands_sync_is_ignored_path",
-      "community": 5,
+      "community": 2,
       "norm_label": "is_ignored_path()"
     },
     {
@@ -1476,7 +1476,7 @@
       "source_file": "src/commands/sync.rs",
       "source_location": "L98",
       "id": "commands_sync_syncstate",
-      "community": 5,
+      "community": 2,
       "norm_label": "syncstate"
     },
     {
@@ -1485,7 +1485,7 @@
       "source_file": "src/commands/sync.rs",
       "source_location": "L107",
       "id": "commands_sync_fileentry",
-      "community": 5,
+      "community": 2,
       "norm_label": "fileentry"
     },
     {
@@ -1494,7 +1494,7 @@
       "source_file": "src/commands/sync.rs",
       "source_location": "L117",
       "id": "commands_sync_localfile",
-      "community": 5,
+      "community": 2,
       "norm_label": "localfile"
     },
     {
@@ -1503,7 +1503,7 @@
       "source_file": "src/commands/sync.rs",
       "source_location": "L123",
       "id": "commands_sync_compute_file_hash",
-      "community": 5,
+      "community": 2,
       "norm_label": "compute_file_hash()"
     },
     {
@@ -1512,7 +1512,7 @@
       "source_file": "src/commands/sync.rs",
       "source_location": "L132",
       "id": "commands_sync_remotefile",
-      "community": 5,
+      "community": 2,
       "norm_label": "remotefile"
     },
     {
@@ -1521,7 +1521,7 @@
       "source_file": "src/commands/sync.rs",
       "source_location": "L138",
       "id": "commands_sync_run",
-      "community": 5,
+      "community": 2,
       "norm_label": "run()"
     },
     {
@@ -1530,7 +1530,7 @@
       "source_file": "src/commands/sync.rs",
       "source_location": "L812",
       "id": "commands_sync_b64",
-      "community": 5,
+      "community": 2,
       "norm_label": "b64()"
     },
     {
@@ -1539,7 +1539,7 @@
       "source_file": "src/commands/sync.rs",
       "source_location": "L816",
       "id": "commands_sync_load_master_key",
-      "community": 5,
+      "community": 2,
       "norm_label": "load_master_key()"
     },
     {
@@ -1548,7 +1548,7 @@
       "source_file": "src/commands/sync.rs",
       "source_location": "L835",
       "id": "commands_sync_rel_path_str",
-      "community": 5,
+      "community": 2,
       "norm_label": "rel_path_str()"
     },
     {
@@ -1557,7 +1557,7 @@
       "source_file": "src/commands/sync.rs",
       "source_location": "L842",
       "id": "commands_sync_walk_local_files",
-      "community": 5,
+      "community": 2,
       "norm_label": "walk_local_files()"
     },
     {
@@ -1566,7 +1566,7 @@
       "source_file": "src/commands/sync.rs",
       "source_location": "L880",
       "id": "commands_sync_walk_local_folders",
-      "community": 5,
+      "community": 2,
       "norm_label": "walk_local_folders()"
     },
     {
@@ -1575,7 +1575,7 @@
       "source_file": "src/commands/sync.rs",
       "source_location": "L902",
       "id": "commands_sync_parent_remote_id",
-      "community": 5,
+      "community": 2,
       "norm_label": "parent_remote_id()"
     },
     {
@@ -1584,7 +1584,7 @@
       "source_file": "src/commands/sync.rs",
       "source_location": "L913",
       "id": "commands_sync_resolve_remote_folder",
-      "community": 5,
+      "community": 2,
       "norm_label": "resolve_remote_folder()"
     },
     {
@@ -1593,7 +1593,7 @@
       "source_file": "src/commands/sync.rs",
       "source_location": "L989",
       "id": "commands_sync_create_folder",
-      "community": 5,
+      "community": 2,
       "norm_label": "create_folder()"
     },
     {
@@ -1602,7 +1602,7 @@
       "source_file": "src/commands/sync.rs",
       "source_location": "L1009",
       "id": "commands_sync_walk_remote",
-      "community": 5,
+      "community": 2,
       "norm_label": "walk_remote()"
     },
     {
@@ -1611,7 +1611,7 @@
       "source_file": "src/commands/sync.rs",
       "source_location": "L1082",
       "id": "commands_sync_do_upload",
-      "community": 5,
+      "community": 2,
       "norm_label": "do_upload()"
     },
     {
@@ -1620,7 +1620,7 @@
       "source_file": "src/commands/sync.rs",
       "source_location": "L1136",
       "id": "commands_sync_do_download",
-      "community": 5,
+      "community": 2,
       "norm_label": "do_download()"
     },
     {
@@ -1629,7 +1629,7 @@
       "source_file": "src/commands/sync.rs",
       "source_location": "L1184",
       "id": "commands_sync_upload_file_to",
-      "community": 5,
+      "community": 2,
       "norm_label": "upload_file_to()"
     },
     {
@@ -1638,7 +1638,7 @@
       "source_file": "src/commands/sync.rs",
       "source_location": "L1243",
       "id": "commands_sync_download_to",
-      "community": 5,
+      "community": 2,
       "norm_label": "download_to()"
     },
     {
@@ -1647,7 +1647,7 @@
       "source_file": "src/commands/sync.rs",
       "source_location": "L1271",
       "id": "commands_sync_format_size",
-      "community": 5,
+      "community": 2,
       "norm_label": "format_size()"
     },
     {
@@ -1656,7 +1656,7 @@
       "source_file": "src/commands/sync.rs",
       "source_location": "L1288",
       "id": "commands_sync_install_launchagent",
-      "community": 5,
+      "community": 2,
       "norm_label": "install_launchagent()"
     },
     {
@@ -1665,7 +1665,7 @@
       "source_file": "src/commands/sync.rs",
       "source_location": "L1364",
       "id": "commands_sync_uninstall_launchagent",
-      "community": 5,
+      "community": 2,
       "norm_label": "uninstall_launchagent()"
     },
     {
@@ -1674,7 +1674,7 @@
       "source_file": "src/commands/repair.rs",
       "source_location": "L1",
       "id": "src_commands_repair_rs",
-      "community": 8,
+      "community": 0,
       "norm_label": "repair.rs"
     },
     {
@@ -1683,7 +1683,7 @@
       "source_file": "src/commands/repair.rs",
       "source_location": "L12",
       "id": "commands_repair_keyderivation",
-      "community": 8,
+      "community": 0,
       "norm_label": "keyderivation"
     },
     {
@@ -1692,7 +1692,7 @@
       "source_file": "src/commands/repair.rs",
       "source_location": "L23",
       "id": "commands_repair_detect_key_derivation",
-      "community": 8,
+      "community": 0,
       "norm_label": "detect_key_derivation()"
     },
     {
@@ -1701,7 +1701,7 @@
       "source_file": "src/commands/repair.rs",
       "source_location": "L82",
       "id": "commands_repair_unwrap_metadata_json",
-      "community": 8,
+      "community": 0,
       "norm_label": "unwrap_metadata_json()"
     },
     {
@@ -1710,7 +1710,7 @@
       "source_file": "src/commands/repair.rs",
       "source_location": "L93",
       "id": "commands_repair_decrypt_chunks_with_binary_key",
-      "community": 8,
+      "community": 0,
       "norm_label": "decrypt_chunks_with_binary_key()"
     },
     {
@@ -1719,7 +1719,7 @@
       "source_file": "src/commands/repair.rs",
       "source_location": "L109",
       "id": "commands_repair_encrypt_chunks_with_string_key",
-      "community": 8,
+      "community": 0,
       "norm_label": "encrypt_chunks_with_string_key()"
     },
     {
@@ -1728,7 +1728,7 @@
       "source_file": "src/commands/repair.rs",
       "source_location": "L138",
       "id": "commands_repair_encrypt_name_with_string_key",
-      "community": 8,
+      "community": 0,
       "norm_label": "encrypt_name_with_string_key()"
     },
     {
@@ -1737,7 +1737,7 @@
       "source_file": "src/commands/repair.rs",
       "source_location": "L149",
       "id": "commands_repair_repairstats",
-      "community": 8,
+      "community": 0,
       "norm_label": "repairstats"
     },
     {
@@ -1746,7 +1746,7 @@
       "source_file": "src/commands/repair.rs",
       "source_location": "L157",
       "id": "commands_repair_run",
-      "community": 8,
+      "community": 0,
       "norm_label": "run()"
     },
     {
@@ -1755,7 +1755,7 @@
       "source_file": "src/commands/repair.rs",
       "source_location": "L370",
       "id": "commands_repair_collect_all_files",
-      "community": 8,
+      "community": 0,
       "norm_label": "collect_all_files()"
     },
     {
@@ -1764,7 +1764,7 @@
       "source_file": "src/commands/repair.rs",
       "source_location": "L414",
       "id": "commands_repair_repair_folder",
-      "community": 8,
+      "community": 0,
       "norm_label": "repair_folder()"
     },
     {
@@ -1773,7 +1773,7 @@
       "source_file": "src/commands/repair.rs",
       "source_location": "L438",
       "id": "commands_repair_repair_file",
-      "community": 8,
+      "community": 0,
       "norm_label": "repair_file()"
     },
     {
@@ -1782,7 +1782,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L1",
       "id": "src_commands_webdav_rs",
-      "community": 1,
+      "community": 3,
       "norm_label": "webdav.rs"
     },
     {
@@ -1791,7 +1791,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L51",
       "id": "commands_webdav_cacheddir",
-      "community": 1,
+      "community": 3,
       "norm_label": "cacheddir"
     },
     {
@@ -1800,7 +1800,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L66",
       "id": "commands_webdav_lockentry",
-      "community": 1,
+      "community": 3,
       "norm_label": "lockentry"
     },
     {
@@ -1809,7 +1809,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L83",
       "id": "commands_webdav_run",
-      "community": 3,
+      "community": 4,
       "norm_label": "run()"
     },
     {
@@ -1818,7 +1818,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L188",
       "id": "commands_webdav_davstate",
-      "community": 1,
+      "community": 3,
       "norm_label": "davstate"
     },
     {
@@ -1827,7 +1827,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L207",
       "id": "commands_webdav_handle_webdav",
-      "community": 1,
+      "community": 3,
       "norm_label": "handle_webdav()"
     },
     {
@@ -1836,7 +1836,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L333",
       "id": "commands_webdav_options_response",
-      "community": 1,
+      "community": 3,
       "norm_label": "options_response()"
     },
     {
@@ -1845,7 +1845,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L350",
       "id": "commands_webdav_propfind_response",
-      "community": 1,
+      "community": 3,
       "norm_label": "propfind_response()"
     },
     {
@@ -1854,7 +1854,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L421",
       "id": "commands_webdav_get_response",
-      "community": 1,
+      "community": 3,
       "norm_label": "get_response()"
     },
     {
@@ -1863,7 +1863,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L509",
       "id": "commands_webdav_head_response",
-      "community": 1,
+      "community": 3,
       "norm_label": "head_response()"
     },
     {
@@ -1872,7 +1872,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L539",
       "id": "commands_webdav_put_response",
-      "community": 1,
+      "community": 3,
       "norm_label": "put_response()"
     },
     {
@@ -1881,7 +1881,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L673",
       "id": "commands_webdav_mkcol_response",
-      "community": 1,
+      "community": 3,
       "norm_label": "mkcol_response()"
     },
     {
@@ -1890,7 +1890,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L745",
       "id": "commands_webdav_delete_response",
-      "community": 1,
+      "community": 3,
       "norm_label": "delete_response()"
     },
     {
@@ -1899,7 +1899,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L776",
       "id": "commands_webdav_move_response",
-      "community": 1,
+      "community": 3,
       "norm_label": "move_response()"
     },
     {
@@ -1908,7 +1908,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L902",
       "id": "commands_webdav_parse_lock_body",
-      "community": 1,
+      "community": 3,
       "norm_label": "parse_lock_body()"
     },
     {
@@ -1917,7 +1917,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L921",
       "id": "commands_webdav_parse_timeout_header",
-      "community": 1,
+      "community": 3,
       "norm_label": "parse_timeout_header()"
     },
     {
@@ -1926,7 +1926,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L933",
       "id": "commands_webdav_parse_if_token",
-      "community": 1,
+      "community": 3,
       "norm_label": "parse_if_token()"
     },
     {
@@ -1935,7 +1935,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L945",
       "id": "commands_webdav_lock_response",
-      "community": 1,
+      "community": 3,
       "norm_label": "lock_response()"
     },
     {
@@ -1944,7 +1944,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L996",
       "id": "commands_webdav_unlock_response",
-      "community": 1,
+      "community": 3,
       "norm_label": "unlock_response()"
     },
     {
@@ -1953,7 +1953,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L1019",
       "id": "commands_webdav_check_lock",
-      "community": 1,
+      "community": 3,
       "norm_label": "check_lock()"
     },
     {
@@ -1962,7 +1962,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L1042",
       "id": "commands_webdav_is_os_metadata_path",
-      "community": 1,
+      "community": 3,
       "norm_label": "is_os_metadata_path()"
     },
     {
@@ -1971,7 +1971,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L1067",
       "id": "commands_webdav_normalise_cache_key",
-      "community": 1,
+      "community": 3,
       "norm_label": "normalise_cache_key()"
     },
     {
@@ -1980,7 +1980,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L1072",
       "id": "commands_webdav_parent_of",
-      "community": 1,
+      "community": 3,
       "norm_label": "parent_of()"
     },
     {
@@ -1989,7 +1989,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L1081",
       "id": "commands_webdav_get_from_cache",
-      "community": 1,
+      "community": 3,
       "norm_label": "get_from_cache()"
     },
     {
@@ -1998,7 +1998,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L1094",
       "id": "commands_webdav_store_in_cache",
-      "community": 1,
+      "community": 3,
       "norm_label": "store_in_cache()"
     },
     {
@@ -2007,7 +2007,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L1102",
       "id": "commands_webdav_invalidate_cache",
-      "community": 1,
+      "community": 3,
       "norm_label": "invalidate_cache()"
     },
     {
@@ -2016,7 +2016,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L1113",
       "id": "commands_webdav_make_etag",
-      "community": 1,
+      "community": 3,
       "norm_label": "make_etag()"
     },
     {
@@ -2025,7 +2025,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L1129",
       "id": "commands_webdav_resolvedentry",
-      "community": 1,
+      "community": 3,
       "norm_label": "resolvedentry"
     },
     {
@@ -2034,7 +2034,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L1139",
       "id": "commands_webdav_decode_file_entry",
-      "community": 1,
+      "community": 3,
       "norm_label": "decode_file_entry()"
     },
     {
@@ -2043,7 +2043,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L1169",
       "id": "commands_webdav_resolve_path",
-      "community": 1,
+      "community": 3,
       "norm_label": "resolve_path()"
     },
     {
@@ -2052,7 +2052,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L1233",
       "id": "commands_webdav_decrypt_name",
-      "community": 1,
+      "community": 3,
       "norm_label": "decrypt_name()"
     },
     {
@@ -2061,7 +2061,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L1244",
       "id": "commands_webdav_child_href",
-      "community": 1,
+      "community": 3,
       "norm_label": "child_href()"
     },
     {
@@ -2070,7 +2070,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L1264",
       "id": "commands_webdav_prop_entry",
-      "community": 1,
+      "community": 3,
       "norm_label": "prop_entry()"
     },
     {
@@ -2079,7 +2079,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L1327",
       "id": "commands_webdav_xml_escape",
-      "community": 1,
+      "community": 3,
       "norm_label": "xml_escape()"
     },
     {
@@ -2088,7 +2088,7 @@
       "source_file": "src/commands/webdav.rs",
       "source_location": "L1337",
       "id": "commands_webdav_resolve_mime",
-      "community": 1,
+      "community": 3,
       "norm_label": "resolve_mime()"
     },
     {
@@ -2097,7 +2097,7 @@
       "source_file": "src/commands/logout.rs",
       "source_location": "L1",
       "id": "src_commands_logout_rs",
-      "community": 3,
+      "community": 4,
       "norm_label": "logout.rs"
     },
     {
@@ -2106,7 +2106,7 @@
       "source_file": "src/commands/logout.rs",
       "source_location": "L6",
       "id": "commands_logout_run",
-      "community": 3,
+      "community": 4,
       "norm_label": "run()"
     },
     {
@@ -2115,7 +2115,7 @@
       "source_file": "src/commands/mod.rs",
       "source_location": "L1",
       "id": "src_commands_mod_rs",
-      "community": 15,
+      "community": 16,
       "norm_label": "mod.rs"
     },
     {
@@ -2124,7 +2124,7 @@
       "source_file": "src/commands/push.rs",
       "source_location": "L1",
       "id": "src_commands_push_rs",
-      "community": 2,
+      "community": 5,
       "norm_label": "push.rs"
     },
     {
@@ -2133,7 +2133,7 @@
       "source_file": "src/commands/push.rs",
       "source_location": "L14",
       "id": "commands_push_b64",
-      "community": 2,
+      "community": 5,
       "norm_label": "b64()"
     },
     {
@@ -2142,7 +2142,7 @@
       "source_file": "src/commands/push.rs",
       "source_location": "L19",
       "id": "commands_push_load_master_key",
-      "community": 2,
+      "community": 5,
       "norm_label": "load_master_key()"
     },
     {
@@ -2151,7 +2151,7 @@
       "source_file": "src/commands/push.rs",
       "source_location": "L40",
       "id": "commands_push_conflictstrategy",
-      "community": 2,
+      "community": 5,
       "norm_label": "conflictstrategy"
     },
     {
@@ -2160,7 +2160,7 @@
       "source_file": "src/commands/push.rs",
       "source_location": "L50",
       "id": "commands_push_conflictresolution",
-      "community": 2,
+      "community": 5,
       "norm_label": "conflictresolution"
     },
     {
@@ -2169,7 +2169,7 @@
       "source_file": "src/commands/push.rs",
       "source_location": "L65",
       "id": "commands_push_find_conflict",
-      "community": 2,
+      "community": 5,
       "norm_label": "find_conflict()"
     },
     {
@@ -2178,7 +2178,7 @@
       "source_file": "src/commands/push.rs",
       "source_location": "L89",
       "id": "commands_push_prompt_conflict",
-      "community": 2,
+      "community": 5,
       "norm_label": "prompt_conflict()"
     },
     {
@@ -2187,7 +2187,7 @@
       "source_file": "src/commands/push.rs",
       "source_location": "L108",
       "id": "commands_push_run",
-      "community": 2,
+      "community": 5,
       "norm_label": "run()"
     },
     {
@@ -2196,7 +2196,7 @@
       "source_file": "src/commands/push.rs",
       "source_location": "L220",
       "id": "commands_push_resolve_upload_folder",
-      "community": 2,
+      "community": 5,
       "norm_label": "resolve_upload_folder()"
     },
     {
@@ -2205,7 +2205,7 @@
       "source_file": "src/commands/push.rs",
       "source_location": "L277",
       "id": "commands_push_uploadresult",
-      "community": 2,
+      "community": 5,
       "norm_label": "uploadresult"
     },
     {
@@ -2214,7 +2214,7 @@
       "source_file": "src/commands/push.rs",
       "source_location": "L286",
       "id": "commands_push_uploadresult_speed_bps",
-      "community": 2,
+      "community": 5,
       "norm_label": ".speed_bps()"
     },
     {
@@ -2223,7 +2223,7 @@
       "source_file": "src/commands/push.rs",
       "source_location": "L298",
       "id": "commands_push_push_single_file",
-      "community": 2,
+      "community": 5,
       "norm_label": "push_single_file()"
     },
     {
@@ -2232,7 +2232,7 @@
       "source_file": "src/commands/push.rs",
       "source_location": "L501",
       "id": "commands_push_push_directory",
-      "community": 2,
+      "community": 5,
       "norm_label": "push_directory()"
     },
     {
@@ -2241,7 +2241,7 @@
       "source_file": "src/commands/push.rs",
       "source_location": "L669",
       "id": "commands_push_collect_entries",
-      "community": 2,
+      "community": 5,
       "norm_label": "collect_entries()"
     },
     {
@@ -2250,7 +2250,7 @@
       "source_file": "src/commands/push.rs",
       "source_location": "L694",
       "id": "commands_push_split_stem_ext",
-      "community": 2,
+      "community": 5,
       "norm_label": "split_stem_ext()"
     },
     {
@@ -2259,7 +2259,7 @@
       "source_file": "src/commands/push.rs",
       "source_location": "L702",
       "id": "commands_push_dir_total_size",
-      "community": 2,
+      "community": 5,
       "norm_label": "dir_total_size()"
     },
     {
@@ -2268,7 +2268,7 @@
       "source_file": "src/commands/push.rs",
       "source_location": "L714",
       "id": "commands_push_check_quota",
-      "community": 2,
+      "community": 5,
       "norm_label": "check_quota()"
     },
     {
@@ -2277,7 +2277,7 @@
       "source_file": "src/commands/confirm.rs",
       "source_location": "L1",
       "id": "src_commands_confirm_rs",
-      "community": 12,
+      "community": 13,
       "norm_label": "confirm.rs"
     },
     {
@@ -2286,7 +2286,7 @@
       "source_file": "src/commands/confirm.rs",
       "source_location": "L24",
       "id": "commands_confirm_acquire_confirm_token",
-      "community": 12,
+      "community": 13,
       "norm_label": "acquire_confirm_token()"
     },
     {
@@ -2295,7 +2295,7 @@
       "source_file": "src/commands/confirm.rs",
       "source_location": "L53",
       "id": "commands_confirm_confirm_module_compiles",
-      "community": 12,
+      "community": 13,
       "norm_label": "confirm_module_compiles()"
     },
     {
@@ -2304,7 +2304,7 @@
       "source_file": "src/commands/status.rs",
       "source_location": "L1",
       "id": "src_commands_status_rs",
-      "community": 3,
+      "community": 4,
       "norm_label": "status.rs"
     },
     {
@@ -2313,7 +2313,7 @@
       "source_file": "src/commands/status.rs",
       "source_location": "L1",
       "id": "commands_status_run",
-      "community": 3,
+      "community": 4,
       "norm_label": "run()"
     },
     {
@@ -2322,7 +2322,7 @@
       "source_file": "src/commands/login.rs",
       "source_location": "L1",
       "id": "src_commands_login_rs",
-      "community": 3,
+      "community": 4,
       "norm_label": "login.rs"
     },
     {
@@ -2331,7 +2331,7 @@
       "source_file": "src/commands/login.rs",
       "source_location": "L8",
       "id": "commands_login_browser_login",
-      "community": 3,
+      "community": 4,
       "norm_label": "browser_login()"
     },
     {
@@ -2340,7 +2340,7 @@
       "source_file": "src/commands/login.rs",
       "source_location": "L193",
       "id": "commands_login_print_browser_block",
-      "community": 3,
+      "community": 4,
       "norm_label": "print_browser_block()"
     },
     {
@@ -2349,7 +2349,7 @@
       "source_file": "src/commands/login.rs",
       "source_location": "L224",
       "id": "commands_login_print_headless_block",
-      "community": 3,
+      "community": 4,
       "norm_label": "print_headless_block()"
     },
     {
@@ -2358,7 +2358,7 @@
       "source_file": "src/commands/login.rs",
       "source_location": "L264",
       "id": "commands_login_spawn_countdown",
-      "community": 3,
+      "community": 4,
       "norm_label": "spawn_countdown()"
     },
     {
@@ -2367,7 +2367,7 @@
       "source_file": "src/commands/login.rs",
       "source_location": "L291",
       "id": "commands_login_run",
-      "community": 3,
+      "community": 4,
       "norm_label": "run()"
     },
     {
@@ -2376,7 +2376,7 @@
       "source_file": "src/commands/watch.rs",
       "source_location": "L1",
       "id": "src_commands_watch_rs",
-      "community": 3,
+      "community": 4,
       "norm_label": "watch.rs"
     },
     {
@@ -2385,7 +2385,7 @@
       "source_file": "src/commands/watch.rs",
       "source_location": "L15",
       "id": "commands_watch_run",
-      "community": 3,
+      "community": 4,
       "norm_label": "run()"
     },
     {
@@ -2394,7 +2394,7 @@
       "source_file": "src/commands/watch.rs",
       "source_location": "L175",
       "id": "commands_watch_relevant_paths",
-      "community": 3,
+      "community": 4,
       "norm_label": "relevant_paths()"
     },
     {
@@ -2403,7 +2403,7 @@
       "source_file": "src/commands/watch.rs",
       "source_location": "L241",
       "id": "commands_watch_sync_batch",
-      "community": 3,
+      "community": 4,
       "norm_label": "sync_batch()"
     },
     {
@@ -2412,7 +2412,7 @@
       "source_file": "src/commands/watch.rs",
       "source_location": "L293",
       "id": "commands_watch_trash_server_file",
-      "community": 3,
+      "community": 4,
       "norm_label": "trash_server_file()"
     },
     {
@@ -2421,7 +2421,7 @@
       "source_file": "src/commands/watch.rs",
       "source_location": "L338",
       "id": "commands_watch_chrono_now",
-      "community": 3,
+      "community": 4,
       "norm_label": "chrono_now()"
     },
     {
@@ -2430,7 +2430,7 @@
       "source_file": "src/commands/watch.rs",
       "source_location": "L351",
       "id": "commands_watch_ctrlc_channel",
-      "community": 3,
+      "community": 4,
       "norm_label": "ctrlc_channel()"
     },
     {
@@ -2439,7 +2439,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L1",
       "id": "src_commands_mount_rs",
-      "community": 7,
+      "community": 6,
       "norm_label": "mount.rs"
     },
     {
@@ -2448,7 +2448,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L63",
       "id": "commands_mount_run",
-      "community": 3,
+      "community": 4,
       "norm_label": "run()"
     },
     {
@@ -2457,7 +2457,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L83",
       "id": "commands_mount_unmount",
-      "community": 7,
+      "community": 6,
       "norm_label": "unmount()"
     },
     {
@@ -2466,7 +2466,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L116",
       "id": "commands_mount_inodeentry",
-      "community": 7,
+      "community": 6,
       "norm_label": "inodeentry"
     },
     {
@@ -2475,7 +2475,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L132",
       "id": "commands_mount_inodeentry_file_attr",
-      "community": 7,
+      "community": 6,
       "norm_label": ".file_attr()"
     },
     {
@@ -2484,7 +2484,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L162",
       "id": "commands_mount_pendingcreate",
-      "community": 7,
+      "community": 6,
       "norm_label": "pendingcreate"
     },
     {
@@ -2493,7 +2493,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L169",
       "id": "commands_mount_cacheddir",
-      "community": 7,
+      "community": 6,
       "norm_label": "cacheddir"
     },
     {
@@ -2502,7 +2502,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L176",
       "id": "commands_mount_beebeebfs",
-      "community": 7,
+      "community": 6,
       "norm_label": "beebeebfs"
     },
     {
@@ -2511,7 +2511,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L197",
       "id": "commands_mount_beebeebfs_new",
-      "community": 6,
+      "community": 2,
       "norm_label": ".new()"
     },
     {
@@ -2520,7 +2520,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L228",
       "id": "commands_mount_beebeebfs_alloc_ino",
-      "community": 7,
+      "community": 6,
       "norm_label": ".alloc_ino()"
     },
     {
@@ -2529,7 +2529,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L236",
       "id": "commands_mount_beebeebfs_populate_dir",
-      "community": 7,
+      "community": 6,
       "norm_label": ".populate_dir()"
     },
     {
@@ -2538,7 +2538,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L324",
       "id": "commands_mount_beebeebfs_find_child",
-      "community": 7,
+      "community": 6,
       "norm_label": ".find_child()"
     },
     {
@@ -2547,7 +2547,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L333",
       "id": "commands_mount_beebeebfs_fetch_file",
-      "community": 8,
+      "community": 2,
       "norm_label": ".fetch_file()"
     },
     {
@@ -2556,7 +2556,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L361",
       "id": "commands_mount_beebeebfs_upload_file",
-      "community": 7,
+      "community": 6,
       "norm_label": ".upload_file()"
     },
     {
@@ -2565,7 +2565,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L444",
       "id": "commands_mount_beebeebfs_root_attr",
-      "community": 7,
+      "community": 6,
       "norm_label": ".root_attr()"
     },
     {
@@ -2574,7 +2574,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L470",
       "id": "commands_mount_beebeebfs_lookup",
-      "community": 7,
+      "community": 6,
       "norm_label": ".lookup()"
     },
     {
@@ -2583,7 +2583,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L497",
       "id": "commands_mount_beebeebfs_getattr",
-      "community": 7,
+      "community": 6,
       "norm_label": ".getattr()"
     },
     {
@@ -2592,7 +2592,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L511",
       "id": "commands_mount_beebeebfs_readdir",
-      "community": 7,
+      "community": 6,
       "norm_label": ".readdir()"
     },
     {
@@ -2601,7 +2601,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L538",
       "id": "commands_mount_beebeebfs_open",
-      "community": 7,
+      "community": 6,
       "norm_label": ".open()"
     },
     {
@@ -2610,7 +2610,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L546",
       "id": "commands_mount_beebeebfs_read",
-      "community": 5,
+      "community": 2,
       "norm_label": ".read()"
     },
     {
@@ -2619,7 +2619,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L578",
       "id": "commands_mount_beebeebfs_create",
-      "community": 7,
+      "community": 6,
       "norm_label": ".create()"
     },
     {
@@ -2628,7 +2628,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L639",
       "id": "commands_mount_beebeebfs_write",
-      "community": 5,
+      "community": 2,
       "norm_label": ".write()"
     },
     {
@@ -2637,7 +2637,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L679",
       "id": "commands_mount_beebeebfs_setattr",
-      "community": 7,
+      "community": 6,
       "norm_label": ".setattr()"
     },
     {
@@ -2646,7 +2646,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L728",
       "id": "commands_mount_beebeebfs_release",
-      "community": 7,
+      "community": 6,
       "norm_label": ".release()"
     },
     {
@@ -2655,7 +2655,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L800",
       "id": "commands_mount_beebeebfs_mkdir",
-      "community": 7,
+      "community": 6,
       "norm_label": ".mkdir()"
     },
     {
@@ -2664,7 +2664,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L877",
       "id": "commands_mount_beebeebfs_unlink",
-      "community": 7,
+      "community": 6,
       "norm_label": ".unlink()"
     },
     {
@@ -2673,7 +2673,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L922",
       "id": "commands_mount_beebeebfs_rmdir",
-      "community": 7,
+      "community": 6,
       "norm_label": ".rmdir()"
     },
     {
@@ -2682,7 +2682,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L970",
       "id": "commands_mount_beebeebfs_rename",
-      "community": 7,
+      "community": 6,
       "norm_label": ".rename()"
     },
     {
@@ -2691,7 +2691,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L1109",
       "id": "commands_mount_decrypt_name",
-      "community": 9,
+      "community": 5,
       "norm_label": "decrypt_name()"
     },
     {
@@ -2700,7 +2700,7 @@
       "source_file": "src/commands/share.rs",
       "source_location": "L1",
       "id": "src_commands_share_rs",
-      "community": 4,
+      "community": 0,
       "norm_label": "share.rs"
     },
     {
@@ -2709,7 +2709,7 @@
       "source_file": "src/commands/share.rs",
       "source_location": "L13",
       "id": "commands_share_parse_hours",
-      "community": 4,
+      "community": 0,
       "norm_label": "parse_hours()"
     },
     {
@@ -2718,7 +2718,7 @@
       "source_file": "src/commands/share.rs",
       "source_location": "L27",
       "id": "commands_share_run",
-      "community": 4,
+      "community": 0,
       "norm_label": "run()"
     },
     {
@@ -2727,7 +2727,7 @@
       "source_file": "src/commands/share.rs",
       "source_location": "L320",
       "id": "commands_share_list",
-      "community": 4,
+      "community": 0,
       "norm_label": "list()"
     },
     {
@@ -2736,7 +2736,7 @@
       "source_file": "src/commands/share.rs",
       "source_location": "L451",
       "id": "commands_share_revoke",
-      "community": 4,
+      "community": 0,
       "norm_label": "revoke()"
     },
     {
@@ -2745,7 +2745,7 @@
       "source_file": "src/commands/share.rs",
       "source_location": "L473",
       "id": "commands_share_shareentry",
-      "community": 4,
+      "community": 0,
       "norm_label": "shareentry"
     },
     {
@@ -2754,7 +2754,7 @@
       "source_file": "src/commands/share.rs",
       "source_location": "L484",
       "id": "commands_share_pick_share_interactively",
-      "community": 4,
+      "community": 0,
       "norm_label": "pick_share_interactively()"
     },
     {
@@ -2763,7 +2763,7 @@
       "source_file": "src/commands/share.rs",
       "source_location": "L592",
       "id": "commands_share_run_picker",
-      "community": 4,
+      "community": 0,
       "norm_label": "run_picker()"
     },
     {
@@ -2772,7 +2772,7 @@
       "source_file": "src/commands/share.rs",
       "source_location": "L662",
       "id": "commands_share_draw_picker",
-      "community": 4,
+      "community": 0,
       "norm_label": "draw_picker()"
     },
     {
@@ -2781,7 +2781,7 @@
       "source_file": "src/commands/speedtest.rs",
       "source_location": "L1",
       "id": "src_commands_speedtest_rs",
-      "community": 6,
+      "community": 0,
       "norm_label": "speedtest.rs"
     },
     {
@@ -2790,7 +2790,7 @@
       "source_file": "src/commands/speedtest.rs",
       "source_location": "L6",
       "id": "commands_speedtest_capitalise",
-      "community": 6,
+      "community": 0,
       "norm_label": "capitalise()"
     },
     {
@@ -2799,7 +2799,7 @@
       "source_file": "src/commands/speedtest.rs",
       "source_location": "L14",
       "id": "commands_speedtest_run",
-      "community": 6,
+      "community": 0,
       "norm_label": "run()"
     },
     {
@@ -2808,7 +2808,7 @@
       "source_file": "src/commands/speedtest.rs",
       "source_location": "L284",
       "id": "commands_speedtest_run_json",
-      "community": 6,
+      "community": 0,
       "norm_label": "run_json()"
     },
     {
@@ -2817,7 +2817,7 @@
       "source_file": "src/commands/whoami.rs",
       "source_location": "L1",
       "id": "src_commands_whoami_rs",
-      "community": 3,
+      "community": 4,
       "norm_label": "whoami.rs"
     },
     {
@@ -2826,7 +2826,7 @@
       "source_file": "src/commands/whoami.rs",
       "source_location": "L8",
       "id": "commands_whoami_run",
-      "community": 3,
+      "community": 4,
       "norm_label": "run()"
     },
     {
@@ -2835,7 +2835,7 @@
       "source_file": "src/commands/whoami.rs",
       "source_location": "L221",
       "id": "commands_whoami_build_plan_label",
-      "community": 3,
+      "community": 4,
       "norm_label": "build_plan_label()"
     },
     {
@@ -2844,7 +2844,7 @@
       "source_file": "src/commands/whoami.rs",
       "source_location": "L248",
       "id": "commands_whoami_capitalise",
-      "community": 3,
+      "community": 4,
       "norm_label": "capitalise()"
     },
     {
@@ -2853,7 +2853,7 @@
       "source_file": "src/commands/whoami.rs",
       "source_location": "L256",
       "id": "commands_whoami_upload_limit_for_plan",
-      "community": 3,
+      "community": 4,
       "norm_label": "upload_limit_for_plan()"
     },
     {
@@ -2862,8 +2862,44 @@
       "source_file": "src/commands/whoami.rs",
       "source_location": "L266",
       "id": "commands_whoami_format_number",
-      "community": 3,
+      "community": 4,
       "norm_label": "format_number()"
+    },
+    {
+      "label": "qr.rs",
+      "file_type": "code",
+      "source_file": "src/commands/qr.rs",
+      "source_location": "L1",
+      "id": "src_commands_qr_rs",
+      "community": 12,
+      "norm_label": "qr.rs"
+    },
+    {
+      "label": "render_otpauth()",
+      "file_type": "code",
+      "source_file": "src/commands/qr.rs",
+      "source_location": "L16",
+      "id": "commands_qr_render_otpauth",
+      "community": 12,
+      "norm_label": "render_otpauth()"
+    },
+    {
+      "label": "renders_a_typical_totp_uri()",
+      "file_type": "code",
+      "source_file": "src/commands/qr.rs",
+      "source_location": "L32",
+      "id": "commands_qr_renders_a_typical_totp_uri",
+      "community": 12,
+      "norm_label": "renders_a_typical_totp_uri()"
+    },
+    {
+      "label": "renders_empty_for_garbage_that_cannot_encode()",
+      "file_type": "code",
+      "source_file": "src/commands/qr.rs",
+      "source_location": "L52",
+      "id": "commands_qr_renders_empty_for_garbage_that_cannot_encode",
+      "community": 12,
+      "norm_label": "renders_empty_for_garbage_that_cannot_encode()"
     }
   ],
   "links": [
@@ -11665,6 +11701,18 @@
     },
     {
       "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "src/commands/qr.rs",
+      "source_location": "L17",
+      "weight": 1.0,
+      "_src": "commands_qr_render_otpauth",
+      "_tgt": "commands_mount_beebeebfs_new",
+      "source": "commands_mount_beebeebfs_new",
+      "target": "commands_qr_render_otpauth"
+    },
+    {
+      "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/mount.rs",
       "source_location": "L288",
@@ -12213,6 +12261,66 @@
       "_tgt": "commands_whoami_capitalise",
       "source": "commands_whoami_build_plan_label",
       "target": "commands_whoami_capitalise",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src/commands/qr.rs",
+      "source_location": "L16",
+      "weight": 1.0,
+      "_src": "src_commands_qr_rs",
+      "_tgt": "commands_qr_render_otpauth",
+      "source": "src_commands_qr_rs",
+      "target": "commands_qr_render_otpauth",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src/commands/qr.rs",
+      "source_location": "L32",
+      "weight": 1.0,
+      "_src": "src_commands_qr_rs",
+      "_tgt": "commands_qr_renders_a_typical_totp_uri",
+      "source": "src_commands_qr_rs",
+      "target": "commands_qr_renders_a_typical_totp_uri",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src/commands/qr.rs",
+      "source_location": "L52",
+      "weight": 1.0,
+      "_src": "src_commands_qr_rs",
+      "_tgt": "commands_qr_renders_empty_for_garbage_that_cannot_encode",
+      "source": "src_commands_qr_rs",
+      "target": "commands_qr_renders_empty_for_garbage_that_cannot_encode",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src/commands/qr.rs",
+      "source_location": "L36",
+      "weight": 1.0,
+      "_src": "commands_qr_renders_a_typical_totp_uri",
+      "_tgt": "commands_qr_render_otpauth",
+      "source": "commands_qr_render_otpauth",
+      "target": "commands_qr_renders_a_typical_totp_uri",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src/commands/qr.rs",
+      "source_location": "L57",
+      "weight": 1.0,
+      "_src": "commands_qr_renders_empty_for_garbage_that_cannot_encode",
+      "_tgt": "commands_qr_render_otpauth",
+      "source": "commands_qr_render_otpauth",
+      "target": "commands_qr_renders_empty_for_garbage_that_cannot_encode",
       "confidence_score": 1.0
     }
   ],
