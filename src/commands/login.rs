@@ -137,12 +137,19 @@ async fn browser_login() -> Result<(), String> {
         .map_err(|e| format!("Invalid browser public key (not on curve): {e}"))?;
 
     let shared_secret = secret.diffie_hellman(&browser_pub_key);
-    // Use first 32 bytes of the shared secret directly as AES-256 key.
-    // Both sides must agree on this derivation (no HKDF in v1 — keep it simple
-    // and auditable; can upgrade to HKDF in a future protocol version).
+    // Derive a proper AES-256 key from the ECDH shared secret using HKDF.
+    // The raw ECDH output is a group element, not a uniformly random key —
+    // HKDF extracts entropy and expands it into a cryptographically strong key.
     let shared_bytes = shared_secret.raw_secret_bytes();
 
-    let cipher = Aes256Gcm::new(GenericArray::from_slice(&shared_bytes[..32]));
+    use hkdf::Hkdf;
+    use sha2::Sha256;
+
+    let hk = Hkdf::<Sha256>::new(None, shared_bytes);
+    let mut key_bytes = [0u8; 32];
+    hk.expand(b"beebeeb-cli-auth-v1", &mut key_bytes)
+        .expect("HKDF expand failed — output length is valid");
+    let cipher = Aes256Gcm::new(GenericArray::from_slice(&key_bytes));
     let nonce_bytes = B64
         .decode(nonce_b64)
         .map_err(|e| format!("Invalid nonce encoding: {e}"))?;

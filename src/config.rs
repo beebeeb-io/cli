@@ -70,6 +70,12 @@ pub fn save_config(config: &Config) -> Result<(), String> {
     let json = serde_json::to_string_pretty(config)
         .map_err(|e| format!("failed to serialize config: {e}"))?;
     std::fs::write(&path, json).map_err(|e| format!("failed to write config: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("failed to set config permissions: {e}"))?;
+    }
     Ok(())
 }
 
