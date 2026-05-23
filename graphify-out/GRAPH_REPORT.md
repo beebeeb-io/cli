@@ -1,12 +1,12 @@
-# Graph Report - cli  (2026-05-07)
+# Graph Report - cli  (2026-05-23)
 
 ## Corpus Check
-- 21 files · ~24,154 words
+- 27 files · ~39,408 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 210 nodes · 482 edges · 8 communities detected
-- Extraction: 82% EXTRACTED · 18% INFERRED · 0% AMBIGUOUS · INFERRED: 85 edges (avg confidence: 0.8)
+- 284 nodes · 722 edges · 11 communities detected
+- Extraction: 72% EXTRACTED · 28% INFERRED · 0% AMBIGUOUS · INFERRED: 204 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Community Hubs (Navigation)
@@ -18,85 +18,100 @@
 - [[_COMMUNITY_Community 5|Community 5]]
 - [[_COMMUNITY_Community 6|Community 6]]
 - [[_COMMUNITY_Community 7|Community 7]]
+- [[_COMMUNITY_Community 8|Community 8]]
+- [[_COMMUNITY_Community 9|Community 9]]
+- [[_COMMUNITY_Community 10|Community 10]]
 
 ## God Nodes (most connected - your core abstractions)
-1. `ApiClient` - 30 edges
-2. `parse_response()` - 24 edges
-3. `BeebeebFs` - 21 edges
-4. `load_config()` - 17 edges
-5. `run()` - 15 edges
-6. `handle_webdav()` - 13 edges
-7. `push_single_file()` - 11 edges
-8. `propfind_response()` - 10 edges
-9. `resolve_path()` - 9 edges
-10. `put_response()` - 8 edges
+1. `ApiClient` - 35 edges
+2. `parse_response()` - 25 edges
+3. `run()` - 24 edges
+4. `BeebeebFs` - 21 edges
+5. `is_json()` - 18 edges
+6. `load_master_key()` - 18 edges
+7. `decrypt_name()` - 17 edges
+8. `load_config()` - 16 edges
+9. `is_quiet()` - 15 edges
+10. `handle_webdav()` - 15 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `push_single_file()` --calls--> `mark_uploaded()`  [INFERRED]
-  commands/push.rs → loopback.rs
-- `load_master_key()` --calls--> `load_config()`  [INFERRED]
-  commands/watch_remote.rs → config.rs
-- `load_config()` --calls--> `run()`  [INFERRED]
-  config.rs → commands/config.rs
-- `load_config()` --calls--> `load_master_key()`  [INFERRED]
-  config.rs → commands/pull.rs
-- `load_config()` --calls--> `load_master_key()`  [INFERRED]
-  config.rs → commands/sync.rs
+- `mark_uploaded()` --calls--> `push_single_file()`  [INFERRED]
+  loopback.rs → commands/push.rs
+- `run()` --calls--> `is_json()`  [INFERRED]
+  commands/ls.rs → ui.rs
+- `run()` --calls--> `is_json()`  [INFERRED]
+  commands/quota.rs → ui.rs
+- `run()` --calls--> `is_json()`  [INFERRED]
+  commands/config.rs → ui.rs
+- `run()` --calls--> `is_json()`  [INFERRED]
+  commands/sync.rs → ui.rs
 
 ## Communities
 
 ### Community 0 - "Community 0"
-Cohesion: 0.07
-Nodes (35): run(), b64(), browser_login(), BrowserState, CallbackPayload, handle_callback(), legacy_login(), LoginResult (+27 more)
+Cohesion: 0.11
+Nodes (38): decrypt_name(), collect_zip_entries(), looks_like_id_prefix(), pull_folder(), pull_single_file(), resolve_as_path(), run(), run_zip() (+30 more)
 
 ### Community 1 - "Community 1"
-Cohesion: 0.14
-Nodes (33): CachedDir, check_lock(), child_href(), DavState, decode_file_entry(), decrypt_chunks(), decrypt_name(), delete_response() (+25 more)
-
-### Community 2 - "Community 2"
-Cohesion: 0.21
+Cohesion: 0.17
 Nodes (2): ApiClient, parse_response()
 
+### Community 2 - "Community 2"
+Cohesion: 0.11
+Nodes (32): b64(), compute_file_hash(), create_folder(), do_download(), do_upload(), download_to(), FileEntry, format_size() (+24 more)
+
 ### Community 3 - "Community 3"
-Cohesion: 0.15
-Nodes (6): BeebeebFs, CachedDir, decrypt_chunks(), decrypt_name(), InodeEntry, PendingCreate
+Cohesion: 0.09
+Nodes (24): run(), draw_picker(), parse_hours(), pick_share_interactively(), revoke(), run(), run_picker(), ShareEntry (+16 more)
 
 ### Community 4 - "Community 4"
-Cohesion: 0.16
-Nodes (19): b64(), create_folder(), do_download(), do_upload(), download_to(), FileEntry, format_size(), load_master_key() (+11 more)
+Cohesion: 0.14
+Nodes (32): CachedDir, check_lock(), child_href(), DavState, decode_file_entry(), decrypt_name(), delete_response(), get_from_cache() (+24 more)
 
 ### Community 5 - "Community 5"
-Cohesion: 0.18
-Nodes (18): b64(), collect_entries(), ConflictResolution, ConflictStrategy, find_conflict(), format_size(), load_master_key(), prompt_conflict() (+10 more)
+Cohesion: 0.12
+Nodes (22): run(), browser_login(), run(), run(), run(), run(), chrono_now(), ctrlc_channel() (+14 more)
 
 ### Community 6 - "Community 6"
-Cohesion: 0.23
-Nodes (13): decrypt_file(), download_to_mirror(), extract_data(), handle_event(), load_master_key(), next_backoff(), run(), sanitize_filename() (+5 more)
+Cohesion: 0.17
+Nodes (5): BeebeebFs, CachedDir, InodeEntry, PendingCreate, unmount()
 
 ### Community 7 - "Community 7"
-Cohesion: 0.54
-Nodes (6): b64(), format_size(), load_master_key(), pull_folder(), pull_single_file(), run()
+Cohesion: 0.25
+Nodes (13): check_and_update(), cooldown_elapsed(), current_target(), extract_binary_from_tarball(), GitHubAsset, GitHubRelease, is_dev_build(), is_homebrew_install() (+5 more)
+
+### Community 8 - "Community 8"
+Cohesion: 0.24
+Nodes (12): download_to_mirror(), extract_data(), handle_event(), load_master_key(), next_backoff(), run(), sanitize_filename(), unlink_in_mirror() (+4 more)
+
+### Community 9 - "Community 9"
+Cohesion: 0.33
+Nodes (7): CacheEntry, hex_val(), list_children_names(), list_files_cached(), percent_decode(), resolve_path(), ResolvedPath
+
+### Community 10 - "Community 10"
+Cohesion: 0.7
+Nodes (4): build_plan_label(), capitalise(), format_number(), run()
 
 ## Knowledge Gaps
-- **17 isolated node(s):** `Cli`, `Commands`, `SyncState`, `FileEntry`, `LocalFile` (+12 more)
+- **24 isolated node(s):** `OutputMode`, `GitHubRelease`, `GitHubAsset`, `CacheEntry`, `ResolvedPath` (+19 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **Thin community `Community 2`** (31 nodes): `api.rs`, `ApiClient`, `.check_conflict()`, `.create_folder()`, `.create_share()`, `.create_stream_token()`, `.delete_share()`, `.download_file()`, `.get_file()`, `.get_file_count()`, `.get_me()`, `.get_region()`, `.get_sessions()`, `.get_subscription()`, `.get_usage()`, `.list_files()`, `.list_ops_since()`, `.list_shares()`, `.login()`, `.logout()`, `.move_file()`, `.opaque_login_finish()`, `.opaque_login_start()`, `.open_sync_stream()`, `.require_auth()`, `.signup()`, `.stream_url()`, `.trash_file()`, `.upload_encrypted()`, `.url()`, `parse_response()`
+- **Thin community `Community 1`** (37 nodes): `api.rs`, `ApiClient`, `.check_conflict()`, `.create_folder()`, `.create_share()`, `.create_stream_token()`, `.delete_share()`, `.download_file()`, `.find_file_by_id_prefix()`, `.get_file()`, `.get_file_count()`, `.get_json()`, `.get_me()`, `.get_my_region()`, `.get_region()`, `.get_sessions()`, `.get_subscription()`, `.get_usage()`, `.list_files()`, `.list_ops_since()`, `.list_shares()`, `.logout()`, `.move_file()`, `.opaque_login_finish()`, `.opaque_login_start()`, `.open_sync_stream()`, `.ping_health()`, `.require_auth()`, `.signup()`, `.speedtest_download()`, `.speedtest_upload()`, `.stream_url()`, `.trash_file()`, `.upload_encrypted()`, `.url()`, `format_request_error()`, `parse_response()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `ApiClient` connect `Community 2` to `Community 0`?**
-  _High betweenness centrality (0.183) - this node is a cross-community bridge._
-- **Why does `BeebeebFs` connect `Community 3` to `Community 0`, `Community 4`, `Community 7`?**
-  _High betweenness centrality (0.111) - this node is a cross-community bridge._
-- **Why does `load_config()` connect `Community 0` to `Community 4`, `Community 5`, `Community 6`, `Community 7`?**
-  _High betweenness centrality (0.099) - this node is a cross-community bridge._
-- **Are the 14 inferred relationships involving `load_config()` (e.g. with `.from_config()` and `load_master_key()`) actually correct?**
-  _`load_config()` has 14 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 5 inferred relationships involving `run()` (e.g. with `.from_config()` and `.read()`) actually correct?**
-  _`run()` has 5 INFERRED edges - model-reasoned connections that need verification._
-- **What connects `Cli`, `Commands`, `SyncState` to the rest of the system?**
-  _17 weakly-connected nodes found - possible documentation gaps or missing edges._
+- **Why does `ApiClient` connect `Community 1` to `Community 5`?**
+  _High betweenness centrality (0.165) - this node is a cross-community bridge._
+- **Why does `run()` connect `Community 2` to `Community 0`, `Community 3`, `Community 5`, `Community 7`?**
+  _High betweenness centrality (0.084) - this node is a cross-community bridge._
+- **Why does `decrypt_name()` connect `Community 0` to `Community 2`, `Community 3`, `Community 4`, `Community 6`, `Community 8`, `Community 9`?**
+  _High betweenness centrality (0.078) - this node is a cross-community bridge._
+- **Are the 8 inferred relationships involving `run()` (e.g. with `.from_config()` and `.read()`) actually correct?**
+  _`run()` has 8 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 17 inferred relationships involving `is_json()` (e.g. with `run()` and `run()`) actually correct?**
+  _`is_json()` has 17 INFERRED edges - model-reasoned connections that need verification._
+- **What connects `OutputMode`, `GitHubRelease`, `GitHubAsset` to the rest of the system?**
+  _24 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `Community 0` be split into smaller, more focused modules?**
-  _Cohesion score 0.07 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.11 - nodes in this community are weakly interconnected._
