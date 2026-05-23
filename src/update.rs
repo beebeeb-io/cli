@@ -7,11 +7,13 @@
 //! - On failure at any stage, we silently fall through — the user's command runs normally.
 //! - After a successful update, the process re-execs itself with the same arguments.
 
+use std::collections::HashMap;
 use std::io::Read as _;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use colored::Colorize;
+use sha2::{Digest, Sha256};
 
 const CHECK_INTERVAL: Duration = Duration::from_secs(3600); // 1 hour
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -94,10 +96,43 @@ async fn try_update(state: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         .find(|a| a.name == asset_name)
         .ok_or_else(|| format!("no release asset for {target}"))?;
 
+    // Locate the cargo-dist manifest published alongside the tarball.
+    // Fail-closed: if the manifest is missing, refuse to update — the previous
+    // behaviour of "just trust HTTPS to GitHub Releases" is not acceptable.
+    let manifest_asset = release
+        .assets
+        .iter()
+        .find(|a| a.name == "dist-manifest.json")
+        .ok_or("dist-manifest.json missing from release — refusing to update without checksum verification")?;
+
     eprintln!(
         "  {} bb v{CURRENT_VERSION} -> v{remote}...",
         "Updating".custom_color(crate::colors::AMBER),
     );
+
+    // Download the signed manifest first so we have the expected hash before
+    // we have the bytes to compare it against.
+    let manifest_bytes = client
+        .get(&manifest_asset.browser_download_url)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+
+    let manifest: DistManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|e| format!("dist-manifest.json is malformed: {e}"))?;
+
+    let expected_sha256 = manifest
+        .artifacts
+        .get(&asset_name)
+        .and_then(|a| a.checksums.as_ref())
+        .and_then(|c| c.sha256.as_deref())
+        .ok_or_else(|| {
+            format!(
+                "dist-manifest.json has no sha256 for {asset_name} — refusing to update"
+            )
+        })?;
 
     // Download the tarball.
     let tarball_bytes = client
@@ -107,6 +142,17 @@ async fn try_update(state: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         .error_for_status()?
         .bytes()
         .await?;
+
+    // Verify SHA-256 BEFORE extracting or touching the binary. If the hash
+    // does not match the manifest we abort and never run any code from the
+    // downloaded archive.
+    let actual_sha256 = sha256_hex(&tarball_bytes);
+    if !ct_eq_ignore_case(&actual_sha256, expected_sha256) {
+        return Err(format!(
+            "SHA-256 mismatch for {asset_name}: expected {expected_sha256}, got {actual_sha256} — aborting update"
+        )
+        .into());
+    }
 
     // Extract the `bb` binary from the tarball.
     let binary_data = extract_binary_from_tarball(&tarball_bytes, target)?;
@@ -342,4 +388,136 @@ struct GitHubRelease {
 struct GitHubAsset {
     name: String,
     browser_download_url: String,
+}
+
+// ---------------------------------------------------------------------------
+// cargo-dist manifest types (minimal — we only read the fields we trust)
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+struct DistManifest {
+    /// Map of artifact filename -> metadata. cargo-dist emits one entry per
+    /// release asset (tarballs, installers, checksums, etc.).
+    #[serde(default)]
+    artifacts: HashMap<String, DistArtifact>,
+}
+
+#[derive(serde::Deserialize)]
+struct DistArtifact {
+    #[serde(default)]
+    checksums: Option<DistChecksums>,
+}
+
+#[derive(serde::Deserialize)]
+struct DistChecksums {
+    #[serde(default)]
+    sha256: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Hash helpers
+// ---------------------------------------------------------------------------
+
+/// Compute the SHA-256 of `bytes` and return it as a lowercase hex string.
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let out = hasher.finalize();
+    let mut hex = String::with_capacity(out.len() * 2);
+    for b in out.iter() {
+        // Manual hex encode to avoid pulling in another crate. Two-char lowercase.
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        hex.push(HEX[(b >> 4) as usize] as char);
+        hex.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    hex
+}
+
+/// Constant-time-ish equality for two equal-length hex strings (case-insensitive).
+/// Hash comparison is not a high-value timing target, but folding the check in
+/// constant time costs us nothing and avoids early-exit on byte mismatch.
+fn ct_eq_ignore_case(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.bytes().zip(b.bytes()) {
+        diff |= x.to_ascii_lowercase() ^ y.to_ascii_lowercase();
+    }
+    diff == 0
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sha256_hex_empty_input_matches_known_value() {
+        // Standard SHA-256 of the empty string.
+        let expected = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        assert_eq!(sha256_hex(&[]), expected);
+    }
+
+    #[test]
+    fn sha256_hex_known_value_for_abc() {
+        // SHA-256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+        let expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert_eq!(sha256_hex(b"abc"), expected);
+    }
+
+    #[test]
+    fn ct_eq_handles_case_insensitivity() {
+        assert!(ct_eq_ignore_case("ABCD", "abcd"));
+        assert!(ct_eq_ignore_case("ba7816bf", "BA7816BF"));
+    }
+
+    #[test]
+    fn ct_eq_detects_mismatch() {
+        assert!(!ct_eq_ignore_case("abcd", "abce"));
+        assert!(!ct_eq_ignore_case("abcd", "abcde"));
+    }
+
+    #[test]
+    fn dist_manifest_parses_real_world_shape() {
+        // Trimmed shape of a real cargo-dist manifest. We only need the
+        // artifacts -> checksums.sha256 path.
+        let json = r#"{
+            "dist_version": "0.31.0",
+            "artifacts": {
+                "beebeeb-cli-aarch64-apple-darwin.tar.xz": {
+                    "name": "beebeeb-cli-aarch64-apple-darwin.tar.xz",
+                    "kind": "executable-zip",
+                    "checksums": {
+                        "sha256": "27c788a7af0c4fde47f93355b37f956ebd8d6ce9b8ac3f62c19402fca2c32d72"
+                    }
+                },
+                "no-checksum-artifact.sh": {
+                    "name": "no-checksum-artifact.sh",
+                    "kind": "installer"
+                }
+            }
+        }"#;
+
+        let manifest: DistManifest = serde_json::from_str(json).unwrap();
+        let with_sha = manifest
+            .artifacts
+            .get("beebeeb-cli-aarch64-apple-darwin.tar.xz")
+            .and_then(|a| a.checksums.as_ref())
+            .and_then(|c| c.sha256.as_deref());
+        assert_eq!(
+            with_sha,
+            Some("27c788a7af0c4fde47f93355b37f956ebd8d6ce9b8ac3f62c19402fca2c32d72")
+        );
+
+        let without_sha = manifest
+            .artifacts
+            .get("no-checksum-artifact.sh")
+            .and_then(|a| a.checksums.as_ref())
+            .and_then(|c| c.sha256.as_deref());
+        assert_eq!(without_sha, None);
+    }
 }
