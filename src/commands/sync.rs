@@ -1219,11 +1219,13 @@ async fn upload_file_to(
         }
     }
 
+    // MIME type is encrypted inside `name_encrypted`; the server has no
+    // plaintext mime_type column. `is_media` is the only thing the server
+    // needs to see, and the client derives it before encryption.
     let metadata = serde_json::json!({
         "name_encrypted": name_encrypted,
         "parent_id": parent_id,
         "file_id": file_id,
-        "mime_type": serde_json::Value::Null,
         "size_bytes": total_enc,
         "is_media": beebeeb_core::media::is_media(mime),
     });

@@ -641,10 +641,11 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
         encrypted_chunks.push((i as u32, bytes));
     }
 
+    // MIME type lives inside the encrypted `name_encrypted` blob; the server
+    // has no plaintext mime_type column.
     let mut metadata = serde_json::json!({
         "name_encrypted": name_encrypted,
         "parent_id":      parent_id.as_deref().and_then(|s| s.parse::<uuid::Uuid>().ok()),
-        "mime_type":      serde_json::Value::Null,
         "size_bytes":     total_encrypted_size,
         "is_media":       beebeeb_core::media::is_media(mime),
     });

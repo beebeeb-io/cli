@@ -431,10 +431,11 @@ async fn push_single_file(
         None => None,
     };
 
+    // MIME type is encrypted inside `name_encrypted`; the server has no
+    // plaintext mime_type column.
     let mut metadata = serde_json::json!({
         "name_encrypted": name_encrypted,
         "parent_id": parent_uuid,
-        "mime_type": serde_json::Value::Null,
         "size_bytes": total_encrypted_size,
         "file_id": file_id,
         "is_media": beebeeb_core::media::is_media(mime),

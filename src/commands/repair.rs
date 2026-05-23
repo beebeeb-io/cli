@@ -443,16 +443,17 @@ async fn repair_file(
     chunk_count: u32,
 ) -> Result<(), String> {
 
-    // Get full metadata (need parent_id, mime_type, size)
+    // Get full metadata (need parent_id, size). The plaintext mime_type column
+    // was dropped server-side — the server no longer returns it, and the
+    // encrypted MIME type lives inside `name_encrypted`. We re-encrypt with
+    // None and let the client recover MIME from the filename if it ever needs
+    // it.
     let file_meta = api.get_file(file_id).await?;
     let parent_id = file_meta
         .get("parent_id")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    let mime_type = file_meta
-        .get("mime_type")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let mime_type: Option<String> = None;
 
     // Step 1: Download encrypted content
     let encrypted_bytes = api.download_file(file_id).await?;
@@ -490,8 +491,8 @@ async fn repair_file(
             metadata["parent_id"] = serde_json::json!(parent_uuid);
         }
     }
-    // MIME type is now encrypted inside name_encrypted — do not leak in plaintext.
-    metadata["mime_type"] = serde_json::Value::Null;
+    // MIME type is encrypted inside name_encrypted; the server has no
+    // mime_type column to receive it. Leave the field out entirely.
 
     let metadata_json = serde_json::to_string(&metadata)
         .map_err(|e| format!("failed to serialize metadata: {e}"))?;

@@ -401,11 +401,11 @@ mod fuse_impl {
             let encrypted_size: usize = encrypted_chunks.iter().map(|(_, b)| b.len()).sum();
 
             // Build metadata JSON matching the server's UploadMetadata struct.
-            // MIME type is encrypted inside name_encrypted — do not leak in plaintext.
+            // MIME type is encrypted inside name_encrypted and the server has
+            // no plaintext mime_type column.
             let meta = serde_json::json!({
                 "name_encrypted": name_enc,
                 "parent_id": parent_file_id,
-                "mime_type": serde_json::Value::Null,
                 "size_bytes": encrypted_size,
                 "is_media": beebeeb_core::media::is_media(mime),
             });
