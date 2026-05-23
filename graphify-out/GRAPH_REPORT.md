@@ -1,11 +1,11 @@
 # Graph Report - cli  (2026-05-23)
 
 ## Corpus Check
-- 29 files · ~41,417 words
+- 30 files · ~41,937 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 313 nodes · 773 edges · 11 communities detected
+- 314 nodes · 773 edges · 11 communities detected
 - Extraction: 73% EXTRACTED · 27% INFERRED · 0% AMBIGUOUS · INFERRED: 212 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
@@ -36,15 +36,15 @@
 
 ## Surprising Connections (you probably didn't know these)
 - `mark_uploaded()` --calls--> `push_single_file()`  [INFERRED]
-  loopback.rs → commands/push.rs
-- `show()` --calls--> `is_json()`  [INFERRED]
-  commands/billing.rs → ui.rs
+  src/loopback.rs → src/commands/push.rs
+- `is_json()` --calls--> `show()`  [INFERRED]
+  src/ui.rs → src/commands/billing.rs
 - `is_json()` --calls--> `run()`  [INFERRED]
-  ui.rs → commands/pull.rs
+  src/ui.rs → src/commands/pull.rs
 - `is_json()` --calls--> `run_zip()`  [INFERRED]
-  ui.rs → commands/pull.rs
+  src/ui.rs → src/commands/pull.rs
 - `is_json()` --calls--> `run()`  [INFERRED]
-  ui.rs → commands/sync.rs
+  src/ui.rs → src/commands/sync.rs
 
 ## Communities
 
@@ -95,16 +95,16 @@ Nodes (11): extract_data(), handle_event(), load_master_key(), next_backoff(), r
 ## Knowledge Gaps
 - **25 isolated node(s):** `OutputMode`, `GitHubRelease`, `GitHubAsset`, `CacheEntry`, `ResolvedPath` (+20 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **Thin community `Community 2`** (39 nodes): `api.rs`, `ApiClient`, `.check_conflict()`, `.create_folder()`, `.create_share()`, `.create_stream_token()`, `.delete_share()`, `.download_file()`, `.find_file_by_id_prefix()`, `.get_billing_subscription()`, `.get_billing_usage()`, `.get_file()`, `.get_file_count()`, `.get_json()`, `.get_me()`, `.get_my_region()`, `.get_region()`, `.get_sessions()`, `.get_subscription()`, `.get_usage()`, `.list_files()`, `.list_ops_since()`, `.list_shares()`, `.logout()`, `.move_file()`, `.opaque_login_finish()`, `.opaque_login_start()`, `.open_sync_stream()`, `.ping_health()`, `.require_auth()`, `.signup()`, `.speedtest_download()`, `.speedtest_upload()`, `.stream_url()`, `.trash_file()`, `.upload_encrypted()`, `.url()`, `format_request_error()`, `parse_response()`
+- **Thin community `Community 2`** (39 nodes): `ApiClient`, `.check_conflict()`, `.create_folder()`, `.create_share()`, `.create_stream_token()`, `.delete_share()`, `.download_file()`, `.find_file_by_id_prefix()`, `.get_billing_subscription()`, `.get_billing_usage()`, `.get_file()`, `.get_file_count()`, `.get_json()`, `.get_me()`, `.get_my_region()`, `.get_region()`, `.get_sessions()`, `.get_subscription()`, `.get_usage()`, `.list_files()`, `.list_ops_since()`, `.list_shares()`, `.logout()`, `.move_file()`, `.opaque_login_finish()`, `.opaque_login_start()`, `.open_sync_stream()`, `.ping_health()`, `.require_auth()`, `.signup()`, `.speedtest_download()`, `.speedtest_upload()`, `.stream_url()`, `.trash_file()`, `.upload_encrypted()`, `.url()`, `format_request_error()`, `parse_response()`, `api.rs`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `ApiClient` connect `Community 2` to `Community 4`?**
-  _High betweenness centrality (0.166) - this node is a cross-community bridge._
+  _High betweenness centrality (0.165) - this node is a cross-community bridge._
 - **Why does `run()` connect `Community 6` to `Community 0`, `Community 1`, `Community 4`, `Community 5`, `Community 7`?**
-  _High betweenness centrality (0.098) - this node is a cross-community bridge._
+  _High betweenness centrality (0.097) - this node is a cross-community bridge._
 - **Why does `decrypt_name()` connect `Community 1` to `Community 0`, `Community 3`, `Community 6`, `Community 7`, `Community 10`?**
   _High betweenness centrality (0.069) - this node is a cross-community bridge._
 - **Are the 8 inferred relationships involving `run()` (e.g. with `.from_config()` and `.read()`) actually correct?**
