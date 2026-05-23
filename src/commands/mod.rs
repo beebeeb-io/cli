@@ -17,3 +17,4 @@ pub mod watch_remote;
 pub mod webdav;
 pub mod whoami;
 pub mod confirm;
+pub mod qr;

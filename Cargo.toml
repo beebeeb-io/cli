@@ -50,6 +50,7 @@ libc = "0.2"
 tar = "0.4"
 xz2 = "0.1"
 semver = "1"
+qrcode = { version = "0.14", default-features = false }
 
 [features]
 # Enable the FUSE filesystem mount command.
