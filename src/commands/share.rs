@@ -153,51 +153,89 @@ pub async fn run(
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
 
-    // Build the URL: standard mode uses server-returned URL; double-encrypted
-    // builds it locally with K_c in the fragment (server never sees K_c).
-    let url = if let Some(ref kc) = client_key_b64 {
+    // Build the URL and key parts. In double-encrypted mode the URL fragment
+    // (#key=…) is the decryption material — we print it on its own line so
+    // the user is forced to think about the link and key as two separate
+    // things, sent through different channels.
+    let (bare_url, full_url) = if let Some(ref kc) = client_key_b64 {
         let app_url = std::env::var("APP_URL")
             .unwrap_or_else(|_| "https://app.beebeeb.io".to_string());
-        format!("{app_url}/s/{token}#key={kc}")
+        let bare = format!("{app_url}/s/{token}");
+        let full = format!("{bare}#key={kc}");
+        (bare, full)
     } else {
-        result
+        let url = result
             .get("url")
             .and_then(|v| v.as_str())
             .unwrap_or("(unknown)")
-            .to_string()
+            .to_string();
+        // Standard mode: the server URL already contains the key fragment.
+        // bare_url is the same — the key is not separable in this mode.
+        (url.clone(), url)
     };
 
     // JSON mode: emit machine-readable output
     if ui::is_json() {
-        let json_out = serde_json::json!({
+        let mut json_out = serde_json::json!({
             "share_id": share_id,
-            "url": url,
+            "url": full_url,
             "expires_at": expires_at,
             "max_opens": max_opens,
             "double_encrypted": double_encrypted,
             "passphrase_protected": passphrase_value.is_some(),
         });
+        if double_encrypted {
+            if let Some(obj) = json_out.as_object_mut() {
+                obj.insert("share_link".into(), serde_json::Value::String(bare_url.clone()));
+                if let Some(ref kc) = client_key_b64 {
+                    obj.insert("decryption_key".into(), serde_json::Value::String(kc.clone()));
+                }
+            }
+        }
         println!("{}", serde_json::to_string_pretty(&json_out).unwrap_or_default());
         return Ok(());
     }
 
     if ui::is_quiet() {
-        println!("{url}");
+        println!("{full_url}");
         return Ok(());
     }
 
     // Rich mode
     println!();
     if double_encrypted {
-        println!("  {}", "\u{2713} Link created (double encrypted)".custom_color(crate::colors::GREEN_OK));
+        println!("  {}", "\u{2713} Link created (end-to-end encrypted)".custom_color(crate::colors::GREEN_OK));
     } else {
         println!("  {}", "\u{2713} Link created".custom_color(crate::colors::GREEN_OK));
     }
-    println!(
-        "  {} {}",
-        "url       ".custom_color(crate::colors::INK_DIM),
-        url.custom_color(crate::colors::AMBER),
-    );
+
+    if double_encrypted {
+        // Print the URL and the decryption key on separate lines so the user
+        // is reminded to send them through different channels.
+        println!(
+            "  {} {}",
+            "share link    ".custom_color(crate::colors::INK_DIM),
+            bare_url.custom_color(crate::colors::AMBER),
+        );
+        if let Some(ref kc) = client_key_b64 {
+            println!(
+                "  {} {}",
+                "decryption key".custom_color(crate::colors::INK_DIM),
+                kc.custom_color(crate::colors::AMBER),
+            );
+            println!(
+                "  {}",
+                "               (send this through a SEPARATE channel)"
+                    .custom_color(crate::colors::INK_SAGE),
+            );
+        }
+    } else {
+        println!(
+            "  {} {}",
+            "url       ".custom_color(crate::colors::INK_DIM),
+            full_url.custom_color(crate::colors::AMBER),
+        );
+    }
     if !file_name.is_empty() {
         let size_str = if file_size > 0 {
             format!(" \u{00b7} {}", ui::human_size(file_size))
@@ -231,7 +269,13 @@ pub async fn run(
         println!(
             "  {} {}",
             "encryption".custom_color(crate::colors::INK_DIM),
-            "double-encrypted \u{00b7} server blind".custom_color(crate::colors::GREEN_OK),
+            "end-to-end \u{00b7} server blind".custom_color(crate::colors::GREEN_OK),
+        );
+    } else {
+        println!(
+            "  {} {}",
+            "encryption".custom_color(crate::colors::INK_DIM),
+            "server-assisted recovery \u{00b7} less secure".custom_color(crate::colors::AMBER),
         );
     }
     println!(
@@ -243,7 +287,17 @@ pub async fn run(
     if double_encrypted {
         println!(
             "  {}",
-            "Even Beebeeb cannot decrypt this link."
+            "Beebeeb cannot decrypt this share. If the recipient loses the key,"
+                .custom_color(crate::colors::AMBER),
+        );
+        println!(
+            "  {}",
+            "the share is permanently inaccessible.".custom_color(crate::colors::AMBER),
+        );
+    } else {
+        println!(
+            "  {}",
+            "Heads up: Beebeeb's servers can technically decrypt this share."
                 .custom_color(crate::colors::AMBER),
         );
     }

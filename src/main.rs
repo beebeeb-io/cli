@@ -129,9 +129,12 @@ enum Commands {
         #[arg(long)]
         passphrase: bool,
 
-        /// Double-encrypt: client wraps file key so server cannot decrypt
-        #[arg(long)]
-        double_encrypted: bool,
+        /// Opt out of double encryption. Default is end-to-end encrypted —
+        /// the server stores an opaque blob and cannot decrypt the share.
+        /// Passing this flag lets Beebeeb hold a server-wrapped copy of the
+        /// key (less secure, allows server-assisted recovery).
+        #[arg(long = "no-double-encrypt")]
+        no_double_encrypt: bool,
     },
 
     /// List all active share links
@@ -379,8 +382,8 @@ async fn main() {
             expires,
             max_opens,
             passphrase,
-            double_encrypted,
-        } => commands::share::run(file_id, expires, max_opens, passphrase, double_encrypted).await,
+            no_double_encrypt,
+        } => commands::share::run(file_id, expires, max_opens, passphrase, !no_double_encrypt).await,
         Commands::Shares => commands::share::list().await,
         Commands::Unshare { share_id } => commands::share::revoke(share_id).await,
         Commands::Watch { path, parent } => {
