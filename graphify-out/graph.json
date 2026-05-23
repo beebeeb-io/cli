@@ -3675,8 +3675,8 @@
       "source_file": "env_detect.rs",
       "source_location": "L79",
       "weight": 1.0,
-      "_src": "src_env_detect_snap",
-      "_tgt": "src_config_config_default",
+      "_src": "src_config_config_default",
+      "_tgt": "src_env_detect_snap",
       "source": "src_config_config_default",
       "target": "src_env_detect_snap"
     },
@@ -6459,8 +6459,8 @@
       "source_file": "commands/watch.rs",
       "source_location": "L223",
       "weight": 1.0,
-      "_src": "commands_watch_relevant_paths",
-      "_tgt": "src_env_detect_envsnapshot_current",
+      "_src": "src_env_detect_envsnapshot_current",
+      "_tgt": "commands_watch_relevant_paths",
       "source": "src_env_detect_envsnapshot_current",
       "target": "commands_watch_relevant_paths"
     },
