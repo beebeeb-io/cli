@@ -52,7 +52,12 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Authenticate with your Beebeeb account
-    Login,
+    Login {
+        /// Skip browser auto-open and print only the URL + code
+        /// (use this on SSH or boxes without a window server)
+        #[arg(long)]
+        headless: bool,
+    },
 
     /// Show current session, device, region, quota
     Whoami,
@@ -366,7 +371,7 @@ async fn main() {
     }
 
     let result = match cli.command {
-        Commands::Login => commands::login::run().await,
+        Commands::Login { headless } => commands::login::run(headless).await,
         Commands::Whoami => commands::whoami::run().await,
         Commands::Status => commands::status::run().await,
         Commands::Quota => commands::quota::run().await,
