@@ -130,7 +130,7 @@ async fn browser_login(headless_flag: bool) -> Result<(), String> {
         .as_str()
         .ok_or("Missing browser_ecdh_public_b64")?;
 
-    // 7. ECDH key agreement + AES-256-GCM decrypt — unchanged from previous version.
+    // 7. ECDH key agreement + AES-256-GCM decrypt.
     let browser_pub_bytes = B64
         .decode(browser_pub_b64)
         .map_err(|e| format!("Invalid browser public key encoding: {e}"))?;
@@ -140,23 +140,33 @@ async fn browser_login(headless_flag: bool) -> Result<(), String> {
     let shared_secret = secret.diffie_hellman(&browser_pub_key);
     let shared_bytes = shared_secret.raw_secret_bytes();
 
-    use hkdf::Hkdf;
-    use sha2::Sha256;
-
-    let hk = Hkdf::<Sha256>::new(None, shared_bytes);
-    let mut key_bytes = [0u8; 32];
-    hk.expand(b"beebeeb-cli-auth-v1", &mut key_bytes)
-        .expect("HKDF expand failed — output length is valid");
-    let cipher = Aes256Gcm::new(GenericArray::from_slice(&key_bytes));
     let nonce_bytes = B64
         .decode(nonce_b64)
         .map_err(|e| format!("Invalid nonce encoding: {e}"))?;
     let ciphertext = B64
         .decode(payload_b64)
         .map_err(|e| format!("Invalid payload encoding: {e}"))?;
-    let plaintext = cipher
-        .decrypt(GenericArray::from_slice(&nonce_bytes), ciphertext.as_ref())
-        .map_err(|_| "Decryption failed — ECDH key mismatch or corrupted ciphertext")?;
+
+    // Try HKDF-derived key first (v0.5+ web app), then raw shared secret
+    // (v0.4 web app) for backward compatibility during the transition.
+    use hkdf::Hkdf;
+    use sha2::Sha256;
+
+    let hk = Hkdf::<Sha256>::new(None, shared_bytes);
+    let mut hkdf_key = [0u8; 32];
+    hk.expand(b"beebeeb-cli-auth-v1", &mut hkdf_key)
+        .expect("HKDF expand failed — output length is valid");
+
+    let plaintext = {
+        let cipher = Aes256Gcm::new(GenericArray::from_slice(&hkdf_key));
+        cipher
+            .decrypt(GenericArray::from_slice(&nonce_bytes), ciphertext.as_ref())
+            .or_else(|_| {
+                let cipher = Aes256Gcm::new(GenericArray::from_slice(&shared_bytes[..32]));
+                cipher.decrypt(GenericArray::from_slice(&nonce_bytes), ciphertext.as_ref())
+            })
+            .map_err(|_| "Decryption failed — ECDH key mismatch or corrupted ciphertext")?
+    };
 
     // 8. Parse credentials and persist — unchanged.
     let creds: serde_json::Value =
