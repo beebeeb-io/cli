@@ -1,8 +1,44 @@
 use reqwest::Client;
 use serde_json::Value;
 use std::error::Error;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use crate::config::load_config;
+
+static RATE_REMAINING: AtomicI64 = AtomicI64::new(-1);
+static RATE_LIMIT: AtomicI64 = AtomicI64::new(-1);
+static RATE_RESET: AtomicI64 = AtomicI64::new(0);
+
+fn update_rate_state(headers: &reqwest::header::HeaderMap) {
+    if let Some(v) = headers.get("x-ratelimit-remaining").and_then(|v| v.to_str().ok()) {
+        if let Ok(n) = v.parse::<i64>() { RATE_REMAINING.store(n, Ordering::Relaxed); }
+    }
+    if let Some(v) = headers.get("x-ratelimit-limit").and_then(|v| v.to_str().ok()) {
+        if let Ok(n) = v.parse::<i64>() { RATE_LIMIT.store(n, Ordering::Relaxed); }
+    }
+    if let Some(v) = headers.get("x-ratelimit-reset").and_then(|v| v.to_str().ok()) {
+        if let Ok(n) = v.parse::<i64>() { RATE_RESET.store(n, Ordering::Relaxed); }
+    }
+}
+
+async fn pace_if_needed() {
+    let remaining = RATE_REMAINING.load(Ordering::Relaxed);
+    let limit = RATE_LIMIT.load(Ordering::Relaxed);
+    let reset = RATE_RESET.load(Ordering::Relaxed);
+    if remaining < 0 || limit <= 0 { return; }
+    let ratio = remaining as f64 / limit as f64;
+    if ratio > 0.2 { return; }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let secs_until_reset = (reset - now).max(1);
+    let requests_left = remaining.max(1);
+    let pace_ms = ((secs_until_reset as f64 / requests_left as f64) * 1000.0).min(5000.0) as u64;
+    if pace_ms > 50 {
+        tokio::time::sleep(std::time::Duration::from_millis(pace_ms)).await;
+    }
+}
 
 fn format_request_error(error: reqwest::Error) -> String {
     let mut message = format!("request failed: {error}");
@@ -246,6 +282,7 @@ impl ApiClient {
             "is_media": is_media,
         });
         for _ in 0..3 {
+            pace_if_needed().await;
             let resp = self
                 .client
                 .post(self.url("/api/v1/files/upload/init"))
@@ -270,6 +307,7 @@ impl ApiClient {
     ) -> Result<Value, String> {
         let token = self.require_auth()?;
         for attempt in 0..3 {
+            pace_if_needed().await;
             let resp = self
                 .client
                 .put(self.url(&format!("/api/v1/files/{file_id}/chunks/{index}")))
@@ -290,6 +328,7 @@ impl ApiClient {
     pub async fn upload_complete(&self, file_id: &str) -> Result<Value, String> {
         let token = self.require_auth()?;
         for _ in 0..3 {
+            pace_if_needed().await;
             let resp = self
                 .client
                 .post(self.url(&format!("/api/v1/files/{file_id}/upload/complete")))
@@ -764,6 +803,7 @@ impl ApiClient {
 
 async fn parse_response(resp: reqwest::Response) -> Result<Value, String> {
     let status = resp.status();
+    update_rate_state(resp.headers());
 
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
         let retry_after = resp
