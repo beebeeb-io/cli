@@ -245,15 +245,21 @@ impl ApiClient {
             "chunk_count": chunk_count,
             "is_media": is_media,
         });
-        let resp = self
-            .client
-            .post(self.url("/api/v1/files/upload/init"))
-            .bearer_auth(token)
-            .json(&body)
-            .send()
-            .await
-            .map_err(format_request_error)?;
-        parse_response(resp).await
+        for _ in 0..3 {
+            let resp = self
+                .client
+                .post(self.url("/api/v1/files/upload/init"))
+                .bearer_auth(&token)
+                .json(&body)
+                .send()
+                .await
+                .map_err(format_request_error)?;
+            match parse_response(resp).await {
+                Err(e) if e == "__rate_limited__" => continue,
+                other => return other,
+            }
+        }
+        Err("rate limited after 3 retries".to_string())
     }
 
     pub async fn upload_chunk(
@@ -263,28 +269,40 @@ impl ApiClient {
         data: Vec<u8>,
     ) -> Result<Value, String> {
         let token = self.require_auth()?;
-        let resp = self
-            .client
-            .put(self.url(&format!("/api/v1/files/{file_id}/chunks/{index}")))
-            .bearer_auth(token)
-            .header("Content-Type", "application/octet-stream")
-            .body(data)
-            .send()
-            .await
-            .map_err(format_request_error)?;
-        parse_response(resp).await
+        for attempt in 0..3 {
+            let resp = self
+                .client
+                .put(self.url(&format!("/api/v1/files/{file_id}/chunks/{index}")))
+                .bearer_auth(&token)
+                .header("Content-Type", "application/octet-stream")
+                .body(if attempt == 0 { data.clone() } else { data.clone() })
+                .send()
+                .await
+                .map_err(format_request_error)?;
+            match parse_response(resp).await {
+                Err(e) if e == "__rate_limited__" => continue,
+                other => return other,
+            }
+        }
+        Err("rate limited after 3 retries".to_string())
     }
 
     pub async fn upload_complete(&self, file_id: &str) -> Result<Value, String> {
         let token = self.require_auth()?;
-        let resp = self
-            .client
-            .post(self.url(&format!("/api/v1/files/{file_id}/upload/complete")))
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(format_request_error)?;
-        parse_response(resp).await
+        for _ in 0..3 {
+            let resp = self
+                .client
+                .post(self.url(&format!("/api/v1/files/{file_id}/upload/complete")))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .map_err(format_request_error)?;
+            match parse_response(resp).await {
+                Err(e) if e == "__rate_limited__" => continue,
+                other => return other,
+            }
+        }
+        Err("rate limited after 3 retries".to_string())
     }
 
     /// Create a share link for a file.
@@ -746,6 +764,34 @@ impl ApiClient {
 
 async fn parse_response(resp: reqwest::Response) -> Result<Value, String> {
     let status = resp.status();
+
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let retry_after = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(5);
+        let remaining = resp
+            .headers()
+            .get("x-ratelimit-remaining")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok());
+
+        if !crate::ui::is_quiet() {
+            use colored::Colorize;
+            eprintln!(
+                "  {} rate limited — pausing {}s{}",
+                "⏸".custom_color(crate::colors::AMBER),
+                retry_after,
+                remaining.map_or(String::new(), |r| format!(" ({r} requests remaining)")),
+            );
+        }
+
+        tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
+        return Err("__rate_limited__".to_string());
+    }
+
     let body = resp
         .text()
         .await
