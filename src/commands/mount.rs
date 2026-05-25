@@ -697,7 +697,7 @@ mod fuse_impl {
             }
         }
 
-        fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
+        fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
             if ino == ROOT_INO {
                 reply.attr(&ATTR_TTL, &Self::root_attr());
                 return;
