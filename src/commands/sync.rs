@@ -101,6 +101,8 @@ struct SyncState {
     remote_folder_id: Option<Uuid>,
     last_sync: Option<DateTime<Utc>>,
     #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
     files: HashMap<String, FileEntry>,
 }
 
@@ -157,6 +159,19 @@ pub async fn run(
     let api = ApiClient::from_config();
     api.require_auth()?;
 
+    // Register this device with the server (best-effort, non-fatal)
+    let device_info = crate::device::load_or_create();
+    let device_resp = api.register_device(
+        &device_info.hostname,
+        &device_info.platform,
+        env!("CARGO_PKG_VERSION"),
+    ).await.ok();
+    let server_device_id = device_resp
+        .as_ref()
+        .and_then(|v| v.get("id"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
     if !local_dir.exists() {
         return Err(format!("local directory not found: {}", local_dir.display()));
     }
@@ -211,6 +226,35 @@ pub async fn run(
         resolve_remote_folder(&api, &master_key, &remote_path, dry_run).await?;
     state.remote_path = Some(remote_path.clone());
     state.remote_folder_id = Some(remote_folder_id);
+
+    // Create or reuse a client session for this sync pair
+    let session_id: Option<String> = if let Some(ref device_id) = server_device_id {
+        if let Some(ref existing) = state.session_id {
+            Some(existing.clone())
+        } else {
+            let default_name = format!("{}/{}",
+                device_info.hostname,
+                remote_path.trim_start_matches('/').replace('/', "-"));
+            match api.create_client_session(
+                device_id, &default_name, "sync",
+                Some(&local_dir.display().to_string()), &remote_path,
+            ).await {
+                Ok(resp) => {
+                    let id = resp.get("id").and_then(|v| v.as_str()).map(String::from);
+                    if let Some(ref id) = id {
+                        state.session_id = Some(id.clone());
+                    }
+                    id
+                }
+                Err(e) => {
+                    if !ui::is_quiet() {
+                        eprintln!("  {} session registration: {e}", "!".custom_color(crate::colors::AMBER));
+                    }
+                    None
+                }
+            }
+        }
+    } else { None };
 
     let local_files = walk_local_files(&local_dir)?;
     let local_folders = walk_local_folders(&local_dir)?;
@@ -553,6 +597,14 @@ pub async fn run(
             .map_err(|e| format!("write state file: {e}"))?;
     }
 
+    // Send a final heartbeat for --once mode
+    if once {
+        if let Some(ref sid) = session_id {
+            let file_count = local_files.len() as u64;
+            let _ = api.send_heartbeat(sid, "idle", Some(file_count), None, Some(total_bytes), None, None, None).await;
+        }
+    }
+
     let elapsed = sync_start.elapsed();
     let elapsed_secs = elapsed.as_secs_f64();
 
@@ -655,6 +707,19 @@ pub async fn run(
 
         println!();
         print_dashboard(&dashboard);
+
+        // Spawn a background heartbeat every 60s while watching
+        if let Some(ref sid) = session_id {
+            let hb_api = ApiClient::from_config();
+            let hb_sid = sid.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                loop {
+                    interval.tick().await;
+                    let _ = hb_api.send_heartbeat(&hb_sid, "watching", None, None, None, None, None, None).await;
+                }
+            });
+        }
 
         use notify::RecursiveMode;
         use notify_debouncer_full::new_debouncer;
