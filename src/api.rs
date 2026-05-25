@@ -225,6 +225,68 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    /// V2 chunked upload: init → upload chunks → complete.
+    /// Stores chunk_size in object_versions so downloads know the exact layout.
+    pub async fn upload_init(
+        &self,
+        file_id: Option<uuid::Uuid>,
+        name_encrypted: &str,
+        parent_id: Option<uuid::Uuid>,
+        size_bytes: i64,
+        chunk_count: i32,
+        is_media: bool,
+    ) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let body = serde_json::json!({
+            "file_id": file_id,
+            "name_encrypted": name_encrypted,
+            "parent_id": parent_id,
+            "size_bytes": size_bytes,
+            "chunk_count": chunk_count,
+            "is_media": is_media,
+        });
+        let resp = self
+            .client
+            .post(self.url("/api/v1/files/upload/init"))
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(resp).await
+    }
+
+    pub async fn upload_chunk(
+        &self,
+        file_id: &str,
+        index: u32,
+        data: Vec<u8>,
+    ) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .put(self.url(&format!("/api/v1/files/{file_id}/chunks/{index}")))
+            .bearer_auth(token)
+            .header("Content-Type", "application/octet-stream")
+            .body(data)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(resp).await
+    }
+
+    pub async fn upload_complete(&self, file_id: &str) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .post(self.url(&format!("/api/v1/files/{file_id}/upload/complete")))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(resp).await
+    }
+
     /// Create a share link for a file.
     ///
     /// `wrapped_file_key` — if provided, enables double-encrypted mode where

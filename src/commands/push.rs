@@ -424,7 +424,6 @@ async fn push_single_file(
         }
     }
 
-    // Build metadata JSON matching the server's UploadMetadata struct
     let parent_uuid = match &parent_id {
         Some(pid) => {
             let parsed: uuid::Uuid =
@@ -434,36 +433,34 @@ async fn push_single_file(
         None => None,
     };
 
-    // MIME type is encrypted inside `name_encrypted`; the server has no
-    // plaintext mime_type column.
-    let mut metadata = serde_json::json!({
-        "name_encrypted": name_encrypted,
-        "parent_id": parent_uuid,
-        "size_bytes": total_encrypted_size,
-        "file_id": file_id,
-        "is_media": beebeeb_core::media::is_media(mime),
-    });
-    // Explicit file_id tells the server to version over the existing file
-    // rather than look up by name_encrypted ciphertext.
-    if let Some(rid) = replace_file_id {
-        metadata["file_id"] = serde_json::json!(rid);
-    }
-    let metadata_json = serde_json::to_string(&metadata)
-        .map_err(|e| format!("failed to serialize metadata: {e}"))?;
+    let is_media = beebeeb_core::media::is_media(mime);
+    let effective_file_id = replace_file_id.unwrap_or(file_id);
 
-    // Upload
-    let result = api
-        .upload_encrypted(&metadata_json, &encrypted_chunks)
+    // V2 upload: init → chunks → complete (stores chunk layout in object_versions)
+    let init_resp = api
+        .upload_init(
+            Some(effective_file_id),
+            &name_encrypted,
+            parent_uuid,
+            total_encrypted_size,
+            total_chunks as i32,
+            is_media,
+        )
         .await?;
 
-    let file_elapsed = file_start.elapsed();
-
-    let file_id_str = file_id.to_string();
-    let server_id = result
+    let server_id = init_resp
         .get("id")
         .and_then(|v| v.as_str())
-        .unwrap_or(&file_id_str)
+        .unwrap_or(&file_id.to_string().as_str())
         .to_string();
+
+    for (idx, data) in encrypted_chunks {
+        api.upload_chunk(&server_id, idx, data).await?;
+    }
+
+    let result = api.upload_complete(&server_id).await?;
+
+    let file_elapsed = file_start.elapsed();
 
     // Mark this upload so a `bb watch` remote-event handler in the same
     // process doesn't redundantly download the file we just sent.

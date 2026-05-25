@@ -600,30 +600,26 @@ mod fuse_impl {
                 .and_then(|e| e.file_id.as_deref())
                 .and_then(|s| s.parse().ok());
 
-            // Compute total encrypted size for the metadata field.
-            let encrypted_size: usize = encrypted_chunks.iter().map(|(_, b)| b.len()).sum();
+            let encrypted_size: i64 = encrypted_chunks.iter().map(|(_, b)| b.len() as i64).sum();
+            let is_media = beebeeb_core::media::is_media(mime);
+            let chunk_count = encrypted_chunks.len() as i32;
 
-            // Build metadata JSON matching the server's UploadMetadata struct.
-            // MIME type is encrypted inside name_encrypted and the server has
-            // no plaintext mime_type column.
-            let meta = serde_json::json!({
-                "name_encrypted": name_enc,
-                "parent_id": parent_file_id,
-                "size_bytes": encrypted_size,
-                "is_media": beebeeb_core::media::is_media(mime),
-            });
-            let meta_str = serde_json::to_string(&meta).map_err(|e| format!("meta json: {e}"))?;
+            // V2 upload: init → chunks → complete
+            let init_resp = self.rt.block_on(self.api.upload_init(
+                Some(key_uuid), &name_enc, parent_file_id, encrypted_size, chunk_count, is_media,
+            ))?;
 
-            let resp = self
-                .rt
-                .block_on(self.api.upload_encrypted(&meta_str, &encrypted_chunks))?;
-
-            // The server assigns the final file_id.
-            let server_id = resp
+            let server_id = init_resp
                 .get("id")
                 .and_then(|v| v.as_str())
                 .map(String::from)
                 .unwrap_or_else(|| key_uuid.to_string());
+
+            for (idx, data) in encrypted_chunks {
+                self.rt.block_on(self.api.upload_chunk(&server_id, idx, data))?;
+            }
+
+            self.rt.block_on(self.api.upload_complete(&server_id))?;
 
             // Update inode: server_id for API calls, key_uuid for decryption.
             if let Some(entry) = self.inodes.get_mut(&ino) {
@@ -631,7 +627,7 @@ mod fuse_impl {
                 entry.file_id = Some(server_id.clone());
                 entry.key_uuid = Some(key_uuid);
                 entry.size = plaintext.len() as u64;
-                entry.chunk_count = encrypted_chunks.len() as u32;
+                entry.chunk_count = chunk_count as u32;
                 entry.modified = SystemTime::now();
             }
             self.id_to_ino.insert(server_id, ino);

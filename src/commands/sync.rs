@@ -1204,43 +1204,42 @@ async fn upload_file_to(
 
     let plan = beebeeb_types::plan_chunks(file_bytes.len() as u64, beebeeb_types::ChunkProfile::Desktop);
     let chunk_size = plan.chunk_size_bytes as usize;
+    let chunk_count = plan.chunk_count as i32;
 
-    let mut chunks: Vec<(u32, Vec<u8>)> = Vec::new();
-    let mut total_enc: i64 = 0;
-
-    if file_bytes.is_empty() {
-        let bytes = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, &[])
-            .map_err(|e| format!("encrypt chunk: {e}"))?;
-        total_enc += bytes.len() as i64;
-        chunks.push((0, bytes));
+    // Encrypt all chunks
+    let mut encrypted_chunks: Vec<(u32, Vec<u8>)> = Vec::new();
+    let raw_chunks: Vec<&[u8]> = if file_bytes.is_empty() {
+        vec![&[]]
     } else {
-        for (i, chunk) in file_bytes.chunks(chunk_size).enumerate() {
-            let bytes = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, chunk)
-                .map_err(|e| format!("encrypt chunk {i}: {e}"))?;
-            total_enc += bytes.len() as i64;
-            chunks.push((i as u32, bytes));
-        }
+        file_bytes.chunks(chunk_size).collect()
+    };
+
+    let mut total_enc: i64 = 0;
+    for (i, chunk) in raw_chunks.iter().enumerate() {
+        let bytes = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, chunk)
+            .map_err(|e| format!("encrypt chunk {i}: {e}"))?;
+        total_enc += bytes.len() as i64;
+        encrypted_chunks.push((i as u32, bytes));
     }
 
-    // MIME type is encrypted inside `name_encrypted`; the server has no
-    // plaintext mime_type column. `is_media` is the only thing the server
-    // needs to see, and the client derives it before encryption.
-    let metadata = serde_json::json!({
-        "name_encrypted": name_encrypted,
-        "parent_id": parent_id,
-        "file_id": file_id,
-        "size_bytes": total_enc,
-        "is_media": beebeeb_core::media::is_media(mime),
-    });
-    let metadata_json =
-        serde_json::to_string(&metadata).map_err(|e| format!("serialize metadata: {e}"))?;
+    let is_media = beebeeb_core::media::is_media(mime);
 
-    let result = api.upload_encrypted(&metadata_json, &chunks).await?;
-    let id_str = result
+    // V2 upload: init → chunks → complete (stores chunk_size in object_versions)
+    let init_resp = api
+        .upload_init(Some(file_id), &name_encrypted, parent_id, total_enc, chunk_count, is_media)
+        .await?;
+    let server_id = init_resp
         .get("id")
         .and_then(|v| v.as_str())
         .ok_or("server response missing file id")?;
-    id_str.parse().map_err(|e| format!("invalid file id: {e}"))
+
+    for (idx, data) in encrypted_chunks {
+        api.upload_chunk(server_id, idx, data).await?;
+    }
+
+    api.upload_complete(server_id).await?;
+
+    server_id.parse().map_err(|e| format!("invalid file id: {e}"))
 }
 
 async fn download_to(

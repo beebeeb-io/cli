@@ -665,24 +665,31 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
         encrypted_chunks.push((i as u32, bytes));
     }
 
-    // MIME type lives inside the encrypted `name_encrypted` blob; the server
-    // has no plaintext mime_type column.
-    let mut metadata = serde_json::json!({
-        "name_encrypted": name_encrypted,
-        "parent_id":      parent_id.as_deref().and_then(|s| s.parse::<uuid::Uuid>().ok()),
-        "size_bytes":     total_encrypted_size,
-        "is_media":       beebeeb_core::media::is_media(mime),
-    });
-    // Tell the server to version over the existing file rather than create new.
-    if let Some(eid) = existing_file_id {
-        metadata["file_id"] = serde_json::json!(eid);
-    }
-    let metadata_json = match serde_json::to_string(&metadata) {
-        Ok(s) => s,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    let parent_uuid = parent_id.as_deref().and_then(|s| s.parse::<uuid::Uuid>().ok());
+    let is_media = beebeeb_core::media::is_media(mime);
+    let effective_file_id = existing_file_id.or(Some(file_uuid));
+
+    // V2 upload: init → chunks → complete
+    let init_resp = match state.api
+        .upload_init(effective_file_id, &name_encrypted, parent_uuid, total_encrypted_size, encrypted_chunks.len() as i32, is_media)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
 
-    match state.api.upload_encrypted(&metadata_json, &encrypted_chunks).await {
+    let server_id = match init_resp.get("id").and_then(|v| v.as_str()) {
+        Some(id) => id.to_string(),
+        None => return (StatusCode::INTERNAL_SERVER_ERROR, "missing file id").into_response(),
+    };
+
+    for (idx, data) in encrypted_chunks {
+        if let Err(e) = state.api.upload_chunk(&server_id, idx, data).await {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
+        }
+    }
+
+    match state.api.upload_complete(&server_id).await {
         Ok(_) => {
             let mut headers = HeaderMap::new();
             headers.insert("Location", path.parse().unwrap_or_else(|_| "/".parse().unwrap()));
