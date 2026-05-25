@@ -610,7 +610,8 @@ mod fuse_impl {
             ))?;
 
             let server_id = init_resp
-                .get("id")
+                .get("file_id")
+                .or_else(|| init_resp.get("id"))
                 .and_then(|v| v.as_str())
                 .map(String::from)
                 .unwrap_or_else(|| key_uuid.to_string());

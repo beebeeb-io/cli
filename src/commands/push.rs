@@ -449,7 +449,8 @@ async fn push_single_file(
         .await?;
 
     let server_id = init_resp
-        .get("id")
+        .get("file_id")
+        .or_else(|| init_resp.get("id"))
         .and_then(|v| v.as_str())
         .unwrap_or(&file_id.to_string().as_str())
         .to_string();

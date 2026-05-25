@@ -1229,9 +1229,10 @@ async fn upload_file_to(
         .upload_init(Some(file_id), &name_encrypted, parent_id, total_enc, chunk_count, is_media)
         .await?;
     let server_id = init_resp
-        .get("id")
+        .get("file_id")
+        .or_else(|| init_resp.get("id"))
         .and_then(|v| v.as_str())
-        .ok_or("server response missing file id")?;
+        .ok_or("server response missing file_id")?;
 
     for (idx, data) in encrypted_chunks {
         api.upload_chunk(server_id, idx, data).await?;

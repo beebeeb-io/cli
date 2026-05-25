@@ -678,7 +678,7 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
 
-    let server_id = match init_resp.get("id").and_then(|v| v.as_str()) {
+    let server_id = match init_resp.get("file_id").or_else(|| init_resp.get("id")).and_then(|v| v.as_str()) {
         Some(id) => id.to_string(),
         None => return (StatusCode::INTERNAL_SERVER_ERROR, "missing file id").into_response(),
     };
