@@ -826,6 +826,137 @@ impl ApiClient {
             .map(|b| b.to_vec())
             .map_err(|e| format!("failed to read response: {e}"))
     }
+
+    // ── Client device + session API ──────────────────────────────────────
+
+    /// Register (upsert) a client device with the server.
+    pub async fn register_device(
+        &self,
+        hostname: &str,
+        platform: &str,
+        bb_version: &str,
+    ) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let body = serde_json::json!({
+            "hostname": hostname,
+            "platform": platform,
+            "bb_version": bb_version,
+        });
+        for _ in 0..3 {
+            pace_if_needed().await;
+            let resp = self
+                .client
+                .post(self.url("/api/v1/clients/devices"))
+                .bearer_auth(&token)
+                .json(&body)
+                .send()
+                .await
+                .map_err(format_request_error)?;
+            match parse_response(resp).await {
+                Err(e) if e == "__rate_limited__" => continue,
+                other => return other,
+            }
+        }
+        Err("rate limited after 3 retries".to_string())
+    }
+
+    /// Create a new client session (sync, mount, etc.).
+    pub async fn create_client_session(
+        &self,
+        device_id: &str,
+        name: &str,
+        session_type: &str,
+        local_path: Option<&str>,
+        remote_path: &str,
+    ) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let body = serde_json::json!({
+            "device_id": device_id,
+            "name": name,
+            "session_type": session_type,
+            "local_path": local_path,
+            "remote_path": remote_path,
+        });
+        for _ in 0..3 {
+            pace_if_needed().await;
+            let resp = self
+                .client
+                .post(self.url("/api/v1/clients/sessions"))
+                .bearer_auth(&token)
+                .json(&body)
+                .send()
+                .await
+                .map_err(format_request_error)?;
+            match parse_response(resp).await {
+                Err(e) if e == "__rate_limited__" => continue,
+                other => return other,
+            }
+        }
+        Err("rate limited after 3 retries".to_string())
+    }
+
+    /// Fire-and-forget heartbeat — no retry on rate limit.
+    pub async fn send_heartbeat(
+        &self,
+        session_id: &str,
+        status: &str,
+        files_synced: Option<u64>,
+        files_total: Option<u64>,
+        bytes_synced: Option<u64>,
+        bytes_total: Option<u64>,
+        current_file: Option<&str>,
+        speed_bps: Option<u64>,
+    ) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let body = serde_json::json!({
+            "status": status,
+            "files_synced": files_synced,
+            "files_total": files_total,
+            "bytes_synced": bytes_synced,
+            "bytes_total": bytes_total,
+            "current_file": current_file,
+            "speed_bps": speed_bps,
+        });
+        // Heartbeats are fire-and-forget — don't retry
+        pace_if_needed().await;
+        let resp = self
+            .client
+            .post(self.url(&format!("/api/v1/clients/sessions/{session_id}/heartbeat")))
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(resp).await
+    }
+
+    /// List all client sessions for the authenticated user.
+    pub async fn list_client_sessions(&self) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .get(self.url("/api/v1/clients/sessions"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(resp).await
+    }
+
+    /// Stop a client session by setting its status to "stopped".
+    pub async fn stop_client_session(&self, session_id: &str) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let body = serde_json::json!({ "status": "stopped" });
+        let resp = self
+            .client
+            .patch(self.url(&format!("/api/v1/clients/sessions/{session_id}")))
+            .bearer_auth(&token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(resp).await
+    }
 }
 
 async fn parse_response(resp: reqwest::Response) -> Result<Value, String> {

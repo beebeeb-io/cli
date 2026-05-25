@@ -3,6 +3,7 @@ mod colors;
 mod commands;
 mod config;
 mod crypto;
+pub mod device;
 mod env_detect;
 mod loopback;
 mod path;
