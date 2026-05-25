@@ -1158,7 +1158,22 @@ async fn do_download(
     }
 
     let out_path = local_dir.join(rel);
-    download_to(api, master_key, remote.id, remote.chunk_count, &out_path).await?;
+    match download_to(api, master_key, remote.id, remote.chunk_count, &out_path).await {
+        Ok(()) => {}
+        Err(e) if e.contains("still in progress") || e.contains("409") => {
+            if !ui::is_quiet() {
+                use colored::Colorize;
+                eprintln!(
+                    "  {} {} — clearing stuck upload, will re-sync next run",
+                    "!".custom_color(crate::colors::AMBER),
+                    rel.custom_color(crate::colors::INK_DIM),
+                );
+            }
+            let _ = api.trash_file(&remote.id.to_string()).await;
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    }
 
     let meta = std::fs::metadata(&out_path)
         .map_err(|e| format!("stat {}: {e}", out_path.display()))?;
