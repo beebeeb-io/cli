@@ -186,10 +186,24 @@ pub async fn run(
     };
 
     if stop_legacy {
-        return uninstall_launchagent();
+        // Legacy --stop: try to uninstall any old single-plist LaunchAgent
+        return crate::daemon::uninstall_launchagent("sync")
+            .map(|removed| {
+                if removed {
+                    println!(
+                        "  {} sync daemon removed",
+                        "\u{2713}".custom_color(crate::colors::GREEN_OK),
+                    );
+                } else {
+                    println!(
+                        "  {} no legacy sync daemon installed",
+                        "\u{00b7}".custom_color(crate::colors::INK_DIM),
+                    );
+                }
+            });
     }
     if daemon {
-        return install_launchagent(&local_dir, remote_path_arg.as_deref());
+        return spawn_sync_daemon(&local_dir, remote_path_arg.as_deref());
     }
 
     let api = ApiClient::from_config();
@@ -1124,7 +1138,14 @@ async fn stop_session_by_name(api: &ApiClient, name: &str) -> Result<(), String>
             .get("name")
             .and_then(|v| v.as_str())
             .unwrap_or("unnamed");
+
+        // Stop the server-side session
         api.stop_client_session(id).await?;
+
+        // Kill the local daemon process + remove auto-start
+        let slug = crate::daemon::slugify(session_name);
+        let _ = crate::daemon::stop_daemon(&slug);
+
         println!(
             "  {} stopped {}",
             "\u{2713}".custom_color(crate::colors::GREEN_OK),
@@ -1160,6 +1181,8 @@ async fn stop_all_sessions(api: &ApiClient) -> Result<(), String> {
             "\u{00b7}".custom_color(crate::colors::INK_DIM),
             "no active sessions on this device".custom_color(crate::colors::INK_DIM),
         );
+        // Still stop any orphaned local daemons
+        let _ = crate::daemon::stop_all_daemons();
         return Ok(());
     }
 
@@ -1173,7 +1196,14 @@ async fn stop_all_sessions(api: &ApiClient) -> Result<(), String> {
             .get("name")
             .and_then(|v| v.as_str())
             .unwrap_or("unnamed");
+
+        // Stop server-side session
         api.stop_client_session(id).await?;
+
+        // Kill local daemon + remove auto-start
+        let slug = crate::daemon::slugify(name);
+        let _ = crate::daemon::stop_daemon(&slug);
+
         println!(
             "  {} stopped {}",
             "\u{2713}".custom_color(crate::colors::GREEN_OK),
@@ -1181,6 +1211,9 @@ async fn stop_all_sessions(api: &ApiClient) -> Result<(), String> {
         );
         stopped += 1;
     }
+
+    // Also stop any orphaned daemons (PID files with no matching server session)
+    let _ = crate::daemon::stop_all_daemons();
 
     println!(
         "\n  {} {} session{} stopped on {}",
@@ -1730,113 +1763,91 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-// ── LaunchAgent daemon ──────────────────────────────────────────────────────
+// ── Daemon spawning ────────────────────────────────────────────────────────
 
-/// Escape user-controllable text for inclusion inside an XML element/attribute
-/// in a launchd plist. Paths may legitimately contain `&` or `'`, and a
-/// malicious filename could contain `<`/`>` that would corrupt the plist.
-fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
+/// Spawn a sync daemon and optionally install platform auto-start.
+///
+/// Builds a session name from the local directory and remote path, computes
+/// a filesystem slug, spawns `bb sync <local> <remote>` as a detached
+/// process, writes a PID file, and installs a LaunchAgent (macOS) or
+/// systemd user unit (Linux) for auto-start on login.
+fn spawn_sync_daemon(local_dir: &Path, remote_path: Option<&str>) -> Result<(), String> {
+    let local_dir = std::fs::canonicalize(local_dir)
+        .map_err(|e| format!("cannot resolve path: {e}"))?;
 
-fn install_launchagent(local_dir: &Path, remote_path: Option<&str>) -> Result<(), String> {
-    let plist_dir = dirs::home_dir()
-        .ok_or("cannot find home directory")?
-        .join("Library/LaunchAgents");
-    std::fs::create_dir_all(&plist_dir).map_err(|e| format!("create dir: {e}"))?;
-    let plist_path = plist_dir.join("io.beebeeb.sync.plist");
+    let remote = remote_path.unwrap_or("/");
+    let remote_normalized = normalize_remote_path(remote);
 
-    let bb_path = std::env::current_exe().map_err(|e| e.to_string())?;
-    let mut args = vec![
-        bb_path.to_string_lossy().to_string(),
-        "sync".to_string(),
-        local_dir.to_string_lossy().to_string(),
-    ];
-    if let Some(rp) = remote_path {
-        args.push(rp.to_string());
-    }
-
-    let args_xml: String = args
-        .iter()
-        .map(|a| format!("        <string>{}</string>", xml_escape(a)))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let plist = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>io.beebeeb.sync</string>
-    <key>ProgramArguments</key>
-    <array>
-{args_xml}
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/tmp/beebeeb-sync.log</string>
-    <key>StandardErrorPath</key>
-    <string>/tmp/beebeeb-sync.err</string>
-</dict>
-</plist>"#
+    // Build a session-like name for the slug
+    let device_info = crate::device::load_or_create();
+    let session_name = format!(
+        "{}/{}",
+        device_info.hostname,
+        remote_normalized.trim_start_matches('/').replace('/', "-")
     );
+    let slug = crate::daemon::slugify(&session_name);
 
-    std::fs::write(&plist_path, plist).map_err(|e| format!("write plist: {e}"))?;
-
-    let status = std::process::Command::new("launchctl")
-        .args(["load", &plist_path.to_string_lossy()])
-        .status()
-        .map_err(|e| format!("launchctl: {e}"))?;
-
-    if !status.success() {
-        return Err("launchctl load failed".to_string());
+    // Check if already running
+    if let Some(pid) = crate::daemon::is_daemon_running(&slug)? {
+        println!(
+            "  {} daemon already running (PID {})",
+            "\u{25CF}".custom_color(crate::colors::GREEN_OK),
+            pid,
+        );
+        println!(
+            "  {} bb sync --status",
+            "status".custom_color(crate::colors::INK_DIM),
+        );
+        return Ok(());
     }
 
+    // Spawn the daemon process
+    let pid = crate::daemon::spawn_daemon(&local_dir, &remote_normalized, &slug)?;
+
+    // Install platform auto-start (best-effort, non-fatal)
+    if let Err(e) = crate::daemon::install_launchagent(&local_dir, &remote_normalized, &slug) {
+        if !ui::is_quiet() {
+            eprintln!(
+                "  {} LaunchAgent install: {e}",
+                "!".custom_color(crate::colors::AMBER),
+            );
+        }
+    }
+    if let Err(e) = crate::daemon::install_systemd_unit(&local_dir, &remote_normalized, &slug) {
+        if !ui::is_quiet() {
+            eprintln!(
+                "  {} systemd unit install: {e}",
+                "!".custom_color(crate::colors::AMBER),
+            );
+        }
+    }
+
+    // Success output
     println!(
-        "  {} sync daemon installed \u{00b7} starts on login",
-        "\u{2713}".custom_color(crate::colors::GREEN_OK)
+        "  {} {} running as daemon (PID {})",
+        "\u{25CF}".custom_color(crate::colors::GREEN_OK),
+        session_name.custom_color(crate::colors::INK),
+        pid,
     );
+    println!(
+        "  {} {} \u{2192} {}",
+        "folder".custom_color(crate::colors::INK_DIM),
+        local_dir.display().to_string().custom_color(crate::colors::INK),
+        remote_normalized.custom_color(crate::colors::INK_DIM),
+    );
+
+    let log_dir = crate::daemon::log_dir()?;
     println!(
         "  {} {}",
-        "folder".custom_color(crate::colors::INK_DIM),
-        local_dir
-            .display()
-            .to_string()
-            .custom_color(crate::colors::INK),
+        "logs".custom_color(crate::colors::INK_DIM),
+        log_dir.join(format!("{slug}.log")).display()
+            .to_string().custom_color(crate::colors::INK_DIM),
     );
     println!(
-        "  {} bb sync --stop",
-        "stop".custom_color(crate::colors::INK_DIM)
+        "  {} bb sync --status to check, bb sync --stop-session \"{}\" to stop",
+        "hint".custom_color(crate::colors::INK_DIM),
+        session_name,
     );
-    Ok(())
-}
 
-fn uninstall_launchagent() -> Result<(), String> {
-    let plist_path = dirs::home_dir()
-        .ok_or("cannot find home directory")?
-        .join("Library/LaunchAgents/io.beebeeb.sync.plist");
-
-    if !plist_path.exists() {
-        return Err("no sync daemon installed".to_string());
-    }
-
-    let _ = std::process::Command::new("launchctl")
-        .args(["unload", &plist_path.to_string_lossy()])
-        .status();
-
-    std::fs::remove_file(&plist_path).map_err(|e| format!("remove plist: {e}"))?;
-
-    println!(
-        "  {} sync daemon removed",
-        "\u{2713}".custom_color(crate::colors::GREEN_OK)
-    );
     Ok(())
 }

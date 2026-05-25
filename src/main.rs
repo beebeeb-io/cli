@@ -3,6 +3,7 @@ mod colors;
 mod commands;
 mod config;
 mod crypto;
+pub mod daemon;
 pub mod device;
 mod env_detect;
 mod loopback;
@@ -188,7 +189,7 @@ enum Commands {
         #[arg(long)]
         once: bool,
 
-        /// Install as macOS LaunchAgent (auto-start on login)
+        /// Run as a background daemon with auto-start on login
         #[arg(long)]
         daemon: bool,
 
