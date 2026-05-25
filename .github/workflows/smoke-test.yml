@@ -13,6 +13,7 @@ jobs:
       CLI_AUTH_TEST_EMAIL: ${{ secrets.CLI_AUTH_TEST_EMAIL }}
       CLI_AUTH_TEST_PASSWORD: ${{ secrets.CLI_AUTH_TEST_PASSWORD }}
       CLI_AUTH_TEST_TOTP_SECRET: ${{ secrets.CLI_AUTH_TEST_TOTP_SECRET }}
+      CLI_AUTH_TEST_RECOVERY_PHRASE: ${{ secrets.CLI_AUTH_TEST_RECOVERY_PHRASE }}
       API_BASE_URL: https://api.beebeeb.io
     steps:
       - uses: actions/checkout@v4
