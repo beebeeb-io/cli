@@ -3,7 +3,7 @@
 // out of the env, runs a Playwright session, and exits 0 on success.
 
 import { chromium } from 'playwright';
-import { authenticator } from 'otplib';
+import { authenticator } from '@otplib/preset-default';
 import path from 'node:path';
 import { mkdirSync } from 'node:fs';
 

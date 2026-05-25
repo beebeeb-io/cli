@@ -45,7 +45,7 @@ jobs:
         working-directory: scripts
         run: |
           set -euo pipefail
-          bun add playwright otplib
+          bun add playwright @otplib/preset-default
           bunx playwright install --with-deps chromium
 
       - name: Run 2FA login smoke test
