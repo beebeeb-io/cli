@@ -61,27 +61,229 @@ use std::path::PathBuf;
 
 #[cfg(not(feature = "fuse"))]
 pub async fn run(_mountpoint: PathBuf, _foreground: bool, _cache_ttl: u64) -> Result<(), String> {
-    Err(concat!(
-        "bb mount is not enabled in this build.\n",
-        "\n",
-        "macOS:\n",
-        "  1. Install macFUSE:  brew install macfuse\n",
-        "  2. Reboot, then allow the kernel extension in System Settings → Privacy & Security\n",
-        "  3. Install bb with FUSE support:\n",
-        "       cargo install --git https://github.com/beebeeb-io/cli --features fuse\n",
-        "\n",
-        "Linux:\n",
-        "  1. Install libfuse3:  sudo apt install libfuse3-dev   (Debian/Ubuntu)\n",
-        "                         sudo dnf install fuse3-devel    (Fedora)\n",
-        "  2. Install bb with FUSE support:\n",
-        "       cargo install --git https://github.com/beebeeb-io/cli --features fuse\n",
-    )
-    .to_string())
+    use colored::Colorize;
+    use std::io::{self, Write};
+
+    println!();
+    println!(
+        "  {} {}",
+        "◆".custom_color(crate::colors::AMBER),
+        "FUSE setup required".bold().custom_color(crate::colors::INK),
+    );
+    println!(
+        "  {}",
+        "bb mount lets you browse your encrypted vault as a regular folder."
+            .custom_color(crate::colors::INK_DIM),
+    );
+    println!();
+
+    #[cfg(target_os = "macos")]
+    {
+        let has_framework = std::path::Path::new("/Library/Frameworks/macFUSE.framework").exists();
+        if !has_framework {
+            println!(
+                "  {} {}",
+                "1".custom_color(crate::colors::AMBER),
+                "macFUSE is not installed on this Mac.".custom_color(crate::colors::INK),
+            );
+
+            let has_brew = std::process::Command::new("brew")
+                .arg("--version")
+                .output()
+                .is_ok();
+
+            if has_brew {
+                print!(
+                    "  {} ",
+                    "Install macFUSE now? [Y/n]".custom_color(crate::colors::INK),
+                );
+                io::stdout().flush().ok();
+                let mut answer = String::new();
+                io::stdin().read_line(&mut answer).ok();
+                let answer = answer.trim().to_lowercase();
+
+                if answer.is_empty() || answer == "y" || answer == "yes" {
+                    println!();
+                    println!(
+                        "  {} {}",
+                        "→".custom_color(crate::colors::AMBER),
+                        "Installing macFUSE...".custom_color(crate::colors::INK_DIM),
+                    );
+                    let status = std::process::Command::new("brew")
+                        .args(["install", "--cask", "macfuse"])
+                        .status();
+
+                    match status {
+                        Ok(s) if s.success() => {
+                            println!();
+                            println!(
+                                "  {} {}",
+                                "✓".green(),
+                                "macFUSE installed.".custom_color(crate::colors::INK),
+                            );
+                        }
+                        _ => {
+                            println!();
+                            println!(
+                                "  {} {}",
+                                "!".custom_color(crate::colors::RED_ERR),
+                                "Installation needs a password. Run this in your terminal:"
+                                    .custom_color(crate::colors::INK),
+                            );
+                            println!(
+                                "    {}",
+                                "brew install --cask macfuse"
+                                    .custom_color(crate::colors::AMBER),
+                            );
+                            println!();
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    println!();
+                    println!(
+                        "  {}",
+                        "To install later: brew install --cask macfuse"
+                            .custom_color(crate::colors::INK_DIM),
+                    );
+                    return Ok(());
+                }
+            } else {
+                println!(
+                    "  {}",
+                    "Install Homebrew (brew.sh), then: brew install --cask macfuse"
+                        .custom_color(crate::colors::INK_DIM),
+                );
+                return Ok(());
+            }
+        }
+
+        // Check if kernel extension / system extension is loaded.
+        let kext_loaded = std::process::Command::new("kextstat")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("macfuse"))
+            .unwrap_or(false);
+
+        let sysext_ok = std::path::Path::new("/Library/Filesystems/macfuse.fs").exists();
+
+        if !kext_loaded && !sysext_ok {
+            println!();
+            println!(
+                "  {} {}",
+                "2".custom_color(crate::colors::AMBER),
+                "macFUSE needs a reboot to activate.".custom_color(crate::colors::INK),
+            );
+            println!(
+                "  {}",
+                "After rebooting, go to:".custom_color(crate::colors::INK_DIM),
+            );
+            println!(
+                "  {}",
+                "System Settings → Privacy & Security → scroll down → Allow"
+                    .custom_color(crate::colors::INK),
+            );
+            println!(
+                "  {}",
+                "Then run bb mount again.".custom_color(crate::colors::INK_DIM),
+            );
+            println!();
+            return Ok(());
+        }
+
+        println!();
+        println!(
+            "  {} {}",
+            "!".custom_color(crate::colors::AMBER),
+            "macFUSE is installed, but this bb binary was built without FUSE support."
+                .custom_color(crate::colors::INK),
+        );
+        println!(
+            "  {}",
+            "Rebuild with:  cargo install --path . --features fuse --force"
+                .custom_color(crate::colors::INK_DIM),
+        );
+        println!(
+            "  {}",
+            "Or download the FUSE build from github.com/beebeeb-io/cli/releases"
+                .custom_color(crate::colors::INK_DIM),
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let has_fuse3 = std::path::Path::new("/usr/include/fuse3/fuse.h").exists()
+            || std::path::Path::new("/usr/include/fuse3/fuse_lowlevel.h").exists();
+
+        if !has_fuse3 {
+            println!(
+                "  {} {}",
+                "1".custom_color(crate::colors::AMBER),
+                "libfuse3 development headers are not installed."
+                    .custom_color(crate::colors::INK),
+            );
+
+            let distro = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+            if distro.contains("debian") || distro.contains("ubuntu") || distro.contains("Ubuntu") {
+                print!(
+                    "  {} ",
+                    "Install now? (sudo apt install libfuse3-dev) [Y/n]"
+                        .custom_color(crate::colors::INK),
+                );
+                io::stdout().flush().ok();
+                let mut answer = String::new();
+                io::stdin().read_line(&mut answer).ok();
+                let answer = answer.trim().to_lowercase();
+
+                if answer.is_empty() || answer == "y" || answer == "yes" {
+                    let status = std::process::Command::new("sudo")
+                        .args(["apt", "install", "-y", "libfuse3-dev"])
+                        .status();
+                    if status.map_or(false, |s| s.success()) {
+                        println!(
+                            "  {} {}",
+                            "✓".green(),
+                            "libfuse3-dev installed.".custom_color(crate::colors::INK),
+                        );
+                    } else {
+                        return Err("Installation failed.".to_string());
+                    }
+                }
+            } else if distro.contains("fedora") || distro.contains("rhel") {
+                println!(
+                    "  {}",
+                    "Install: sudo dnf install fuse3-devel"
+                        .custom_color(crate::colors::INK_DIM),
+                );
+            } else {
+                println!(
+                    "  {}",
+                    "Install your distro's libfuse3 development package."
+                        .custom_color(crate::colors::INK_DIM),
+                );
+            }
+        }
+
+        println!();
+        println!(
+            "  {} {}",
+            "!".custom_color(crate::colors::AMBER),
+            "This bb binary was built without FUSE support."
+                .custom_color(crate::colors::INK),
+        );
+        println!(
+            "  {}",
+            "Rebuild with:  cargo install --path . --features fuse --force"
+                .custom_color(crate::colors::INK_DIM),
+        );
+    }
+
+    println!();
+    Ok(())
 }
 
 #[cfg(not(feature = "fuse"))]
 pub async fn unmount(_mountpoint: PathBuf) -> Result<(), String> {
-    Err("bb unmount requires the `fuse` feature — see `bb mount --help`.".to_string())
+    Err("bb unmount requires FUSE support. Run `bb mount` for setup instructions.".to_string())
 }
 
 // ─── Full implementation (fuse feature enabled) ───────────────────────────────
