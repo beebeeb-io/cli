@@ -1172,6 +1172,18 @@ async fn do_download(
             let _ = api.trash_file(&remote.id.to_string()).await;
             return Ok(());
         }
+        Err(e) if e.contains("key derivation") || e.contains("decrypt") => {
+            if !ui::is_quiet() {
+                use colored::Colorize;
+                eprintln!(
+                    "  {} {} — corrupt remote copy, trashing to re-upload from local",
+                    "!".custom_color(crate::colors::AMBER),
+                    rel.custom_color(crate::colors::INK_DIM),
+                );
+            }
+            let _ = api.trash_file(&remote.id.to_string()).await;
+            return Ok(());
+        }
         Err(e) => return Err(e),
     }
 
