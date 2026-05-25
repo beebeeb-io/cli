@@ -166,8 +166,8 @@ enum Commands {
 
     /// Bidirectionally sync a local folder with a remote vault path
     Sync {
-        /// Local directory to sync
-        local_dir: PathBuf,
+        /// Local directory to sync (omit to show all active sessions)
+        local_dir: Option<PathBuf>,
 
         /// Remote vault path (e.g. "/Documents"). If omitted, uses path stored in .bb-sync.json.
         remote_path: Option<String>,
@@ -192,9 +192,21 @@ enum Commands {
         #[arg(long)]
         daemon: bool,
 
-        /// Uninstall the sync LaunchAgent
+        /// Uninstall the sync LaunchAgent (legacy — use --stop-session <name>)
         #[arg(long)]
         stop: bool,
+
+        /// Show all active sync sessions across devices
+        #[arg(long)]
+        status: bool,
+
+        /// Stop a sync session by name
+        #[arg(long, value_name = "NAME")]
+        stop_session: Option<String>,
+
+        /// Stop all sync sessions on this device
+        #[arg(long)]
+        stop_all: bool,
 
         /// Number of parallel uploads (default: 4)
         #[arg(long, default_value_t = 4)]
@@ -452,7 +464,7 @@ async fn main() {
         Commands::Unshare { share_id } => commands::share::revoke(share_id).await,
         Commands::Watch { path, parent } => {
             eprintln!("  {} bb watch is now bb sync. Redirecting...", "note".custom_color(crate::colors::INK_DIM));
-            commands::sync::run(path, parent, false, false, false, false, false, false, 4).await
+            commands::sync::run(Some(path), parent, false, false, false, false, false, false, false, None, false, 4).await
         }
         Commands::Sync {
             local_dir,
@@ -463,8 +475,11 @@ async fn main() {
             once,
             daemon,
             stop,
+            status,
+            stop_session,
+            stop_all,
             concurrency,
-        } => commands::sync::run(local_dir, remote_path, dry_run, force, delete, once, daemon, stop, concurrency).await,
+        } => commands::sync::run(local_dir, remote_path, dry_run, force, delete, once, daemon, stop, status, stop_session, stop_all, concurrency).await,
         Commands::Mount { mountpoint, foreground, cache_ttl } => {
             commands::mount::run(mountpoint, foreground, cache_ttl).await
         }

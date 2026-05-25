@@ -139,17 +139,53 @@ struct RemoteFile {
 }
 
 pub async fn run(
-    local_dir: PathBuf,
+    local_dir: Option<PathBuf>,
     remote_path_arg: Option<String>,
     dry_run: bool,
     force: bool,
     delete_remote: bool,
     once: bool,
     daemon: bool,
-    stop: bool,
+    stop_legacy: bool,
+    status: bool,
+    stop_session: Option<String>,
+    stop_all: bool,
     concurrency: usize,
 ) -> Result<(), String> {
-    if stop {
+    // ── --status: show all active sync sessions ────────────────────────────
+    if status || stop_session.is_some() || stop_all {
+        let api = ApiClient::from_config();
+        api.require_auth()?;
+
+        if let Some(ref name) = stop_session {
+            return stop_session_by_name(&api, name).await;
+        }
+        if stop_all {
+            return stop_all_sessions(&api).await;
+        }
+        // --status
+        return print_session_status(&api).await;
+    }
+
+    // If no local_dir and no control flags, show status + hint (Task 4)
+    let local_dir = match local_dir {
+        Some(d) => d,
+        None => {
+            let api = ApiClient::from_config();
+            api.require_auth()?;
+            print_session_status(&api).await?;
+            println!();
+            println!(
+                "  {} {}",
+                "hint".custom_color(crate::colors::INK_DIM),
+                "Run bb sync <local> <remote> to start a new sync"
+                    .custom_color(crate::colors::INK_DIM),
+            );
+            return Ok(());
+        }
+    };
+
+    if stop_legacy {
         return uninstall_launchagent();
     }
     if daemon {
@@ -871,6 +907,288 @@ pub async fn run(
             }
         }
     }
+
+    Ok(())
+}
+
+// ── Session management helpers ─────────────────────────────────────────────
+
+async fn print_session_status(api: &ApiClient) -> Result<(), String> {
+    let resp = api.list_client_sessions().await?;
+    let sessions = resp
+        .get("sessions")
+        .and_then(|v| v.as_array())
+        .ok_or("invalid session listing")?;
+
+    if sessions.is_empty() {
+        println!(
+            "  {} {}",
+            "\u{00b7}".custom_color(crate::colors::INK_DIM),
+            "no active sync sessions".custom_color(crate::colors::INK_DIM),
+        );
+        return Ok(());
+    }
+
+    let w = 62;
+    println!("{}", crate::ui::box_header("SESSIONS", w));
+
+    for session in sessions {
+        let name = session
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unnamed");
+        let session_status = session
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let local_path = session
+            .get("local_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let remote_path = session
+            .get("remote_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let device_name = session
+            .get("device_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let files_synced = session
+            .get("files_synced")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let bytes_synced = session
+            .get("bytes_synced")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let current_file = session
+            .get("current_file")
+            .and_then(|v| v.as_str());
+        let speed_bps = session
+            .get("speed_bps")
+            .and_then(|v| v.as_u64());
+
+        // Compute time since last heartbeat
+        let heartbeat_ago = session
+            .get("last_heartbeat")
+            .and_then(|v| v.as_str())
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| {
+                let elapsed = Utc::now().signed_duration_since(dt.with_timezone(&Utc));
+                if elapsed.num_seconds() < 60 {
+                    format!("{}s ago", elapsed.num_seconds())
+                } else if elapsed.num_minutes() < 60 {
+                    format!("{}m ago", elapsed.num_minutes())
+                } else {
+                    format!("{}h ago", elapsed.num_hours())
+                }
+            });
+
+        // Status indicator and color
+        let (indicator, status_text, status_color) = match session_status {
+            "watching" | "idle" => (
+                "\u{25CF}",
+                "watching",
+                crate::colors::GREEN_OK,
+            ),
+            "syncing" | "uploading" | "downloading" => (
+                "\u{25C6}",
+                session_status,
+                crate::colors::AMBER,
+            ),
+            "stopped" => (
+                "\u{25CB}",
+                "stopped",
+                crate::colors::INK_DIM,
+            ),
+            "error" => (
+                "\u{25CF}",
+                "error",
+                crate::colors::RED_ERR,
+            ),
+            _ => (
+                "\u{25CF}",
+                session_status,
+                crate::colors::INK_DIM,
+            ),
+        };
+
+        // Line 1: indicator + name + device → remote + status
+        let path_display = if !local_path.is_empty() {
+            format!("{remote_path}")
+        } else {
+            remote_path.to_string()
+        };
+
+        let line1 = if !device_name.is_empty() {
+            format!(
+                "  {} {}  {} \u{2192} {}  {}",
+                indicator.custom_color(status_color),
+                name.custom_color(crate::colors::INK),
+                device_name.custom_color(crate::colors::INK_DIM),
+                path_display.custom_color(crate::colors::INK_DIM),
+                status_text.custom_color(status_color),
+            )
+        } else {
+            format!(
+                "  {} {}  \u{2192} {}  {}",
+                indicator.custom_color(status_color),
+                name.custom_color(crate::colors::INK),
+                path_display.custom_color(crate::colors::INK_DIM),
+                status_text.custom_color(status_color),
+            )
+        };
+        println!("{}", crate::ui::box_line(&line1, w));
+
+        // Line 2: stats
+        let mut detail_parts: Vec<String> = Vec::new();
+        if files_synced > 0 {
+            detail_parts.push(format!(
+                "{} files",
+                format_count(files_synced)
+            ));
+        }
+        if bytes_synced > 0 {
+            detail_parts.push(crate::ui::human_size(bytes_synced));
+        }
+        if let Some(ref ago) = heartbeat_ago {
+            detail_parts.push(format!("last heartbeat {ago}"));
+        }
+
+        // If syncing, show current file + speed
+        if let Some(file) = current_file {
+            let speed_str = speed_bps
+                .map(|s| format!(" \u{00b7} {}", crate::ui::human_speed(s as f64)))
+                .unwrap_or_default();
+            let line2 = format!(
+                "    {} {file}{speed_str}",
+                "uploading".custom_color(crate::colors::INK_DIM),
+            );
+            println!("{}", crate::ui::box_line(
+                &line2.custom_color(crate::colors::INK_DIM).to_string(),
+                w,
+            ));
+        } else if !detail_parts.is_empty() {
+            let line2 = format!(
+                "    {}",
+                detail_parts.join(" \u{00b7} ")
+            );
+            println!("{}", crate::ui::box_line(
+                &line2.custom_color(crate::colors::INK_DIM).to_string(),
+                w,
+            ));
+        }
+    }
+
+    println!("{}", crate::ui::box_footer(w));
+    Ok(())
+}
+
+fn format_count(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{},{:03}", n / 1_000, n % 1_000)
+    } else {
+        format!("{n}")
+    }
+}
+
+async fn stop_session_by_name(api: &ApiClient, name: &str) -> Result<(), String> {
+    let resp = api.list_client_sessions().await?;
+    let sessions = resp
+        .get("sessions")
+        .and_then(|v| v.as_array())
+        .ok_or("invalid session listing")?;
+
+    let matching: Vec<&serde_json::Value> = sessions
+        .iter()
+        .filter(|s| {
+            s.get("name")
+                .and_then(|v| v.as_str())
+                .map(|n| n == name)
+                .unwrap_or(false)
+        })
+        .collect();
+
+    if matching.is_empty() {
+        return Err(format!("no session found with name \"{name}\""));
+    }
+
+    for session in matching {
+        let id = session
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or("session missing id")?;
+        let session_name = session
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unnamed");
+        api.stop_client_session(id).await?;
+        println!(
+            "  {} stopped {}",
+            "\u{2713}".custom_color(crate::colors::GREEN_OK),
+            session_name.custom_color(crate::colors::INK),
+        );
+    }
+
+    Ok(())
+}
+
+async fn stop_all_sessions(api: &ApiClient) -> Result<(), String> {
+    let device_info = crate::device::load_or_create();
+    let resp = api.list_client_sessions().await?;
+    let sessions = resp
+        .get("sessions")
+        .and_then(|v| v.as_array())
+        .ok_or("invalid session listing")?;
+
+    // Filter to sessions on this device (match by device_name == hostname)
+    let device_sessions: Vec<&serde_json::Value> = sessions
+        .iter()
+        .filter(|s| {
+            s.get("device_name")
+                .and_then(|v| v.as_str())
+                .map(|n| n == device_info.hostname)
+                .unwrap_or(false)
+        })
+        .collect();
+
+    if device_sessions.is_empty() {
+        println!(
+            "  {} {}",
+            "\u{00b7}".custom_color(crate::colors::INK_DIM),
+            "no active sessions on this device".custom_color(crate::colors::INK_DIM),
+        );
+        return Ok(());
+    }
+
+    let mut stopped = 0u32;
+    for session in &device_sessions {
+        let id = session
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or("session missing id")?;
+        let name = session
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unnamed");
+        api.stop_client_session(id).await?;
+        println!(
+            "  {} stopped {}",
+            "\u{2713}".custom_color(crate::colors::GREEN_OK),
+            name.custom_color(crate::colors::INK),
+        );
+        stopped += 1;
+    }
+
+    println!(
+        "\n  {} {} session{} stopped on {}",
+        "\u{2713}".custom_color(crate::colors::GREEN_OK),
+        stopped,
+        if stopped == 1 { "" } else { "s" },
+        device_info.hostname.custom_color(crate::colors::INK),
+    );
 
     Ok(())
 }
