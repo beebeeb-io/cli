@@ -6,6 +6,7 @@ mod crypto;
 mod env_detect;
 mod loopback;
 mod path;
+mod thumbnail;
 mod ui;
 mod update;
 
