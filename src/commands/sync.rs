@@ -176,7 +176,7 @@ pub async fn run(
     };
 
     let remote_path = match remote_path_arg.or_else(|| state.remote_path.clone()) {
-        Some(p) => p,
+        Some(p) => normalize_remote_path(&p),
         None => {
             return Err("remote_path is required (no .bb-sync.json found). \
                         Usage: bb sync <local_dir> <remote_path>"
@@ -1269,6 +1269,29 @@ async fn download_to(
     Ok(())
 }
 
+
+fn normalize_remote_path(raw: &str) -> String {
+    let path = raw.trim_end_matches('/');
+    if let Some(home) = dirs::home_dir() {
+        let home_str = home.to_string_lossy();
+        if let Some(rest) = path.strip_prefix(home_str.as_ref()) {
+            let rest = rest.trim_start_matches('/');
+            return if rest.is_empty() {
+                "/".to_string()
+            } else {
+                format!("/{rest}")
+            };
+        }
+    }
+    if path.is_empty() || path == "/" {
+        return "/".to_string();
+    }
+    if !path.starts_with('/') {
+        format!("/{path}")
+    } else {
+        path.to_string()
+    }
+}
 
 fn format_size(bytes: u64) -> String {
     const KB: u64 = 1024;
