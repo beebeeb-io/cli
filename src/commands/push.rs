@@ -459,7 +459,37 @@ async fn push_single_file(
         api.upload_chunk(&server_id, idx, data).await?;
     }
 
-    let result = api.upload_complete(&server_id).await?;
+    let _result = api.upload_complete(&server_id).await?;
+
+    // ── Thumbnail generation + upload (best-effort, non-fatal) ──────────
+    if let Some(mime_str) = mime {
+        if let Some(thumb) = crate::thumbnail::generate_from_file(&file_bytes, Some(mime_str)) {
+            match beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, &thumb.data) {
+                Ok(thumb_encrypted) => {
+                    if let Err(e) = api.upload_thumbnail(&server_id, thumb_encrypted).await {
+                        if !ui::is_quiet() {
+                            eprintln!(
+                                "  {} {}",
+                                "note".custom_color(crate::colors::INK_DIM),
+                                format!("thumbnail upload skipped: {e}")
+                                    .custom_color(crate::colors::INK_DIM),
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    if !ui::is_quiet() {
+                        eprintln!(
+                            "  {} {}",
+                            "note".custom_color(crate::colors::INK_DIM),
+                            format!("thumbnail encrypt failed: {e}")
+                                .custom_color(crate::colors::INK_DIM),
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     let file_elapsed = file_start.elapsed();
 

@@ -1267,6 +1267,17 @@ async fn upload_file_to(
 
     api.upload_complete(server_id).await?;
 
+    // ── Thumbnail generation + upload (best-effort, non-fatal) ──────────
+    if let Some(mime_str) = mime {
+        if let Some(thumb) = crate::thumbnail::generate_from_file(&file_bytes, Some(mime_str)) {
+            if let Ok(thumb_encrypted) =
+                beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, &thumb.data)
+            {
+                let _ = api.upload_thumbnail(server_id, thumb_encrypted).await;
+            }
+        }
+    }
+
     server_id.parse().map_err(|e| format!("invalid file id: {e}"))
 }
 

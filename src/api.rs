@@ -777,6 +777,33 @@ impl ApiClient {
         }
     }
 
+    /// Upload an encrypted thumbnail for a file.
+    ///
+    /// `PUT /api/v1/files/{file_id}/thumbnail` with the encrypted blob as the
+    /// request body. The server stores it as a reserved chunk index and sets
+    /// `has_thumbnail = true` on the file row.
+    pub async fn upload_thumbnail(&self, file_id: &str, encrypted_data: Vec<u8>) -> Result<(), String> {
+        let token = self.require_auth()?;
+        for _ in 0..3 {
+            pace_if_needed().await;
+            let resp = self
+                .client
+                .put(self.url(&format!("/api/v1/files/{file_id}/thumbnail")))
+                .bearer_auth(&token)
+                .header("Content-Type", "application/octet-stream")
+                .body(encrypted_data.clone())
+                .send()
+                .await
+                .map_err(format_request_error)?;
+            match parse_response(resp).await {
+                Err(e) if e == "__rate_limited__" => continue,
+                Err(e) => return Err(format!("thumbnail upload: {e}")),
+                Ok(_) => return Ok(()),
+            }
+        }
+        Err("thumbnail upload rate limited after 3 retries".to_string())
+    }
+
     /// Download the raw encrypted bytes for a file.
     pub async fn download_file(&self, file_id: &str) -> Result<Vec<u8>, String> {
         let token = self.require_auth()?;
