@@ -1,0 +1,66 @@
+name: CLI Login Smoke Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke-test-login:
+    runs-on: ubuntu-22.04
+    env:
+      CLI_AUTH_TEST_EMAIL: ${{ secrets.CLI_AUTH_TEST_EMAIL }}
+      CLI_AUTH_TEST_PASSWORD: ${{ secrets.CLI_AUTH_TEST_PASSWORD }}
+      CLI_AUTH_TEST_TOTP_SECRET: ${{ secrets.CLI_AUTH_TEST_TOTP_SECRET }}
+      API_BASE_URL: https://api.beebeeb.io
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build bb from source
+        run: |
+          set -euo pipefail
+          cargo build --release
+          echo "$PWD/target/release" >> "$GITHUB_PATH"
+          target/release/bb --version
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@v1
+
+      - name: Install Playwright + otplib
+        working-directory: scripts
+        run: |
+          set -euo pipefail
+          bun add playwright otplib
+          bunx playwright install --with-deps chromium
+
+      - name: Run 2FA login smoke test
+        if: ${{ env.CLI_AUTH_TEST_EMAIL != '' }}
+        run: bash scripts/test-2fa-login.sh
+
+      - name: Fail loudly if secrets missing
+        if: ${{ env.CLI_AUTH_TEST_EMAIL == '' }}
+        run: |
+          echo "::error::CLI_AUTH_TEST_EMAIL/PASSWORD/TOTP_SECRET secrets are not set."
+          exit 1
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: login-smoke-test-evidence
+          path: test-2fa-evidence/
