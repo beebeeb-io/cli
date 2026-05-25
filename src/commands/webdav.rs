@@ -1268,20 +1268,7 @@ fn decrypt_name(
 fn child_href(parent: &str, name: &str, is_dir: bool) -> String {
     let parent = parent.trim_end_matches('/');
     let suffix = if is_dir { "/" } else { "" };
-    // URL-encode the name for safe inclusion in hrefs
-    let encoded: String = name
-        .chars()
-        .flat_map(|c| {
-            if c.is_ascii_alphanumeric() || "._-~".contains(c) {
-                vec![c]
-            } else if c == ' ' {
-                vec!['%', '2', '0']
-            } else {
-                // percent-encode: for Day 1 just pass through printable ASCII
-                vec![c]
-            }
-        })
-        .collect();
+    let encoded = percent_encode(name.as_bytes(), NON_ALPHANUMERIC).to_string();
     format!("{parent}/{encoded}{suffix}")
 }
 
