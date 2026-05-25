@@ -19,7 +19,7 @@ Generated from `bb --help`. Source of truth is `src/main.rs` (clap derive).
 
 ### Auth & session
 
-- `bb login` — browser-based device authorisation (P-256 ECDH + AES-GCM handoff). Supports `--headless` for SSH boxes.
+- `bb login` — browser-based device authorisation (P-256 ECDH + HKDF-SHA256 + AES-GCM handoff, with raw fallback for v0.4 web apps). Supports `--headless` for SSH boxes. CLI auth sessions stored in Redis (HA-safe across API servers).
 - `bb logout` — end the current session.
 - `bb whoami` — show email, device, region, quota.
 - `bb status` — connection + session + storage status.
@@ -27,7 +27,7 @@ Generated from `bb --help`. Source of truth is `src/main.rs` (clap derive).
 
 ### Files
 
-- `bb push <path>` (alias `bb upload`) — encrypt and upload a file or folder.
+- `bb push <path>` (alias `bb upload`) — encrypt and upload a file or folder. Uses V2 upload path (init → chunks → complete) so chunk metadata is stored in `object_versions`.
 - `bb pull <id-or-path>` (alias `bb download`) — download and decrypt.
 - `bb ls [path]` — list vault contents.
 - `bb quota` — storage usage with a colour-coded bar.
@@ -40,9 +40,9 @@ Generated from `bb --help`. Source of truth is `src/main.rs` (clap derive).
 
 ### Sync & mount
 
-- `bb sync <local> [remote]` — bidirectional folder sync (continuous by default; `--once`, `--daemon`, `--stop`, `--dry-run`, `--force`, `--delete`).
+- `bb sync <local> [remote]` — bidirectional folder sync (continuous by default; `--once`, `--daemon`, `--stop`, `--dry-run`, `--force`, `--delete`). V2 uploads. Remote path auto-strips `~/` home prefix. Gracefully handles 409 stuck uploads and corrupt remote files (trashes + re-uploads next run).
 - `bb watch <path>` — deprecated alias for `bb sync`.
-- `bb mount <mountpoint>` — FUSE mount (requires `fuse` feature + macFUSE/libfuse3).
+- `bb mount <mountpoint>` — FUSE mount. Interactive setup wizard guides through macFUSE/libfuse3 installation. V2 uploads.
 - `bb unmount <mountpoint>` — unmount a previously mounted vault.
 - `bb webdav` — serve the vault as a local WebDAV server (`--port`, `--read-only`, `--cache-ttl`, `--no-cache`, `--verbose`).
 
