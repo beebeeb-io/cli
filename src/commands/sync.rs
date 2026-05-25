@@ -282,6 +282,24 @@ pub async fn run(
         if let Some(ref existing) = state.session_id {
             Some(existing.clone())
         } else {
+            // Check if a session already exists for this remote_path on this device
+            let existing_session = api.list_client_sessions().await.ok()
+                .and_then(|resp| resp.get("sessions").and_then(|v| v.as_array()).cloned())
+                .and_then(|sessions| {
+                    sessions.into_iter().find(|s| {
+                        s.get("remote_path").and_then(|v| v.as_str()) == Some(&remote_path)
+                            && s.get("device_id").and_then(|v| v.as_str()) == Some(device_id)
+                            && s.get("status").and_then(|v| v.as_str()) != Some("stopped")
+                    })
+                });
+
+            if let Some(existing) = existing_session {
+                let id = existing.get("id").and_then(|v| v.as_str()).map(String::from);
+                if let Some(ref id) = id {
+                    state.session_id = Some(id.clone());
+                }
+                id
+            } else {
             let default_name = format!("{}/{}",
                 device_info.hostname,
                 remote_path.trim_start_matches('/').replace('/', "-"));
@@ -303,6 +321,7 @@ pub async fn run(
                     None
                 }
             }
+        }
         }
     } else { None };
 
@@ -1115,12 +1134,18 @@ async fn stop_session_by_name(api: &ApiClient, name: &str) -> Result<(), String>
         .and_then(|v| v.as_array())
         .ok_or("invalid session listing")?;
 
+    let name_lower = name.to_lowercase();
     let matching: Vec<&serde_json::Value> = sessions
         .iter()
         .filter(|s| {
             s.get("name")
                 .and_then(|v| v.as_str())
-                .map(|n| n == name)
+                .map(|n| {
+                    let n_lower = n.to_lowercase();
+                    n_lower == name_lower
+                        || n_lower.ends_with(&format!("/{name_lower}"))
+                        || n_lower.contains(&name_lower)
+                })
                 .unwrap_or(false)
         })
         .collect();
