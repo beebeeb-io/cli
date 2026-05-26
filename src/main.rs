@@ -9,6 +9,7 @@ mod env_detect;
 mod loopback;
 mod path;
 mod thumbnail;
+mod tui;
 mod ui;
 mod update;
 
@@ -354,18 +355,27 @@ fn print_custom_help() {
     let w = 58;
 
     println!("{}", ui::box_header("BEEBEEB", w));
-    println!("{}", ui::box_line(
-        &format!("{}",
-            "end-to-end encrypted vault, from the terminal"
-                .custom_color(colors::INK_DIM)),
-        w,
-    ));
-    println!("{}", ui::box_line(
-        &format!("v{} · {}",
-            version.custom_color(colors::INK_DIM),
-            "e2ee".custom_color(colors::GREEN_OK)),
-        w,
-    ));
+    println!(
+        "{}",
+        ui::box_line(
+            &format!(
+                "{}",
+                "end-to-end encrypted vault, from the terminal".custom_color(colors::INK_DIM)
+            ),
+            w,
+        )
+    );
+    println!(
+        "{}",
+        ui::box_line(
+            &format!(
+                "v{} · {}",
+                version.custom_color(colors::INK_DIM),
+                "e2ee".custom_color(colors::GREEN_OK)
+            ),
+            w,
+        )
+    );
     println!("{}", ui::box_footer(w));
     println!();
 
@@ -382,14 +392,17 @@ fn print_custom_help() {
         ("repair", "", "fix cross-client encryption"),
     ];
     for (name, args, desc) in cmds {
-        println!("  {:<10}{:<18}{}",
+        println!(
+            "  {:<10}{:<18}{}",
             name.custom_color(colors::GREEN_OK),
             args.custom_color(colors::PATH),
-            desc.custom_color(colors::INK_DIM));
+            desc.custom_color(colors::INK_DIM)
+        );
     }
-    println!("  {}",
-        "+ login, logout, mount, shares, unshare, config, quota, status, completions"
-            .custom_color(colors::INK_DIM));
+    println!(
+        "  {}",
+        "+ login, logout, mount, shares, unshare, config, quota, status, completions".custom_color(colors::INK_DIM)
+    );
     println!();
 
     println!("  {}", "FLAGS".custom_color(colors::AMBER));
@@ -399,14 +412,17 @@ fn print_custom_help() {
         ("--api <url>", "override API endpoint"),
     ];
     for (flag, desc) in flags {
-        println!("  {:<14}{}",
+        println!(
+            "  {:<14}{}",
             flag.custom_color(colors::CYAN),
-            desc.custom_color(colors::INK_DIM));
+            desc.custom_color(colors::INK_DIM)
+        );
     }
     println!();
-    println!("  {}",
-        "# docs · beebeeb.io/cli · fingerprints · beebeeb.io/fingerprints"
-            .custom_color(colors::INK_SAGE));
+    println!(
+        "  {}",
+        "# docs · beebeeb.io/cli · fingerprints · beebeeb.io/fingerprints".custom_color(colors::INK_SAGE)
+    );
 }
 
 #[tokio::main]
@@ -447,12 +463,19 @@ async fn main() {
         Commands::Status => commands::status::run().await,
         Commands::Quota => commands::quota::run().await,
         Commands::Config => commands::config::run().await,
-        Commands::Push { path, parent, folder, replace, keep_both } => {
-            commands::push::run(path, parent, folder, replace, keep_both).await
-        }
-        Commands::Pull { file_id, output, output_flag, zip } => {
-            commands::pull::run(file_id, output.or(output_flag), zip).await
-        }
+        Commands::Push {
+            path,
+            parent,
+            folder,
+            replace,
+            keep_both,
+        } => commands::push::run(path, parent, folder, replace, keep_both).await,
+        Commands::Pull {
+            file_id,
+            output,
+            output_flag,
+            zip,
+        } => commands::pull::run(file_id, output.or(output_flag), zip).await,
         Commands::Ls { path } => commands::ls::run(path).await,
         Commands::Share {
             file_id,
@@ -464,8 +487,25 @@ async fn main() {
         Commands::Shares => commands::share::list().await,
         Commands::Unshare { share_id } => commands::share::revoke(share_id).await,
         Commands::Watch { path, parent } => {
-            eprintln!("  {} bb watch is now bb sync. Redirecting...", "note".custom_color(crate::colors::INK_DIM));
-            commands::sync::run(Some(path), parent, false, false, false, false, false, false, false, None, false, 4).await
+            eprintln!(
+                "  {} bb watch is now bb sync. Redirecting...",
+                "note".custom_color(crate::colors::INK_DIM)
+            );
+            commands::sync::run(
+                Some(path),
+                parent,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                None,
+                false,
+                4,
+            )
+            .await
         }
         Commands::Sync {
             local_dir,
@@ -480,16 +520,36 @@ async fn main() {
             stop_session,
             stop_all,
             concurrency,
-        } => commands::sync::run(local_dir, remote_path, dry_run, force, delete, once, daemon, stop, status, stop_session, stop_all, concurrency).await,
-        Commands::Mount { mountpoint, foreground, cache_ttl } => {
-            commands::mount::run(mountpoint, foreground, cache_ttl).await
+        } => {
+            commands::sync::run(
+                local_dir,
+                remote_path,
+                dry_run,
+                force,
+                delete,
+                once,
+                daemon,
+                stop,
+                status,
+                stop_session,
+                stop_all,
+                concurrency,
+            )
+            .await
         }
-        Commands::Unmount { mountpoint } => {
-            commands::mount::unmount(mountpoint).await
-        }
-        Commands::Webdav { port, read_only, cache_ttl, no_cache, verbose } => {
-            commands::webdav::run(port, read_only, cache_ttl, no_cache, verbose).await
-        }
+        Commands::Mount {
+            mountpoint,
+            foreground,
+            cache_ttl,
+        } => commands::mount::run(mountpoint, foreground, cache_ttl).await,
+        Commands::Unmount { mountpoint } => commands::mount::unmount(mountpoint).await,
+        Commands::Webdav {
+            port,
+            read_only,
+            cache_ttl,
+            no_cache,
+            verbose,
+        } => commands::webdav::run(port, read_only, cache_ttl, no_cache, verbose).await,
         Commands::Speedtest => commands::speedtest::run().await,
         Commands::Repair { dry_run } => commands::repair::run(dry_run).await,
         Commands::Billing { action } => match action {
@@ -509,12 +569,7 @@ async fn main() {
         },
         Commands::Logout => commands::logout::run().await,
         Commands::Completions { shell } => {
-            clap_complete::generate(
-                shell,
-                &mut Cli::command(),
-                "bb",
-                &mut std::io::stdout(),
-            );
+            clap_complete::generate(shell, &mut Cli::command(), "bb", &mut std::io::stdout());
             Ok(())
         }
     };

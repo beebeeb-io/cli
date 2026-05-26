@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Instant, SystemTime};
 
 use base64::Engine;
@@ -36,10 +36,7 @@ fn print_dashboard(dash: &SyncDashboard) {
             "\u{25CF}".custom_color(crate::colors::GREEN_OK)
         )
     } else {
-        format!(
-            "{} syncing",
-            "\u{25CF}".custom_color(crate::colors::AMBER)
-        )
+        format!("{} syncing", "\u{25CF}".custom_color(crate::colors::AMBER))
     };
     let files = dash.file_count.load(Ordering::Relaxed);
     let bytes = dash.total_bytes.load(Ordering::Relaxed);
@@ -60,11 +57,7 @@ fn print_dashboard(dash: &SyncDashboard) {
     println!(
         "{}",
         crate::ui::box_line(
-            &format!(
-                "  {:<10}{}",
-                "status".custom_color(crate::colors::INK_DIM),
-                status
-            ),
+            &format!("  {:<10}{}", "status".custom_color(crate::colors::INK_DIM), status),
             w,
         )
     );
@@ -124,7 +117,7 @@ struct LocalFile {
 }
 
 fn compute_file_hash(path: &Path) -> Result<String, String> {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     let mut file = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
     let mut hasher = Sha256::new();
     std::io::copy(&mut file, &mut hasher).map_err(|e| format!("read {}: {e}", path.display()))?;
@@ -178,8 +171,7 @@ pub async fn run(
             println!(
                 "  {} {}",
                 "hint".custom_color(crate::colors::INK_DIM),
-                "Run bb sync <local> <remote> to start a new sync"
-                    .custom_color(crate::colors::INK_DIM),
+                "Run bb sync <local> <remote> to start a new sync".custom_color(crate::colors::INK_DIM),
             );
             return Ok(());
         }
@@ -187,20 +179,19 @@ pub async fn run(
 
     if stop_legacy {
         // Legacy --stop: try to uninstall any old single-plist LaunchAgent
-        return crate::daemon::uninstall_launchagent("sync")
-            .map(|removed| {
-                if removed {
-                    println!(
-                        "  {} sync daemon removed",
-                        "\u{2713}".custom_color(crate::colors::GREEN_OK),
-                    );
-                } else {
-                    println!(
-                        "  {} no legacy sync daemon installed",
-                        "\u{00b7}".custom_color(crate::colors::INK_DIM),
-                    );
-                }
-            });
+        return crate::daemon::uninstall_launchagent("sync").map(|removed| {
+            if removed {
+                println!(
+                    "  {} sync daemon removed",
+                    "\u{2713}".custom_color(crate::colors::GREEN_OK),
+                );
+            } else {
+                println!(
+                    "  {} no legacy sync daemon installed",
+                    "\u{00b7}".custom_color(crate::colors::INK_DIM),
+                );
+            }
+        });
     }
     if daemon {
         return spawn_sync_daemon(&local_dir, remote_path_arg.as_deref());
@@ -211,11 +202,10 @@ pub async fn run(
 
     // Register this device with the server (best-effort, non-fatal)
     let device_info = crate::device::load_or_create();
-    let device_resp = api.register_device(
-        &device_info.hostname,
-        &device_info.platform,
-        env!("CARGO_PKG_VERSION"),
-    ).await.ok();
+    let device_resp = api
+        .register_device(&device_info.hostname, &device_info.platform, env!("CARGO_PKG_VERSION"))
+        .await
+        .ok();
     let server_device_id = device_resp
         .as_ref()
         .and_then(|v| v.get("id"))
@@ -229,8 +219,7 @@ pub async fn run(
         return Err(format!("not a directory: {}", local_dir.display()));
     }
 
-    let local_dir = std::fs::canonicalize(&local_dir)
-        .map_err(|e| format!("cannot resolve path: {e}"))?;
+    let local_dir = std::fs::canonicalize(&local_dir).map_err(|e| format!("cannot resolve path: {e}"))?;
 
     let state_path = local_dir.join(STATE_FILE);
     let mut state: SyncState = if state_path.exists() {
@@ -272,8 +261,7 @@ pub async fn run(
     let sync_start = Instant::now();
     let mut total_bytes: u64 = 0;
 
-    let remote_folder_id =
-        resolve_remote_folder(&api, &master_key, &remote_path, dry_run).await?;
+    let remote_folder_id = resolve_remote_folder(&api, &master_key, &remote_path, dry_run).await?;
     state.remote_path = Some(remote_path.clone());
     state.remote_folder_id = Some(remote_folder_id);
 
@@ -283,7 +271,10 @@ pub async fn run(
             Some(existing.clone())
         } else {
             // Check if a session already exists for this remote_path on this device
-            let existing_session = api.list_client_sessions().await.ok()
+            let existing_session = api
+                .list_client_sessions()
+                .await
+                .ok()
                 .and_then(|resp| resp.get("sessions").and_then(|v| v.as_array()).cloned())
                 .and_then(|sessions| {
                     sessions.into_iter().find(|s| {
@@ -300,30 +291,40 @@ pub async fn run(
                 }
                 id
             } else {
-            let default_name = format!("{}/{}",
-                device_info.hostname,
-                remote_path.trim_start_matches('/').replace('/', "-"));
-            match api.create_client_session(
-                device_id, &default_name, "sync",
-                Some(&local_dir.display().to_string()), &remote_path,
-            ).await {
-                Ok(resp) => {
-                    let id = resp.get("id").and_then(|v| v.as_str()).map(String::from);
-                    if let Some(ref id) = id {
-                        state.session_id = Some(id.clone());
+                let default_name = format!(
+                    "{}/{}",
+                    device_info.hostname,
+                    remote_path.trim_start_matches('/').replace('/', "-")
+                );
+                match api
+                    .create_client_session(
+                        device_id,
+                        &default_name,
+                        "sync",
+                        Some(&local_dir.display().to_string()),
+                        &remote_path,
+                    )
+                    .await
+                {
+                    Ok(resp) => {
+                        let id = resp.get("id").and_then(|v| v.as_str()).map(String::from);
+                        if let Some(ref id) = id {
+                            state.session_id = Some(id.clone());
+                        }
+                        id
                     }
-                    id
-                }
-                Err(e) => {
-                    if !ui::is_quiet() {
-                        eprintln!("  {} session registration: {e}", "!".custom_color(crate::colors::AMBER));
+                    Err(e) => {
+                        if !ui::is_quiet() {
+                            eprintln!("  {} session registration: {e}", "!".custom_color(crate::colors::AMBER));
+                        }
+                        None
                     }
-                    None
                 }
             }
         }
-        }
-    } else { None };
+    } else {
+        None
+    };
 
     let local_files = walk_local_files(&local_dir)?;
     let local_folders = walk_local_folders(&local_dir)?;
@@ -348,8 +349,7 @@ pub async fn run(
 
     for folder_rel in &sorted_folders {
         if !remote_folders.contains_key(folder_rel) {
-            let parent_id =
-                parent_remote_id(folder_rel, &remote_folders, remote_folder_id);
+            let parent_id = parent_remote_id(folder_rel, &remote_folders, remote_folder_id);
             let folder_name = folder_rel.rsplit('/').next().unwrap_or(folder_rel);
             if dry_run {
                 println!(
@@ -372,8 +372,7 @@ pub async fn run(
         if !local_folders.contains(folder_rel) {
             let local_path = local_dir.join(folder_rel);
             if !dry_run {
-                std::fs::create_dir_all(&local_path)
-                    .map_err(|e| format!("mkdir {}: {e}", local_path.display()))?;
+                std::fs::create_dir_all(&local_path).map_err(|e| format!("mkdir {}: {e}", local_path.display()))?;
             }
             println!(
                 "  {} {} {}",
@@ -537,8 +536,7 @@ pub async fn run(
                         "  {} {} {}",
                         "?".custom_color(crate::colors::INK_DIM),
                         "missing locally".custom_color(crate::colors::INK_DIM),
-                        format!("{rel} (use --delete to trash from vault)")
-                            .custom_color(crate::colors::INK_DIM),
+                        format!("{rel} (use --delete to trash from vault)").custom_color(crate::colors::INK_DIM),
                     );
                 }
             }
@@ -558,8 +556,8 @@ pub async fn run(
     {
         use futures_util::stream::{self, StreamExt};
 
-        let upload_results: Vec<Result<(String, FileEntry, u64), String>> = stream::iter(
-            pending_uploads.into_iter().map(|(rel, local, replace_id)| {
+        let upload_results: Vec<Result<(String, FileEntry, u64), String>> =
+            stream::iter(pending_uploads.into_iter().map(|(rel, local, replace_id)| {
                 let api = &api;
                 let master_key = &master_key;
                 let local_dir = &local_dir;
@@ -576,13 +574,17 @@ pub async fn run(
                     }
 
                     if dry_run {
-                        return Ok((rel, FileEntry {
-                            remote_id: Uuid::nil(),
-                            last_mtime: local.mtime,
-                            last_size: local.size,
-                            last_sync: Utc::now(),
-                            content_hash: Some(local.content_hash.clone()),
-                        }, local.size));
+                        return Ok((
+                            rel,
+                            FileEntry {
+                                remote_id: Uuid::nil(),
+                                last_mtime: local.mtime,
+                                last_size: local.size,
+                                last_sync: Utc::now(),
+                                content_hash: Some(local.content_hash.clone()),
+                            },
+                            local.size,
+                        ));
                     }
 
                     if let Some(old_id) = replace_id {
@@ -608,11 +610,10 @@ pub async fn run(
                     };
                     Ok((rel, entry, local.size))
                 }
-            }),
-        )
-        .buffer_unordered(concurrency)
-        .collect()
-        .await;
+            }))
+            .buffer_unordered(concurrency)
+            .collect()
+            .await;
 
         for result in upload_results {
             match result {
@@ -624,11 +625,7 @@ pub async fn run(
                     up_count += 1;
                 }
                 Err(e) => {
-                    eprintln!(
-                        "  {} upload failed: {}",
-                        "!".custom_color(crate::colors::RED_ERR),
-                        e
-                    );
+                    eprintln!("  {} upload failed: {}", "!".custom_color(crate::colors::RED_ERR), e);
                 }
             }
         }
@@ -636,8 +633,7 @@ pub async fn run(
 
     // ── Phase 4: sequential downloads ──────────────────────────────────────
     for (rel, remote) in &pending_downloads {
-        do_download(&api, &master_key, &local_dir, rel, remote, &mut state, dry_run)
-            .await?;
+        do_download(&api, &master_key, &local_dir, rel, remote, &mut state, dry_run).await?;
         down_count += 1;
     }
 
@@ -660,17 +656,17 @@ pub async fn run(
 
     state.last_sync = Some(Utc::now());
     if !dry_run {
-        let data = serde_json::to_vec_pretty(&state)
-            .map_err(|e| format!("serialize state: {e}"))?;
-        std::fs::write(&state_path, data)
-            .map_err(|e| format!("write state file: {e}"))?;
+        let data = serde_json::to_vec_pretty(&state).map_err(|e| format!("serialize state: {e}"))?;
+        std::fs::write(&state_path, data).map_err(|e| format!("write state file: {e}"))?;
     }
 
     // Send a final heartbeat for --once mode
     if once {
         if let Some(ref sid) = session_id {
             let file_count = local_files.len() as u64;
-            let _ = api.send_heartbeat(sid, "idle", Some(file_count), None, Some(total_bytes), None, None, None).await;
+            let _ = api
+                .send_heartbeat(sid, "idle", Some(file_count), None, Some(total_bytes), None, None, None)
+                .await;
         }
     }
 
@@ -694,8 +690,14 @@ pub async fn run(
     if ui::is_quiet() {
         println!(
             "{} up {} down {} conflict{}",
-            up_count, down_count, conflicts,
-            if deletes > 0 { format!(" {deletes} del") } else { String::new() },
+            up_count,
+            down_count,
+            conflicts,
+            if deletes > 0 {
+                format!(" {deletes} del")
+            } else {
+                String::new()
+            },
         );
         return Ok(());
     }
@@ -761,187 +763,539 @@ pub async fn run(
 
     // ── Continuous watch mode ───────────────────────────────────────────────
     if !once && !dry_run {
-        let local_display = local_dir
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| local_dir.display().to_string());
+        use std::io::IsTerminal;
 
-        let dashboard = Arc::new(SyncDashboard {
-            local_path: local_display,
-            remote_path: remote_path.clone(),
-            file_count: AtomicU64::new(local_files.len() as u64),
-            total_bytes: AtomicU64::new(total_bytes),
-            is_synced: AtomicBool::new(true),
-        });
+        let use_tui = ui::is_rich() && std::io::stdout().is_terminal();
 
-        println!();
-        print_dashboard(&dashboard);
-
-        // Spawn a background heartbeat every 60s while watching
-        if let Some(ref sid) = session_id {
-            let hb_api = ApiClient::from_config();
-            let hb_sid = sid.clone();
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-                loop {
-                    interval.tick().await;
-                    let _ = hb_api.send_heartbeat(&hb_sid, "watching", None, None, None, None, None, None).await;
-                }
-            });
-        }
-
-        use notify::RecursiveMode;
-        use notify_debouncer_full::new_debouncer;
-
-        let (tx, rx) = std::sync::mpsc::channel();
-        let mut debouncer = new_debouncer(
-            std::time::Duration::from_millis(500),
-            None,
-            tx,
-        )
-        .map_err(|e| format!("watcher: {e}"))?;
-
-        debouncer
-            .watch(&local_dir, RecursiveMode::Recursive)
-            .map_err(|e| format!("watch: {e}"))?;
-
-        eprintln!(
-            "  {} watching for changes \u{00b7} press Ctrl+C to stop",
-            "\u{00b7}".custom_color(crate::colors::INK_DIM)
-        );
-
-        loop {
-            match rx.recv() {
-                Ok(Ok(events)) => {
-                    let changed: Vec<_> = events
-                        .iter()
-                        .filter_map(|e| e.paths.first().cloned())
-                        .filter(|p| !is_ignored_path(p))
-                        .collect();
-
-                    if !changed.is_empty() {
-                        dashboard.is_synced.store(false, Ordering::Relaxed);
-                        let now = chrono::Local::now().format("%H:%M:%S");
-                        for path in &changed {
-                            let name = path
-                                .file_name()
-                                .map(|n| n.to_string_lossy().to_string())
-                                .unwrap_or_default();
-                            eprintln!(
-                                "  {} {} {}",
-                                now.to_string().custom_color(crate::colors::INK_DIM),
-                                "\u{2191}".custom_color(crate::colors::GREEN_OK),
-                                name.custom_color(crate::colors::INK),
-                            );
-                        }
-
-                        // Re-run the sync to upload changes
-                        let resync_api = ApiClient::from_config();
-                        let resync_master = load_master_key()?;
-                        let resync_local = walk_local_files(&local_dir)?;
-                        let resync_folders = walk_local_folders(&local_dir)?;
-                        let mut resync_remote_files: HashMap<String, RemoteFile> = HashMap::new();
-                        let mut resync_remote_folders: HashMap<String, Uuid> = HashMap::new();
-                        walk_remote(
-                            &resync_api,
-                            &resync_master,
-                            remote_folder_id,
-                            "",
-                            &mut resync_remote_files,
-                            &mut resync_remote_folders,
-                        )
-                        .await?;
-
-                        // Ensure remote folders exist
-                        let mut all_dirs: HashSet<String> = HashSet::new();
-                        all_dirs.extend(resync_folders.iter().cloned());
-                        all_dirs.extend(resync_remote_folders.keys().cloned());
-                        let mut sorted_dirs: Vec<String> = all_dirs.into_iter().collect();
-                        sorted_dirs.sort_by_key(|s| s.matches('/').count());
-                        for folder_rel in &sorted_dirs {
-                            if !resync_remote_folders.contains_key(folder_rel) {
-                                let pid = parent_remote_id(
-                                    folder_rel,
-                                    &resync_remote_folders,
-                                    remote_folder_id,
-                                );
-                                let fname = folder_rel
-                                    .rsplit('/')
-                                    .next()
-                                    .unwrap_or(folder_rel);
-                                let new_id = create_folder(
-                                    &resync_api,
-                                    &resync_master,
-                                    fname,
-                                    pid,
-                                )
-                                .await?;
-                                resync_remote_folders.insert(folder_rel.clone(), new_id);
-                            }
-                        }
-
-                        // Upload changed files
-                        let mut resync_bytes: u64 = 0;
-                        for rel in resync_local.keys() {
-                            let local = resync_local.get(rel).cloned();
-                            let remote = resync_remote_files.get(rel).cloned();
-                            let prior = state.files.get(rel).cloned();
-
-                            if let Some(l) = local {
-                                let local_changed = match &prior {
-                                    Some(p) => l.mtime != p.last_mtime || l.size != p.last_size,
-                                    None => remote.is_none(),
-                                };
-                                if local_changed {
-                                    do_upload(
-                                        &resync_api,
-                                        &resync_master,
-                                        &local_dir,
-                                        rel,
-                                        &l,
-                                        remote.map(|r| r.id),
-                                        remote_folder_id,
-                                        &resync_remote_folders,
-                                        &mut state,
-                                        false,
-                                    )
-                                    .await?;
-                                    resync_bytes += l.size;
-                                }
-                            }
-                        }
-
-                        // Save state
-                        state.last_sync = Some(Utc::now());
-                        let data = serde_json::to_vec_pretty(&state)
-                            .map_err(|e| format!("serialize state: {e}"))?;
-                        std::fs::write(&state_path, data)
-                            .map_err(|e| format!("write state file: {e}"))?;
-
-                        // Update dashboard
-                        let new_local = walk_local_files(&local_dir)?;
-                        dashboard
-                            .file_count
-                            .store(new_local.len() as u64, Ordering::Relaxed);
-                        dashboard.total_bytes.fetch_add(resync_bytes, Ordering::Relaxed);
-                        dashboard.is_synced.store(true, Ordering::Relaxed);
-                    }
-                }
-                Ok(Err(errs)) => {
-                    for e in errs {
-                        eprintln!(
-                            "  {} watch error: {}",
-                            "!".custom_color(crate::colors::RED_ERR),
-                            e
-                        );
-                    }
-                }
-                Err(_) => break,
-            }
+        if use_tui {
+            run_tui_watch(
+                &local_dir,
+                &remote_path,
+                remote_folder_id,
+                &mut state,
+                &state_path,
+                session_id.as_deref(),
+                local_files.len() as u64,
+                total_bytes,
+            )
+            .await?;
+        } else {
+            run_plain_watch(
+                &local_dir,
+                &remote_path,
+                remote_folder_id,
+                &mut state,
+                &state_path,
+                session_id.as_deref(),
+                local_files.len() as u64,
+                total_bytes,
+            )
+            .await?;
         }
     }
 
     Ok(())
+}
+
+// ── Plain-text watch loop (non-TTY / json / quiet fallback) ───────────────
+
+#[allow(clippy::too_many_arguments)]
+async fn run_plain_watch(
+    local_dir: &Path,
+    remote_path: &str,
+    remote_folder_id: Uuid,
+    state: &mut SyncState,
+    state_path: &Path,
+    session_id: Option<&str>,
+    file_count: u64,
+    total_bytes: u64,
+) -> Result<(), String> {
+    let local_display = local_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| local_dir.display().to_string());
+
+    let dashboard = Arc::new(SyncDashboard {
+        local_path: local_display,
+        remote_path: remote_path.to_string(),
+        file_count: AtomicU64::new(file_count),
+        total_bytes: AtomicU64::new(total_bytes),
+        is_synced: AtomicBool::new(true),
+    });
+
+    println!();
+    print_dashboard(&dashboard);
+
+    // Spawn a background heartbeat every 60s while watching
+    if let Some(sid) = session_id {
+        let hb_api = ApiClient::from_config();
+        let hb_sid = sid.to_string();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                let _ = hb_api
+                    .send_heartbeat(&hb_sid, "watching", None, None, None, None, None, None)
+                    .await;
+            }
+        });
+    }
+
+    use notify::RecursiveMode;
+    use notify_debouncer_full::new_debouncer;
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut debouncer =
+        new_debouncer(std::time::Duration::from_millis(500), None, tx).map_err(|e| format!("watcher: {e}"))?;
+
+    debouncer
+        .watch(local_dir, RecursiveMode::Recursive)
+        .map_err(|e| format!("watch: {e}"))?;
+
+    eprintln!(
+        "  {} watching for changes \u{00b7} press Ctrl+C to stop",
+        "\u{00b7}".custom_color(crate::colors::INK_DIM)
+    );
+
+    loop {
+        match rx.recv() {
+            Ok(Ok(events)) => {
+                let changed: Vec<_> = events
+                    .iter()
+                    .filter_map(|e| e.paths.first().cloned())
+                    .filter(|p| !is_ignored_path(p))
+                    .collect();
+
+                if !changed.is_empty() {
+                    dashboard.is_synced.store(false, Ordering::Relaxed);
+                    let now = chrono::Local::now().format("%H:%M:%S");
+                    for path in &changed {
+                        let name = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        eprintln!(
+                            "  {} {} {}",
+                            now.to_string().custom_color(crate::colors::INK_DIM),
+                            "\u{2191}".custom_color(crate::colors::GREEN_OK),
+                            name.custom_color(crate::colors::INK),
+                        );
+                    }
+
+                    // Re-run the sync to upload changes
+                    let resync_api = ApiClient::from_config();
+                    let resync_master = load_master_key()?;
+                    let resync_local = walk_local_files(local_dir)?;
+                    let resync_folders = walk_local_folders(local_dir)?;
+                    let mut resync_remote_files: HashMap<String, RemoteFile> = HashMap::new();
+                    let mut resync_remote_folders: HashMap<String, Uuid> = HashMap::new();
+                    walk_remote(
+                        &resync_api,
+                        &resync_master,
+                        remote_folder_id,
+                        "",
+                        &mut resync_remote_files,
+                        &mut resync_remote_folders,
+                    )
+                    .await?;
+
+                    // Ensure remote folders exist
+                    let mut all_dirs: HashSet<String> = HashSet::new();
+                    all_dirs.extend(resync_folders.iter().cloned());
+                    all_dirs.extend(resync_remote_folders.keys().cloned());
+                    let mut sorted_dirs: Vec<String> = all_dirs.into_iter().collect();
+                    sorted_dirs.sort_by_key(|s| s.matches('/').count());
+                    for folder_rel in &sorted_dirs {
+                        if !resync_remote_folders.contains_key(folder_rel) {
+                            let pid = parent_remote_id(folder_rel, &resync_remote_folders, remote_folder_id);
+                            let fname = folder_rel.rsplit('/').next().unwrap_or(folder_rel);
+                            let new_id = create_folder(&resync_api, &resync_master, fname, pid).await?;
+                            resync_remote_folders.insert(folder_rel.clone(), new_id);
+                        }
+                    }
+
+                    // Upload changed files
+                    let mut resync_bytes: u64 = 0;
+                    for rel in resync_local.keys() {
+                        let local = resync_local.get(rel).cloned();
+                        let remote = resync_remote_files.get(rel).cloned();
+                        let prior = state.files.get(rel).cloned();
+
+                        if let Some(l) = local {
+                            let local_changed = match &prior {
+                                Some(p) => l.mtime != p.last_mtime || l.size != p.last_size,
+                                None => remote.is_none(),
+                            };
+                            if local_changed {
+                                do_upload(
+                                    &resync_api,
+                                    &resync_master,
+                                    local_dir,
+                                    rel,
+                                    &l,
+                                    remote.map(|r| r.id),
+                                    remote_folder_id,
+                                    &resync_remote_folders,
+                                    state,
+                                    false,
+                                )
+                                .await?;
+                                resync_bytes += l.size;
+                            }
+                        }
+                    }
+
+                    // Save state
+                    state.last_sync = Some(Utc::now());
+                    let data = serde_json::to_vec_pretty(&state).map_err(|e| format!("serialize state: {e}"))?;
+                    std::fs::write(state_path, data).map_err(|e| format!("write state file: {e}"))?;
+
+                    // Update dashboard
+                    let new_local = walk_local_files(local_dir)?;
+                    dashboard.file_count.store(new_local.len() as u64, Ordering::Relaxed);
+                    dashboard.total_bytes.fetch_add(resync_bytes, Ordering::Relaxed);
+                    dashboard.is_synced.store(true, Ordering::Relaxed);
+                }
+            }
+            Ok(Err(errs)) => {
+                for e in errs {
+                    eprintln!("  {} watch error: {}", "!".custom_color(crate::colors::RED_ERR), e);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    Ok(())
+}
+
+// ── TUI watch loop (interactive terminal) ─────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+async fn run_tui_watch(
+    local_dir: &Path,
+    remote_path: &str,
+    remote_folder_id: Uuid,
+    state: &mut SyncState,
+    state_path: &Path,
+    session_id: Option<&str>,
+    file_count: u64,
+    total_bytes: u64,
+) -> Result<(), String> {
+    use crate::tui::events::{TuiAction, TuiEvent};
+    use crate::tui::state::{FileEventStatus, SyncFileEvent};
+
+    let local_display = local_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| local_dir.display().to_string());
+
+    let session_name = format!("{local_display} \u{2192} {remote_path}");
+
+    let (tui_tx, tui_rx) = tokio::sync::mpsc::unbounded_channel::<TuiEvent>();
+
+    // Spawn heartbeat task.
+    if let Some(sid) = session_id {
+        let hb_api = ApiClient::from_config();
+        let hb_sid = sid.to_string();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                let _ = hb_api
+                    .send_heartbeat(&hb_sid, "watching", None, None, None, None, None, None)
+                    .await;
+            }
+        });
+    }
+
+    // Spawn session refresh task (every 30s, sends SessionsRefresh events).
+    {
+        let tx = tui_tx.clone();
+        tokio::spawn(async move {
+            let refresh_api = ApiClient::from_config();
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                if let Ok(resp) = refresh_api.list_client_sessions().await {
+                    let sessions = parse_sessions_from_json(&resp);
+                    let _ = tx.send(TuiEvent::SessionsRefresh(sessions));
+                }
+            }
+        });
+    }
+
+    // Do an immediate session refresh so the dashboard has data.
+    {
+        let tx = tui_tx.clone();
+        tokio::spawn(async move {
+            let api = ApiClient::from_config();
+            if let Ok(resp) = api.list_client_sessions().await {
+                let sessions = parse_sessions_from_json(&resp);
+                let _ = tx.send(TuiEvent::SessionsRefresh(sessions));
+            }
+        });
+    }
+
+    // Set up the file watcher.
+    use notify::RecursiveMode;
+    use notify_debouncer_full::new_debouncer;
+
+    let (watch_tx, watch_rx) = std::sync::mpsc::channel();
+    let mut debouncer =
+        new_debouncer(std::time::Duration::from_millis(500), None, watch_tx).map_err(|e| format!("watcher: {e}"))?;
+    debouncer
+        .watch(local_dir, RecursiveMode::Recursive)
+        .map_err(|e| format!("watch: {e}"))?;
+
+    // Spawn the sync worker that processes file system events and sends TUI updates.
+    let sync_tx = tui_tx.clone();
+    let sync_local_dir = local_dir.to_path_buf();
+    let _sync_remote_path = remote_path.to_string();
+    let sync_state_path = state_path.to_path_buf();
+    // We need to share SyncState between the sync task and the caller.
+    // Use a mutex for simplicity since contention is minimal.
+    let shared_state = Arc::new(tokio::sync::Mutex::new(state.clone()));
+    let sync_shared_state = Arc::clone(&shared_state);
+
+    tokio::spawn(async move {
+        loop {
+            // Block on the watcher channel (this is in a tokio task, but the
+            // recv is blocking — that's fine because the TUI runs on
+            // spawn_blocking and the sync worker is on a separate tokio task).
+            let events = match watch_rx.recv() {
+                Ok(Ok(events)) => events,
+                Ok(Err(_)) => continue,
+                Err(_) => break,
+            };
+
+            let changed: Vec<_> = events
+                .iter()
+                .filter_map(|e| e.paths.first().cloned())
+                .filter(|p| !is_ignored_path(p))
+                .collect();
+
+            if changed.is_empty() {
+                continue;
+            }
+
+            let now = chrono::Local::now().format("%H:%M:%S").to_string();
+
+            // Notify TUI that sync started.
+            let _ = sync_tx.send(TuiEvent::SyncStarted(changed.len() as u32));
+
+            // Send an event per changed file.
+            for path in &changed {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                let _ = sync_tx.send(TuiEvent::SyncUpdate(SyncFileEvent {
+                    status: FileEventStatus::Uploading,
+                    filename: name,
+                    size,
+                    timestamp: now.clone(),
+                }));
+            }
+
+            // Re-run the sync logic.
+            let resync_api = ApiClient::from_config();
+            let resync_master = match load_master_key() {
+                Ok(k) => k,
+                Err(e) => {
+                    let _ = sync_tx.send(TuiEvent::SyncError(e));
+                    continue;
+                }
+            };
+            let resync_local = match walk_local_files(&sync_local_dir) {
+                Ok(f) => f,
+                Err(e) => {
+                    let _ = sync_tx.send(TuiEvent::SyncError(e));
+                    continue;
+                }
+            };
+            let resync_folders = match walk_local_folders(&sync_local_dir) {
+                Ok(f) => f,
+                Err(e) => {
+                    let _ = sync_tx.send(TuiEvent::SyncError(e));
+                    continue;
+                }
+            };
+
+            let mut resync_remote_files: HashMap<String, RemoteFile> = HashMap::new();
+            let mut resync_remote_folders: HashMap<String, Uuid> = HashMap::new();
+            if let Err(e) = walk_remote(
+                &resync_api,
+                &resync_master,
+                remote_folder_id,
+                "",
+                &mut resync_remote_files,
+                &mut resync_remote_folders,
+            )
+            .await
+            {
+                let _ = sync_tx.send(TuiEvent::SyncError(e));
+                continue;
+            }
+
+            // Ensure remote folders exist.
+            let mut all_dirs: HashSet<String> = HashSet::new();
+            all_dirs.extend(resync_folders.iter().cloned());
+            all_dirs.extend(resync_remote_folders.keys().cloned());
+            let mut sorted_dirs: Vec<String> = all_dirs.into_iter().collect();
+            sorted_dirs.sort_by_key(|s| s.matches('/').count());
+            for folder_rel in &sorted_dirs {
+                if !resync_remote_folders.contains_key(folder_rel) {
+                    let pid = parent_remote_id(folder_rel, &resync_remote_folders, remote_folder_id);
+                    let fname = folder_rel.rsplit('/').next().unwrap_or(folder_rel);
+                    match create_folder(&resync_api, &resync_master, fname, pid).await {
+                        Ok(new_id) => {
+                            resync_remote_folders.insert(folder_rel.clone(), new_id);
+                        }
+                        Err(e) => {
+                            let _ = sync_tx.send(TuiEvent::SyncError(e));
+                        }
+                    }
+                }
+            }
+
+            // Upload changed files.
+            let mut sync_state = sync_shared_state.lock().await;
+            for rel in resync_local.keys() {
+                let local = resync_local.get(rel).cloned();
+                let remote = resync_remote_files.get(rel).cloned();
+                let prior = sync_state.files.get(rel).cloned();
+
+                if let Some(l) = local {
+                    let local_changed = match &prior {
+                        Some(p) => l.mtime != p.last_mtime || l.size != p.last_size,
+                        None => remote.is_none(),
+                    };
+                    if local_changed {
+                        let file_name = rel.rsplit('/').next().unwrap_or(rel).to_string();
+                        match do_upload(
+                            &resync_api,
+                            &resync_master,
+                            &sync_local_dir,
+                            rel,
+                            &l,
+                            remote.map(|r| r.id),
+                            remote_folder_id,
+                            &resync_remote_folders,
+                            &mut sync_state,
+                            false,
+                        )
+                        .await
+                        {
+                            Ok(()) => {
+                                let _ = sync_tx.send(TuiEvent::SyncUpdate(SyncFileEvent {
+                                    status: FileEventStatus::Done,
+                                    filename: file_name,
+                                    size: l.size,
+                                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                                }));
+                            }
+                            Err(e) => {
+                                let _ = sync_tx.send(TuiEvent::SyncUpdate(SyncFileEvent {
+                                    status: FileEventStatus::Error,
+                                    filename: file_name,
+                                    size: l.size,
+                                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                                }));
+                                let _ = sync_tx.send(TuiEvent::SyncError(e));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Save state.
+            sync_state.last_sync = Some(Utc::now());
+            if let Ok(data) = serde_json::to_vec_pretty(&*sync_state) {
+                let _ = std::fs::write(&sync_state_path, data);
+            }
+
+            // Compute updated totals.
+            let new_local = walk_local_files(&sync_local_dir).unwrap_or_default();
+            let new_count = new_local.len() as u64;
+            let new_bytes: u64 = new_local.values().map(|f| f.size).sum();
+            drop(sync_state);
+
+            let _ = sync_tx.send(TuiEvent::SyncFinished {
+                file_count: new_count,
+                total_bytes: new_bytes,
+            });
+        }
+    });
+
+    // Run the TUI on a blocking thread (it does terminal I/O).
+    let tui_session_name = session_name.clone();
+    let tui_result =
+        tokio::task::spawn_blocking(move || crate::tui::app::run(tui_rx, tui_session_name, file_count, total_bytes))
+            .await
+            .map_err(|e| format!("TUI task panicked: {e}"))??;
+
+    // Copy shared state back to caller's state.
+    let final_state = shared_state.lock().await;
+    *state = final_state.clone();
+
+    match tui_result {
+        TuiAction::Quit => {
+            // Normal exit.
+        }
+        TuiAction::Daemonize => {
+            // User pressed 'd' — spawn daemon and exit.
+            let remote_str = remote_path.to_string();
+            spawn_sync_daemon(local_dir, Some(&remote_str))?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Parse the JSON response from list_client_sessions into SessionInfo structs.
+fn parse_sessions_from_json(resp: &serde_json::Value) -> Vec<crate::tui::state::SessionInfo> {
+    use crate::tui::state::SessionInfo;
+    let sessions = match resp.get("sessions").and_then(|v| v.as_array()) {
+        Some(arr) => arr,
+        None => return Vec::new(),
+    };
+
+    sessions
+        .iter()
+        .map(|s| {
+            let heartbeat_ago = s
+                .get("last_heartbeat")
+                .and_then(|v| v.as_str())
+                .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
+                .map(|dt| {
+                    let elapsed = Utc::now().signed_duration_since(dt.with_timezone(&Utc));
+                    if elapsed.num_seconds() < 60 {
+                        format!("{}s ago", elapsed.num_seconds())
+                    } else if elapsed.num_minutes() < 60 {
+                        format!("{}m ago", elapsed.num_minutes())
+                    } else {
+                        format!("{}h ago", elapsed.num_hours())
+                    }
+                });
+
+            SessionInfo {
+                name: s.get("name").and_then(|v| v.as_str()).unwrap_or("unnamed").to_string(),
+                device_name: s.get("device_name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                remote_path: s.get("remote_path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                status: s
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                files_synced: s.get("files_synced").and_then(|v| v.as_u64()).unwrap_or(0),
+                bytes_synced: s.get("bytes_synced").and_then(|v| v.as_u64()).unwrap_or(0),
+                last_heartbeat: heartbeat_ago,
+                current_file: s.get("current_file").and_then(|v| v.as_str()).map(String::from),
+                speed_bps: s.get("speed_bps").and_then(|v| v.as_u64()),
+            }
+        })
+        .collect()
 }
 
 // ── Session management helpers ─────────────────────────────────────────────
@@ -966,40 +1320,15 @@ async fn print_session_status(api: &ApiClient) -> Result<(), String> {
     println!("{}", crate::ui::box_header("SESSIONS", w));
 
     for session in sessions {
-        let name = session
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unnamed");
-        let session_status = session
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
-        let local_path = session
-            .get("local_path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let remote_path = session
-            .get("remote_path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let device_name = session
-            .get("device_name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let files_synced = session
-            .get("files_synced")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        let bytes_synced = session
-            .get("bytes_synced")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        let current_file = session
-            .get("current_file")
-            .and_then(|v| v.as_str());
-        let speed_bps = session
-            .get("speed_bps")
-            .and_then(|v| v.as_u64());
+        let name = session.get("name").and_then(|v| v.as_str()).unwrap_or("unnamed");
+        let session_status = session.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let local_path = session.get("local_path").and_then(|v| v.as_str()).unwrap_or("");
+        let remote_path = session.get("remote_path").and_then(|v| v.as_str()).unwrap_or("");
+        let device_name = session.get("device_name").and_then(|v| v.as_str()).unwrap_or("");
+        let files_synced = session.get("files_synced").and_then(|v| v.as_u64()).unwrap_or(0);
+        let bytes_synced = session.get("bytes_synced").and_then(|v| v.as_u64()).unwrap_or(0);
+        let current_file = session.get("current_file").and_then(|v| v.as_str());
+        let speed_bps = session.get("speed_bps").and_then(|v| v.as_u64());
 
         // Compute time since last heartbeat
         let heartbeat_ago = session
@@ -1019,31 +1348,11 @@ async fn print_session_status(api: &ApiClient) -> Result<(), String> {
 
         // Status indicator and color
         let (indicator, status_text, status_color) = match session_status {
-            "watching" | "idle" => (
-                "\u{25CF}",
-                "watching",
-                crate::colors::GREEN_OK,
-            ),
-            "syncing" | "uploading" | "downloading" => (
-                "\u{25C6}",
-                session_status,
-                crate::colors::AMBER,
-            ),
-            "stopped" => (
-                "\u{25CB}",
-                "stopped",
-                crate::colors::INK_DIM,
-            ),
-            "error" => (
-                "\u{25CF}",
-                "error",
-                crate::colors::RED_ERR,
-            ),
-            _ => (
-                "\u{25CF}",
-                session_status,
-                crate::colors::INK_DIM,
-            ),
+            "watching" | "idle" => ("\u{25CF}", "watching", crate::colors::GREEN_OK),
+            "syncing" | "uploading" | "downloading" => ("\u{25C6}", session_status, crate::colors::AMBER),
+            "stopped" => ("\u{25CB}", "stopped", crate::colors::INK_DIM),
+            "error" => ("\u{25CF}", "error", crate::colors::RED_ERR),
+            _ => ("\u{25CF}", session_status, crate::colors::INK_DIM),
         };
 
         // Line 1: indicator + name + device → remote + status
@@ -1076,10 +1385,7 @@ async fn print_session_status(api: &ApiClient) -> Result<(), String> {
         // Line 2: stats
         let mut detail_parts: Vec<String> = Vec::new();
         if files_synced > 0 {
-            detail_parts.push(format!(
-                "{} files",
-                format_count(files_synced)
-            ));
+            detail_parts.push(format!("{} files", format_count(files_synced)));
         }
         if bytes_synced > 0 {
             detail_parts.push(crate::ui::human_size(bytes_synced));
@@ -1097,19 +1403,16 @@ async fn print_session_status(api: &ApiClient) -> Result<(), String> {
                 "    {} {file}{speed_str}",
                 "uploading".custom_color(crate::colors::INK_DIM),
             );
-            println!("{}", crate::ui::box_line(
-                &line2.custom_color(crate::colors::INK_DIM).to_string(),
-                w,
-            ));
-        } else if !detail_parts.is_empty() {
-            let line2 = format!(
-                "    {}",
-                detail_parts.join(" \u{00b7} ")
+            println!(
+                "{}",
+                crate::ui::box_line(&line2.custom_color(crate::colors::INK_DIM).to_string(), w,)
             );
-            println!("{}", crate::ui::box_line(
-                &line2.custom_color(crate::colors::INK_DIM).to_string(),
-                w,
-            ));
+        } else if !detail_parts.is_empty() {
+            let line2 = format!("    {}", detail_parts.join(" \u{00b7} "));
+            println!(
+                "{}",
+                crate::ui::box_line(&line2.custom_color(crate::colors::INK_DIM).to_string(), w,)
+            );
         }
     }
 
@@ -1155,14 +1458,8 @@ async fn stop_session_by_name(api: &ApiClient, name: &str) -> Result<(), String>
     }
 
     for session in matching {
-        let id = session
-            .get("id")
-            .and_then(|v| v.as_str())
-            .ok_or("session missing id")?;
-        let session_name = session
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unnamed");
+        let id = session.get("id").and_then(|v| v.as_str()).ok_or("session missing id")?;
+        let session_name = session.get("name").and_then(|v| v.as_str()).unwrap_or("unnamed");
 
         // Stop the server-side session
         api.stop_client_session(id).await?;
@@ -1213,14 +1510,8 @@ async fn stop_all_sessions(api: &ApiClient) -> Result<(), String> {
 
     let mut stopped = 0u32;
     for session in &device_sessions {
-        let id = session
-            .get("id")
-            .and_then(|v| v.as_str())
-            .ok_or("session missing id")?;
-        let name = session
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unnamed");
+        let id = session.get("id").and_then(|v| v.as_str()).ok_or("session missing id")?;
+        let name = session.get("name").and_then(|v| v.as_str()).unwrap_or("unnamed");
 
         // Stop server-side session
         api.stop_client_session(id).await?;
@@ -1257,19 +1548,14 @@ fn b64() -> base64::engine::GeneralPurpose {
 
 fn load_master_key() -> Result<beebeeb_core::kdf::MasterKey, String> {
     let config = load_config();
-    let mk_b64 = config
-        .master_key
-        .ok_or("No master key found. Run `bb login` first.")?;
+    let mk_b64 = config.master_key.ok_or("No master key found. Run `bb login` first.")?;
     let mk_bytes: Zeroizing<Vec<u8>> = Zeroizing::new(
         b64()
             .decode(&mk_b64)
             .map_err(|e| format!("invalid master key in config: {e}"))?,
     );
     if mk_bytes.len() != 32 {
-        return Err(format!(
-            "master key must be 32 bytes, got {}",
-            mk_bytes.len()
-        ));
+        return Err(format!("master key must be 32 bytes, got {}", mk_bytes.len()));
     }
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&mk_bytes);
@@ -1300,8 +1586,7 @@ fn walk_local_files(root: &Path) -> Result<HashMap<String, LocalFile>, String> {
         {
             continue;
         }
-        let meta = std::fs::metadata(path)
-            .map_err(|e| format!("stat {}: {e}", path.display()))?;
+        let meta = std::fs::metadata(path).map_err(|e| format!("stat {}: {e}", path.display()))?;
         let mtime = meta
             .modified()
             .ok()
@@ -1343,11 +1628,7 @@ fn walk_local_folders(root: &Path) -> Result<HashSet<String>, String> {
     Ok(out)
 }
 
-fn parent_remote_id(
-    rel: &str,
-    folders: &HashMap<String, Uuid>,
-    root_id: Uuid,
-) -> Option<Uuid> {
+fn parent_remote_id(rel: &str, folders: &HashMap<String, Uuid>, root_id: Uuid) -> Option<Uuid> {
     match rel.rsplit_once('/') {
         Some((parent, _)) => folders.get(parent).copied().or(Some(root_id)),
         None => Some(root_id),
@@ -1360,10 +1641,7 @@ async fn resolve_remote_folder(
     remote_path: &str,
     dry_run: bool,
 ) -> Result<Uuid, String> {
-    let segments: Vec<&str> = remote_path
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .collect();
+    let segments: Vec<&str> = remote_path.split('/').filter(|s| !s.is_empty()).collect();
     if segments.is_empty() {
         return Err("remote_path cannot be empty or root".to_string());
     }
@@ -1371,9 +1649,7 @@ async fn resolve_remote_folder(
     let mut current_parent: Option<Uuid> = None;
 
     for seg in segments {
-        let listing = api
-            .list_files(current_parent.map(|u| u.to_string()).as_deref())
-            .await?;
+        let listing = api.list_files(current_parent.map(|u| u.to_string()).as_deref()).await?;
         let items = listing
             .get("files")
             .and_then(|v| v.as_array())
@@ -1381,10 +1657,7 @@ async fn resolve_remote_folder(
 
         let mut found: Option<Uuid> = None;
         for item in items {
-            let is_folder = item
-                .get("is_folder")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+            let is_folder = item.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
             if !is_folder {
                 continue;
             }
@@ -1396,10 +1669,7 @@ async fn resolve_remote_folder(
                 Ok(u) => u,
                 Err(_) => continue,
             };
-            let name_enc = item
-                .get("name_encrypted")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let name_enc = item.get("name_encrypted").and_then(|v| v.as_str()).unwrap_or("");
             let name = crate::crypto::decrypt_name(master_key, id_str, name_enc);
             if name.as_deref() == Some(seg) {
                 found = Some(id);
@@ -1411,9 +1681,7 @@ async fn resolve_remote_folder(
             Some(id) => current_parent = Some(id),
             None => {
                 if dry_run {
-                    return Err(format!(
-                        "remote folder '{seg}' does not exist (dry-run, cannot create)"
-                    ));
+                    return Err(format!("remote folder '{seg}' does not exist (dry-run, cannot create)"));
                 }
                 let new_id = create_folder(api, master_key, seg, current_parent).await?;
                 println!(
@@ -1437,16 +1705,10 @@ async fn create_folder(
     parent_id: Option<Uuid>,
 ) -> Result<Uuid, String> {
     let new_id = Uuid::new_v4();
-    let name_enc =
-        beebeeb_core::encrypt::encrypt_name(master_key, &new_id.to_string(), name, None)
-            .map_err(|e| format!("encrypt folder name: {e}"))?;
-    let result = api
-        .create_folder(&name_enc, parent_id, Some(new_id))
-        .await?;
-    let id_str = result
-        .get("id")
-        .and_then(|v| v.as_str())
-        .ok_or("missing folder id")?;
+    let name_enc = beebeeb_core::encrypt::encrypt_name(master_key, &new_id.to_string(), name, None)
+        .map_err(|e| format!("encrypt folder name: {e}"))?;
+    let result = api.create_folder(&name_enc, parent_id, Some(new_id)).await?;
+    let id_str = result.get("id").and_then(|v| v.as_str()).ok_or("missing folder id")?;
     id_str.parse().map_err(|e| format!("invalid folder id: {e}"))
 }
 
@@ -1465,19 +1727,10 @@ async fn walk_remote(
         .ok_or("invalid file listing")?;
 
     for item in items {
-        let id_str = item
-            .get("id")
-            .and_then(|v| v.as_str())
-            .ok_or("missing id")?;
+        let id_str = item.get("id").and_then(|v| v.as_str()).ok_or("missing id")?;
         let id: Uuid = id_str.parse().map_err(|e| format!("invalid id: {e}"))?;
-        let is_folder = item
-            .get("is_folder")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let name_enc = item
-            .get("name_encrypted")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let is_folder = item.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
+        let name_enc = item.get("name_encrypted").and_then(|v| v.as_str()).unwrap_or("");
 
         // Use the shared crypto module which handles all server formats
         // (Rust EncryptedBlob, web-app base64 blob, plaintext) and both
@@ -1497,17 +1750,11 @@ async fn walk_remote(
             folders.insert(rel.clone(), id);
             Box::pin(walk_remote(api, master_key, id, &rel, files, folders)).await?;
         } else {
-            let updated_at_str = item
-                .get("updated_at")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let updated_at_str = item.get("updated_at").and_then(|v| v.as_str()).unwrap_or("");
             let updated_at = DateTime::parse_from_rfc3339(updated_at_str)
                 .map(|d| d.with_timezone(&Utc))
                 .unwrap_or_else(|_| Utc::now());
-            let chunk_count = item
-                .get("chunk_count")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(1) as u32;
+            let chunk_count = item.get("chunk_count").and_then(|v| v.as_i64()).unwrap_or(1) as u32;
             files.insert(
                 rel,
                 RemoteFile {
@@ -1628,8 +1875,7 @@ async fn do_download(
         Err(e) => return Err(e),
     }
 
-    let meta = std::fs::metadata(&out_path)
-        .map_err(|e| format!("stat {}: {e}", out_path.display()))?;
+    let meta = std::fs::metadata(&out_path).map_err(|e| format!("stat {}: {e}", out_path.display()))?;
     let mtime = meta
         .modified()
         .ok()
@@ -1659,16 +1905,14 @@ async fn upload_file_to(
     file_name: &str,
     parent_id: Option<Uuid>,
 ) -> Result<Uuid, String> {
-    let file_bytes =
-        std::fs::read(file_path).map_err(|e| format!("read {}: {e}", file_path.display()))?;
+    let file_bytes = std::fs::read(file_path).map_err(|e| format!("read {}: {e}", file_path.display()))?;
 
     let file_id = Uuid::new_v4();
     let file_key = beebeeb_core::kdf::derive_file_key(master_key, file_id.to_string().as_bytes());
 
     let mime = beebeeb_core::media::guess_mime_type(file_name);
-    let name_encrypted =
-        beebeeb_core::encrypt::encrypt_name(master_key, &file_id.to_string(), file_name, mime)
-            .map_err(|e| format!("encrypt name: {e}"))?;
+    let name_encrypted = beebeeb_core::encrypt::encrypt_name(master_key, &file_id.to_string(), file_name, mime)
+        .map_err(|e| format!("encrypt name: {e}"))?;
 
     let plan = beebeeb_types::plan_chunks(file_bytes.len() as u64, beebeeb_types::ChunkProfile::Desktop);
     let chunk_size = plan.chunk_size_bytes as usize;
@@ -1694,7 +1938,14 @@ async fn upload_file_to(
 
     // V2 upload: init → chunks → complete (stores chunk_size in object_versions)
     let init_resp = api
-        .upload_init(Some(file_id), &name_encrypted, parent_id, total_enc, chunk_count, is_media)
+        .upload_init(
+            Some(file_id),
+            &name_encrypted,
+            parent_id,
+            total_enc,
+            chunk_count,
+            is_media,
+        )
         .await?;
     let server_id = init_resp
         .get("file_id")
@@ -1711,9 +1962,7 @@ async fn upload_file_to(
     // ── Thumbnail generation + upload (best-effort, non-fatal) ──────────
     if let Some(mime_str) = mime {
         if let Some(thumb) = crate::thumbnail::generate_from_file(&file_bytes, Some(mime_str)) {
-            if let Ok(thumb_encrypted) =
-                beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, &thumb.data)
-            {
+            if let Ok(thumb_encrypted) = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, &thumb.data) {
                 let _ = api.upload_thumbnail(server_id, thumb_encrypted).await;
             }
         }
@@ -1732,23 +1981,15 @@ async fn download_to(
     let file_id_str = file_id.to_string();
     let encrypted_bytes = api.download_file(&file_id_str).await?;
 
-    let plaintext = crate::crypto::decrypt_file_chunks(
-        master_key,
-        &file_id_str,
-        &encrypted_bytes,
-        chunk_count,
-    )?;
+    let plaintext = crate::crypto::decrypt_file_chunks(master_key, &file_id_str, &encrypted_bytes, chunk_count)?;
 
     if let Some(parent) = out_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
-    std::fs::write(out_path, &plaintext)
-        .map_err(|e| format!("write {}: {e}", out_path.display()))?;
+    std::fs::write(out_path, &plaintext).map_err(|e| format!("write {}: {e}", out_path.display()))?;
 
     Ok(())
 }
-
 
 fn normalize_remote_path(raw: &str) -> String {
     let path = raw.trim_end_matches('/');
@@ -1797,8 +2038,7 @@ fn format_size(bytes: u64) -> String {
 /// process, writes a PID file, and installs a LaunchAgent (macOS) or
 /// systemd user unit (Linux) for auto-start on login.
 fn spawn_sync_daemon(local_dir: &Path, remote_path: Option<&str>) -> Result<(), String> {
-    let local_dir = std::fs::canonicalize(local_dir)
-        .map_err(|e| format!("cannot resolve path: {e}"))?;
+    let local_dir = std::fs::canonicalize(local_dir).map_err(|e| format!("cannot resolve path: {e}"))?;
 
     let remote = remote_path.unwrap_or("/");
     let remote_normalized = normalize_remote_path(remote);
@@ -1819,10 +2059,7 @@ fn spawn_sync_daemon(local_dir: &Path, remote_path: Option<&str>) -> Result<(), 
             "\u{25CF}".custom_color(crate::colors::GREEN_OK),
             pid,
         );
-        println!(
-            "  {} bb sync --status",
-            "status".custom_color(crate::colors::INK_DIM),
-        );
+        println!("  {} bb sync --status", "status".custom_color(crate::colors::INK_DIM),);
         return Ok(());
     }
 
@@ -1832,18 +2069,12 @@ fn spawn_sync_daemon(local_dir: &Path, remote_path: Option<&str>) -> Result<(), 
     // Install platform auto-start (best-effort, non-fatal)
     if let Err(e) = crate::daemon::install_launchagent(&local_dir, &remote_normalized, &slug) {
         if !ui::is_quiet() {
-            eprintln!(
-                "  {} LaunchAgent install: {e}",
-                "!".custom_color(crate::colors::AMBER),
-            );
+            eprintln!("  {} LaunchAgent install: {e}", "!".custom_color(crate::colors::AMBER),);
         }
     }
     if let Err(e) = crate::daemon::install_systemd_unit(&local_dir, &remote_normalized, &slug) {
         if !ui::is_quiet() {
-            eprintln!(
-                "  {} systemd unit install: {e}",
-                "!".custom_color(crate::colors::AMBER),
-            );
+            eprintln!("  {} systemd unit install: {e}", "!".custom_color(crate::colors::AMBER),);
         }
     }
 
@@ -1865,8 +2096,11 @@ fn spawn_sync_daemon(local_dir: &Path, remote_path: Option<&str>) -> Result<(), 
     println!(
         "  {} {}",
         "logs".custom_color(crate::colors::INK_DIM),
-        log_dir.join(format!("{slug}.log")).display()
-            .to_string().custom_color(crate::colors::INK_DIM),
+        log_dir
+            .join(format!("{slug}.log"))
+            .display()
+            .to_string()
+            .custom_color(crate::colors::INK_DIM),
     );
     println!(
         "  {} bb sync --status to check, bb sync --stop-session \"{}\" to stop",
