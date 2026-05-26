@@ -41,8 +41,7 @@ pub async fn run(
             "? Passphrase (12+ chars, mixed): ".custom_color(crate::colors::AMBER),
         );
         io::stdout().flush().map_err(|e| e.to_string())?;
-        let pass =
-            rpassword::read_password().map_err(|e| format!("failed to read passphrase: {e}"))?;
+        let pass = rpassword::read_password().map_err(|e| format!("failed to read passphrase: {e}"))?;
         if pass.len() < 12 {
             return Err("passphrase must be at least 12 characters".to_string());
         }
@@ -121,8 +120,7 @@ pub async fn run(
         // Encrypt file_key.as_bytes() under wrap_key using AES-256-GCM
         let blob = beebeeb_core::encrypt::encrypt_chunk(&wrap_key, file_key.as_bytes())
             .map_err(|e| format!("encrypt file key: {e}"))?;
-        let wfk_json = serde_json::to_string(&blob)
-            .map_err(|e| format!("serialize wrapped key: {e}"))?;
+        let wfk_json = serde_json::to_string(&blob).map_err(|e| format!("serialize wrapped key: {e}"))?;
 
         let k_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(client_key);
         (Some(wfk_json), Some(k_b64))
@@ -161,8 +159,7 @@ pub async fn run(
     // the user is forced to think about the link and key as two separate
     // things, sent through different channels.
     let (bare_url, full_url) = if let Some(ref kc) = client_key_b64 {
-        let app_url = std::env::var("APP_URL")
-            .unwrap_or_else(|_| "https://app.beebeeb.io".to_string());
+        let app_url = std::env::var("APP_URL").unwrap_or_else(|_| "https://app.beebeeb.io".to_string());
         let bare = format!("{app_url}/s/{token}");
         let full = format!("{bare}#key={kc}");
         (bare, full)
@@ -207,7 +204,10 @@ pub async fn run(
     // Rich mode
     println!();
     if double_encrypted {
-        println!("  {}", "\u{2713} Link created (end-to-end encrypted)".custom_color(crate::colors::GREEN_OK));
+        println!(
+            "  {}",
+            "\u{2713} Link created (end-to-end encrypted)".custom_color(crate::colors::GREEN_OK)
+        );
     } else {
         println!("  {}", "\u{2713} Link created".custom_color(crate::colors::GREEN_OK));
     }
@@ -228,8 +228,7 @@ pub async fn run(
             );
             println!(
                 "  {}",
-                "               (send this through a SEPARATE channel)"
-                    .custom_color(crate::colors::INK_SAGE),
+                "               (send this through a SEPARATE channel)".custom_color(crate::colors::INK_SAGE),
             );
         }
     } else {
@@ -290,8 +289,7 @@ pub async fn run(
     if double_encrypted {
         println!(
             "  {}",
-            "Beebeeb cannot decrypt this share. If the recipient loses the key,"
-                .custom_color(crate::colors::AMBER),
+            "Beebeeb cannot decrypt this share. If the recipient loses the key,".custom_color(crate::colors::AMBER),
         );
         println!(
             "  {}",
@@ -300,15 +298,13 @@ pub async fn run(
     } else {
         println!(
             "  {}",
-            "Heads up: Beebeeb's servers can technically decrypt this share."
-                .custom_color(crate::colors::AMBER),
+            "Heads up: Beebeeb's servers can technically decrypt this share.".custom_color(crate::colors::AMBER),
         );
     }
     if passphrase_value.is_some() {
         println!(
             "  {}",
-            "# send passphrase by a different channel"
-                .custom_color(crate::colors::INK_SAGE),
+            "# send passphrase by a different channel".custom_color(crate::colors::INK_SAGE),
         );
     }
     println!(
@@ -334,10 +330,7 @@ pub async fn list() -> Result<(), String> {
         if ui::is_json() {
             println!("[]");
         } else if !ui::is_quiet() {
-            println!(
-                "  {}",
-                "no active shares".custom_color(crate::colors::INK_DIM),
-            );
+            println!("  {}", "no active shares".custom_color(crate::colors::INK_DIM),);
         }
         return Ok(());
     };
@@ -346,10 +339,7 @@ pub async fn list() -> Result<(), String> {
         if ui::is_json() {
             println!("[]");
         } else if !ui::is_quiet() {
-            println!(
-                "  {}",
-                "no active shares".custom_color(crate::colors::INK_DIM),
-            );
+            println!("  {}", "no active shares".custom_color(crate::colors::INK_DIM),);
         }
         return Ok(());
     }
@@ -361,11 +351,7 @@ pub async fn list() -> Result<(), String> {
 
     println!(
         "  {}",
-        format!(
-            "  {:<36}  {:<40}  {:<20}  {}",
-            "file", "url", "expires", "opens"
-        )
-        .custom_color(crate::colors::INK_DIM),
+        format!("  {:<36}  {:<40}  {:<20}  {}", "file", "url", "expires", "opens").custom_color(crate::colors::INK_DIM),
     );
 
     let master_key = crate::commands::push::load_master_key()?;
@@ -379,32 +365,20 @@ pub async fn list() -> Result<(), String> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             if !file_id.is_empty() && !name_enc.is_empty() {
-                crate::crypto::decrypt_name(&master_key, file_id, name_enc)
-                    .unwrap_or_else(|| "(encrypted)".to_string())
+                crate::crypto::decrypt_name(&master_key, file_id, name_enc).unwrap_or_else(|| "(encrypted)".to_string())
             } else {
                 "(unknown)".to_string()
             }
         };
-        let url = share
-            .get("url")
-            .and_then(|v| v.as_str())
-            .unwrap_or("-");
-        let expires_raw = share
-            .get("expires_at")
-            .and_then(|v| v.as_str())
-            .unwrap_or("never");
-        let is_revoked = share
-            .get("revoked")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let url = share.get("url").and_then(|v| v.as_str()).unwrap_or("-");
+        let expires_raw = share.get("expires_at").and_then(|v| v.as_str()).unwrap_or("never");
+        let is_revoked = share.get("revoked").and_then(|v| v.as_bool()).unwrap_or(false);
         let opens = share
             .get("open_count")
             .or_else(|| share.get("opens"))
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
-        let max_opens = share
-            .get("max_opens")
-            .and_then(|v| v.as_u64());
+        let max_opens = share.get("max_opens").and_then(|v| v.as_u64());
 
         // Status indicator: active, expired, or revoked
         let (status_icon, name_color) = if is_revoked {
@@ -418,7 +392,10 @@ pub async fn list() -> Result<(), String> {
             if is_expired {
                 ("\u{25CB}".custom_color(crate::colors::INK_DIM), crate::colors::INK_DIM)
             } else {
-                ("\u{25CF}".custom_color(crate::colors::GREEN_OK), crate::colors::INK_WARM)
+                (
+                    "\u{25CF}".custom_color(crate::colors::GREEN_OK),
+                    crate::colors::INK_WARM,
+                )
             }
         };
 
@@ -465,8 +442,7 @@ pub async fn revoke(share_id: Option<String>) -> Result<(), String> {
     println!(
         "  {} {}",
         "Revoked".custom_color(crate::colors::GREEN_OK),
-        format!("· share {resolved_id} is no longer accessible")
-            .custom_color(crate::colors::INK_DIM),
+        format!("· share {resolved_id} is no longer accessible").custom_color(crate::colors::INK_DIM),
     );
 
     Ok(())
@@ -504,11 +480,7 @@ async fn pick_share_interactively(api: &ApiClient) -> Result<String, String> {
     let entries: Vec<ShareEntry> = shares_json
         .iter()
         .map(|share| {
-            let id = share
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            let id = share.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let file_id = share.get("file_id").and_then(|v| v.as_str()).unwrap_or("");
             let name_enc = share
                 .get("file")
@@ -516,19 +488,12 @@ async fn pick_share_interactively(api: &ApiClient) -> Result<String, String> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let file_name = if !file_id.is_empty() && !name_enc.is_empty() {
-                crate::crypto::decrypt_name(&master_key, file_id, name_enc)
-                    .unwrap_or_else(|| "(encrypted)".to_string())
+                crate::crypto::decrypt_name(&master_key, file_id, name_enc).unwrap_or_else(|| "(encrypted)".to_string())
             } else {
                 "(unknown)".to_string()
             };
-            let expires_raw = share
-                .get("expires_at")
-                .and_then(|v| v.as_str())
-                .unwrap_or("never");
-            let is_revoked = share
-                .get("revoked")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+            let expires_raw = share.get("expires_at").and_then(|v| v.as_str()).unwrap_or("never");
+            let is_revoked = share.get("revoked").and_then(|v| v.as_bool()).unwrap_or(false);
             let is_expired = !is_revoked
                 && expires_raw != "never"
                 && chrono::DateTime::parse_from_rfc3339(expires_raw)
@@ -574,8 +539,7 @@ async fn pick_share_interactively(api: &ApiClient) -> Result<String, String> {
     // Confirm before revoking.
     print!(
         "  {} ",
-        format!("Revoke share for {}? (y/N)", selected.file_name)
-            .custom_color(crate::colors::AMBER),
+        format!("Revoke share for {}? (y/N)", selected.file_name).custom_color(crate::colors::AMBER),
     );
     io::stdout().flush().map_err(|e| e.to_string())?;
 
@@ -608,9 +572,7 @@ fn run_picker(entries: &[ShareEntry]) -> Result<usize, String> {
 
     loop {
         // Block until an event arrives (100ms poll interval to keep responsive).
-        if !event::poll(std::time::Duration::from_millis(100))
-            .map_err(|e| e.to_string())?
-        {
+        if !event::poll(std::time::Duration::from_millis(100)).map_err(|e| e.to_string())? {
             continue;
         }
 
@@ -650,23 +612,15 @@ fn run_picker(entries: &[ShareEntry]) -> Result<usize, String> {
         // Redraw: move cursor up to overwrite previous list, then draw again.
         // Move up by `entries.len() + 1` lines (list + header).
         let lines_up = entries.len() as u16 + 1;
-        crossterm::execute!(
-            stdout,
-            cursor::MoveUp(lines_up),
-            Clear(ClearType::FromCursorDown)
-        )
-        .map_err(|e| e.to_string())?;
+        crossterm::execute!(stdout, cursor::MoveUp(lines_up), Clear(ClearType::FromCursorDown))
+            .map_err(|e| e.to_string())?;
 
         draw_picker(&mut stdout, entries, selected)?;
     }
 }
 
 /// Render the share list to the terminal.
-fn draw_picker(
-    stdout: &mut io::Stdout,
-    entries: &[ShareEntry],
-    selected: usize,
-) -> Result<(), String> {
+fn draw_picker(stdout: &mut io::Stdout, entries: &[ShareEntry], selected: usize) -> Result<(), String> {
     use std::io::Write;
 
     // Header

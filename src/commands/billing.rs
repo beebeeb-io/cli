@@ -3,7 +3,7 @@
 //! Spec: docs/superpowers/specs/2026-05-23-cli-launch-readiness-design.md §4
 //! "bb billing show output".
 
-use beebeeb_types::quota::{effective_quota, format_storage_si, Plan};
+use beebeeb_types::quota::{Plan, effective_quota, format_storage_si};
 use chrono::DateTime;
 use colored::Colorize;
 
@@ -54,10 +54,7 @@ pub async fn show(json: bool) -> Result<(), String> {
         .unwrap_or(0);
 
     let status = sub.get("status").and_then(|v| v.as_str()).unwrap_or("active");
-    let billing_cycle = sub
-        .get("billing_cycle")
-        .and_then(|v| v.as_str())
-        .unwrap_or("monthly");
+    let billing_cycle = sub.get("billing_cycle").and_then(|v| v.as_str()).unwrap_or("monthly");
     let current_period_end = sub.get("current_period_end").and_then(|v| v.as_str());
     let pending_downgrade_plan = sub
         .get("pending_downgrade_plan")
@@ -149,9 +146,7 @@ pub async fn show(json: bool) -> Result<(), String> {
     );
 
     if let Some(deadline) = storage_grace_deadline {
-        let pending = pending_downgrade_plan
-            .map(|p| Plan::from_slug(p))
-            .unwrap_or(plan);
+        let pending = pending_downgrade_plan.map(|p| Plan::from_slug(p)).unwrap_or(plan);
         let new_quota = effective_quota(pending, 0, 0);
         let over_by = (used_bytes - new_quota).max(0);
         if over_by > 0 {
@@ -163,10 +158,8 @@ pub async fn show(json: bool) -> Result<(), String> {
                 .unwrap_or_else(|| "the downgrade date".into());
             println!(
                 "    {}",
-                format!(
-                    "After {downgrade_date}: {new_quota_str} quota — currently over by {over_str}."
-                )
-                .custom_color(crate::colors::INK_WARM)
+                format!("After {downgrade_date}: {new_quota_str} quota — currently over by {over_str}.")
+                    .custom_color(crate::colors::INK_WARM)
             );
             let deadline_str = format_date_human(Some(deadline));
             println!(
@@ -182,10 +175,7 @@ pub async fn show(json: bool) -> Result<(), String> {
 
     // REGION
     println!("  {}", "REGION".custom_color(crate::colors::AMBER));
-    println!(
-        "    {}",
-        region_human(region_slug).custom_color(crate::colors::INK)
-    );
+    println!("    {}", region_human(region_slug).custom_color(crate::colors::INK));
     println!();
 
     // STATUS (only render for paid plans — free plans are always "active" in

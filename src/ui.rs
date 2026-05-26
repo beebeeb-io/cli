@@ -234,11 +234,7 @@ pub fn human_speed(bytes_per_sec: f64) -> String {
 
 /// A speed bar: amber filled `━` against dim `━`.
 pub fn speed_bar(value: f64, max: f64, width: usize) -> String {
-    let ratio = if max > 0.0 {
-        (value / max).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
+    let ratio = if max > 0.0 { (value / max).clamp(0.0, 1.0) } else { 0.0 };
     let filled = (ratio * width as f64).round() as usize;
     let empty = width.saturating_sub(filled);
     format!(

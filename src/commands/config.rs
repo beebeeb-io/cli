@@ -27,10 +27,7 @@ pub async fn run() -> Result<(), String> {
             "master_key_set": config.master_key.is_some(),
             "config_path": config_path.display().to_string(),
         });
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json).unwrap_or_default()
-        );
+        println!("{}", serde_json::to_string_pretty(&json).unwrap_or_default());
         return Ok(());
     }
 
@@ -57,8 +54,7 @@ pub async fn run() -> Result<(), String> {
             Some(t) => {
                 // Show first 8 and last 4 chars, mask the rest
                 if t.len() > 16 {
-                    format!("{}...{}", &t[..8], &t[t.len() - 4..])
-                        .custom_color(crate::colors::INK)
+                    format!("{}...{}", &t[..8], &t[t.len() - 4..]).custom_color(crate::colors::INK)
                 } else {
                     "(set)".custom_color(crate::colors::INK)
                 }

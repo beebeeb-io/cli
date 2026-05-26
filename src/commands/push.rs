@@ -1,5 +1,5 @@
 use base64::Engine;
-use beebeeb_types::quota::{effective_quota, format_storage_si, Plan};
+use beebeeb_types::quota::{Plan, effective_quota, format_storage_si};
 use colored::Colorize;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -19,19 +19,14 @@ fn b64() -> base64::engine::GeneralPurpose {
 /// Load the master key from config, returning a beebeeb_core MasterKey.
 pub(crate) fn load_master_key() -> Result<beebeeb_core::kdf::MasterKey, String> {
     let config = load_config();
-    let mk_b64 = config
-        .master_key
-        .ok_or("No master key found. Run `bb login` first.")?;
+    let mk_b64 = config.master_key.ok_or("No master key found. Run `bb login` first.")?;
     let mk_bytes: Zeroizing<Vec<u8>> = Zeroizing::new(
         b64()
             .decode(&mk_b64)
             .map_err(|e| format!("invalid master key in config: {e}"))?,
     );
     if mk_bytes.len() != 32 {
-        return Err(format!(
-            "master key must be 32 bytes, got {}",
-            mk_bytes.len()
-        ));
+        return Err(format!("master key must be 32 bytes, got {}", mk_bytes.len()));
     }
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&mk_bytes);
@@ -102,8 +97,12 @@ fn prompt_conflict(filename: &str) -> ConflictResolution {
         return ConflictResolution::Skip;
     }
     match line.trim().to_ascii_lowercase().as_str() {
-        "r" | "replace" => ConflictResolution::Replace { existing_id: uuid::Uuid::nil() }, // filled by caller
-        "k" | "keep" | "keep both" => ConflictResolution::Upload { filename: filename.to_string() },
+        "r" | "replace" => ConflictResolution::Replace {
+            existing_id: uuid::Uuid::nil(),
+        }, // filled by caller
+        "k" | "keep" | "keep both" => ConflictResolution::Upload {
+            filename: filename.to_string(),
+        },
         _ => ConflictResolution::Skip,
     }
 }
@@ -151,9 +150,7 @@ pub async fn run(
     }
 
     // ── Resolve line (single file) ──────────────────────────────────────────
-    let file_size = std::fs::metadata(&path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     if ui::is_rich() {
         println!(
             "  {}",
@@ -237,10 +234,7 @@ async fn resolve_upload_folder(api: &ApiClient, folder: &str) -> Result<String, 
         .ok_or("invalid file listing response")?;
 
     for file in files {
-        let is_folder = file
-            .get("is_folder")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let is_folder = file.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
         if !is_folder {
             continue;
         }
@@ -262,13 +256,10 @@ async fn resolve_upload_folder(api: &ApiClient, folder: &str) -> Result<String, 
     }
 
     let folder_id = uuid::Uuid::new_v4();
-    let name_encrypted =
-        beebeeb_core::encrypt::encrypt_name(&master_key, &folder_id.to_string(), folder, None)
-            .map_err(|e| format!("failed to encrypt folder name: {e}"))?;
+    let name_encrypted = beebeeb_core::encrypt::encrypt_name(&master_key, &folder_id.to_string(), folder, None)
+        .map_err(|e| format!("failed to encrypt folder name: {e}"))?;
 
-    let created = api
-        .create_folder(&name_encrypted, None, Some(folder_id))
-        .await?;
+    let created = api.create_folder(&name_encrypted, None, Some(folder_id)).await?;
     let created_id = created
         .get("id")
         .and_then(|v| v.as_str())
@@ -305,21 +296,14 @@ async fn push_single_file(
     strategy: ConflictStrategy,
     suppress_output: bool,
 ) -> Result<Option<UploadResult>, String> {
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("file")
-        .to_string();
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
 
-    let file_bytes =
-        std::fs::read(path).map_err(|e| format!("failed to read file: {e}"))?;
+    let file_bytes = std::fs::read(path).map_err(|e| format!("failed to read file: {e}"))?;
     let file_size = file_bytes.len() as u64;
 
     let master_key = load_master_key()?;
 
-    let parent_uuid: Option<uuid::Uuid> = parent_id
-        .as_deref()
-        .and_then(|s| s.parse().ok());
+    let parent_uuid: Option<uuid::Uuid> = parent_id.as_deref().and_then(|s| s.parse().ok());
 
     // ── Conflict detection ────────────────────────────────────────────────────
     // Decrypt existing filenames in the folder and check for a match.
@@ -346,9 +330,7 @@ async fn push_single_file(
                         let r = prompt_conflict(&file_name);
                         // If user chose Replace, inject the actual existing_id
                         match r {
-                            ConflictResolution::Replace { .. } => {
-                                ConflictResolution::Replace { existing_id }
-                            }
+                            ConflictResolution::Replace { .. } => ConflictResolution::Replace { existing_id },
                             ConflictResolution::Upload { .. } => {
                                 let (stem, ext) = split_stem_ext(&file_name);
                                 let new_name = if ext.is_empty() {
@@ -379,9 +361,7 @@ async fn push_single_file(
                         // file was first uploaded).
                         (existing_id, file_name.clone(), Some(existing_id))
                     }
-                    ConflictResolution::Upload { filename } => {
-                        (uuid::Uuid::new_v4(), filename, None)
-                    }
+                    ConflictResolution::Upload { filename } => (uuid::Uuid::new_v4(), filename, None),
                     ConflictResolution::Skip => return Ok(None),
                 }
             }
@@ -393,9 +373,8 @@ async fn push_single_file(
 
     // Encrypt the filename (MIME type is now part of the encrypted envelope)
     let mime = beebeeb_core::media::guess_mime_type(&upload_name);
-    let name_encrypted =
-        beebeeb_core::encrypt::encrypt_name(&master_key, &file_id.to_string(), &upload_name, mime)
-            .map_err(|e| format!("failed to encrypt filename: {e}"))?;
+    let name_encrypted = beebeeb_core::encrypt::encrypt_name(&master_key, &file_id.to_string(), &upload_name, mime)
+        .map_err(|e| format!("failed to encrypt filename: {e}"))?;
     let file_name = upload_name; // use the possibly-suffixed name for display
 
     // Chunk the file using the adaptive chunk-size ladder
@@ -411,8 +390,8 @@ async fn push_single_file(
 
     if file_bytes.is_empty() {
         // Encrypt an empty chunk
-        let bytes = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, &[])
-            .map_err(|e| format!("encrypt chunk: {e}"))?;
+        let bytes =
+            beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, &[]).map_err(|e| format!("encrypt chunk: {e}"))?;
         total_encrypted_size += bytes.len() as i64;
         encrypted_chunks.push((0, bytes));
     } else {
@@ -426,8 +405,7 @@ async fn push_single_file(
 
     let parent_uuid = match &parent_id {
         Some(pid) => {
-            let parsed: uuid::Uuid =
-                pid.parse().map_err(|e| format!("invalid parent ID: {e}"))?;
+            let parsed: uuid::Uuid = pid.parse().map_err(|e| format!("invalid parent ID: {e}"))?;
             Some(parsed)
         }
         None => None,
@@ -471,8 +449,7 @@ async fn push_single_file(
                             eprintln!(
                                 "  {} {}",
                                 "note".custom_color(crate::colors::INK_DIM),
-                                format!("thumbnail upload skipped: {e}")
-                                    .custom_color(crate::colors::INK_DIM),
+                                format!("thumbnail upload skipped: {e}").custom_color(crate::colors::INK_DIM),
                             );
                         }
                     }
@@ -482,8 +459,7 @@ async fn push_single_file(
                         eprintln!(
                             "  {} {}",
                             "note".custom_color(crate::colors::INK_DIM),
-                            format!("thumbnail encrypt failed: {e}")
-                                .custom_color(crate::colors::INK_DIM),
+                            format!("thumbnail encrypt failed: {e}").custom_color(crate::colors::INK_DIM),
                         );
                     }
                 }
@@ -567,9 +543,8 @@ async fn push_directory(
     }
 
     let folder_id = uuid::Uuid::new_v4();
-    let name_encrypted =
-        beebeeb_core::encrypt::encrypt_name(&master_key, &folder_id.to_string(), &dir_name, None)
-            .map_err(|e| format!("failed to encrypt folder name: {e}"))?;
+    let name_encrypted = beebeeb_core::encrypt::encrypt_name(&master_key, &folder_id.to_string(), &dir_name, None)
+        .map_err(|e| format!("failed to encrypt folder name: {e}"))?;
 
     let parent_uuid = parent_id
         .as_deref()
@@ -577,9 +552,7 @@ async fn push_directory(
         .transpose()
         .map_err(|e| format!("invalid parent ID: {e}"))?;
 
-    let root_folder = api
-        .create_folder(&name_encrypted, parent_uuid, Some(folder_id))
-        .await?;
+    let root_folder = api.create_folder(&name_encrypted, parent_uuid, Some(folder_id)).await?;
     let root_id: uuid::Uuid = root_folder
         .get("id")
         .and_then(|v| v.as_str())
@@ -587,8 +560,7 @@ async fn push_directory(
         .parse()
         .map_err(|e| format!("invalid folder id: {e}"))?;
 
-    let mut folder_map: std::collections::HashMap<PathBuf, uuid::Uuid> =
-        std::collections::HashMap::new();
+    let mut folder_map: std::collections::HashMap<PathBuf, uuid::Uuid> = std::collections::HashMap::new();
     folder_map.insert(dir_path.to_path_buf(), root_id);
 
     let total_start = std::time::Instant::now();
@@ -599,19 +571,13 @@ async fn push_directory(
         let entry_parent_id = folder_map.get(entry_parent).copied().unwrap_or(root_id);
 
         if *is_dir {
-            let name = entry_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("folder");
+            let name = entry_path.file_name().and_then(|n| n.to_str()).unwrap_or("folder");
 
             let sub_id = uuid::Uuid::new_v4();
-            let sub_enc =
-                beebeeb_core::encrypt::encrypt_name(&master_key, &sub_id.to_string(), name, None)
-                    .map_err(|e| format!("failed to encrypt subfolder name: {e}"))?;
+            let sub_enc = beebeeb_core::encrypt::encrypt_name(&master_key, &sub_id.to_string(), name, None)
+                .map_err(|e| format!("failed to encrypt subfolder name: {e}"))?;
 
-            let result = api
-                .create_folder(&sub_enc, Some(entry_parent_id), Some(sub_id))
-                .await?;
+            let result = api.create_folder(&sub_enc, Some(entry_parent_id), Some(sub_id)).await?;
             let created_id: uuid::Uuid = result
                 .get("id")
                 .and_then(|v| v.as_str())
@@ -699,9 +665,7 @@ async fn push_directory(
 
 fn collect_entries(dir: &std::path::Path, entries: &mut Vec<(PathBuf, bool)>) -> Result<(), String> {
     let read_dir = std::fs::read_dir(dir).map_err(|e| format!("failed to read directory: {e}"))?;
-    let mut sorted: Vec<_> = read_dir
-        .filter_map(|e| e.ok())
-        .collect();
+    let mut sorted: Vec<_> = read_dir.filter_map(|e| e.ok()).collect();
     sorted.sort_by_key(|e| e.file_name());
 
     for entry in sorted {
@@ -748,24 +712,12 @@ async fn check_quota(api: &ApiClient, upload_size: u64) -> Result<(), String> {
     let usage = usage_res.unwrap_or_default();
     let sub = sub_res.unwrap_or_default();
 
-    let used_bytes = usage
-        .get("used_bytes")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
+    let used_bytes = usage.get("used_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
 
-    let plan_slug = sub
-        .get("plan")
-        .and_then(|v| v.as_str())
-        .unwrap_or("free");
+    let plan_slug = sub.get("plan").and_then(|v| v.as_str()).unwrap_or("free");
     let plan = Plan::from_slug(plan_slug);
-    let extra_tb = sub
-        .get("extra_storage_tb")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-    let bonus_bytes = sub
-        .get("bonus_bytes")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
+    let extra_tb = sub.get("extra_storage_tb").and_then(|v| v.as_i64()).unwrap_or(0);
+    let bonus_bytes = sub.get("bonus_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
     let quota = effective_quota(plan, extra_tb, bonus_bytes);
 
     if quota > 0 && used_bytes + upload_size as i64 > quota {
@@ -776,9 +728,7 @@ async fn check_quota(api: &ApiClient, upload_size: u64) -> Result<(), String> {
         } else {
             ""
         };
-        return Err(format!(
-            "Storage full ({used_str} / {quota_str}).{extra_hint}"
-        ));
+        return Err(format!("Storage full ({used_str} / {quota_str}).{extra_hint}"));
     }
 
     Ok(())

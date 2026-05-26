@@ -11,13 +11,19 @@ static RATE_RESET: AtomicI64 = AtomicI64::new(0);
 
 fn update_rate_state(headers: &reqwest::header::HeaderMap) {
     if let Some(v) = headers.get("x-ratelimit-remaining").and_then(|v| v.to_str().ok()) {
-        if let Ok(n) = v.parse::<i64>() { RATE_REMAINING.store(n, Ordering::Relaxed); }
+        if let Ok(n) = v.parse::<i64>() {
+            RATE_REMAINING.store(n, Ordering::Relaxed);
+        }
     }
     if let Some(v) = headers.get("x-ratelimit-limit").and_then(|v| v.to_str().ok()) {
-        if let Ok(n) = v.parse::<i64>() { RATE_LIMIT.store(n, Ordering::Relaxed); }
+        if let Ok(n) = v.parse::<i64>() {
+            RATE_LIMIT.store(n, Ordering::Relaxed);
+        }
     }
     if let Some(v) = headers.get("x-ratelimit-reset").and_then(|v| v.to_str().ok()) {
-        if let Ok(n) = v.parse::<i64>() { RATE_RESET.store(n, Ordering::Relaxed); }
+        if let Ok(n) = v.parse::<i64>() {
+            RATE_RESET.store(n, Ordering::Relaxed);
+        }
     }
 }
 
@@ -25,9 +31,13 @@ async fn pace_if_needed() {
     let remaining = RATE_REMAINING.load(Ordering::Relaxed);
     let limit = RATE_LIMIT.load(Ordering::Relaxed);
     let reset = RATE_RESET.load(Ordering::Relaxed);
-    if remaining < 0 || limit <= 0 { return; }
+    if remaining < 0 || limit <= 0 {
+        return;
+    }
     let ratio = remaining as f64 / limit as f64;
-    if ratio > 0.2 { return; }
+    if ratio > 0.2 {
+        return;
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -90,11 +100,7 @@ impl ApiClient {
     }
 
     #[allow(dead_code)]
-    pub async fn opaque_login_start(
-        &self,
-        email: &str,
-        client_message_b64: &str,
-    ) -> Result<Value, String> {
+    pub async fn opaque_login_start(&self, email: &str, client_message_b64: &str) -> Result<Value, String> {
         let resp = self
             .client
             .post(self.url("/api/v1/opaque/login-start"))
@@ -239,8 +245,7 @@ impl ApiClient {
     ) -> Result<Value, String> {
         let token = self.require_auth()?;
 
-        let mut form = reqwest::multipart::Form::new()
-            .text("metadata", metadata_json.to_string());
+        let mut form = reqwest::multipart::Form::new().text("metadata", metadata_json.to_string());
 
         for (idx, data) in encrypted_chunks {
             let part = reqwest::multipart::Part::bytes(data.clone())
@@ -299,12 +304,7 @@ impl ApiClient {
         Err("rate limited after 3 retries".to_string())
     }
 
-    pub async fn upload_chunk(
-        &self,
-        file_id: &str,
-        index: u32,
-        data: Vec<u8>,
-    ) -> Result<Value, String> {
+    pub async fn upload_chunk(&self, file_id: &str, index: u32, data: Vec<u8>) -> Result<Value, String> {
         let token = self.require_auth()?;
         for attempt in 0..3 {
             pace_if_needed().await;
@@ -498,10 +498,7 @@ impl ApiClient {
     /// Return all `{id, name_encrypted}` pairs in a folder so the caller can
     /// decrypt names locally and detect filename conflicts before uploading.
     /// `parent_id = None` queries the root folder.
-    pub async fn check_conflict(
-        &self,
-        parent_id: Option<uuid::Uuid>,
-    ) -> Result<Value, String> {
+    pub async fn check_conflict(&self, parent_id: Option<uuid::Uuid>) -> Result<Value, String> {
         let token = self.require_auth()?;
         let resp = self
             .client
@@ -660,10 +657,7 @@ impl ApiClient {
 
     /// Build a streaming SSE response for the sync endpoint. Caller is
     /// responsible for parsing event frames out of the byte stream.
-    pub async fn open_sync_stream(
-        &self,
-        stream_token: &str,
-    ) -> Result<reqwest::Response, String> {
+    pub async fn open_sync_stream(&self, stream_token: &str) -> Result<reqwest::Response, String> {
         let resp = self
             .client
             .get(self.stream_url(stream_token))
@@ -830,12 +824,7 @@ impl ApiClient {
     // ── Client device + session API ──────────────────────────────────────
 
     /// Register (upsert) a client device with the server.
-    pub async fn register_device(
-        &self,
-        hostname: &str,
-        platform: &str,
-        bb_version: &str,
-    ) -> Result<Value, String> {
+    pub async fn register_device(&self, hostname: &str, platform: &str, bb_version: &str) -> Result<Value, String> {
         let token = self.require_auth()?;
         let body = serde_json::json!({
             "hostname": hostname,
@@ -990,10 +979,7 @@ async fn parse_response(resp: reqwest::Response) -> Result<Value, String> {
         return Err("__rate_limited__".to_string());
     }
 
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| format!("failed to read response: {e}"))?;
+    let body = resp.text().await.map_err(|e| format!("failed to read response: {e}"))?;
 
     if !status.is_success() {
         let msg = serde_json::from_str::<Value>(&body)

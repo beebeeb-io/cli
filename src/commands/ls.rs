@@ -39,10 +39,7 @@ pub async fn run(path: Option<String>) -> Result<(), String> {
 
     let Some(files) = files else {
         if !ui::is_json() {
-            println!(
-                "  {}",
-                "empty \u{2014} no files here".custom_color(colors::INK_DIM),
-            );
+            println!("  {}", "empty \u{2014} no files here".custom_color(colors::INK_DIM),);
         } else {
             println!(
                 "{}",
@@ -59,10 +56,7 @@ pub async fn run(path: Option<String>) -> Result<(), String> {
 
     if files.is_empty() {
         if !ui::is_json() {
-            println!(
-                "  {}",
-                "empty \u{2014} no files here".custom_color(colors::INK_DIM),
-            );
+            println!("  {}", "empty \u{2014} no files here".custom_color(colors::INK_DIM),);
         } else {
             println!(
                 "{}",
@@ -103,10 +97,7 @@ pub async fn run(path: Option<String>) -> Result<(), String> {
             }
         };
 
-        let is_folder = file
-            .get("is_folder")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let is_folder = file.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
 
         let size_bytes = file
             .get("size_bytes")
@@ -132,11 +123,7 @@ pub async fn run(path: Option<String>) -> Result<(), String> {
 
     // ── JSON mode ────────────────────────────────────────────────────────────
     if ui::is_json() {
-        let total_bytes: u64 = decrypted
-            .iter()
-            .filter(|f| !f.is_folder)
-            .map(|f| f.size_bytes)
-            .sum();
+        let total_bytes: u64 = decrypted.iter().filter(|f| !f.is_folder).map(|f| f.size_bytes).sum();
         let json_files: Vec<serde_json::Value> = decrypted
             .iter()
             .map(|f| {
@@ -167,11 +154,7 @@ pub async fn run(path: Option<String>) -> Result<(), String> {
     if !ui::is_quiet() {
         println!(
             "  {}",
-            format!(
-                "{:<44}{:>8}  {:<14}{}",
-                "NAME", "SIZE", "MODIFIED", "ID"
-            )
-            .custom_color(colors::INK_DIM),
+            format!("{:<44}{:>8}  {:<14}{}", "NAME", "SIZE", "MODIFIED", "ID").custom_color(colors::INK_DIM),
         );
     }
 
@@ -196,9 +179,7 @@ pub async fn run(path: Option<String>) -> Result<(), String> {
                 .custom_color(colors::PATH)
                 .to_string()
         } else {
-            file.decrypted_name
-                .custom_color(colors::INK)
-                .to_string()
+            file.decrypted_name.custom_color(colors::INK).to_string()
         };
         let size_str = if file.is_folder {
             "\u{2014}".to_string() // —

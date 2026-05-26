@@ -6,14 +6,14 @@ use crate::env_detect::is_headless;
 // ─── WebSocket device-auth login ─────────────────────────────────────────────
 
 async fn browser_login(headless_flag: bool) -> Result<(), String> {
-    use aes_gcm::aead::generic_array::GenericArray;
     use aes_gcm::aead::Aead;
+    use aes_gcm::aead::generic_array::GenericArray;
     use aes_gcm::{Aes256Gcm, KeyInit};
-    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+    use base64::{Engine, engine::general_purpose::STANDARD as B64};
     use futures_util::{SinkExt, StreamExt};
+    use p256::PublicKey;
     use p256::ecdh::EphemeralSecret;
     use p256::elliptic_curve::sec1::ToEncodedPoint;
-    use p256::PublicKey;
     use rand::rngs::OsRng;
     use tokio_tungstenite::{connect_async, tungstenite::Message};
 
@@ -27,15 +27,10 @@ async fn browser_login(headless_flag: bool) -> Result<(), String> {
     // 2. Connect WebSocket
     let config = load_config();
     let api_url = config.api_url;
-    let ws_url = api_url
-        .replace("https://", "wss://")
-        .replace("http://", "ws://");
+    let ws_url = api_url.replace("https://", "wss://").replace("http://", "ws://");
     let ws_url = format!("{ws_url}/api/v1/auth/cli");
 
-    println!(
-        "  {} Connecting to Beebeeb...",
-        "→".custom_color(crate::colors::AMBER)
-    );
+    println!("  {} Connecting to Beebeeb...", "→".custom_color(crate::colors::AMBER));
 
     let (mut ws_stream, _) = connect_async(&ws_url)
         .await
@@ -58,17 +53,13 @@ async fn browser_login(headless_flag: bool) -> Result<(), String> {
         Message::Text(t) => t,
         _ => return Err("Unexpected message type (expected text)".into()),
     };
-    let resp: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("Invalid response: {e}"))?;
+    let resp: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("Invalid response: {e}"))?;
 
     if let Some(err) = resp["error"].as_str() {
         return Err(format!("Auth error: {err}"));
     }
 
-    let user_code = resp["user_code"]
-        .as_str()
-        .ok_or("Missing user_code")?
-        .to_string();
+    let user_code = resp["user_code"].as_str().ok_or("Missing user_code")?.to_string();
     let verification_uri = resp["verification_uri"]
         .as_str()
         .ok_or("Missing verification_uri")?
@@ -93,21 +84,14 @@ async fn browser_login(headless_flag: bool) -> Result<(), String> {
     //    completes, regardless of outcome.
     let countdown_handle = spawn_countdown(expires_in);
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(expires_in),
-        ws_stream.next(),
-    )
-    .await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(expires_in), ws_stream.next()).await;
 
     countdown_handle.abort();
     // Clear the countdown line so it doesn't bleed into the next print.
     eprint!("\r\x1b[2K");
 
     let result_msg = result
-        .map_err(|_| {
-            "Timed out waiting for browser authorization (5 min). Run `bb login` again."
-                .to_string()
-        })?
+        .map_err(|_| "Timed out waiting for browser authorization (5 min). Run `bb login` again.".to_string())?
         .ok_or("Connection closed before authorization completed")?
         .map_err(|e| format!("WS error: {e}"))?;
 
@@ -115,8 +99,7 @@ async fn browser_login(headless_flag: bool) -> Result<(), String> {
         Message::Text(t) => t,
         _ => return Err("Unexpected message type (expected text)".into()),
     };
-    let result: serde_json::Value =
-        serde_json::from_str(&result_text).map_err(|e| format!("Invalid result: {e}"))?;
+    let result: serde_json::Value = serde_json::from_str(&result_text).map_err(|e| format!("Invalid result: {e}"))?;
 
     if let Some(err) = result["error"].as_str() {
         return Err(format!("Auth error: {err}"));
@@ -178,9 +161,7 @@ async fn browser_login(headless_flag: bool) -> Result<(), String> {
     let master_key_b64 = creds["master_key_b64"]
         .as_str()
         .ok_or("Missing master_key_b64 in credentials")?;
-    let email = creds["email"]
-        .as_str()
-        .ok_or("Missing email in credentials")?;
+    let email = creds["email"].as_str().ok_or("Missing email in credentials")?;
 
     let mut config = load_config();
     config.session_token = Some(session_token.to_string());
@@ -220,13 +201,11 @@ fn print_browser_block(user_code: &str, verification_uri: &str) {
     println!();
     println!(
         "  {}",
-        "If your browser did not open, paste the URL above into any"
-            .custom_color(crate::colors::INK_DIM)
+        "If your browser did not open, paste the URL above into any".custom_color(crate::colors::INK_DIM)
     );
     println!(
         "  {}",
-        "signed-in browser. The code shown there must match the one above."
-            .custom_color(crate::colors::INK_DIM)
+        "signed-in browser. The code shown there must match the one above.".custom_color(crate::colors::INK_DIM)
     );
     println!();
 }
@@ -239,14 +218,10 @@ fn print_headless_block(user_code: &str, verification_uri: &str) {
     );
     println!(
         "  {}",
-        "Open this URL in a browser on any device you trust:"
-            .custom_color(crate::colors::INK)
+        "Open this URL in a browser on any device you trust:".custom_color(crate::colors::INK)
     );
     println!();
-    println!(
-        "      {}",
-        verification_uri.custom_color(crate::colors::AMBER)
-    );
+    println!("      {}", verification_uri.custom_color(crate::colors::AMBER));
     println!();
     println!(
         "  When prompted, confirm the code shown:  {}",
@@ -255,13 +230,11 @@ fn print_headless_block(user_code: &str, verification_uri: &str) {
     println!();
     println!(
         "  {}",
-        "(If you are not signed in there, you will be asked to sign in"
-            .custom_color(crate::colors::INK_DIM)
+        "(If you are not signed in there, you will be asked to sign in".custom_color(crate::colors::INK_DIM)
     );
     println!(
         "  {}",
-        " and complete two-factor authentication first.)"
-            .custom_color(crate::colors::INK_DIM)
+        " and complete two-factor authentication first.)".custom_color(crate::colors::INK_DIM)
     );
     println!();
 }
@@ -313,16 +286,14 @@ pub async fn run(headless: bool) -> Result<(), String> {
                     );
                     println!(
                         "  {}",
-                        "Run `bb logout` first to switch accounts."
-                            .custom_color(crate::colors::INK_DIM)
+                        "Run `bb logout` first to switch accounts.".custom_color(crate::colors::INK_DIM)
                     );
                     return Ok(());
                 }
                 Err(_) => {
                     println!(
                         "  {}",
-                        "Session expired. Re-authenticating..."
-                            .custom_color(crate::colors::INK_DIM)
+                        "Session expired. Re-authenticating...".custom_color(crate::colors::INK_DIM)
                     );
                 }
             }

@@ -28,15 +28,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+use axum::Router;
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::Router;
 use axum::routing::any;
 use base64::Engine as _;
 use colored::Colorize;
-use percent_encoding::{percent_encode, NON_ALPHANUMERIC};
+use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
@@ -89,19 +89,14 @@ pub async fn run(port: u16, read_only: bool, cache_ttl: u64, no_cache: bool, ver
         return Err("Not logged in. Run `bb login` first.".to_string());
     }
 
-    let mk_b64 = config
-        .master_key
-        .ok_or("No master key found. Run `bb login` first.")?;
+    let mk_b64 = config.master_key.ok_or("No master key found. Run `bb login` first.")?;
     let mk_bytes: Zeroizing<Vec<u8>> = Zeroizing::new(
         base64::engine::general_purpose::STANDARD
             .decode(&mk_b64)
             .map_err(|e| format!("invalid master key in config: {e}"))?,
     );
     if mk_bytes.len() != 32 {
-        return Err(format!(
-            "master key must be 32 bytes, got {}",
-            mk_bytes.len()
-        ));
+        return Err(format!("master key must be 32 bytes, got {}", mk_bytes.len()));
     }
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&mk_bytes);
@@ -173,13 +168,9 @@ pub async fn run(port: u16, read_only: bool, cache_ttl: u64, no_cache: bool, ver
     println!();
     println!(
         "  {}",
-        "# Finder: Go \u{2192} Connect to Server \u{2192} http://localhost:7878"
-            .custom_color(crate::colors::INK_SAGE),
+        "# Finder: Go \u{2192} Connect to Server \u{2192} http://localhost:7878".custom_color(crate::colors::INK_SAGE),
     );
-    println!(
-        "  {}",
-        "# press Ctrl+C to stop".custom_color(crate::colors::INK_SAGE),
-    );
+    println!("  {}", "# press Ctrl+C to stop".custom_color(crate::colors::INK_SAGE),);
     println!();
 
     axum::serve(listener, router)
@@ -208,10 +199,7 @@ struct DavState {
 
 // ─── Request dispatcher ───────────────────────────────────────────────────────
 
-async fn handle_webdav(
-    State(state): State<Arc<DavState>>,
-    req: Request,
-) -> Response {
+async fn handle_webdav(State(state): State<Arc<DavState>>, req: Request) -> Response {
     let method = req.method().clone();
     let uri = req.uri().clone();
     let headers = req.headers().clone();
@@ -247,26 +235,23 @@ async fn handle_webdav(
     }
 
     // Guard write operations when --read-only is set
-    let is_write = matches!(method, Method::PUT | Method::DELETE)
-        || method.as_str() == "MKCOL"
-        || method.as_str() == "MOVE";
+    let is_write =
+        matches!(method, Method::PUT | Method::DELETE) || method.as_str() == "MKCOL" || method.as_str() == "MOVE";
     if is_write && state.read_only {
-        return (StatusCode::METHOD_NOT_ALLOWED, "read-only mode — use bb webdav without --read-only").into_response();
+        return (
+            StatusCode::METHOD_NOT_ALLOWED,
+            "read-only mode — use bb webdav without --read-only",
+        )
+            .into_response();
     }
 
     // Extract the If: (<token>) header once (used by PUT/DELETE to verify locks)
-    let if_token = headers
-        .get("if")
-        .and_then(|v| v.to_str().ok())
-        .and_then(parse_if_token);
+    let if_token = headers.get("if").and_then(|v| v.to_str().ok()).and_then(parse_if_token);
 
     let response = match method {
         Method::OPTIONS => options_response(&state),
         ref m if m.as_str() == "PROPFIND" => {
-            let depth = headers
-                .get("depth")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("1");
+            let depth = headers.get("depth").and_then(|v| v.to_str().ok()).unwrap_or("1");
             propfind_response(&state, &path, depth).await
         }
         Method::GET => get_response(&state, &path, &headers).await,
@@ -475,15 +460,11 @@ async fn get_response(state: &Arc<DavState>, path: &str, req_headers: &HeaderMap
     // Decrypt all chunks using the shared helper that handles both
     // CLI-format (JSON) and web-app-format (raw binary) chunks, and
     // both UUID key derivation methods (binary and string).
-    let plaintext = match crate::crypto::decrypt_file_chunks(
-        &state.master_key,
-        &file_id,
-        &encrypted_bytes,
-        resolved.chunk_count,
-    ) {
-        Ok(p) => p,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-    };
+    let plaintext =
+        match crate::crypto::decrypt_file_chunks(&state.master_key, &file_id, &encrypted_bytes, resolved.chunk_count) {
+            Ok(p) => p,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        };
 
     let mut headers = HeaderMap::new();
     let mime = resolve_mime(&resolved.display_name);
@@ -514,15 +495,10 @@ async fn get_response(state: &Arc<DavState>, path: &str, req_headers: &HeaderMap
         })
         .collect();
     let encoded = percent_encode(resolved.display_name.as_bytes(), NON_ALPHANUMERIC).to_string();
-    let header_value = format!(
-        "inline; filename=\"{}\"; filename*=UTF-8''{}",
-        ascii_fallback, encoded
-    );
+    let header_value = format!("inline; filename=\"{}\"; filename*=UTF-8''{}", ascii_fallback, encoded);
     headers.insert(
         "Content-Disposition",
-        header_value
-            .parse()
-            .unwrap_or_else(|_| "inline".parse().unwrap()),
+        header_value.parse().unwrap_or_else(|_| "inline".parse().unwrap()),
     );
 
     (StatusCode::OK, headers, Body::from(plaintext)).into_response()
@@ -540,7 +516,10 @@ async fn head_response(state: &Arc<DavState>, path: &str) -> Response {
     let etag = make_etag(file_id, resolved.modified.as_deref());
 
     let mut headers = HeaderMap::new();
-    headers.insert("Content-Length", resolved.size_bytes.unwrap_or(0).to_string().parse().unwrap());
+    headers.insert(
+        "Content-Length",
+        resolved.size_bytes.unwrap_or(0).to_string().parse().unwrap(),
+    );
     let mime = resolve_mime(&resolved.display_name);
     if let Ok(hv) = mime.parse() {
         headers.insert("Content-Type", hv);
@@ -623,22 +602,17 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
 
     // Use existing UUID for versioning; generate fresh UUID for new files.
     let file_uuid = existing_file_id.unwrap_or_else(uuid::Uuid::new_v4);
-    let file_key =
-        beebeeb_core::kdf::derive_file_key(&state.master_key, file_uuid.to_string().as_bytes());
+    let file_key = beebeeb_core::kdf::derive_file_key(&state.master_key, file_uuid.to_string().as_bytes());
 
     // Encrypt filename (MIME type is now part of the encrypted envelope)
     let mime = beebeeb_core::media::guess_mime_type(&filename);
-    let name_encrypted = match beebeeb_core::encrypt::encrypt_name(
-        &state.master_key,
-        &file_uuid.to_string(),
-        &filename,
-        mime,
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-        }
-    };
+    let name_encrypted =
+        match beebeeb_core::encrypt::encrypt_name(&state.master_key, &file_uuid.to_string(), &filename, mime) {
+            Ok(s) => s,
+            Err(e) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+            }
+        };
 
     // Encrypt body in chunks using adaptive chunk sizing
     let plan = beebeeb_types::plan_chunks(body.len() as u64, beebeeb_types::ChunkProfile::Desktop);
@@ -657,8 +631,7 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
         let bytes = match beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, chunk) {
             Ok(b) => b,
             Err(e) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, format!("encrypt chunk {i}: {e}"))
-                    .into_response();
+                return (StatusCode::INTERNAL_SERVER_ERROR, format!("encrypt chunk {i}: {e}")).into_response();
             }
         };
         total_encrypted_size += bytes.len() as i64;
@@ -670,15 +643,27 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
     let effective_file_id = existing_file_id.or(Some(file_uuid));
 
     // V2 upload: init → chunks → complete
-    let init_resp = match state.api
-        .upload_init(effective_file_id, &name_encrypted, parent_uuid, total_encrypted_size, encrypted_chunks.len() as i32, is_media)
+    let init_resp = match state
+        .api
+        .upload_init(
+            effective_file_id,
+            &name_encrypted,
+            parent_uuid,
+            total_encrypted_size,
+            encrypted_chunks.len() as i32,
+            is_media,
+        )
         .await
     {
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
 
-    let server_id = match init_resp.get("file_id").or_else(|| init_resp.get("id")).and_then(|v| v.as_str()) {
+    let server_id = match init_resp
+        .get("file_id")
+        .or_else(|| init_resp.get("id"))
+        .and_then(|v| v.as_str())
+    {
         Some(id) => id.to_string(),
         None => return (StatusCode::INTERNAL_SERVER_ERROR, "missing file id").into_response(),
     };
@@ -725,9 +710,7 @@ async fn mkcol_response(state: &Arc<DavState>, path: &str) -> Response {
         None
     } else {
         match resolve_path(state, parent_path).await {
-            Ok(e) if e.is_collection => {
-                e.file_id.as_deref().and_then(|s| s.parse().ok())
-            }
+            Ok(e) if e.is_collection => e.file_id.as_deref().and_then(|s| s.parse().ok()),
             Ok(_) => return (StatusCode::CONFLICT, "parent is not a folder").into_response(),
             Err(e) => {
                 return (StatusCode::CONFLICT, format!("parent not found: {e}")).into_response();
@@ -743,17 +726,13 @@ async fn mkcol_response(state: &Arc<DavState>, path: &str) -> Response {
     // Encrypt folder name — needs a UUID key. Use nil UUID for folders (consistent
     // with the server's convention: folder name is encrypted with the folder's own UUID).
     let folder_uuid = uuid::Uuid::new_v4();
-    let name_encrypted = match beebeeb_core::encrypt::encrypt_name(
-        &state.master_key,
-        &folder_uuid.to_string(),
-        &folder_name,
-        None,
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-        }
-    };
+    let name_encrypted =
+        match beebeeb_core::encrypt::encrypt_name(&state.master_key, &folder_uuid.to_string(), &folder_name, None) {
+            Ok(s) => s,
+            Err(e) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+            }
+        };
 
     match state
         .api
@@ -808,10 +787,7 @@ async fn move_response(state: &Arc<DavState>, src_path: &str, destination: &str)
     // Strip any http://host prefix from the Destination header to get a bare path
     let dst_path = if let Some(pos) = destination.find("://") {
         let after_scheme = &destination[pos + 3..];
-        after_scheme
-            .find('/')
-            .map(|i| &after_scheme[i..])
-            .unwrap_or("/")
+        after_scheme.find('/').map(|i| &after_scheme[i..]).unwrap_or("/")
     } else {
         destination
     };
@@ -881,16 +857,12 @@ async fn move_response(state: &Arc<DavState>, src_path: &str, destination: &str)
             None // will be handled specially below
         } else {
             match resolve_path(state, dst_parent_path).await {
-                Ok(e) if e.is_collection => {
-                    e.file_id.as_deref().and_then(|s| s.parse::<uuid::Uuid>().ok())
-                }
+                Ok(e) if e.is_collection => e.file_id.as_deref().and_then(|s| s.parse::<uuid::Uuid>().ok()),
                 Ok(_) => {
-                    return (StatusCode::CONFLICT, "destination parent is not a folder")
-                        .into_response();
+                    return (StatusCode::CONFLICT, "destination parent is not a folder").into_response();
                 }
                 Err(e) => {
-                    return (StatusCode::CONFLICT, format!("destination parent not found: {e}"))
-                        .into_response();
+                    return (StatusCode::CONFLICT, format!("destination parent not found: {e}")).into_response();
                 }
             }
         }
@@ -909,11 +881,7 @@ async fn move_response(state: &Arc<DavState>, src_path: &str, destination: &str)
 
     match state
         .api
-        .move_file(
-            &file_id,
-            new_name_encrypted.as_deref(),
-            patch_parent.flatten(),
-        )
+        .move_file(&file_id, new_name_encrypted.as_deref(), patch_parent.flatten())
         .await
     {
         Ok(_) => {
@@ -953,10 +921,7 @@ fn parse_timeout_header(headers: &HeaderMap) -> u64 {
     headers
         .get("timeout")
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| {
-            s.strip_prefix("Second-")
-                .and_then(|rest| rest.parse::<u64>().ok())
-        })
+        .and_then(|s| s.strip_prefix("Second-").and_then(|rest| rest.parse::<u64>().ok()))
         .unwrap_or(300) // 5 minutes default
 }
 
@@ -989,12 +954,15 @@ async fn lock_response(state: &Arc<DavState>, path: &str, body: &[u8], timeout_s
                 return (StatusCode::LOCKED, "resource is already exclusively locked").into_response();
             }
         }
-        locks.insert(path.to_string(), LockEntry {
-            token: token.clone(),
-            owner: owner.clone(),
-            exclusive,
-            expires_at: Instant::now() + Duration::from_secs(timeout_secs),
-        });
+        locks.insert(
+            path.to_string(),
+            LockEntry {
+                token: token.clone(),
+                owner: owner.clone(),
+                exclusive,
+                expires_at: Instant::now() + Duration::from_secs(timeout_secs),
+            },
+        );
     }
 
     let href = xml_escape(path);
@@ -1019,7 +987,10 @@ async fn lock_response(state: &Arc<DavState>, path: &str, body: &[u8], timeout_s
     let lock_token_header = format!("<{token}>");
     let mut headers = HeaderMap::new();
     headers.insert("Content-Type", "application/xml; charset=utf-8".parse().unwrap());
-    headers.insert("Lock-Token", lock_token_header.parse().unwrap_or_else(|_| "".parse().unwrap()));
+    headers.insert(
+        "Lock-Token",
+        lock_token_header.parse().unwrap_or_else(|_| "".parse().unwrap()),
+    );
     (StatusCode::OK, headers, body).into_response()
 }
 
@@ -1071,11 +1042,7 @@ async fn check_lock(state: &Arc<DavState>, path: &str, client_token: Option<&str
 /// Check whether a WebDAV path targets a macOS/Windows metadata file that
 /// should never be stored in the vault.
 fn is_os_metadata_path(path: &str) -> bool {
-    let filename = path
-        .trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .unwrap_or(path);
+    let filename = path.trim_end_matches('/').rsplit('/').next().unwrap_or(path);
     if filename.is_empty() {
         return false;
     }
@@ -1127,7 +1094,13 @@ async fn store_in_cache(state: &DavState, key: String, children: Vec<ResolvedEnt
         return;
     }
     let mut cache = state.dir_cache.lock().await;
-    cache.insert(key, CachedDir { children, cached_at: Instant::now() });
+    cache.insert(
+        key,
+        CachedDir {
+            children,
+            cached_at: Instant::now(),
+        },
+    );
 }
 
 async fn invalidate_cache(state: &DavState, key: &str) {
@@ -1180,8 +1153,8 @@ fn decode_file_entry(
 
     // Decrypt name
     let name_encrypted = file.get("name_encrypted").and_then(|v| v.as_str())?;
-    let display_name = decrypt_name(master_key, &file_id, name_encrypted)
-        .unwrap_or_else(|| format!("[{}]", &file_id[..8]));
+    let display_name =
+        decrypt_name(master_key, &file_id, name_encrypted).unwrap_or_else(|| format!("[{}]", &file_id[..8]));
 
     Some(ResolvedEntry {
         file_id: Some(file_id),
@@ -1261,14 +1234,9 @@ async fn resolve_path(state: &Arc<DavState>, path: &str) -> Result<ResolvedEntry
 
 // ─── Decryption helpers ───────────────────────────────────────────────────────
 
-fn decrypt_name(
-    master_key: &beebeeb_core::kdf::MasterKey,
-    file_id: &str,
-    name_encrypted: &str,
-) -> Option<String> {
+fn decrypt_name(master_key: &beebeeb_core::kdf::MasterKey, file_id: &str, name_encrypted: &str) -> Option<String> {
     crate::crypto::decrypt_name(master_key, file_id, name_encrypted)
 }
-
 
 // ─── XML helpers ─────────────────────────────────────────────────────────────
 
@@ -1353,8 +1321,5 @@ fn xml_escape(s: &str) -> String {
 /// Resolve a MIME type for a filename using the mime_guess crate.
 /// Falls back to application/octet-stream for unknown extensions.
 fn resolve_mime(filename: &str) -> String {
-    mime_guess::from_path(filename)
-        .first_or_octet_stream()
-        .to_string()
+    mime_guess::from_path(filename).first_or_octet_stream().to_string()
 }
-

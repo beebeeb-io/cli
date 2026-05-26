@@ -35,10 +35,8 @@ fn detect_key_derivation(
 
     let file_uuid: uuid::Uuid = file_id_str.parse().ok()?;
 
-    let key_from_string =
-        beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes());
-    let key_from_binary =
-        beebeeb_core::kdf::derive_file_key(master_key, file_uuid.as_bytes());
+    let key_from_string = beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes());
+    let key_from_binary = beebeeb_core::kdf::derive_file_key(master_key, file_uuid.as_bytes());
 
     // Try string-UUID key first (the "correct" / web-compatible derivation)
     for (file_key, derivation) in [
@@ -60,9 +58,7 @@ fn detect_key_derivation(
         }
         if let Ok(web_blob) = serde_json::from_str::<WebAppBlob>(name_encrypted_str) {
             let b64 = base64::engine::general_purpose::STANDARD;
-            if let (Ok(nonce), Ok(ciphertext)) =
-                (b64.decode(&web_blob.nonce), b64.decode(&web_blob.ciphertext))
-            {
+            if let (Ok(nonce), Ok(ciphertext)) = (b64.decode(&web_blob.nonce), b64.decode(&web_blob.ciphertext)) {
                 let blob = EncryptedBlob {
                     cipher_suite: beebeeb_types::CipherSuite::V1Aes256Gcm,
                     nonce,
@@ -96,11 +92,8 @@ fn decrypt_chunks_with_binary_key(
     encrypted_bytes: &[u8],
     chunk_count: u32,
 ) -> Result<Vec<u8>, String> {
-    let file_uuid: uuid::Uuid = file_id_str
-        .parse()
-        .map_err(|e| format!("invalid file ID: {e}"))?;
-    let key_from_binary =
-        beebeeb_core::kdf::derive_file_key(master_key, file_uuid.as_bytes());
+    let file_uuid: uuid::Uuid = file_id_str.parse().map_err(|e| format!("invalid file ID: {e}"))?;
+    let key_from_binary = beebeeb_core::kdf::derive_file_key(master_key, file_uuid.as_bytes());
 
     crate::crypto::try_decrypt_all_chunks(&key_from_binary, encrypted_bytes, chunk_count)
 }
@@ -111,8 +104,7 @@ fn encrypt_chunks_with_string_key(
     file_id_str: &str,
     plaintext: &[u8],
 ) -> Result<Vec<(u32, Vec<u8>)>, String> {
-    let file_key =
-        beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes());
+    let file_key = beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes());
 
     let plan = beebeeb_types::plan_chunks(plaintext.len() as u64, beebeeb_types::ChunkProfile::Desktop);
     let chunk_size = plan.chunk_size_bytes as usize;
@@ -175,10 +167,7 @@ pub async fn run(dry_run: bool) -> Result<(), String> {
 
     if all_items.is_empty() {
         if !ui::is_json() && !ui::is_quiet() {
-            println!(
-                "  {}",
-                "No files in vault.".custom_color(crate::colors::INK_DIM),
-            );
+            println!("  {}", "No files in vault.".custom_color(crate::colors::INK_DIM),);
         }
         return Ok(());
     }
@@ -200,14 +189,8 @@ pub async fn run(dry_run: bool) -> Result<(), String> {
             Some(n) => n,
             None => continue,
         };
-        let is_folder = item
-            .get("is_folder")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let chunk_count = item
-            .get("chunk_count")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(1) as u32;
+        let is_folder = item.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
+        let chunk_count = item.get("chunk_count").and_then(|v| v.as_i64()).unwrap_or(1) as u32;
 
         let detection = detect_key_derivation(&master_key, file_id, name_encrypted);
 
@@ -250,15 +233,7 @@ pub async fn run(dry_run: bool) -> Result<(), String> {
                         }
                     }
                 } else {
-                    match repair_file(
-                        &api,
-                        &master_key,
-                        file_id,
-                        &decrypted_name,
-                        chunk_count,
-                    )
-                    .await
-                    {
+                    match repair_file(&api, &master_key, file_id, &decrypted_name, chunk_count).await {
                         Ok(()) => {
                             stats.files_repaired += 1;
                         }
@@ -313,8 +288,7 @@ pub async fn run(dry_run: bool) -> Result<(), String> {
             "\u{2713}".custom_color(crate::colors::GREEN_OK),
             "All files are already compatible.".custom_color(crate::colors::GREEN_OK),
             if stats.skipped > 0 {
-                format!("({} skipped \u{2014} unknown format)", stats.skipped)
-                    .custom_color(crate::colors::INK_DIM)
+                format!("({} skipped \u{2014} unknown format)", stats.skipped).custom_color(crate::colors::INK_DIM)
             } else {
                 "".to_string().custom_color(crate::colors::INK_DIM)
             },
@@ -367,10 +341,7 @@ pub async fn run(dry_run: bool) -> Result<(), String> {
 }
 
 /// Recursively collect all files and folders from the vault.
-async fn collect_all_files(
-    api: &ApiClient,
-    parent_id: Option<&str>,
-) -> Result<Vec<serde_json::Value>, String> {
+async fn collect_all_files(api: &ApiClient, parent_id: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
     let listing = api.list_files(parent_id).await?;
 
     let files = listing
@@ -385,10 +356,7 @@ async fn collect_all_files(
 
     for file in files {
         let file_id = file.get("id").and_then(|v| v.as_str()).unwrap_or("");
-        let is_folder = file
-            .get("is_folder")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let is_folder = file.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
 
         result.push(file.clone());
 
@@ -417,10 +385,8 @@ async fn repair_folder(
     file_id: &str,
     decrypted_name: &str,
 ) -> Result<(), String> {
-    let new_name_encrypted =
-        encrypt_name_with_string_key(master_key, file_id, decrypted_name, None)?;
-    api.move_file(file_id, Some(&new_name_encrypted), None)
-        .await?;
+    let new_name_encrypted = encrypt_name_with_string_key(master_key, file_id, decrypted_name, None)?;
+    api.move_file(file_id, Some(&new_name_encrypted), None).await?;
 
     if !ui::is_json() && !ui::is_quiet() {
         println!(
@@ -442,7 +408,6 @@ async fn repair_file(
     decrypted_name: &str,
     chunk_count: u32,
 ) -> Result<(), String> {
-
     // Get full metadata (need parent_id, size). The plaintext mime_type column
     // was dropped server-side — the server no longer returns it, and the
     // encrypted MIME type lives inside `name_encrypted`. We re-encrypt with
@@ -459,27 +424,19 @@ async fn repair_file(
     let encrypted_bytes = api.download_file(file_id).await?;
 
     // Step 2: Decrypt with binary-UUID key
-    let plaintext =
-        decrypt_chunks_with_binary_key(master_key, file_id, &encrypted_bytes, chunk_count)?;
+    let plaintext = decrypt_chunks_with_binary_key(master_key, file_id, &encrypted_bytes, chunk_count)?;
 
     // Step 3: Re-encrypt name + chunks with string-UUID key
-    let new_name_encrypted =
-        encrypt_name_with_string_key(master_key, file_id, decrypted_name, mime_type.as_deref())?;
-    let new_chunks =
-        encrypt_chunks_with_string_key(master_key, file_id, &plaintext)?;
+    let new_name_encrypted = encrypt_name_with_string_key(master_key, file_id, decrypted_name, mime_type.as_deref())?;
+    let new_chunks = encrypt_chunks_with_string_key(master_key, file_id, &plaintext)?;
 
-    let total_encrypted_size: i64 = new_chunks
-        .iter()
-        .map(|(_, data)| data.len() as i64)
-        .sum();
+    let total_encrypted_size: i64 = new_chunks.iter().map(|(_, data)| data.len() as i64).sum();
 
     // Step 4: Trash old file
     api.trash_file(file_id).await?;
 
     // Step 5: Re-upload with the same file_id so links/shares are preserved
-    let file_uuid: uuid::Uuid = file_id
-        .parse()
-        .map_err(|e| format!("invalid file ID: {e}"))?;
+    let file_uuid: uuid::Uuid = file_id.parse().map_err(|e| format!("invalid file ID: {e}"))?;
 
     let mut metadata = serde_json::json!({
         "name_encrypted": new_name_encrypted,
@@ -494,8 +451,7 @@ async fn repair_file(
     // MIME type is encrypted inside name_encrypted; the server has no
     // mime_type column to receive it. Leave the field out entirely.
 
-    let metadata_json = serde_json::to_string(&metadata)
-        .map_err(|e| format!("failed to serialize metadata: {e}"))?;
+    let metadata_json = serde_json::to_string(&metadata).map_err(|e| format!("failed to serialize metadata: {e}"))?;
 
     api.upload_encrypted(&metadata_json, &new_chunks).await?;
 

@@ -18,8 +18,7 @@ use sha2::{Digest, Sha256};
 const CHECK_INTERVAL: Duration = Duration::from_secs(3600); // 1 hour
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-const GITHUB_RELEASES_URL: &str =
-    "https://api.github.com/repos/beebeeb-io/cli/releases/latest";
+const GITHUB_RELEASES_URL: &str = "https://api.github.com/repos/beebeeb-io/cli/releases/latest";
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -120,19 +119,15 @@ async fn try_update(state: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         .bytes()
         .await?;
 
-    let manifest: DistManifest = serde_json::from_slice(&manifest_bytes)
-        .map_err(|e| format!("dist-manifest.json is malformed: {e}"))?;
+    let manifest: DistManifest =
+        serde_json::from_slice(&manifest_bytes).map_err(|e| format!("dist-manifest.json is malformed: {e}"))?;
 
     let expected_sha256 = manifest
         .artifacts
         .get(&asset_name)
         .and_then(|a| a.checksums.as_ref())
         .and_then(|c| c.sha256.as_deref())
-        .ok_or_else(|| {
-            format!(
-                "dist-manifest.json has no sha256 for {asset_name} — refusing to update"
-            )
-        })?;
+        .ok_or_else(|| format!("dist-manifest.json has no sha256 for {asset_name} — refusing to update"))?;
 
     // Download the tarball.
     let tarball_bytes = client
@@ -210,10 +205,7 @@ fn is_homebrew_install() -> bool {
 }
 
 /// Update via `brew upgrade` instead of self-replacing.
-fn update_via_homebrew(
-    old_ver: &str,
-    new_ver: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn update_via_homebrew(old_ver: &str, new_ver: &str) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!(
         "  {} bb v{old_ver} -> v{new_ver} via Homebrew...",
         "Updating".custom_color(crate::colors::AMBER),
@@ -244,15 +236,16 @@ fn update_via_homebrew(
     // Re-exec from the Homebrew-linked path, not current_exe() which may be
     // a stale direct binary from a previous OTA overwrite.
     let brew_bin = PathBuf::from("/opt/homebrew/bin/bb");
-    let exe = if brew_bin.exists() { brew_bin } else { std::env::current_exe()? };
+    let exe = if brew_bin.exists() {
+        brew_bin
+    } else {
+        std::env::current_exe()?
+    };
     re_exec(&exe)
 }
 
 /// Extract the `bb` binary from a `.tar.xz` archive.
-fn extract_binary_from_tarball(
-    data: &[u8],
-    target: &str,
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+fn extract_binary_from_tarball(data: &[u8], target: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let xz_reader = xz2::read::XzDecoder::new(data);
     let mut archive = tar::Archive::new(xz_reader);
 
@@ -307,16 +300,24 @@ fn re_exec(exe: &std::path::Path) -> ! {
 fn current_target() -> &'static str {
     // These are set at compile time via cfg.
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-    { "aarch64-apple-darwin" }
+    {
+        "aarch64-apple-darwin"
+    }
 
     #[cfg(all(target_arch = "x86_64", target_os = "macos"))]
-    { "x86_64-apple-darwin" }
+    {
+        "x86_64-apple-darwin"
+    }
 
     #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
-    { "x86_64-unknown-linux-musl" }
+    {
+        "x86_64-unknown-linux-musl"
+    }
 
     #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
-    { "aarch64-unknown-linux-musl" }
+    {
+        "aarch64-unknown-linux-musl"
+    }
 
     #[cfg(not(any(
         all(target_arch = "aarch64", target_os = "macos"),
@@ -324,7 +325,9 @@ fn current_target() -> &'static str {
         all(target_arch = "x86_64", target_os = "linux"),
         all(target_arch = "aarch64", target_os = "linux"),
     )))]
-    { "unknown" }
+    {
+        "unknown"
+    }
 }
 
 /// Returns `true` when the binary is a development build (running via `cargo run`

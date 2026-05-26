@@ -1,4 +1,4 @@
-use beebeeb_types::quota::{effective_quota, format_storage_si, Plan};
+use beebeeb_types::quota::{Plan, effective_quota, format_storage_si};
 use colored::Colorize;
 
 use crate::api::ApiClient;
@@ -36,24 +36,12 @@ pub async fn run() -> Result<(), String> {
 
     // ── Parse fields ─────────────────────────────────────────────────────────
 
-    let email = me
-        .get("email")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
+    let email = me.get("email").and_then(|v| v.as_str()).unwrap_or("unknown");
 
-    let plan_slug = sub
-        .get("plan")
-        .and_then(|v| v.as_str())
-        .unwrap_or("free");
+    let plan_slug = sub.get("plan").and_then(|v| v.as_str()).unwrap_or("free");
     let plan = Plan::from_slug(plan_slug);
-    let extra_tb = sub
-        .get("extra_storage_tb")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-    let bonus_bytes = sub
-        .get("bonus_bytes")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
+    let extra_tb = sub.get("extra_storage_tb").and_then(|v| v.as_i64()).unwrap_or(0);
+    let bonus_bytes = sub.get("bonus_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
     let total_bytes = effective_quota(plan, extra_tb, bonus_bytes);
     let plan_label = build_plan_label(plan, extra_tb, bonus_bytes);
 
@@ -63,10 +51,7 @@ pub async fn run() -> Result<(), String> {
         .map(|s| capitalise(s))
         .unwrap_or_else(|| "Europe".to_string());
 
-    let used_bytes = usage
-        .get("used_bytes")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
+    let used_bytes = usage.get("used_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
     let percentage = if total_bytes > 0 {
         used_bytes as f64 / total_bytes as f64
     } else {
@@ -95,16 +80,10 @@ pub async fn run() -> Result<(), String> {
     };
 
     // Session expiry
-    let current_session = sessions
-        .get("sessions")
-        .and_then(|v| v.as_array())
-        .and_then(|arr| {
-            arr.iter().find(|s| {
-                s.get("is_current")
-                    .and_then(|c| c.as_bool())
-                    .unwrap_or(false)
-            })
-        });
+    let current_session = sessions.get("sessions").and_then(|v| v.as_array()).and_then(|arr| {
+        arr.iter()
+            .find(|s| s.get("is_current").and_then(|c| c.as_bool()).unwrap_or(false))
+    });
 
     let (session_active, expires_label, expires_str) = match current_session
         .and_then(|s| s.get("expires_at"))
@@ -184,15 +163,16 @@ pub async fn run() -> Result<(), String> {
     println!(
         "  {} {}",
         dim("upload  "),
-        format!("up to {} \u{00b7} {} parallel", upload_limit_for_plan(plan), "4 connections").custom_color(crate::colors::INK),
+        format!(
+            "up to {} \u{00b7} {} parallel",
+            upload_limit_for_plan(plan),
+            "4 connections"
+        )
+        .custom_color(crate::colors::INK),
     );
 
     // File count
-    println!(
-        "  {} {}",
-        dim("files   "),
-        val(&format_number(file_count))
-    );
+    println!("  {} {}", dim("files   "), val(&format_number(file_count)));
 
     // Session indicator
     let session_display = if session_active {
@@ -234,12 +214,7 @@ fn build_plan_label(plan: Plan, extra_tb: i64, bonus_bytes: i64) -> String {
         if bonus_bytes > 0 {
             parts.push(format!("{} bonus", format_storage_si(bonus_bytes)));
         }
-        format!(
-            "{} \u{2014} {} ({})",
-            name,
-            format_storage_si(total),
-            parts.join(" + "),
-        )
+        format!("{} \u{2014} {} ({})", name, format_storage_si(total), parts.join(" + "),)
     } else {
         format!("{} \u{2014} {}", name, format_storage_si(total))
     }

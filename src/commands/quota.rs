@@ -1,4 +1,4 @@
-use beebeeb_types::quota::{effective_quota, format_storage_si, Plan};
+use beebeeb_types::quota::{Plan, effective_quota, format_storage_si};
 use colored::Colorize;
 
 use crate::api::ApiClient;
@@ -9,31 +9,18 @@ pub async fn run() -> Result<(), String> {
     api.require_auth()?;
 
     // Fetch usage, file count, and subscription in parallel
-    let (usage_res, count_res, sub_res) =
-        tokio::join!(api.get_usage(), api.get_file_count(), api.get_subscription());
+    let (usage_res, count_res, sub_res) = tokio::join!(api.get_usage(), api.get_file_count(), api.get_subscription());
 
     let usage = usage_res?;
     let count = count_res.unwrap_or_default();
     let sub = sub_res.unwrap_or_default();
 
-    let used_bytes = usage
-        .get("used_bytes")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
+    let used_bytes = usage.get("used_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
 
-    let plan_slug = sub
-        .get("plan")
-        .and_then(|v| v.as_str())
-        .unwrap_or("free");
+    let plan_slug = sub.get("plan").and_then(|v| v.as_str()).unwrap_or("free");
     let plan = Plan::from_slug(plan_slug);
-    let extra_tb = sub
-        .get("extra_storage_tb")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-    let bonus_bytes = sub
-        .get("bonus_bytes")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
+    let extra_tb = sub.get("extra_storage_tb").and_then(|v| v.as_i64()).unwrap_or(0);
+    let bonus_bytes = sub.get("bonus_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
     let quota_bytes = effective_quota(plan, extra_tb, bonus_bytes);
 
     let percentage = if quota_bytes > 0 {
@@ -169,12 +156,7 @@ fn build_plan_label(plan: Plan, extra_tb: i64, bonus_bytes: i64) -> String {
         if bonus_bytes > 0 {
             parts.push(format!("{} bonus", format_storage_si(bonus_bytes)));
         }
-        format!(
-            "{} \u{2014} {} ({})",
-            name,
-            format_storage_si(total),
-            parts.join(" + "),
-        )
+        format!("{} \u{2014} {} ({})", name, format_storage_si(total), parts.join(" + "),)
     } else {
         format!("{} \u{2014} {}", name, format_storage_si(total))
     }

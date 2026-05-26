@@ -101,9 +101,13 @@ pub fn remove_pid(slug: &str) -> Result<(), String> {
 /// Check whether a process with the given PID is still running.
 fn process_exists(pid: u32) -> bool {
     #[cfg(unix)]
-    { unsafe { libc::kill(pid as i32, 0) == 0 } }
+    {
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
     #[cfg(not(unix))]
-    { false }
+    {
+        false
+    }
 }
 
 /// Check if a daemon for the given session slug is currently running.
@@ -171,11 +175,7 @@ pub fn kill_daemon(slug: &str) -> Result<bool, String> {
 /// Spawn `bb sync <local> <remote>` as a detached daemon process.
 ///
 /// Stdout/stderr are redirected to log files. Returns the child PID.
-pub fn spawn_daemon(
-    local_dir: &Path,
-    remote_path: &str,
-    slug: &str,
-) -> Result<u32, String> {
+pub fn spawn_daemon(local_dir: &Path, remote_path: &str, slug: &str) -> Result<u32, String> {
     // Check if already running
     if let Some(pid) = is_daemon_running(slug)? {
         return Err(format!(
@@ -190,17 +190,11 @@ pub fn spawn_daemon(
     let stdout_path = logs.join(format!("{slug}.log"));
     let stderr_path = logs.join(format!("{slug}.err"));
 
-    let stdout_file = fs::File::create(&stdout_path)
-        .map_err(|e| format!("create log file: {e}"))?;
-    let stderr_file = fs::File::create(&stderr_path)
-        .map_err(|e| format!("create error log file: {e}"))?;
+    let stdout_file = fs::File::create(&stdout_path).map_err(|e| format!("create log file: {e}"))?;
+    let stderr_file = fs::File::create(&stderr_path).map_err(|e| format!("create error log file: {e}"))?;
 
     let child = std::process::Command::new(&exe)
-        .args([
-            "sync",
-            &local_dir.to_string_lossy(),
-            remote_path,
-        ])
+        .args(["sync", &local_dir.to_string_lossy(), remote_path])
         .stdout(stdout_file)
         .stderr(stderr_file)
         // Detach from the parent process group
@@ -230,11 +224,7 @@ fn xml_escape(s: &str) -> String {
 /// The plist label is `io.beebeeb.sync.<slug>` to allow multiple
 /// concurrent sync sessions.
 #[cfg(target_os = "macos")]
-pub fn install_launchagent(
-    local_dir: &Path,
-    remote_path: &str,
-    slug: &str,
-) -> Result<(), String> {
+pub fn install_launchagent(local_dir: &Path, remote_path: &str, slug: &str) -> Result<(), String> {
     let plist_dir = dirs::home_dir()
         .ok_or("cannot find home directory")?
         .join("Library/LaunchAgents");
@@ -335,11 +325,7 @@ pub fn uninstall_launchagent(slug: &str) -> Result<bool, String> {
 
 /// No-op on non-macOS for LaunchAgent install.
 #[cfg(not(target_os = "macos"))]
-pub fn install_launchagent(
-    _local_dir: &Path,
-    _remote_path: &str,
-    _slug: &str,
-) -> Result<(), String> {
+pub fn install_launchagent(_local_dir: &Path, _remote_path: &str, _slug: &str) -> Result<(), String> {
     Ok(())
 }
 
@@ -351,11 +337,7 @@ pub fn uninstall_launchagent(_slug: &str) -> Result<bool, String> {
 
 /// Install a systemd user service unit for the given sync session.
 #[cfg(target_os = "linux")]
-pub fn install_systemd_unit(
-    local_dir: &Path,
-    remote_path: &str,
-    slug: &str,
-) -> Result<(), String> {
+pub fn install_systemd_unit(local_dir: &Path, remote_path: &str, slug: &str) -> Result<(), String> {
     let unit_dir = dirs::home_dir()
         .ok_or("cannot find home directory")?
         .join(".config/systemd/user");
@@ -437,11 +419,7 @@ pub fn uninstall_systemd_unit(slug: &str) -> Result<bool, String> {
 
 /// No-op on non-Linux for systemd install.
 #[cfg(not(target_os = "linux"))]
-pub fn install_systemd_unit(
-    _local_dir: &Path,
-    _remote_path: &str,
-    _slug: &str,
-) -> Result<(), String> {
+pub fn install_systemd_unit(_local_dir: &Path, _remote_path: &str, _slug: &str) -> Result<(), String> {
     Ok(())
 }
 

@@ -41,10 +41,7 @@ pub async fn run(file_id: String, output: Option<PathBuf>, zip: bool) -> Result<
     // Step 1: Get file metadata to learn chunk count and encrypted name
     let file_meta = api.get_file(&file_id).await?;
 
-    let chunk_count = file_meta
-        .get("chunk_count")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(1) as u32;
+    let chunk_count = file_meta.get("chunk_count").and_then(|v| v.as_i64()).unwrap_or(1) as u32;
 
     let name_encrypted_str = file_meta
         .get("name_encrypted")
@@ -58,28 +55,17 @@ pub async fn run(file_id: String, output: Option<PathBuf>, zip: bool) -> Result<
     // Uses the shared crypto module which handles all server formats
     // (Rust EncryptedBlob, web-app base64 blob, plaintext) and both
     // UUID key derivations (binary and string).
-    let decrypted_name = crate::crypto::decrypt_name(
-        &master_key,
-        &file_id,
-        name_encrypted_str,
-    );
+    let decrypted_name = crate::crypto::decrypt_name(&master_key, &file_id, name_encrypted_str);
 
-    let is_folder = file_meta
-        .get("is_folder")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let is_folder = file_meta.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
 
     if is_folder {
-        let folder_name = decrypted_name
-            .as_deref()
-            .unwrap_or(&file_id);
+        let folder_name = decrypted_name.as_deref().unwrap_or(&file_id);
         let out_dir = output.unwrap_or_else(|| PathBuf::from(folder_name));
         return pull_folder(&api, &file_id, &out_dir).await;
     }
 
-    let display_name = decrypted_name
-        .as_deref()
-        .unwrap_or(&file_id);
+    let display_name = decrypted_name.as_deref().unwrap_or(&file_id);
 
     // Step 2: Download encrypted data (timed)
     let dl_start = std::time::Instant::now();
@@ -90,35 +76,31 @@ pub async fn run(file_id: String, output: Option<PathBuf>, zip: bool) -> Result<
     // Handles both CLI-format (JSON EncryptedBlob) and web-app-format
     // (raw nonce|ciphertext) chunks, and both UUID key derivation methods.
     let dec_start = std::time::Instant::now();
-    let plaintext = crate::crypto::decrypt_file_chunks(
-        &master_key,
-        &file_id,
-        &encrypted_bytes,
-        chunk_count,
-    )?;
+    let plaintext = crate::crypto::decrypt_file_chunks(&master_key, &file_id, &encrypted_bytes, chunk_count)?;
     let dec_elapsed = dec_start.elapsed();
 
     // Step 4: Write to disk
-    let out_path = output.unwrap_or_else(|| {
-        PathBuf::from(decrypted_name.as_deref().unwrap_or(&file_id))
-    });
+    let out_path = output.unwrap_or_else(|| PathBuf::from(decrypted_name.as_deref().unwrap_or(&file_id)));
 
-    std::fs::write(&out_path, &plaintext)
-        .map_err(|e| format!("failed to write file: {e}"))?;
+    std::fs::write(&out_path, &plaintext).map_err(|e| format!("failed to write file: {e}"))?;
 
     // Step 5: Output
     let dl_speed = encrypted_bytes.len() as f64 / dl_elapsed.as_secs_f64();
 
     if crate::ui::is_json() {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "id": file_id,
-            "name": display_name,
-            "size_bytes": plaintext.len(),
-            "download_speed_bps": dl_speed as u64,
-            "download_ms": dl_elapsed.as_millis() as u64,
-            "decrypt_ms": dec_elapsed.as_millis() as u64,
-            "output": out_path.display().to_string(),
-        })).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "id": file_id,
+                "name": display_name,
+                "size_bytes": plaintext.len(),
+                "download_speed_bps": dl_speed as u64,
+                "download_ms": dl_elapsed.as_millis() as u64,
+                "decrypt_ms": dec_elapsed.as_millis() as u64,
+                "output": out_path.display().to_string(),
+            }))
+            .unwrap()
+        );
         return Ok(());
     }
 
@@ -128,15 +110,22 @@ pub async fn run(file_id: String, output: Option<PathBuf>, zip: bool) -> Result<
     }
 
     // Rich mode (default)
-    println!("  {} {}  {}  {}",
+    println!(
+        "  {} {}  {}  {}",
         "\u{2713}".custom_color(crate::colors::GREEN_OK),
         display_name.custom_color(crate::colors::INK),
         crate::ui::human_size(plaintext.len() as u64).custom_color(crate::colors::INK_DIM),
-        crate::ui::human_speed(dl_speed).custom_color(crate::colors::GREEN_OK));
-    println!("    {}",
-        format!("{}ms download \u{00b7} {}ms decrypt",
-            dl_elapsed.as_millis(), dec_elapsed.as_millis())
-            .custom_color(crate::colors::INK_DIM));
+        crate::ui::human_speed(dl_speed).custom_color(crate::colors::GREEN_OK)
+    );
+    println!(
+        "    {}",
+        format!(
+            "{}ms download \u{00b7} {}ms decrypt",
+            dl_elapsed.as_millis(),
+            dec_elapsed.as_millis()
+        )
+        .custom_color(crate::colors::INK_DIM)
+    );
 
     Ok(())
 }
@@ -174,8 +163,7 @@ async fn resolve_as_path(api: &ApiClient, path: &str) -> Result<(String, Option<
 async fn pull_folder(api: &ApiClient, folder_id: &str, out_dir: &std::path::Path) -> Result<(), String> {
     let master_key = load_master_key()?;
 
-    std::fs::create_dir_all(out_dir)
-        .map_err(|e| format!("failed to create directory: {e}"))?;
+    std::fs::create_dir_all(out_dir).map_err(|e| format!("failed to create directory: {e}"))?;
 
     let listing = api.list_files(Some(folder_id)).await?;
     let files = listing
@@ -195,8 +183,8 @@ async fn pull_folder(api: &ApiClient, folder_id: &str, out_dir: &std::path::Path
         let is_subfolder = item.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
         let name_enc = item.get("name_encrypted").and_then(|v| v.as_str()).unwrap_or("");
 
-        let decrypted_name = crate::crypto::decrypt_name(&master_key, item_id, name_enc)
-            .unwrap_or_else(|| item_id.to_string());
+        let decrypted_name =
+            crate::crypto::decrypt_name(&master_key, item_id, name_enc).unwrap_or_else(|| item_id.to_string());
 
         if is_subfolder {
             let sub_dir = out_dir.join(&decrypted_name);
@@ -221,20 +209,13 @@ async fn pull_single_file(api: &ApiClient, file_id: &str, out_path: &std::path::
     let dl_elapsed = dl_start.elapsed();
 
     let dec_start = std::time::Instant::now();
-    let plaintext = crate::crypto::decrypt_file_chunks(
-        &master_key,
-        file_id,
-        &encrypted_bytes,
-        chunk_count,
-    )?;
+    let plaintext = crate::crypto::decrypt_file_chunks(&master_key, file_id, &encrypted_bytes, chunk_count)?;
     let dec_elapsed = dec_start.elapsed();
 
     if let Some(parent) = out_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("failed to create dir: {e}"))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("failed to create dir: {e}"))?;
     }
-    std::fs::write(out_path, &plaintext)
-        .map_err(|e| format!("failed to write: {e}"))?;
+    std::fs::write(out_path, &plaintext).map_err(|e| format!("failed to write: {e}"))?;
 
     let name = out_path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
 
@@ -242,15 +223,22 @@ async fn pull_single_file(api: &ApiClient, file_id: &str, out_path: &std::path::
         println!("{}", out_path.display());
     } else if crate::ui::is_rich() {
         let dl_speed = encrypted_bytes.len() as f64 / dl_elapsed.as_secs_f64();
-        println!("    {} {}  {}  {}",
+        println!(
+            "    {} {}  {}  {}",
             "\u{2713}".custom_color(crate::colors::GREEN_OK),
             name.custom_color(crate::colors::INK),
             crate::ui::human_size(plaintext.len() as u64).custom_color(crate::colors::INK_DIM),
-            crate::ui::human_speed(dl_speed).custom_color(crate::colors::GREEN_OK));
-        println!("      {}",
-            format!("{}ms download \u{00b7} {}ms decrypt",
-                dl_elapsed.as_millis(), dec_elapsed.as_millis())
-                .custom_color(crate::colors::INK_DIM));
+            crate::ui::human_speed(dl_speed).custom_color(crate::colors::GREEN_OK)
+        );
+        println!(
+            "      {}",
+            format!(
+                "{}ms download \u{00b7} {}ms decrypt",
+                dl_elapsed.as_millis(),
+                dec_elapsed.as_millis()
+            )
+            .custom_color(crate::colors::INK_DIM)
+        );
     }
     // In JSON mode, the folder pull prints nothing per-file — the caller handles output.
 
@@ -331,8 +319,7 @@ async fn run_zip(api: &ApiClient, path_arg: &str, output: Option<PathBuf>) -> Re
     let out_path = output.unwrap_or_else(|| PathBuf::from(&zip_filename));
 
     // Create the output file
-    let file = std::fs::File::create(&out_path)
-        .map_err(|e| format!("failed to create {}: {e}", out_path.display()))?;
+    let file = std::fs::File::create(&out_path).map_err(|e| format!("failed to create {}: {e}", out_path.display()))?;
 
     // Build the fetch_chunk callback.
     // For single-chunk files (chunk_count=1, the vast majority), the entire blob
@@ -345,13 +332,14 @@ async fn run_zip(api: &ApiClient, path_arg: &str, output: Option<PathBuf>) -> Re
     // single-chunk CLI files where we detect and convert JSON blobs.
     // Multi-chunk CLI-uploaded files with JSON format need future work.
     let mut fetch_chunk = |file_id: &str, chunk_idx: u32| -> Result<Vec<u8>, beebeeb_core::CoreError> {
-        let blob = blob_cache.get(file_id).ok_or_else(|| {
-            beebeeb_core::CoreError::Io(format!("no cached blob for {file_id}"))
-        })?;
+        let blob = blob_cache
+            .get(file_id)
+            .ok_or_else(|| beebeeb_core::CoreError::Io(format!("no cached blob for {file_id}")))?;
 
-        let entry = entries.iter().find(|e| e.file_id == file_id).ok_or_else(|| {
-            beebeeb_core::CoreError::Io(format!("no entry for {file_id}"))
-        })?;
+        let entry = entries
+            .iter()
+            .find(|e| e.file_id == file_id)
+            .ok_or_else(|| beebeeb_core::CoreError::Io(format!("no entry for {file_id}")))?;
 
         if entry.chunk_count <= 1 {
             // Single-chunk: return the entire blob as chunk 0.
@@ -365,7 +353,11 @@ async fn run_zip(api: &ApiClient, path_arg: &str, output: Option<PathBuf>) -> Re
         let idx = chunk_idx as usize;
 
         let start = idx * chunk_size;
-        let end = if idx == count - 1 { blob.len() } else { start + chunk_size };
+        let end = if idx == count - 1 {
+            blob.len()
+        } else {
+            start + chunk_size
+        };
 
         if start >= blob.len() {
             return Err(beebeeb_core::CoreError::Io(format!(
@@ -398,23 +390,14 @@ async fn run_zip(api: &ApiClient, path_arg: &str, output: Option<PathBuf>) -> Re
 
     let cancel = AtomicBool::new(false);
 
-    beebeeb_core::zip::stream_folder_zip(
-        &master_key,
-        &entries,
-        &mut fetch_chunk,
-        file,
-        &on_progress,
-        &cancel,
-    )
-    .map_err(|e| format!("zip failed: {e}"))?;
+    beebeeb_core::zip::stream_folder_zip(&master_key, &entries, &mut fetch_chunk, file, &on_progress, &cancel)
+        .map_err(|e| format!("zip failed: {e}"))?;
 
     let zip_elapsed = zip_start.elapsed();
     let total_elapsed = dl_start.elapsed();
 
     // Get final file size
-    let zip_size = std::fs::metadata(&out_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let zip_size = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
 
     if crate::ui::is_rich() {
         // Clear the zipping line
@@ -438,15 +421,19 @@ async fn run_zip(api: &ApiClient, path_arg: &str, output: Option<PathBuf>) -> Re
             .custom_color(crate::colors::INK_DIM),
         );
     } else if crate::ui::is_json() {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "folder": folder_name,
-            "file_count": entries.len(),
-            "total_size_bytes": total_size,
-            "zip_size_bytes": zip_size,
-            "download_ms": dl_elapsed.as_millis() as u64,
-            "zip_ms": zip_elapsed.as_millis() as u64,
-            "output": out_path.display().to_string(),
-        })).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "folder": folder_name,
+                "file_count": entries.len(),
+                "total_size_bytes": total_size,
+                "zip_size_bytes": zip_size,
+                "download_ms": dl_elapsed.as_millis() as u64,
+                "zip_ms": zip_elapsed.as_millis() as u64,
+                "output": out_path.display().to_string(),
+            }))
+            .unwrap()
+        );
     } else {
         // Quiet mode
         println!("{}", out_path.display());
@@ -478,8 +465,8 @@ async fn collect_zip_entries(
         let size_bytes = item.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
         let chunk_count = item.get("chunk_count").and_then(|v| v.as_i64()).unwrap_or(1) as u32;
 
-        let decrypted_name = crate::crypto::decrypt_name(master_key, item_id, name_enc)
-            .unwrap_or_else(|| item_id.to_string());
+        let decrypted_name =
+            crate::crypto::decrypt_name(master_key, item_id, name_enc).unwrap_or_else(|| item_id.to_string());
 
         let path = format!("{}/{}", prefix, decrypted_name);
 
@@ -499,4 +486,3 @@ async fn collect_zip_entries(
 
     Ok(entries)
 }
-

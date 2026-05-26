@@ -1,7 +1,7 @@
-use aes_gcm::aead::generic_array::GenericArray;
 use aes_gcm::aead::Aead;
+use aes_gcm::aead::generic_array::GenericArray;
 use aes_gcm::{Aes256Gcm, KeyInit};
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use hkdf::Hkdf;
 use sha2::Sha256;
 
@@ -15,10 +15,8 @@ fn hex_decode(hex: &str) -> Vec<u8> {
 #[test]
 fn hkdf_matches_webcrypto() {
     // Test vector from Node.js WebCrypto (test_ecdh_compat.mjs)
-    let shared_secret =
-        hex_decode("f27228cf21fdcc6e2e3370bdb71a3e7e09ef251d0ad2ea42a4881417b95dc397");
-    let expected_aes_key =
-        hex_decode("d6f84bc0b0d28dd0f7b9959c16662d54a0df753a47c5f4ef6e59b10ca29b9e1c");
+    let shared_secret = hex_decode("f27228cf21fdcc6e2e3370bdb71a3e7e09ef251d0ad2ea42a4881417b95dc397");
+    let expected_aes_key = hex_decode("d6f84bc0b0d28dd0f7b9959c16662d54a0df753a47c5f4ef6e59b10ca29b9e1c");
 
     // Replicate the CLI's HKDF derivation
     let hk = Hkdf::<Sha256>::new(None, &shared_secret);
@@ -36,11 +34,11 @@ fn hkdf_matches_webcrypto() {
 #[test]
 fn aes_gcm_decrypt_matches_webcrypto() {
     // Same test vector: use the known AES key, nonce, and ciphertext
-    let aes_key =
-        hex_decode("d6f84bc0b0d28dd0f7b9959c16662d54a0df753a47c5f4ef6e59b10ca29b9e1c");
+    let aes_key = hex_decode("d6f84bc0b0d28dd0f7b9959c16662d54a0df753a47c5f4ef6e59b10ca29b9e1c");
     let nonce_b64 = "AQIDBAUGBwgJCgsM";
     let ciphertext_b64 = "zPY+LzA6/FJLZH5z/AR+orn3ZmWicxT4+m/ssstYzp0nVvWXjmmS4ndKfZsR15C8WMXUxuaEFxVhqgkelub+32NwZgyL2pJfwPS8LfBdax1J+qXVRKef+Xbm/+2Ngpb38FKbtoS+lJQ=";
-    let expected_plaintext = r#"{"session_token":"test-token","master_key_b64":"dGVzdC1rZXk=","email":"test@beebeeb.io"}"#;
+    let expected_plaintext =
+        r#"{"session_token":"test-token","master_key_b64":"dGVzdC1rZXk=","email":"test@beebeeb.io"}"#;
 
     let cipher = Aes256Gcm::new(GenericArray::from_slice(&aes_key));
     let nonce_bytes = B64.decode(nonce_b64).unwrap();
@@ -60,14 +58,14 @@ fn aes_gcm_decrypt_matches_webcrypto() {
 #[test]
 fn full_ecdh_hkdf_decrypt_flow() {
     // Full flow: start from browser's public key, do ECDH, HKDF, decrypt
-    use p256::ecdh::EphemeralSecret;
     use p256::PublicKey;
+    use p256::ecdh::EphemeralSecret;
 
     // Browser's public key from the test vector (base64)
     let browser_pub_b64 = "BNFx/4Z8lzU++XyRv+uXz4yavlaXFGxKJQ765zysItlS0cop5JUOkwKXnD0Ez0At/rklj/DetH7mQFSeFONtUqg=";
     let browser_pub_bytes = B64.decode(browser_pub_b64).unwrap();
-    let browser_pub_key = PublicKey::from_sec1_bytes(&browser_pub_bytes)
-        .expect("Browser public key must be valid SEC1");
+    let browser_pub_key =
+        PublicKey::from_sec1_bytes(&browser_pub_bytes).expect("Browser public key must be valid SEC1");
 
     // CLI private key (d parameter from JWK, base64url-encoded)
     // We can't construct EphemeralSecret from bytes, but we can use SecretKey
@@ -75,17 +73,15 @@ fn full_ecdh_hkdf_decrypt_flow() {
     let d_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(d_b64url)
         .unwrap();
-    let secret_key = p256::SecretKey::from_bytes(GenericArray::from_slice(&d_bytes))
-        .expect("CLI secret key must be valid");
+    let secret_key =
+        p256::SecretKey::from_bytes(GenericArray::from_slice(&d_bytes)).expect("CLI secret key must be valid");
 
     // ECDH
-    let shared_secret =
-        p256::ecdh::diffie_hellman(secret_key.to_nonzero_scalar(), browser_pub_key.as_affine());
+    let shared_secret = p256::ecdh::diffie_hellman(secret_key.to_nonzero_scalar(), browser_pub_key.as_affine());
     let shared_bytes = shared_secret.raw_secret_bytes();
 
     // Verify ECDH shared secret matches
-    let expected_shared =
-        hex_decode("f27228cf21fdcc6e2e3370bdb71a3e7e09ef251d0ad2ea42a4881417b95dc397");
+    let expected_shared = hex_decode("f27228cf21fdcc6e2e3370bdb71a3e7e09ef251d0ad2ea42a4881417b95dc397");
     assert_eq!(
         shared_bytes.as_slice(),
         expected_shared.as_slice(),
@@ -125,8 +121,7 @@ fn fallback_to_raw_shared_secret() {
         .unwrap();
     let secret_key = p256::SecretKey::from_bytes(GenericArray::from_slice(&d_bytes)).unwrap();
 
-    let shared_secret =
-        p256::ecdh::diffie_hellman(secret_key.to_nonzero_scalar(), browser_pub_key.as_affine());
+    let shared_secret = p256::ecdh::diffie_hellman(secret_key.to_nonzero_scalar(), browser_pub_key.as_affine());
     let shared_bytes = shared_secret.raw_secret_bytes();
 
     // Encrypt with RAW shared secret (v0.4 web behavior)

@@ -25,8 +25,7 @@ struct CacheEntry {
 }
 
 /// Global directory-listing cache keyed by `parent_id` (empty string = root).
-static DIR_CACHE: LazyLock<Mutex<HashMap<String, CacheEntry>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static DIR_CACHE: LazyLock<Mutex<HashMap<String, CacheEntry>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// How long a cached listing stays valid.
 const CACHE_TTL: Duration = Duration::from_secs(30);
@@ -127,11 +126,7 @@ pub struct ResolvedPath {
 /// - Each segment is percent-decoded, then case-insensitively matched against
 ///   decrypted children of the current parent.
 /// - Returns `Err` if any segment cannot be found.
-pub async fn resolve_path(
-    api: &ApiClient,
-    master_key: &MasterKey,
-    path: &str,
-) -> Result<ResolvedPath, String> {
+pub async fn resolve_path(api: &ApiClient, master_key: &MasterKey, path: &str) -> Result<ResolvedPath, String> {
     let trimmed = path.trim_matches('/');
 
     // Empty path → root.
@@ -167,21 +162,12 @@ pub async fn resolve_path(
         let mut found = false;
 
         for entry in files {
-            let id = entry
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            let name_enc = entry
-                .get("name_encrypted")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            let is_folder = entry
-                .get("is_folder")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+            let id = entry.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+            let name_enc = entry.get("name_encrypted").and_then(|v| v.as_str()).unwrap_or_default();
+            let is_folder = entry.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
 
-            let decrypted = crate::crypto::decrypt_name(master_key, id, name_enc)
-                .unwrap_or_else(|| name_enc.to_string());
+            let decrypted =
+                crate::crypto::decrypt_name(master_key, id, name_enc).unwrap_or_else(|| name_enc.to_string());
 
             if decrypted.eq_ignore_ascii_case(&decoded) {
                 current = ResolvedPath {
@@ -219,21 +205,11 @@ pub async fn list_children_names(
     let mut results = Vec::with_capacity(files.len());
 
     for entry in files {
-        let id = entry
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let name_enc = entry
-            .get("name_encrypted")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let is_folder = entry
-            .get("is_folder")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let id = entry.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+        let name_enc = entry.get("name_encrypted").and_then(|v| v.as_str()).unwrap_or_default();
+        let is_folder = entry.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
 
-        let name = crate::crypto::decrypt_name(master_key, id, name_enc)
-            .unwrap_or_else(|| name_enc.to_string());
+        let name = crate::crypto::decrypt_name(master_key, id, name_enc).unwrap_or_else(|| name_enc.to_string());
 
         results.push((name, id.to_string(), is_folder));
     }

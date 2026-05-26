@@ -94,8 +94,7 @@ pub async fn run(
                 eprintln!(
                     "  {} {}",
                     "warn:".custom_color(crate::colors::AMBER),
-                    format!("could not mint stream token: {e}")
-                        .custom_color(crate::colors::INK_DIM),
+                    format!("could not mint stream token: {e}").custom_color(crate::colors::INK_DIM),
                 );
                 if wait_or_cancel(&mut cancel, backoff).await.is_break() {
                     return Ok(());
@@ -197,11 +196,7 @@ fn extract_data(frame: &str) -> Option<String> {
             out.push_str(rest.trim_start());
         }
     }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 /// Dispatch a single decoded SSE payload.
@@ -245,10 +240,7 @@ async fn handle_event(
         .get("parent_id")
         .and_then(Value::as_str)
         .and_then(|s| Uuid::parse_str(s).ok());
-    let is_folder = data
-        .get("is_folder")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let is_folder = data.get("is_folder").and_then(Value::as_bool).unwrap_or(false);
 
     // Filter: only act on events for files in the watched folder.
     // `None` parent in the event means root; matches when watched_parent is None.
@@ -304,10 +296,7 @@ async fn download_to_mirror(
     mirror_root: &Path,
 ) -> Result<(), String> {
     let meta = api.get_file(file_id).await?;
-    let chunk_count = meta
-        .get("chunk_count")
-        .and_then(Value::as_i64)
-        .unwrap_or(1) as u32;
+    let chunk_count = meta.get("chunk_count").and_then(Value::as_i64).unwrap_or(1) as u32;
     let name_encrypted = meta
         .get("name_encrypted")
         .and_then(Value::as_str)
@@ -325,12 +314,7 @@ async fn download_to_mirror(
     // Download and decrypt using the shared helper that handles both
     // CLI-format and web-app-format chunks, and both key derivations.
     let encrypted_bytes = api.download_file(file_id).await?;
-    let plaintext = crate::crypto::decrypt_file_chunks(
-        master_key,
-        file_id,
-        &encrypted_bytes,
-        chunk_count,
-    )?;
+    let plaintext = crate::crypto::decrypt_file_chunks(master_key, file_id, &encrypted_bytes, chunk_count)?;
 
     // Skip clobbering if local content already matches: same byte length on
     // disk usually means we already have this file from a prior push or
@@ -342,11 +326,9 @@ async fn download_to_mirror(
     }
 
     if let Some(parent) = out_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("create dir: {e}"))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("create dir: {e}"))?;
     }
-    std::fs::write(&out_path, &plaintext)
-        .map_err(|e| format!("write: {e}"))?;
+    std::fs::write(&out_path, &plaintext).map_err(|e| format!("write: {e}"))?;
 
     println!(
         "  {} {}",
@@ -396,9 +378,7 @@ async fn unlink_in_mirror(
 
 fn load_master_key() -> Result<beebeeb_core::kdf::MasterKey, String> {
     let cfg = load_config();
-    let mk_b64 = cfg
-        .master_key
-        .ok_or("No master key found. Run `bb login` first.")?;
+    let mk_b64 = cfg.master_key.ok_or("No master key found. Run `bb login` first.")?;
     let mk: Zeroizing<Vec<u8>> = Zeroizing::new(
         base64::engine::general_purpose::STANDARD
             .decode(&mk_b64)
@@ -422,19 +402,12 @@ fn sanitize_filename(name: &str) -> String {
 /// Compute the next backoff delay (capped at [`MAX_BACKOFF`]).
 fn next_backoff(current: Duration) -> Duration {
     let doubled = current.saturating_mul(2);
-    if doubled > MAX_BACKOFF {
-        MAX_BACKOFF
-    } else {
-        doubled
-    }
+    if doubled > MAX_BACKOFF { MAX_BACKOFF } else { doubled }
 }
 
 /// Sleep for `delay`, but bail early if `cancel` resolves. Returns
 /// `ControlFlow::Break` if cancelled, `Continue` to keep going.
-async fn wait_or_cancel(
-    cancel: &mut tokio::sync::oneshot::Receiver<()>,
-    delay: Duration,
-) -> std::ops::ControlFlow<()> {
+async fn wait_or_cancel(cancel: &mut tokio::sync::oneshot::Receiver<()>, delay: Duration) -> std::ops::ControlFlow<()> {
     tokio::select! {
         biased;
         _ = cancel => std::ops::ControlFlow::Break(()),

@@ -72,8 +72,7 @@ pub async fn run(_mountpoint: PathBuf, _foreground: bool, _cache_ttl: u64) -> Re
     );
     println!(
         "  {}",
-        "bb mount lets you browse your encrypted vault as a regular folder."
-            .custom_color(crate::colors::INK_DIM),
+        "bb mount lets you browse your encrypted vault as a regular folder.".custom_color(crate::colors::INK_DIM),
     );
     println!();
 
@@ -87,16 +86,10 @@ pub async fn run(_mountpoint: PathBuf, _foreground: bool, _cache_ttl: u64) -> Re
                 "macFUSE is not installed on this Mac.".custom_color(crate::colors::INK),
             );
 
-            let has_brew = std::process::Command::new("brew")
-                .arg("--version")
-                .output()
-                .is_ok();
+            let has_brew = std::process::Command::new("brew").arg("--version").output().is_ok();
 
             if has_brew {
-                print!(
-                    "  {} ",
-                    "Install macFUSE now? [Y/n]".custom_color(crate::colors::INK),
-                );
+                print!("  {} ", "Install macFUSE now? [Y/n]".custom_color(crate::colors::INK),);
                 io::stdout().flush().ok();
                 let mut answer = String::new();
                 io::stdin().read_line(&mut answer).ok();
@@ -132,8 +125,7 @@ pub async fn run(_mountpoint: PathBuf, _foreground: bool, _cache_ttl: u64) -> Re
                             );
                             println!(
                                 "    {}",
-                                "brew install --cask macfuse"
-                                    .custom_color(crate::colors::AMBER),
+                                "brew install --cask macfuse".custom_color(crate::colors::AMBER),
                             );
                             println!();
                             return Ok(());
@@ -143,8 +135,7 @@ pub async fn run(_mountpoint: PathBuf, _foreground: bool, _cache_ttl: u64) -> Re
                     println!();
                     println!(
                         "  {}",
-                        "To install later: brew install --cask macfuse"
-                            .custom_color(crate::colors::INK_DIM),
+                        "To install later: brew install --cask macfuse".custom_color(crate::colors::INK_DIM),
                     );
                     return Ok(());
                 }
@@ -173,19 +164,12 @@ pub async fn run(_mountpoint: PathBuf, _foreground: bool, _cache_ttl: u64) -> Re
                 "2".custom_color(crate::colors::AMBER),
                 "macFUSE needs a reboot to activate.".custom_color(crate::colors::INK),
             );
+            println!("  {}", "After rebooting, go to:".custom_color(crate::colors::INK_DIM),);
             println!(
                 "  {}",
-                "After rebooting, go to:".custom_color(crate::colors::INK_DIM),
+                "System Settings → Privacy & Security → scroll down → Allow".custom_color(crate::colors::INK),
             );
-            println!(
-                "  {}",
-                "System Settings → Privacy & Security → scroll down → Allow"
-                    .custom_color(crate::colors::INK),
-            );
-            println!(
-                "  {}",
-                "Then run bb mount again.".custom_color(crate::colors::INK_DIM),
-            );
+            println!("  {}", "Then run bb mount again.".custom_color(crate::colors::INK_DIM),);
             println!();
             return Ok(());
         }
@@ -194,18 +178,15 @@ pub async fn run(_mountpoint: PathBuf, _foreground: bool, _cache_ttl: u64) -> Re
         println!(
             "  {} {}",
             "!".custom_color(crate::colors::AMBER),
-            "macFUSE is installed, but this bb binary was built without FUSE support."
-                .custom_color(crate::colors::INK),
+            "macFUSE is installed, but this bb binary was built without FUSE support.".custom_color(crate::colors::INK),
         );
         println!(
             "  {}",
-            "Rebuild with:  cargo install --path . --features fuse --force"
-                .custom_color(crate::colors::INK_DIM),
+            "Rebuild with:  cargo install --path . --features fuse --force".custom_color(crate::colors::INK_DIM),
         );
         println!(
             "  {}",
-            "Or download the FUSE build from github.com/beebeeb-io/cli/releases"
-                .custom_color(crate::colors::INK_DIM),
+            "Or download the FUSE build from github.com/beebeeb-io/cli/releases".custom_color(crate::colors::INK_DIM),
         );
     }
 
@@ -218,16 +199,14 @@ pub async fn run(_mountpoint: PathBuf, _foreground: bool, _cache_ttl: u64) -> Re
             println!(
                 "  {} {}",
                 "1".custom_color(crate::colors::AMBER),
-                "libfuse3 development headers are not installed."
-                    .custom_color(crate::colors::INK),
+                "libfuse3 development headers are not installed.".custom_color(crate::colors::INK),
             );
 
             let distro = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
             if distro.contains("debian") || distro.contains("ubuntu") || distro.contains("Ubuntu") {
                 print!(
                     "  {} ",
-                    "Install now? (sudo apt install libfuse3-dev) [Y/n]"
-                        .custom_color(crate::colors::INK),
+                    "Install now? (sudo apt install libfuse3-dev) [Y/n]".custom_color(crate::colors::INK),
                 );
                 io::stdout().flush().ok();
                 let mut answer = String::new();
@@ -251,14 +230,12 @@ pub async fn run(_mountpoint: PathBuf, _foreground: bool, _cache_ttl: u64) -> Re
             } else if distro.contains("fedora") || distro.contains("rhel") {
                 println!(
                     "  {}",
-                    "Install: sudo dnf install fuse3-devel"
-                        .custom_color(crate::colors::INK_DIM),
+                    "Install: sudo dnf install fuse3-devel".custom_color(crate::colors::INK_DIM),
                 );
             } else {
                 println!(
                     "  {}",
-                    "Install your distro's libfuse3 development package."
-                        .custom_color(crate::colors::INK_DIM),
+                    "Install your distro's libfuse3 development package.".custom_color(crate::colors::INK_DIM),
                 );
             }
         }
@@ -267,13 +244,11 @@ pub async fn run(_mountpoint: PathBuf, _foreground: bool, _cache_ttl: u64) -> Re
         println!(
             "  {} {}",
             "!".custom_color(crate::colors::AMBER),
-            "This bb binary was built without FUSE support."
-                .custom_color(crate::colors::INK),
+            "This bb binary was built without FUSE support.".custom_color(crate::colors::INK),
         );
         println!(
             "  {}",
-            "Rebuild with:  cargo install --path . --features fuse --force"
-                .custom_color(crate::colors::INK_DIM),
+            "Rebuild with:  cargo install --path . --features fuse --force".custom_color(crate::colors::INK_DIM),
         );
     }
 
@@ -545,12 +520,7 @@ mod fuse_impl {
             // Use the shared helper that handles both CLI-format (JSON) and
             // web-app-format (raw binary) chunks, and both UUID key derivation
             // methods (binary and string).
-            let plaintext = crate::crypto::decrypt_file_chunks(
-                &self.master_key,
-                &file_id,
-                &encrypted,
-                chunk_count,
-            )?;
+            let plaintext = crate::crypto::decrypt_file_chunks(&self.master_key, &file_id, &encrypted, chunk_count)?;
 
             if let Some(e) = self.inodes.get_mut(&ino) {
                 e.size = plaintext.len() as u64;
@@ -568,13 +538,8 @@ mod fuse_impl {
 
             // Encrypt the filename (MIME type is now part of the encrypted envelope).
             let mime = beebeeb_core::media::guess_mime_type(name);
-            let name_enc = beebeeb_core::encrypt::encrypt_name(
-                &self.master_key,
-                &key_uuid.to_string(),
-                name,
-                mime,
-            )
-            .map_err(|e| format!("encrypt name: {e}"))?;
+            let name_enc = beebeeb_core::encrypt::encrypt_name(&self.master_key, &key_uuid.to_string(), name, mime)
+                .map_err(|e| format!("encrypt name: {e}"))?;
 
             // Encrypt content using the adaptive chunk-size ladder.
             let plan = beebeeb_types::plan_chunks(plaintext.len() as u64, beebeeb_types::ChunkProfile::Desktop);
@@ -606,7 +571,12 @@ mod fuse_impl {
 
             // V2 upload: init → chunks → complete
             let init_resp = self.rt.block_on(self.api.upload_init(
-                Some(key_uuid), &name_enc, parent_file_id, encrypted_size, chunk_count, is_media,
+                Some(key_uuid),
+                &name_enc,
+                parent_file_id,
+                encrypted_size,
+                chunk_count,
+                is_media,
             ))?;
 
             let server_id = init_resp

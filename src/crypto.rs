@@ -74,9 +74,7 @@ pub fn decrypt_name(
         // Format 2: Web-app blob (nonce + ciphertext as base64 strings).
         if let Ok(web_blob) = serde_json::from_str::<WebAppBlob>(name_encrypted_str) {
             let b64 = base64::engine::general_purpose::STANDARD;
-            if let (Ok(nonce), Ok(ciphertext)) =
-                (b64.decode(&web_blob.nonce), b64.decode(&web_blob.ciphertext))
-            {
+            if let (Ok(nonce), Ok(ciphertext)) = (b64.decode(&web_blob.nonce), b64.decode(&web_blob.ciphertext)) {
                 let blob = EncryptedBlob {
                     cipher_suite: beebeeb_types::CipherSuite::V1Aes256Gcm,
                     nonce,
@@ -126,9 +124,7 @@ pub fn decrypt_file_chunks(
     encrypted_bytes: &[u8],
     chunk_count: u32,
 ) -> Result<Vec<u8>, String> {
-    let file_uuid: uuid::Uuid = file_id_str
-        .parse()
-        .map_err(|e| format!("invalid file ID: {e}"))?;
+    let file_uuid: uuid::Uuid = file_id_str.parse().map_err(|e| format!("invalid file ID: {e}"))?;
 
     // Try binary-UUID key first (CLI origin), then string-UUID key (web origin).
     let key_from_binary = beebeeb_core::kdf::derive_file_key(master_key, file_uuid.as_bytes());
@@ -186,8 +182,7 @@ fn decrypt_json_chunks(
         }
 
         let remaining = &encrypted_bytes[offset..];
-        let mut de =
-            serde_json::Deserializer::from_slice(remaining).into_iter::<EncryptedBlob>();
+        let mut de = serde_json::Deserializer::from_slice(remaining).into_iter::<EncryptedBlob>();
 
         let blob = match de.next() {
             Some(Ok(b)) => b,
@@ -196,8 +191,8 @@ fn decrypt_json_chunks(
         };
         offset += de.byte_offset();
 
-        let decrypted = beebeeb_core::encrypt::decrypt_chunk(file_key, &blob)
-            .map_err(|e| format!("decrypt chunk {i}: {e}"))?;
+        let decrypted =
+            beebeeb_core::encrypt::decrypt_chunk(file_key, &blob).map_err(|e| format!("decrypt chunk {i}: {e}"))?;
         plaintext.extend_from_slice(&decrypted);
     }
 
@@ -252,11 +247,7 @@ fn decrypt_raw_chunks(
     for i in 0..count {
         let remaining = total - offset;
         // Last chunk takes whatever is left; earlier chunks take the uniform size.
-        let this_chunk_size = if i == count - 1 {
-            remaining
-        } else {
-            chunk_enc_size
-        };
+        let this_chunk_size = if i == count - 1 { remaining } else { chunk_enc_size };
 
         if this_chunk_size < min_chunk_overhead {
             return Err(format!(
@@ -274,8 +265,8 @@ fn decrypt_raw_chunks(
             ciphertext: ciphertext.to_vec(),
         };
 
-        let decrypted = beebeeb_core::encrypt::decrypt_chunk(file_key, &blob)
-            .map_err(|e| format!("decrypt raw chunk {i}: {e}"))?;
+        let decrypted =
+            beebeeb_core::encrypt::decrypt_chunk(file_key, &blob).map_err(|e| format!("decrypt raw chunk {i}: {e}"))?;
         plaintext.extend_from_slice(&decrypted);
 
         offset += this_chunk_size;

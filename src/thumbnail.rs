@@ -38,8 +38,7 @@ pub fn generate_from_file(file_bytes: &[u8], mime: Option<&str>) -> Option<Thumb
 
     // Delegate to the canonical core implementation for lossy WebP encoding.
     let config = beebeeb_core::thumbnail::ThumbnailConfig::medium();
-    let output =
-        beebeeb_core::thumbnail::generate_thumbnail(&rgba, width, height, &config).ok()?;
+    let output = beebeeb_core::thumbnail::generate_thumbnail(&rgba, width, height, &config).ok()?;
 
     Some(ThumbnailResult {
         data: output.data,
@@ -74,12 +73,9 @@ mod tests {
     #[test]
     fn generates_thumbnail_from_synthetic_image() {
         // Create a small synthetic JPEG in memory.
-        let img = image::RgbImage::from_fn(100, 100, |x, y| {
-            image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
-        });
+        let img = image::RgbImage::from_fn(100, 100, |x, y| image::Rgb([(x % 256) as u8, (y % 256) as u8, 128]));
         let mut jpeg_bytes = Cursor::new(Vec::new());
-        let mut encoder =
-            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_bytes, 90);
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_bytes, 90);
         encoder
             .encode(img.as_raw(), 100, 100, image::ExtendedColorType::Rgb8)
             .unwrap();
@@ -103,8 +99,7 @@ mod tests {
             ])
         });
         let mut jpeg_bytes = Cursor::new(Vec::new());
-        let mut encoder =
-            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_bytes, 90);
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_bytes, 90);
         encoder
             .encode(img.as_raw(), 200, 150, image::ExtendedColorType::Rgb8)
             .unwrap();
@@ -130,8 +125,7 @@ mod tests {
             ])
         });
         let mut jpeg_bytes = Cursor::new(Vec::new());
-        let mut encoder =
-            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_bytes, 95);
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_bytes, 95);
         encoder
             .encode(img.as_raw(), 2000, 1500, image::ExtendedColorType::Rgb8)
             .unwrap();

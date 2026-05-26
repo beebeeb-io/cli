@@ -23,15 +23,15 @@ use crate::colors;
 /// `POST /api/v1/auth/confirm`).
 pub async fn acquire_confirm_token(api: &ApiClient) -> Result<String, String> {
     let prompt = format!("  {} ", "confirm your password:".custom_color(colors::INK_DIM));
-    let password = rpassword::prompt_password(prompt)
-        .map_err(|e| format!("could not read password: {e}"))?;
+    let password = rpassword::prompt_password(prompt).map_err(|e| format!("could not read password: {e}"))?;
 
     api.confirm_password(&password).await.map_err(|e| {
         // The server returns "Unauthorized" for wrong password and a specific
         // "session too old" error for OPAQUE accounts whose session is stale.
         if e.contains("session_too_old") || e.contains("SessionTooOld") {
             "this account has no password (OPAQUE) and your session is older than 15 minutes — \
-             run `bb login` again to refresh, then retry the destructive action".to_string()
+             run `bb login` again to refresh, then retry the destructive action"
+                .to_string()
         } else if e.contains("Unauthorized") || e.contains("401") || e.contains("incorrect") {
             "incorrect password".to_string()
         } else {

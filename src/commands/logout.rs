@@ -6,10 +6,7 @@ use crate::config::{clear_config, load_config};
 pub async fn run() -> Result<(), String> {
     let config = load_config();
     if config.session_token.is_none() {
-        println!(
-            "  {}",
-            "Already logged out.".custom_color(crate::colors::INK_DIM),
-        );
+        println!("  {}", "Already logged out.".custom_color(crate::colors::INK_DIM),);
         return Ok(());
     }
 

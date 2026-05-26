@@ -32,23 +32,12 @@ pub async fn run() -> Result<(), String> {
         .unwrap_or_else(|| "Europe".to_string());
     println!(
         "{}",
-        ui::box_line(
-            &format!(
-                "{:<12}{}",
-                "region".custom_color(colors::INK_DIM),
-                region,
-            ),
-            w,
-        )
+        ui::box_line(&format!("{:<12}{}", "region".custom_color(colors::INK_DIM), region,), w,)
     );
     println!(
         "{}",
         ui::box_line(
-            &format!(
-                "{:<12}{}",
-                "endpoint".custom_color(colors::INK_DIM),
-                "api.beebeeb.io"
-            ),
+            &format!("{:<12}{}", "endpoint".custom_color(colors::INK_DIM), "api.beebeeb.io"),
             w,
         )
     );
@@ -70,8 +59,7 @@ pub async fn run() -> Result<(), String> {
         "  {:<12}{} {}",
         "latency".custom_color(colors::INK_DIM),
         format!("{}ms", avg_lat).custom_color(colors::GREEN_OK),
-        format!("avg ({} / {} / {} min/avg/max)", min_lat, avg_lat, max_lat)
-            .custom_color(colors::INK_DIM),
+        format!("avg ({} / {} / {} min/avg/max)", min_lat, avg_lat, max_lat).custom_color(colors::INK_DIM),
     );
 
     // -- Phase 2: Upload --
@@ -105,9 +93,7 @@ pub async fn run() -> Result<(), String> {
         println!(
             "  {:<12}{}  {}",
             "upload".custom_color(colors::INK_DIM),
-            ui::human_speed(avg_up)
-                .custom_color(colors::GREEN_OK)
-                .bold(),
+            ui::human_speed(avg_up).custom_color(colors::GREEN_OK).bold(),
             ui::speed_bar(avg_up, 100_000_000.0, 30),
         );
     }
@@ -142,9 +128,7 @@ pub async fn run() -> Result<(), String> {
         println!(
             "  {:<12}{}  {}",
             "download".custom_color(colors::INK_DIM),
-            ui::human_speed(avg_dl)
-                .custom_color(colors::GREEN_OK)
-                .bold(),
+            ui::human_speed(avg_dl).custom_color(colors::GREEN_OK).bold(),
             ui::speed_bar(avg_dl, 100_000_000.0, 38),
         );
     }
@@ -165,14 +149,12 @@ pub async fn run() -> Result<(), String> {
     let bench_buf = vec![42u8; bench_size];
 
     let start = Instant::now();
-    let enc_blob = beebeeb_core::encrypt::encrypt_chunk(&fk, &bench_buf)
-        .map_err(|e| format!("encrypt bench: {e}"))?;
+    let enc_blob = beebeeb_core::encrypt::encrypt_chunk(&fk, &bench_buf).map_err(|e| format!("encrypt bench: {e}"))?;
     let enc_elapsed = start.elapsed().as_secs_f64();
     let enc_speed = bench_size as f64 / enc_elapsed;
 
     let start = Instant::now();
-    let _ = beebeeb_core::encrypt::decrypt_chunk(&fk, &enc_blob)
-        .map_err(|e| format!("decrypt bench: {e}"))?;
+    let _ = beebeeb_core::encrypt::decrypt_chunk(&fk, &enc_blob).map_err(|e| format!("decrypt bench: {e}"))?;
     let dec_elapsed = start.elapsed().as_secs_f64();
     let dec_speed = bench_size as f64 / dec_elapsed;
 
@@ -188,17 +170,13 @@ pub async fn run() -> Result<(), String> {
     println!(
         "  {:<12}{}  {}",
         "encrypt".custom_color(colors::INK_DIM),
-        ui::human_speed(enc_speed)
-            .custom_color(colors::GREEN_OK)
-            .bold(),
+        ui::human_speed(enc_speed).custom_color(colors::GREEN_OK).bold(),
         format!("AES-256-GCM \u{00B7} {hw_hint}").custom_color(colors::INK_DIM),
     );
     println!(
         "  {:<12}{}  {}",
         "decrypt".custom_color(colors::INK_DIM),
-        ui::human_speed(dec_speed)
-            .custom_color(colors::GREEN_OK)
-            .bold(),
+        ui::human_speed(dec_speed).custom_color(colors::GREEN_OK).bold(),
         format!("AES-256-GCM \u{00B7} {hw_hint}").custom_color(colors::INK_DIM),
     );
 
@@ -214,34 +192,19 @@ pub async fn run() -> Result<(), String> {
     println!();
 
     // -- Phase 5: Effective throughput --
-    println!(
-        "  {}",
-        "EFFECTIVE THROUGHPUT".custom_color(colors::AMBER),
-    );
-    let eff_push = if avg_up > 0.0 {
-        avg_up.min(enc_speed)
-    } else {
-        enc_speed
-    };
-    let eff_pull = if avg_dl > 0.0 {
-        avg_dl.min(dec_speed)
-    } else {
-        dec_speed
-    };
+    println!("  {}", "EFFECTIVE THROUGHPUT".custom_color(colors::AMBER),);
+    let eff_push = if avg_up > 0.0 { avg_up.min(enc_speed) } else { enc_speed };
+    let eff_pull = if avg_dl > 0.0 { avg_dl.min(dec_speed) } else { dec_speed };
     println!(
         "  {:<12}{}  {}",
         "push".custom_color(colors::INK_DIM),
-        ui::human_speed(eff_push)
-            .custom_color(colors::AMBER)
-            .bold(),
+        ui::human_speed(eff_push).custom_color(colors::AMBER).bold(),
         "(encrypt + upload)".custom_color(colors::INK_DIM),
     );
     println!(
         "  {:<12}{}  {}",
         "pull".custom_color(colors::INK_DIM),
-        ui::human_speed(eff_pull)
-            .custom_color(colors::AMBER)
-            .bold(),
+        ui::human_speed(eff_pull).custom_color(colors::AMBER).bold(),
         "(download + decrypt)".custom_color(colors::INK_DIM),
     );
     println!();
@@ -259,24 +222,15 @@ pub async fn run() -> Result<(), String> {
     );
 
     let bottleneck = if avg_up > 0.0 && enc_speed > avg_up * 2.0 {
-        format!(
-            "network upload (crypto is {:.0}\u{00D7} faster)",
-            enc_speed / avg_up,
-        )
+        format!("network upload (crypto is {:.0}\u{00D7} faster)", enc_speed / avg_up,)
     } else if avg_up > 0.0 && avg_up > enc_speed * 2.0 {
-        format!(
-            "encryption (network is {:.0}\u{00D7} faster)",
-            avg_up / enc_speed,
-        )
+        format!("encryption (network is {:.0}\u{00D7} faster)", avg_up / enc_speed,)
     } else if avg_up > 0.0 {
         "balanced (network \u{2248} crypto)".to_string()
     } else {
         "crypto only (speedtest endpoint unavailable)".to_string()
     };
-    println!(
-        "  bottleneck: {}",
-        bottleneck.custom_color(colors::INK_DIM),
-    );
+    println!("  bottleneck: {}", bottleneck.custom_color(colors::INK_DIM),);
 
     Ok(())
 }
@@ -345,14 +299,12 @@ async fn run_json(api: &ApiClient) -> Result<(), String> {
     let bench_buf = vec![42u8; bench_size];
 
     let start = Instant::now();
-    let enc_blob = beebeeb_core::encrypt::encrypt_chunk(&fk, &bench_buf)
-        .map_err(|e| format!("encrypt bench: {e}"))?;
+    let enc_blob = beebeeb_core::encrypt::encrypt_chunk(&fk, &bench_buf).map_err(|e| format!("encrypt bench: {e}"))?;
     let enc_elapsed = start.elapsed().as_secs_f64();
     let enc_speed = bench_size as f64 / enc_elapsed;
 
     let start = Instant::now();
-    let _ = beebeeb_core::encrypt::decrypt_chunk(&fk, &enc_blob)
-        .map_err(|e| format!("decrypt bench: {e}"))?;
+    let _ = beebeeb_core::encrypt::decrypt_chunk(&fk, &enc_blob).map_err(|e| format!("decrypt bench: {e}"))?;
     let dec_elapsed = start.elapsed().as_secs_f64();
     let dec_speed = bench_size as f64 / dec_elapsed;
 
@@ -361,16 +313,8 @@ async fn run_json(api: &ApiClient) -> Result<(), String> {
     let kd_elapsed = start.elapsed();
 
     // Effective throughput
-    let eff_push = if avg_up > 0.0 {
-        avg_up.min(enc_speed)
-    } else {
-        enc_speed
-    };
-    let eff_pull = if avg_dl > 0.0 {
-        avg_dl.min(dec_speed)
-    } else {
-        dec_speed
-    };
+    let eff_push = if avg_up > 0.0 { avg_up.min(enc_speed) } else { enc_speed };
+    let eff_pull = if avg_dl > 0.0 { avg_dl.min(dec_speed) } else { dec_speed };
     let eff_mbps = eff_push / 1_000_000.0;
     let (verdict, _) = ui::speed_verdict(eff_mbps);
 

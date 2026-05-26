@@ -28,9 +28,7 @@ impl Default for Config {
 }
 
 fn config_path() -> PathBuf {
-    let config_dir = dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("beebeeb");
+    let config_dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("beebeeb");
     config_dir.join("config.json")
 }
 
@@ -64,11 +62,9 @@ pub fn set_api_url_override(api_url: String) -> Result<(), String> {
 pub fn save_config(config: &Config) -> Result<(), String> {
     let path = config_path();
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("failed to create config directory: {e}"))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("failed to create config directory: {e}"))?;
     }
-    let json = serde_json::to_string_pretty(config)
-        .map_err(|e| format!("failed to serialize config: {e}"))?;
+    let json = serde_json::to_string_pretty(config).map_err(|e| format!("failed to serialize config: {e}"))?;
     std::fs::write(&path, json).map_err(|e| format!("failed to write config: {e}"))?;
     #[cfg(unix)]
     {

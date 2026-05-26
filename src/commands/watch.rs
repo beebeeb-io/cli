@@ -19,8 +19,7 @@ pub async fn run(path: PathBuf, parent_id: Option<String>) -> Result<(), String>
         api.require_auth()?;
     }
 
-    let watch_path = std::fs::canonicalize(&path)
-        .map_err(|e| format!("cannot resolve path: {e}"))?;
+    let watch_path = std::fs::canonicalize(&path).map_err(|e| format!("cannot resolve path: {e}"))?;
 
     if !watch_path.is_dir() {
         return Err(format!(
@@ -33,10 +32,7 @@ pub async fn run(path: PathBuf, parent_id: Option<String>) -> Result<(), String>
     // consumer can filter to events under this folder. Bad input bails
     // before we open any connections.
     let watched_parent: Option<Uuid> = match &parent_id {
-        Some(s) => Some(
-            Uuid::parse_str(s)
-                .map_err(|e| format!("invalid --parent uuid '{s}': {e}"))?,
-        ),
+        Some(s) => Some(Uuid::parse_str(s).map_err(|e| format!("invalid --parent uuid '{s}': {e}"))?),
         None => None,
     };
 
@@ -62,10 +58,7 @@ pub async fn run(path: PathBuf, parent_id: Option<String>) -> Result<(), String>
         "local: ".custom_color(crate::colors::INK_DIM),
         "fsnotify".custom_color(crate::colors::INK_DIM),
     );
-    println!(
-        "  {}",
-        "press Ctrl+C to stop".custom_color(crate::colors::INK_DIM),
-    );
+    println!("  {}", "press Ctrl+C to stop".custom_color(crate::colors::INK_DIM),);
     println!();
 
     // Spawn the remote-event consumer on a background tokio task. It owns
@@ -80,8 +73,7 @@ pub async fn run(path: PathBuf, parent_id: Option<String>) -> Result<(), String>
                 eprintln!(
                     "  {} {}",
                     "warn:".custom_color(crate::colors::AMBER),
-                    format!("remote watcher exited: {e}")
-                        .custom_color(crate::colors::INK_DIM),
+                    format!("remote watcher exited: {e}").custom_color(crate::colors::INK_DIM),
                 );
             }
         })
@@ -93,8 +85,7 @@ pub async fn run(path: PathBuf, parent_id: Option<String>) -> Result<(), String>
 
     // Set up file watcher
     let (fs_tx, fs_rx) = mpsc::channel::<notify::Result<Event>>();
-    let mut watcher = notify::recommended_watcher(fs_tx)
-        .map_err(|e| format!("failed to create file watcher: {e}"))?;
+    let mut watcher = notify::recommended_watcher(fs_tx).map_err(|e| format!("failed to create file watcher: {e}"))?;
 
     watcher
         .watch(&watch_path, RecursiveMode::Recursive)
@@ -117,11 +108,7 @@ pub async fn run(path: PathBuf, parent_id: Option<String>) -> Result<(), String>
             // Tell the remote consumer to stop, then wait briefly for it to
             // close its SSE connection cleanly.
             let _ = cancel_tx.send(());
-            let _ = tokio::time::timeout(
-                Duration::from_secs(2),
-                remote_handle,
-            )
-            .await;
+            let _ = tokio::time::timeout(Duration::from_secs(2), remote_handle).await;
             break;
         }
 
@@ -129,9 +116,7 @@ pub async fn run(path: PathBuf, parent_id: Option<String>) -> Result<(), String>
         while let Ok(event_result) = fs_rx.try_recv() {
             match event_result {
                 Ok(event) => {
-                    if let Some(paths) =
-                        relevant_paths(&event, &watch_path, parent_id.as_deref())
-                    {
+                    if let Some(paths) = relevant_paths(&event, &watch_path, parent_id.as_deref()) {
                         for p in paths {
                             pending.insert(p);
                         }
@@ -172,11 +157,7 @@ pub async fn run(path: PathBuf, parent_id: Option<String>) -> Result<(), String>
 /// Create/Modify events return paths to be queued for upload. Remove events
 /// are handled inline: we soft-delete the corresponding server file (best
 /// effort, never blocks the watch loop) and return None.
-fn relevant_paths(
-    event: &Event,
-    watch_root: &Path,
-    parent_id: Option<&str>,
-) -> Option<Vec<PathBuf>> {
+fn relevant_paths(event: &Event, watch_root: &Path, parent_id: Option<&str>) -> Option<Vec<PathBuf>> {
     match event.kind {
         EventKind::Create(_) | EventKind::Modify(_) => {
             let paths: Vec<PathBuf> = event
@@ -199,11 +180,7 @@ fn relevant_paths(
                 .cloned()
                 .collect();
 
-            if paths.is_empty() {
-                None
-            } else {
-                Some(paths)
-            }
+            if paths.is_empty() { None } else { Some(paths) }
         }
         EventKind::Remove(_) => {
             for p in &event.paths {
@@ -221,12 +198,7 @@ fn relevant_paths(
                     let watch_root_owned = watch_root.to_path_buf();
                     tokio::task::block_in_place(|| {
                         tokio::runtime::Handle::current().block_on(async {
-                            trash_server_file(
-                                &name_owned,
-                                &watch_root_owned,
-                                parent_owned.as_deref(),
-                            )
-                            .await;
+                            trash_server_file(&name_owned, &watch_root_owned, parent_owned.as_deref()).await;
                         })
                     });
                 }
@@ -238,11 +210,7 @@ fn relevant_paths(
 }
 
 /// Process a batch of changed files: encrypt and upload each one.
-async fn sync_batch(
-    paths: &[PathBuf],
-    watch_root: &Path,
-    parent_id: Option<&str>,
-) {
+async fn sync_batch(paths: &[PathBuf], watch_root: &Path, parent_id: Option<&str>) {
     let count = paths.len();
     let timestamp = chrono_now();
 
@@ -250,8 +218,7 @@ async fn sync_batch(
         "  {} {} {} {}",
         "\u{2191}".custom_color(crate::colors::GREEN_OK),
         timestamp.custom_color(crate::colors::INK_DIM),
-        format!("{count} file{}", if count == 1 { "" } else { "s" })
-            .custom_color(crate::colors::INK),
+        format!("{count} file{}", if count == 1 { "" } else { "s" }).custom_color(crate::colors::INK),
         "uploading".custom_color(crate::colors::INK_DIM),
     );
 
@@ -305,9 +272,7 @@ async fn trash_server_file(file_name: &str, _watch_root: &Path, parent_id: Optio
 
     // find_conflict decrypts server-side names and matches the local filename.
     // Returns Some(uuid) if a matching file exists on the server.
-    if let Some(file_uuid) =
-        push::find_conflict(&api, &master_key, file_name, parent_uuid).await
-    {
+    if let Some(file_uuid) = push::find_conflict(&api, &master_key, file_name, parent_uuid).await {
         let file_id = file_uuid.to_string();
         match api.trash_file(&file_id).await {
             Ok(_) => {
@@ -352,9 +317,7 @@ fn ctrlc_channel(tx: mpsc::Sender<()>) {
     // Use a simple atomic flag + handler via ctrlc behavior built into tokio
     // Since we're already in a tokio runtime, use tokio's signal handling
     tokio::spawn(async move {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to listen for Ctrl+C");
+        tokio::signal::ctrl_c().await.expect("failed to listen for Ctrl+C");
         let _ = tx.send(());
     });
 }

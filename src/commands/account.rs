@@ -22,7 +22,7 @@
 
 use std::path::PathBuf;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::api::ApiClient;
 
@@ -114,9 +114,9 @@ fn build_show_payload(
 }
 
 pub async fn show() -> Result<(), String> {
+    use crate::{colors, ui};
     use beebeeb_types::quota::format_storage_si;
     use colored::Colorize;
-    use crate::{colors, ui};
 
     let api = ApiClient::from_config();
     let _ = api.require_auth()?;
@@ -133,7 +133,10 @@ pub async fn show() -> Result<(), String> {
     let payload = build_show_payload(&me, &sub, &region, &score, &sessions, &passkeys);
 
     if ui::is_json() {
-        println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
+        );
         return Ok(());
     }
 
@@ -152,7 +155,12 @@ pub async fn show() -> Result<(), String> {
     if !created_rel.is_empty() {
         println!(
             "{}",
-            ui::box_line(&format!("joined{}", created_rel).custom_color(colors::INK_DIM).to_string(), w),
+            ui::box_line(
+                &format!("joined{}", created_rel)
+                    .custom_color(colors::INK_DIM)
+                    .to_string(),
+                w
+            ),
         );
     }
     println!("{}", ui::box_footer(w));
@@ -166,16 +174,25 @@ pub async fn show() -> Result<(), String> {
     let billing_state = payload["plan"]["billing_state"].as_str().unwrap_or("active");
     let pending = payload["plan"]["pending_downgrade_plan"].as_str();
 
-    println!("  {} \u{00b7} {} cycle", plan_id.custom_color(colors::INK), cycle.custom_color(colors::INK_DIM));
+    println!(
+        "  {} \u{00b7} {} cycle",
+        plan_id.custom_color(colors::INK),
+        cycle.custom_color(colors::INK_DIM)
+    );
     if !period_end.is_empty() {
-        println!("  renews {}", ui::relative_time(period_end).custom_color(colors::INK_DIM));
+        println!(
+            "  renews {}",
+            ui::relative_time(period_end).custom_color(colors::INK_DIM)
+        );
     }
     let city = payload["region"]["city"].as_str().unwrap_or("");
     let provider = payload["region"]["provider"].as_str().unwrap_or("");
     if !city.is_empty() {
-        println!("  region   europe \u{00b7} {} \u{00b7} {}",
-                 city.to_lowercase().custom_color(colors::INK_DIM),
-                 provider.to_lowercase().custom_color(colors::INK_DIM));
+        println!(
+            "  region   europe \u{00b7} {} \u{00b7} {}",
+            city.to_lowercase().custom_color(colors::INK_DIM),
+            provider.to_lowercase().custom_color(colors::INK_DIM)
+        );
     }
     if billing_state == "active" {
         println!("  status   {}", "active".custom_color(colors::GREEN_OK));
@@ -183,7 +200,10 @@ pub async fn show() -> Result<(), String> {
         println!("  status   {}", billing_state.custom_color(colors::RED_ERR));
     }
     if let Some(p) = pending {
-        println!("  {}", format!("switching to {p} at period end").custom_color(colors::AMBER));
+        println!(
+            "  {}",
+            format!("switching to {p} at period end").custom_color(colors::AMBER)
+        );
     }
     println!();
 
@@ -192,19 +212,31 @@ pub async fn show() -> Result<(), String> {
     let used = payload["storage"]["used_bytes"].as_i64().unwrap_or(0);
     let quota = payload["storage"]["quota_bytes"].as_i64().unwrap_or(0);
     let bar = render_progress_bar(used, quota, 20);
-    println!("  {}  {} / {}  ({:.0}%)",
+    println!(
+        "  {}  {} / {}  ({:.0}%)",
         bar,
         format_storage_si(used),
         format_storage_si(quota),
-        if quota > 0 { used as f64 / quota as f64 * 100.0 } else { 0.0 });
+        if quota > 0 {
+            used as f64 / quota as f64 * 100.0
+        } else {
+            0.0
+        }
+    );
     println!();
 
     // SECURITY
-    println!("  {}                                          score {}/{} {}",
+    println!(
+        "  {}                                          score {}/{} {}",
         "SECURITY".custom_color(colors::AMBER),
         payload["security"]["score"],
         payload["security"]["max"],
-        payload["security"]["label"].as_str().unwrap_or("").to_lowercase().custom_color(colors::INK_DIM));
+        payload["security"]["label"]
+            .as_str()
+            .unwrap_or("")
+            .to_lowercase()
+            .custom_color(colors::INK_DIM)
+    );
 
     if let Some(factors) = payload["security"]["factors"].as_array() {
         for f in factors {
@@ -219,19 +251,29 @@ pub async fn show() -> Result<(), String> {
                 other => other,
             };
             if ok {
-                println!("  {} {}", "ok".custom_color(colors::GREEN_OK), label.custom_color(colors::INK_DIM));
+                println!(
+                    "  {} {}",
+                    "ok".custom_color(colors::GREEN_OK),
+                    label.custom_color(colors::INK_DIM)
+                );
             } else {
-                println!("  {} {}", "!!".custom_color(colors::RED_ERR), label.custom_color(colors::INK_DIM));
+                println!(
+                    "  {} {}",
+                    "!!".custom_color(colors::RED_ERR),
+                    label.custom_color(colors::INK_DIM)
+                );
             }
         }
     }
     println!();
 
     // SESSIONS + PASSKEYS summary
-    println!("  {}  {} active \u{00b7} {} passkeys registered",
+    println!(
+        "  {}  {} active \u{00b7} {} passkeys registered",
         "SESSIONS".custom_color(colors::AMBER),
         payload["session_count"],
-        payload["passkey_count"]);
+        payload["passkey_count"]
+    );
 
     Ok(())
 }
