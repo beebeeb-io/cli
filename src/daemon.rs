@@ -100,8 +100,10 @@ pub fn remove_pid(slug: &str) -> Result<(), String> {
 
 /// Check whether a process with the given PID is still running.
 fn process_exists(pid: u32) -> bool {
-    // kill(pid, 0) checks existence without sending a signal
-    unsafe { libc::kill(pid as i32, 0) == 0 }
+    #[cfg(unix)]
+    { unsafe { libc::kill(pid as i32, 0) == 0 } }
+    #[cfg(not(unix))]
+    { false }
 }
 
 /// Check if a daemon for the given session slug is currently running.
@@ -141,18 +143,23 @@ pub fn list_daemon_slugs() -> Result<Vec<String>, String> {
 pub fn kill_daemon(slug: &str) -> Result<bool, String> {
     match read_pid(slug)? {
         Some(pid) => {
+            #[cfg(unix)]
             if process_exists(pid) {
                 unsafe {
                     libc::kill(pid as i32, libc::SIGTERM);
                 }
-                // Give it a moment to exit, then check
                 std::thread::sleep(std::time::Duration::from_millis(200));
                 if process_exists(pid) {
-                    // Force kill if still running
                     unsafe {
                         libc::kill(pid as i32, libc::SIGKILL);
                     }
                 }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/F"])
+                    .status();
             }
             remove_pid(slug)?;
             Ok(true)
