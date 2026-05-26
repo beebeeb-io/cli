@@ -93,8 +93,8 @@ pub async fn run() -> Result<(), String> {
         println!(
             "  {:<12}{}  {}",
             "upload".custom_color(colors::INK_DIM),
-            ui::human_speed(avg_up).custom_color(colors::GREEN_OK).bold(),
-            ui::speed_bar(avg_up, 100_000_000.0, 30),
+            ui::human_speed_network(avg_up).custom_color(colors::GREEN_OK).bold(),
+            ui::speed_bar(avg_up * 8.0, 1_000_000_000.0, 30),
         );
     }
 
@@ -128,8 +128,8 @@ pub async fn run() -> Result<(), String> {
         println!(
             "  {:<12}{}  {}",
             "download".custom_color(colors::INK_DIM),
-            ui::human_speed(avg_dl).custom_color(colors::GREEN_OK).bold(),
-            ui::speed_bar(avg_dl, 100_000_000.0, 38),
+            ui::human_speed_network(avg_dl).custom_color(colors::GREEN_OK).bold(),
+            ui::speed_bar(avg_dl * 8.0, 1_000_000_000.0, 38),
         );
     }
     if !up_speeds.is_empty() || !dl_speeds.is_empty() {
@@ -210,7 +210,7 @@ pub async fn run() -> Result<(), String> {
     println!();
 
     // -- Verdict --
-    let eff_mbps = eff_push / 1_000_000.0;
+    let eff_mbps = eff_push * 8.0 / 1_000_000.0;
     let (verdict, color) = ui::speed_verdict(eff_mbps);
     let time_up = 1_000_000_000.0 / eff_push;
     let time_dl = 1_000_000_000.0 / eff_pull;

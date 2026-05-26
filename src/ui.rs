@@ -211,7 +211,8 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
-/// Format bytes-per-second as a human-readable speed: "48.2 MB/s".
+/// Format bytes-per-second as a human-readable throughput: "48.2 MB/s".
+/// Use for disk/crypto throughput where MB/s (megabytes) is conventional.
 pub fn human_speed(bytes_per_sec: f64) -> String {
     if bytes_per_sec <= 0.0 {
         return "\u{2014}".to_string(); // —
@@ -227,6 +228,27 @@ pub fn human_speed(bytes_per_sec: f64) -> String {
         format!("{:.1} MB/s", bytes_per_sec / MB)
     } else {
         format!("{:.1} GB/s", bytes_per_sec / GB)
+    }
+}
+
+/// Format bytes-per-second as a network speed in bits: "515.2 Mbps".
+/// Use for network upload/download where Mbps (megabits) is conventional.
+pub fn human_speed_network(bytes_per_sec: f64) -> String {
+    if bytes_per_sec <= 0.0 {
+        return "\u{2014}".to_string(); // —
+    }
+    let bits = bytes_per_sec * 8.0;
+    const KBIT: f64 = 1_000.0;
+    const MBIT: f64 = 1_000_000.0;
+    const GBIT: f64 = 1_000_000_000.0;
+    if bits < KBIT {
+        format!("{:.0} bps", bits)
+    } else if bits < MBIT {
+        format!("{:.1} Kbps", bits / KBIT)
+    } else if bits < GBIT {
+        format!("{:.1} Mbps", bits / MBIT)
+    } else {
+        format!("{:.1} Gbps", bits / GBIT)
     }
 }
 
@@ -273,11 +295,11 @@ pub fn quota_bar(used: u64, total: u64, width: usize) -> String {
 
 /// Return a (label, color) pair rating a speed in Mbps.
 pub fn speed_verdict(mbps: f64) -> (&'static str, colored::CustomColor) {
-    if mbps > 30.0 {
+    if mbps > 200.0 {
         ("excellent", colors::GREEN_OK)
-    } else if mbps > 10.0 {
+    } else if mbps > 50.0 {
         ("good", colors::GREEN_OK)
-    } else if mbps > 3.0 {
+    } else if mbps > 10.0 {
         ("fair", colors::AMBER)
     } else {
         ("slow", colors::RED_ERR)
