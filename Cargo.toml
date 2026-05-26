@@ -54,6 +54,7 @@ semver = "1"
 qrcode = { version = "0.14", default-features = false }
 percent-encoding = "2"
 zeroize = "1"
+ratatui = { version = "0.29", features = ["crossterm"] }
 
 [features]
 # Enable the FUSE filesystem mount command.
