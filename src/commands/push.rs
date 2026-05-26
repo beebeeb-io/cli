@@ -465,6 +465,19 @@ async fn push_single_file(
                 }
             }
         }
+        if let Some(large_thumb) = crate::thumbnail::generate_large_from_file(&file_bytes, Some(mime_str)) {
+            if let Ok(large_encrypted) = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, &large_thumb.data) {
+                if let Err(e) = api.upload_thumbnail_large(&server_id, large_encrypted).await {
+                    if !ui::is_quiet() {
+                        eprintln!(
+                            "  {} {}",
+                            "note".custom_color(crate::colors::INK_DIM),
+                            format!("large thumbnail upload skipped: {e}").custom_color(crate::colors::INK_DIM),
+                        );
+                    }
+                }
+            }
+        }
     }
 
     let file_elapsed = file_start.elapsed();

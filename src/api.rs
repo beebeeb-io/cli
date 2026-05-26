@@ -798,6 +798,29 @@ impl ApiClient {
         Err("thumbnail upload rate limited after 3 retries".to_string())
     }
 
+    /// Upload an encrypted large thumbnail for a file.
+    pub async fn upload_thumbnail_large(&self, file_id: &str, encrypted_data: Vec<u8>) -> Result<(), String> {
+        let token = self.require_auth()?;
+        for _ in 0..3 {
+            pace_if_needed().await;
+            let resp = self
+                .client
+                .put(self.url(&format!("/api/v1/files/{file_id}/thumbnail/large")))
+                .bearer_auth(&token)
+                .header("Content-Type", "application/octet-stream")
+                .body(encrypted_data.clone())
+                .send()
+                .await
+                .map_err(format_request_error)?;
+            match parse_response(resp).await {
+                Err(e) if e == "__rate_limited__" => continue,
+                Err(e) => return Err(format!("large thumbnail upload: {e}")),
+                Ok(_) => return Ok(()),
+            }
+        }
+        Err("large thumbnail upload rate limited after 3 retries".to_string())
+    }
+
     /// Download the raw encrypted bytes for a file.
     pub async fn download_file(&self, file_id: &str) -> Result<Vec<u8>, String> {
         let token = self.require_auth()?;

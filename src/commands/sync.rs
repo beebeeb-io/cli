@@ -1966,6 +1966,11 @@ async fn upload_file_to(
                 let _ = api.upload_thumbnail(server_id, thumb_encrypted).await;
             }
         }
+        if let Some(large_thumb) = crate::thumbnail::generate_large_from_file(&file_bytes, Some(mime_str)) {
+            if let Ok(large_encrypted) = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, &large_thumb.data) {
+                let _ = api.upload_thumbnail_large(server_id, large_encrypted).await;
+            }
+        }
     }
 
     server_id.parse().map_err(|e| format!("invalid file id: {e}"))

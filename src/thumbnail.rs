@@ -47,6 +47,37 @@ pub fn generate_from_file(file_bytes: &[u8], mime: Option<&str>) -> Option<Thumb
     })
 }
 
+/// Generate a large (1600px) WebP thumbnail for full-screen preview.
+///
+/// Returns `None` for non-image MIME types, if decoding fails, or if the
+/// source image is too small to benefit from a large thumbnail.
+pub fn generate_large_from_file(file_bytes: &[u8], mime: Option<&str>) -> Option<ThumbnailResult> {
+    let is_image = mime.map(|m| m.starts_with("image/")).unwrap_or(false);
+    if !is_image {
+        return None;
+    }
+
+    let img = image::load_from_memory(file_bytes).ok()?;
+    let (width, height) = img.dimensions();
+
+    // Skip large thumbnail if source is smaller than medium (768px) —
+    // the medium already captures the full resolution.
+    if width <= 768 && height <= 768 {
+        return None;
+    }
+
+    let rgba = img.into_rgba8().into_raw();
+
+    let config = beebeeb_core::thumbnail::ThumbnailConfig::large();
+    let output = beebeeb_core::thumbnail::generate_thumbnail(&rgba, width, height, &config).ok()?;
+
+    Some(ThumbnailResult {
+        data: output.data,
+        width: output.width,
+        height: output.height,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
