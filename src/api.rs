@@ -69,8 +69,16 @@ pub struct ApiClient {
 impl ApiClient {
     pub fn from_config() -> Self {
         let config = load_config();
+        // 300s per-request timeout, matching beebeeb-upload, so a stalled chunk
+        // PUT fails instead of hanging forever. Long-lived calls that need more
+        // (the SSE sync stream) override this per-request with their own
+        // `.timeout(...)`, so this default is safe for them.
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .unwrap_or_else(|_| Client::new());
         Self {
-            client: Client::new(),
+            client,
             base_url: config.api_url,
             token: config.session_token,
         }
@@ -819,6 +827,30 @@ impl ApiClient {
             }
         }
         Err("large thumbnail upload rate limited after 3 retries".to_string())
+    }
+
+    /// Open a streaming download of a file's encrypted bytes.
+    ///
+    /// Returns the live `Response` (headers + unread body) so the caller can
+    /// read the body incrementally with `Response::chunk()` instead of
+    /// buffering the whole payload. A 600s timeout overrides the client default
+    /// (large files), matching `beebeeb-upload`.
+    pub async fn download_stream(&self, file_id: &str) -> Result<reqwest::Response, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .get(self.url(&format!("/api/v1/files/{file_id}/download")))
+            .bearer_auth(token)
+            .timeout(std::time::Duration::from_secs(600))
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("download failed ({status}): {body}"));
+        }
+        Ok(resp)
     }
 
     /// Download the raw encrypted bytes for a file.

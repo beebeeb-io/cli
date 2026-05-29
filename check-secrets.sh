@@ -79,7 +79,14 @@ done
 
 # 3. Scan file contents for secrets
 SECRET_PATTERNS=(
-    'PRIVATE KEY'
+    # Match real PEM-wrapped private-key material (any key type:
+    # RSA/EC/OPENSSH/ENCRYPTED/DSA/etc.) via its header line. This intentionally
+    # does NOT match the bare prose phrase "private key" or field/column names
+    # like "wrapped_private_key" in markdown, code comments, SQL, or JSON --
+    # those are not secrets and were causing false positives that trained
+    # developers to bypass the hook with --no-verify. (Pattern starts with a
+    # bracket, not a dash, so grep does not parse it as a flag.)
+    '[-]{5}BEGIN [A-Z0-9 ]*PRIVATE KEY[-]{5}'
     'AWS_SECRET_ACCESS_KEY'
     'AWS_ACCESS_KEY_ID'
     'sk_live_'

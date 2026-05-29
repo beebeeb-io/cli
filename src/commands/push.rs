@@ -298,9 +298,8 @@ async fn push_single_file(
 ) -> Result<Option<UploadResult>, String> {
     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
 
-    let file_bytes = std::fs::read(path).map_err(|e| format!("failed to read file: {e}"))?;
-    let file_size = file_bytes.len() as u64;
-
+    // The streaming uploader stats + reads the file itself in bounded chunks;
+    // no full read here.
     let master_key = load_master_key()?;
 
     let parent_uuid: Option<uuid::Uuid> = parent_id.as_deref().and_then(|s| s.parse().ok());
@@ -368,119 +367,36 @@ async fn push_single_file(
         }
     };
 
-    // ── Encrypt name + chunks under the resolved file key ─────────────────────
-    let file_key = beebeeb_core::kdf::derive_file_key(&master_key, file_id.to_string().as_bytes());
+    // ── Streaming, constant-memory upload ─────────────────────────────────────
+    // For a replace, `file_id` already equals the existing id, so the file key,
+    // the encrypted name, and the server-side version all derive from one id.
+    let master_key = std::sync::Arc::new(master_key);
+    let _ = replace_file_id; // `file_id` already carries the existing id on replace
+    let display_name = upload_name.clone();
 
-    // Encrypt the filename (MIME type is now part of the encrypted envelope)
-    let mime = beebeeb_core::media::guess_mime_type(&upload_name);
-    let name_encrypted = beebeeb_core::encrypt::encrypt_name(&master_key, &file_id.to_string(), &upload_name, mime)
-        .map_err(|e| format!("failed to encrypt filename: {e}"))?;
-    let file_name = upload_name; // use the possibly-suffixed name for display
-
-    // Chunk the file using the adaptive chunk-size ladder
-    let plan = beebeeb_types::plan_chunks(file_size, beebeeb_types::ChunkProfile::Desktop);
-    let chunk_size = plan.chunk_size_bytes as usize;
-    let total_chunks = plan.chunk_count as usize;
-
-    let mut encrypted_chunks: Vec<(u32, Vec<u8>)> = Vec::with_capacity(total_chunks);
-    let mut total_encrypted_size: i64 = 0;
-
-    // ── Time the encrypt + upload together ────────────────────────────────────
-    let file_start = std::time::Instant::now();
-
-    if file_bytes.is_empty() {
-        // Encrypt an empty chunk
-        let bytes =
-            beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, &[]).map_err(|e| format!("encrypt chunk: {e}"))?;
-        total_encrypted_size += bytes.len() as i64;
-        encrypted_chunks.push((0, bytes));
-    } else {
-        for (i, chunk) in file_bytes.chunks(chunk_size).enumerate() {
-            let bytes = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, chunk)
-                .map_err(|e| format!("encrypt chunk {i}: {e}"))?;
-            total_encrypted_size += bytes.len() as i64;
-            encrypted_chunks.push((i as u32, bytes));
-        }
-    }
-
-    let parent_uuid = match &parent_id {
-        Some(pid) => {
-            let parsed: uuid::Uuid = pid.parse().map_err(|e| format!("invalid parent ID: {e}"))?;
-            Some(parsed)
-        }
+    let parent_uuid: Option<uuid::Uuid> = match &parent_id {
+        Some(pid) => Some(pid.parse().map_err(|e| format!("invalid parent ID: {e}"))?),
         None => None,
     };
 
-    let is_media = beebeeb_core::media::is_media(mime);
-    let effective_file_id = replace_file_id.unwrap_or(file_id);
-
-    // V2 upload: init → chunks → complete (stores chunk layout in object_versions)
-    let init_resp = api
-        .upload_init(
-            Some(effective_file_id),
-            &name_encrypted,
-            parent_uuid,
-            total_encrypted_size,
-            total_chunks as i32,
-            is_media,
-        )
-        .await?;
-
-    let server_id = init_resp
-        .get("file_id")
-        .or_else(|| init_resp.get("id"))
-        .and_then(|v| v.as_str())
-        .unwrap_or(&file_id.to_string().as_str())
-        .to_string();
-
-    for (idx, data) in encrypted_chunks {
-        api.upload_chunk(&server_id, idx, data).await?;
-    }
-
-    let _result = api.upload_complete(&server_id).await?;
-
-    // ── Thumbnail generation + upload (best-effort, non-fatal) ──────────
-    if let Some(mime_str) = mime {
-        if let Some(thumb) = crate::thumbnail::generate_from_file(&file_bytes, Some(mime_str)) {
-            match beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, &thumb.data) {
-                Ok(thumb_encrypted) => {
-                    if let Err(e) = api.upload_thumbnail(&server_id, thumb_encrypted).await {
-                        if !ui::is_quiet() {
-                            eprintln!(
-                                "  {} {}",
-                                "note".custom_color(crate::colors::INK_DIM),
-                                format!("thumbnail upload skipped: {e}").custom_color(crate::colors::INK_DIM),
-                            );
-                        }
-                    }
-                }
-                Err(e) => {
-                    if !ui::is_quiet() {
-                        eprintln!(
-                            "  {} {}",
-                            "note".custom_color(crate::colors::INK_DIM),
-                            format!("thumbnail encrypt failed: {e}").custom_color(crate::colors::INK_DIM),
-                        );
-                    }
-                }
-            }
-        }
-        if let Some(large_thumb) = crate::thumbnail::generate_large_from_file(&file_bytes, Some(mime_str)) {
-            if let Ok(large_encrypted) = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, &large_thumb.data) {
-                if let Err(e) = api.upload_thumbnail_large(&server_id, large_encrypted).await {
-                    if !ui::is_quiet() {
-                        eprintln!(
-                            "  {} {}",
-                            "note".custom_color(crate::colors::INK_DIM),
-                            format!("large thumbnail upload skipped: {e}").custom_color(crate::colors::INK_DIM),
-                        );
-                    }
-                }
-            }
-        }
-    }
-
+    let file_start = std::time::Instant::now();
+    let spec = crate::upload::UploadSpec {
+        path: path.to_path_buf(),
+        file_name: upload_name,
+        file_id,
+        parent_id: parent_uuid,
+        shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    let outcome = crate::upload::stream_encrypt_upload(
+        api,
+        std::sync::Arc::clone(&master_key),
+        spec,
+        &crate::upload::NoopProgress,
+    )
+    .await?;
+    let server_id = outcome.server_id.to_string();
     let file_elapsed = file_start.elapsed();
+    let file_name = display_name; // possibly-suffixed name for display
 
     // Mark this upload so a `bb watch` remote-event handler in the same
     // process doesn't redundantly download the file we just sent.
@@ -489,8 +405,8 @@ async fn push_single_file(
     let upload_result = UploadResult {
         name: file_name.clone(),
         id: server_id.clone(),
-        size_bytes: file_size,
-        encrypted_bytes: total_encrypted_size as u64,
+        size_bytes: outcome.plaintext_bytes,
+        encrypted_bytes: outcome.ciphertext_bytes,
         duration: file_elapsed,
     };
 
@@ -504,7 +420,7 @@ async fn push_single_file(
                 "  {} {:<36}{:>8}  {:>10}  {}",
                 "\u{2713}".custom_color(crate::colors::GREEN_OK),
                 file_name.custom_color(crate::colors::INK),
-                ui::human_size(total_encrypted_size as u64).custom_color(crate::colors::INK_DIM),
+                ui::human_size(upload_result.encrypted_bytes).custom_color(crate::colors::INK_DIM),
                 ui::human_speed(speed).custom_color(crate::colors::GREEN_OK),
                 format!("{}ms", file_elapsed.as_millis()).custom_color(crate::colors::INK_DIM),
             );

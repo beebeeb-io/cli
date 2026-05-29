@@ -28,7 +28,7 @@ Generated from `bb --help`. Source of truth is `src/main.rs` (clap derive).
 ### Files
 
 - `bb push <path>` (alias `bb upload`) — encrypt and upload a file or folder. Uses V2 upload path (init → chunks → complete) so chunk metadata is stored in `object_versions`.
-- `bb pull <id-or-path>` (alias `bb download`) — download and decrypt.
+- `bb pull <id-or-path>` (alias `bb download`) — **streaming** download + decrypt (constant memory, live progress bar). Preserves legacy decrypt: JSON-blob chunks and pre-`bb repair` binary-UUID files fall back to the buffered path.
 - `bb ls [path]` — list vault contents.
 - `bb quota` — storage usage with a colour-coded bar.
 
@@ -40,7 +40,7 @@ Generated from `bb --help`. Source of truth is `src/main.rs` (clap derive).
 
 ### Sync & mount
 
-- `bb sync <local> [remote]` — bidirectional folder sync (continuous by default; `--once`, `--daemon`, `--stop`, `--dry-run`, `--force`, `--delete`). V2 uploads. Remote path auto-strips `~/` home prefix. Gracefully handles 409 stuck uploads and corrupt remote files (trashes + re-uploads next run).
+- `bb sync <local> [remote]` — bidirectional folder sync (continuous by default; `--once`, `--daemon`, `--stop`, `--dry-run`, `--force`, `--delete`, `--concurrency`, `--rehash`). V2 **streaming** uploads (constant memory). Remote path auto-strips `~/` home prefix. Gracefully handles 409 stuck uploads and corrupt remote files (trashes + re-uploads next run). Shows a scan spinner, then live per-file + overall progress bars (rich TTY only). `--rehash` forces a full re-hash of every file instead of trusting unchanged `(size, mtime)` entries from the last sync.
 - `bb watch <path>` — deprecated alias for `bb sync`.
 - `bb mount <mountpoint>` — FUSE mount. Interactive setup wizard guides through macFUSE/libfuse3 installation. V2 uploads.
 - `bb unmount <mountpoint>` — unmount a previously mounted vault.
@@ -55,6 +55,57 @@ Generated from `bb --help`. Source of truth is `src/main.rs` (clap derive).
 - `bb speedtest` — benchmark network throughput + crypto speed against the API.
 - `bb repair [--dry-run]` — re-encrypt files stuck in the legacy binary-UUID key derivation so they open in the web app.
 - `bb completions <shell>` — print a shell completion script (`bash`, `zsh`, `fish`, `powershell`).
+
+## Upload pipeline (`src/upload.rs`)
+
+`bb push` and `bb sync` share **one** streaming upload driver:
+`upload::stream_encrypt_upload(api, Arc<MasterKey>, UploadSpec, &dyn ChunkProgress)`.
+
+- Consumes `beebeeb_core::chunk_stream::ChunkEncryptor` (the shared core
+  primitive). A producer task owns the encryptor and runs `next_chunk()` inside
+  `spawn_blocking` (AES off the reactor), feeding a bounded `tokio::mpsc`
+  (cap 1); the consumer PUTs each chunk and advances progress on the 200.
+- **Constant memory**: peak ≈ `concurrency × ~4 × chunk_size`, never
+  file-size- or tree-size-proportional. (Measured: ~75 MiB RSS for a 5.2 GB
+  tree.) Replaces the old read-whole-file + encrypt-all-into-RAM path.
+- `upload_init` uses `ChunkEncryptor::expected_total_ciphertext()`
+  (`= size + 28·chunk_count`) — no full read. `finish()` guards a file that
+  shrank mid-stream; a re-stat before init guards a size change.
+- **Cancellation**: a shared `AtomicBool` (set by the Ctrl-C handler) is checked
+  at the top of the producer loop and consumer loop; the consumer always
+  `rx.close()`s before awaiting the producer (cap-1 deadlock-proof).
+- **Progress** uses `indicatif` (now an active dependency): a scan spinner
+  around `walk`/`scan_local_files` + a `MultiProgress` (overall bar + transient
+  per-file bars), amber accent (xterm 214), bytes advancing only on
+  server-confirmed chunks. `--json`/`--quiet`/non-TTY → a no-op `ChunkProgress`
+  + the existing plain `println!` lines.
+- Thumbnails (image/* only, one bounded ≤64 MiB read) are best-effort and
+  non-fatal, encrypted with the per-file key derived in the CLI.
+- The `ApiClient` (`api.rs`) now carries a **300 s per-request timeout**; the SSE
+  sync stream overrides it per-request with its own 24 h timeout.
+
+## Download pipeline (`src/download.rs`)
+
+`bb pull` and `bb sync`'s `download_to` share `download::stream_download_decrypt`
+— the read-side counterpart to `upload.rs`:
+
+- Reads the response body incrementally with `ApiClient::download_stream` +
+  `reqwest::Response::chunk()` (no whole-payload buffer), reassembles one logical
+  frame at a time, decrypts via `beebeeb_core::chunk_stream::ChunkDecryptor`
+  (`push_frame`), and writes to a `.tmp` + atomic rename. Constant memory
+  (~one chunk; measured ~40 MiB RSS for a 256 MiB download).
+- Frame sizing = `total / chunk_count` for the first N-1 frames, remainder for
+  the last (matches `crypto::decrypt_raw_chunks`); `total` from `Content-Length`
+  or `X-Original-Size + 28·chunk_count`. The download API sends no
+  `X-Chunk-Size`, so `push_frame` (self-describing per frame) is used.
+- **Legacy preserved** (user-data safety): JSON-blob chunks (first byte `{`) and
+  pre-`bb repair` binary-UUID files fall back to the unchanged buffered
+  `crypto::decrypt_file_chunks` (which retries binary-UUID then string-UUID).
+  `ChunkDecryptor` only derives the string-UUID key, so a first-frame decrypt
+  failure triggers the buffered fallback. `bb repair` semantics intact.
+- 600 s download timeout (via `download_stream`), matching `beebeeb-upload`.
+- `bb pull --zip` (batch folder zip) stays buffered by design (the zip streamer
+  needs random access).
 
 ## Dependencies
 
