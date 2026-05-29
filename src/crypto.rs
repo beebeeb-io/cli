@@ -64,25 +64,45 @@ pub fn decrypt_name(
 
     // Try each key derivation against each blob format.
     for file_key in [&key_from_string, &key_from_binary] {
-        // Format 1: Rust-native EncryptedBlob (cipher_suite + byte-array fields).
-        if let Ok(blob) = serde_json::from_str::<EncryptedBlob>(name_encrypted_str) {
+        if let Some(name) = decrypt_name_with_key(file_key, name_encrypted_str) {
+            return Some(name);
+        }
+    }
+
+    None
+}
+
+/// Decrypt a `name_encrypted` value with a **known** file key (rather than one
+/// derived from the master key + file id). Used for file-request uploads, whose
+/// content key `C` is recovered via the request-key path — the filename is then
+/// encrypted directly under `FileKey(C)`, not under a master-derived key.
+///
+/// Handles both server blob formats (Rust `EncryptedBlob` JSON and the web-app
+/// base64 `{nonce, ciphertext}` blob) and the plaintext fast-path.
+pub fn decrypt_name_with_key(file_key: &beebeeb_core::kdf::FileKey, name_encrypted_str: &str) -> Option<String> {
+    // Plaintext fast path — not JSON at all.
+    if !name_encrypted_str.starts_with('{') {
+        return Some(name_encrypted_str.to_string());
+    }
+
+    // Format 1: Rust-native EncryptedBlob (cipher_suite + byte-array fields).
+    if let Ok(blob) = serde_json::from_str::<EncryptedBlob>(name_encrypted_str) {
+        if let Ok(name) = beebeeb_core::encrypt::decrypt_metadata(file_key, &blob) {
+            return Some(unwrap_metadata_json(&name));
+        }
+    }
+
+    // Format 2: Web-app blob (nonce + ciphertext as base64 strings).
+    if let Ok(web_blob) = serde_json::from_str::<WebAppBlob>(name_encrypted_str) {
+        let b64 = base64::engine::general_purpose::STANDARD;
+        if let (Ok(nonce), Ok(ciphertext)) = (b64.decode(&web_blob.nonce), b64.decode(&web_blob.ciphertext)) {
+            let blob = EncryptedBlob {
+                cipher_suite: beebeeb_types::CipherSuite::V1Aes256Gcm,
+                nonce,
+                ciphertext,
+            };
             if let Ok(name) = beebeeb_core::encrypt::decrypt_metadata(file_key, &blob) {
                 return Some(unwrap_metadata_json(&name));
-            }
-        }
-
-        // Format 2: Web-app blob (nonce + ciphertext as base64 strings).
-        if let Ok(web_blob) = serde_json::from_str::<WebAppBlob>(name_encrypted_str) {
-            let b64 = base64::engine::general_purpose::STANDARD;
-            if let (Ok(nonce), Ok(ciphertext)) = (b64.decode(&web_blob.nonce), b64.decode(&web_blob.ciphertext)) {
-                let blob = EncryptedBlob {
-                    cipher_suite: beebeeb_types::CipherSuite::V1Aes256Gcm,
-                    nonce,
-                    ciphertext,
-                };
-                if let Ok(name) = beebeeb_core::encrypt::decrypt_metadata(file_key, &blob) {
-                    return Some(unwrap_metadata_json(&name));
-                }
             }
         }
     }

@@ -467,6 +467,118 @@ fn decode_any_b64(s: &str) -> Option<Vec<u8>> {
         .ok()
 }
 
+// ───────────────────────────── Receiving (decrypt) ─────────────────────────
+//
+// Files uploaded *via a file request* are not encrypted under a master-derived
+// file key — the anonymous uploader sealed a random content key `C` to the
+// request's public key. The owner recovers `C` by unwrapping the request private
+// key (`R_priv`, under the master key) and running ECDH against the uploader's
+// ephemeral public key. The server marks these rows by populating
+// `file_request_id` + `sender_ephemeral_pubkey` + `wrapped_content_key` (all null
+// on normal uploads).
+
+/// The request-upload fields the server attaches to a received file row.
+struct RequestUploadFields {
+    request_id: uuid::Uuid,
+    e_pub: [u8; 32],
+    wrapped_content_key: Vec<u8>,
+}
+
+/// Extract + validate the request-upload fields from a `GET /files` row. Returns
+/// `None` for a normal (non-request) file, i.e. when the fields are absent/null.
+fn request_upload_fields(file: &serde_json::Value) -> Option<RequestUploadFields> {
+    let request_id = file
+        .get("file_request_id")
+        .and_then(|v| v.as_str())?
+        .parse::<uuid::Uuid>()
+        .ok()?;
+    let e_pub_bytes = decode_any_b64(file.get("sender_ephemeral_pubkey").and_then(|v| v.as_str())?)?;
+    if e_pub_bytes.len() != 32 {
+        return None;
+    }
+    let mut e_pub = [0u8; 32];
+    e_pub.copy_from_slice(&e_pub_bytes);
+    let wrapped_content_key = decode_any_b64(file.get("wrapped_content_key").and_then(|v| v.as_str())?)?;
+    Some(RequestUploadFields {
+        request_id,
+        e_pub,
+        wrapped_content_key,
+    })
+}
+
+/// Cheap check: does this file row look like a file-request upload?
+pub fn is_request_upload(file: &serde_json::Value) -> bool {
+    file.get("file_request_id").and_then(|v| v.as_str()).is_some()
+        && file.get("sender_ephemeral_pubkey").and_then(|v| v.as_str()).is_some()
+        && file.get("wrapped_content_key").and_then(|v| v.as_str()).is_some()
+}
+
+/// Resolves the per-file content key for request-uploaded files. Fetches the
+/// owner's file requests once (for the wrapped private keys), then unwraps each
+/// `R_priv` lazily and caches it — so listing many files from the same request
+/// only unwraps once.
+pub struct RequestKeyResolver {
+    /// request_id → (wrapped_private_key_b64, wrap_nonce_b64) from `GET /file-requests`.
+    wrapped: std::collections::HashMap<uuid::Uuid, (String, String)>,
+    /// Cache of unwrapped request private keys.
+    privs: std::collections::HashMap<uuid::Uuid, Zeroizing<[u8; 32]>>,
+}
+
+impl RequestKeyResolver {
+    /// Build by fetching `GET /api/v1/file-requests`. Empty (but valid) when the
+    /// user owns no requests.
+    pub async fn load(api: &ApiClient) -> Result<Self, String> {
+        let result = api.list_file_requests().await?;
+        let mut wrapped = std::collections::HashMap::new();
+        if let Some(items) = result.get("file_requests").and_then(|v| v.as_array()) {
+            for r in items {
+                let id = r
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<uuid::Uuid>().ok());
+                let w = r.get("wrapped_private_key").and_then(|v| v.as_str());
+                let n = r.get("wrap_nonce").and_then(|v| v.as_str());
+                if let (Some(id), Some(w), Some(n)) = (id, w, n) {
+                    wrapped.insert(id, (w.to_string(), n.to_string()));
+                }
+            }
+        }
+        Ok(Self {
+            wrapped,
+            privs: std::collections::HashMap::new(),
+        })
+    }
+
+    /// Unwrap (and cache) the request private key for `request_id`.
+    fn request_priv(&mut self, master_key: &MasterKey, request_id: uuid::Uuid) -> Option<Zeroizing<[u8; 32]>> {
+        if let Some(p) = self.privs.get(&request_id) {
+            return Some(p.clone());
+        }
+        let (w_b64, n_b64) = self.wrapped.get(&request_id)?;
+        let wrapped = decode_any_b64(w_b64)?;
+        let nonce = decode_any_b64(n_b64)?;
+        let r_priv = file_request::unwrap_request_private(master_key, REQUEST_WRAP_CONTEXT, &wrapped, &nonce).ok()?;
+        self.privs.insert(request_id, r_priv.clone());
+        Some(r_priv)
+    }
+
+    /// Recover the content key `C` (as a `FileKey`) for a request-uploaded file
+    /// row. Returns `None` for normal files or if the key material is missing /
+    /// the row's request is unknown to this owner.
+    pub fn content_key(&mut self, master_key: &MasterKey, file: &serde_json::Value) -> Option<FileKey> {
+        let fields = request_upload_fields(file)?;
+        let r_priv = self.request_priv(master_key, fields.request_id)?;
+        let c = file_request::open_request_upload(
+            &r_priv,
+            &fields.e_pub,
+            REQUEST_SEAL_CONTEXT,
+            &fields.wrapped_content_key,
+        )
+        .ok()?;
+        Some(FileKey::from_bytes(*c))
+    }
+}
+
 /// `bb request rm <id>` — close (default) or hard-delete (`--delete`) a request.
 pub async fn rm(id: String, delete: bool) -> Result<(), String> {
     let api = ApiClient::from_config();
@@ -758,5 +870,77 @@ mod tests {
         }
         let plaintext = crate::crypto::try_decrypt_all_chunks(&file_key, &all, chunks.len() as u32).expect("decrypts");
         assert_eq!(plaintext, body);
+    }
+
+    #[test]
+    fn receive_decrypts_request_uploaded_file_row() {
+        // Full receiving path: an uploader seals a file; the server stores the
+        // request fields on the file row; the owner's RequestKeyResolver recovers
+        // the content key from a `GET /files`-shaped row and decrypts name + body.
+        let mk = test_master_key();
+        let request_id = "11111111-2222-3333-4444-555555555555".parse::<uuid::Uuid>().unwrap();
+        let (r_priv, r_pub) = generate_request_keypair();
+        let (wrapped, nonce) = file_request::wrap_request_private(&mk, REQUEST_WRAP_CONTEXT, &r_priv).unwrap();
+
+        // Uploader side (mirrors `bb request send`).
+        let body = b"received over a file request, sealed to the request key.".repeat(3);
+        let (metadata, chunks) =
+            seal_file_for_request(&r_pub, "received.bin", Some("application/octet-stream"), &body, 24).unwrap();
+        let meta: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+
+        // Server-shaped file row (what GET /files returns for a request upload).
+        let file_row = serde_json::json!({
+            "id": "99999999-8888-7777-6666-555555555555",
+            "name_encrypted": meta["name_encrypted"].as_str().unwrap(),
+            "chunk_count": chunks.len(),
+            "is_folder": false,
+            "file_request_id": request_id.to_string(),
+            "sender_ephemeral_pubkey": meta["sender_ephemeral_pubkey"].as_str().unwrap(),
+            "wrapped_content_key": meta["wrapped_key"].as_str().unwrap(),
+        });
+        assert!(is_request_upload(&file_row));
+
+        // A normal file row must NOT be treated as a request upload.
+        let normal_row = serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000000",
+            "name_encrypted": "{}",
+            "file_request_id": serde_json::Value::Null,
+        });
+        assert!(!is_request_upload(&normal_row));
+
+        // Owner side: build a resolver seeded with the wrapped private key (as the
+        // list endpoint would return it) and recover the content key.
+        let mut resolver = RequestKeyResolver {
+            wrapped: std::collections::HashMap::from([(
+                request_id,
+                (b64std().encode(&wrapped), b64std().encode(&nonce)),
+            )]),
+            privs: std::collections::HashMap::new(),
+        };
+        let content_key = resolver.content_key(&mk, &file_row).expect("recovers content key");
+
+        // Name decrypts via the request content key.
+        let name =
+            crate::crypto::decrypt_name_with_key(&content_key, file_row["name_encrypted"].as_str().unwrap()).unwrap();
+        assert_eq!(name, "received.bin");
+
+        // Body decrypts via the shared raw-chunk path.
+        let mut all = Vec::new();
+        for (_idx, c) in &chunks {
+            all.extend_from_slice(c);
+        }
+        let plaintext = crate::crypto::try_decrypt_all_chunks(&content_key, &all, chunks.len() as u32).unwrap();
+        assert_eq!(plaintext, body);
+
+        // R_priv is cached after the first resolve.
+        assert!(resolver.privs.contains_key(&request_id));
+
+        // An unknown request id yields no key (graceful, not a panic).
+        let orphan_row = serde_json::json!({
+            "file_request_id": "deadbeef-0000-0000-0000-000000000000",
+            "sender_ephemeral_pubkey": meta["sender_ephemeral_pubkey"].as_str().unwrap(),
+            "wrapped_content_key": meta["wrapped_key"].as_str().unwrap(),
+        });
+        assert!(resolver.content_key(&mk, &orphan_row).is_none());
     }
 }

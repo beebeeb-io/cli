@@ -82,6 +82,16 @@ pub async fn run(path: Option<String>) -> Result<(), String> {
 
     let mut decrypted: Vec<DecryptedFile> = Vec::with_capacity(files.len());
 
+    // Files uploaded via a file request decrypt via the request-key path, not
+    // the master-derived path. Only pay for the extra `GET /file-requests` when
+    // at least one such file is present in this listing.
+    let mut request_keys: Option<crate::commands::request::RequestKeyResolver> =
+        if files.iter().any(crate::commands::request::is_request_upload) {
+            Some(crate::commands::request::RequestKeyResolver::load(&api).await?)
+        } else {
+            None
+        };
+
     for file in files {
         let file_id = file.get("id").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -89,7 +99,13 @@ pub async fn run(path: Option<String>) -> Result<(), String> {
             .get("name_encrypted")
             .and_then(|v| v.as_str())
             .ok_or_else(|| format!("server response missing name_encrypted for file {file_id}"))?;
-        let name = match decrypt_name(&master_key, file_id, name_encrypted) {
+        // Request-uploaded file: recover the content key C and decrypt the name
+        // with it. Falls back to the normal master-key path on any miss.
+        let request_name = request_keys
+            .as_mut()
+            .and_then(|rk| rk.content_key(&master_key, file))
+            .and_then(|c| crate::crypto::decrypt_name_with_key(&c, name_encrypted));
+        let name = match request_name.or_else(|| decrypt_name(&master_key, file_id, name_encrypted)) {
             Some(n) => n,
             None => {
                 // Old binary-UUID key derivation — show encrypted ID instead of failing

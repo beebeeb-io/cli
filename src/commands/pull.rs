@@ -52,11 +52,27 @@ pub async fn run(file_id: String, output: Option<PathBuf>, zip: bool) -> Result<
     // Load master key
     let master_key = load_master_key()?;
 
+    // File-request upload? Recover its content key C via the request-key path;
+    // it decrypts both the name and the chunks (normal files use the
+    // master-derived path below).
+    let request_content_key: Option<beebeeb_core::kdf::FileKey> =
+        if crate::commands::request::is_request_upload(&file_meta) {
+            crate::commands::request::RequestKeyResolver::load(&api)
+                .await
+                .ok()
+                .and_then(|mut rk| rk.content_key(&master_key, &file_meta))
+        } else {
+            None
+        };
+
     // Try to decrypt the filename for display and default output path.
     // Uses the shared crypto module which handles all server formats
     // (Rust EncryptedBlob, web-app base64 blob, plaintext) and both
     // UUID key derivations (binary and string).
-    let decrypted_name = crate::crypto::decrypt_name(&master_key, &file_id, name_encrypted_str);
+    let decrypted_name = match &request_content_key {
+        Some(c) => crate::crypto::decrypt_name_with_key(c, name_encrypted_str),
+        None => crate::crypto::decrypt_name(&master_key, &file_id, name_encrypted_str),
+    };
 
     let is_folder = file_meta.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
 
@@ -70,6 +86,63 @@ pub async fn run(file_id: String, output: Option<PathBuf>, zip: bool) -> Result<
 
     // Output path (needed up front for the streaming write).
     let out_path = output.unwrap_or_else(|| PathBuf::from(decrypted_name.as_deref().unwrap_or(&file_id)));
+
+    // File-request uploads are sealed under a per-file content key C, not the
+    // master-derived key the streaming path assumes. Decrypt them via the
+    // buffered request-key path (download whole blob → decrypt with C → write).
+    if let Some(c) = &request_content_key {
+        let dl_start = std::time::Instant::now();
+        let encrypted_bytes = api.download_file(&file_id).await?;
+        let dl_elapsed = dl_start.elapsed();
+
+        let dec_start = std::time::Instant::now();
+        let plaintext = crate::crypto::try_decrypt_all_chunks(c, &encrypted_bytes, chunk_count)?;
+        let dec_elapsed = dec_start.elapsed();
+
+        std::fs::write(&out_path, &plaintext).map_err(|e| format!("failed to write file: {e}"))?;
+
+        let dl_speed = if dl_elapsed.as_secs_f64() > 0.0 {
+            encrypted_bytes.len() as f64 / dl_elapsed.as_secs_f64()
+        } else {
+            0.0
+        };
+
+        if crate::ui::is_json() {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "id": file_id,
+                    "name": display_name,
+                    "size_bytes": plaintext.len(),
+                    "download_speed_bps": dl_speed as u64,
+                    "download_ms": dl_elapsed.as_millis() as u64,
+                    "decrypt_ms": dec_elapsed.as_millis() as u64,
+                    "output": out_path.display().to_string(),
+                }))
+                .unwrap()
+            );
+        } else if crate::ui::is_quiet() {
+            println!("{}", out_path.display());
+        } else {
+            println!(
+                "  {} {}  {}  {}",
+                "\u{2713}".custom_color(crate::colors::GREEN_OK),
+                display_name.custom_color(crate::colors::INK),
+                crate::ui::human_size(plaintext.len() as u64).custom_color(crate::colors::INK_DIM),
+                crate::ui::human_speed(dl_speed).custom_color(crate::colors::GREEN_OK)
+            );
+            println!(
+                "    {}",
+                format!(
+                    "{}ms download \u{00b7} {}ms decrypt",
+                    dl_elapsed.as_millis(),
+                    dec_elapsed.as_millis()
+                )
+                .custom_color(crate::colors::INK_DIM)
+            );
+        }
+        return Ok(());
+    }
 
     // Estimate the encrypted size for the progress bar length.
     let size_bytes = file_meta.get("size_bytes").and_then(|v| v.as_i64()).unwrap_or(0) as u64;
@@ -171,6 +244,18 @@ async fn resolve_as_path(api: &ApiClient, path: &str) -> Result<(String, Option<
 }
 
 async fn pull_folder(api: &ApiClient, folder_id: &str, out_dir: &std::path::Path) -> Result<(), String> {
+    // A single resolver, shared across the whole folder tree, so request-uploaded
+    // files only trigger one `GET /file-requests` and each R_priv is unwrapped once.
+    let mut request_keys: Option<crate::commands::request::RequestKeyResolver> = None;
+    pull_folder_inner(api, folder_id, out_dir, &mut request_keys).await
+}
+
+async fn pull_folder_inner(
+    api: &ApiClient,
+    folder_id: &str,
+    out_dir: &std::path::Path,
+    request_keys: &mut Option<crate::commands::request::RequestKeyResolver>,
+) -> Result<(), String> {
     let master_key = load_master_key()?;
 
     std::fs::create_dir_all(out_dir).map_err(|e| format!("failed to create directory: {e}"))?;
@@ -193,22 +278,49 @@ async fn pull_folder(api: &ApiClient, folder_id: &str, out_dir: &std::path::Path
         let is_subfolder = item.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
         let name_enc = item.get("name_encrypted").and_then(|v| v.as_str()).unwrap_or("");
 
-        let decrypted_name =
-            crate::crypto::decrypt_name(&master_key, item_id, name_enc).unwrap_or_else(|| item_id.to_string());
+        // Request-uploaded files decrypt their name via the request-key path.
+        let content_key = resolve_request_key(api, &master_key, item, request_keys).await;
+        let decrypted_name = content_key
+            .as_ref()
+            .and_then(|c| crate::crypto::decrypt_name_with_key(c, name_enc))
+            .or_else(|| crate::crypto::decrypt_name(&master_key, item_id, name_enc))
+            .unwrap_or_else(|| item_id.to_string());
 
         if is_subfolder {
             let sub_dir = out_dir.join(&decrypted_name);
-            Box::pin(pull_folder(api, item_id, &sub_dir)).await?;
+            Box::pin(pull_folder_inner(api, item_id, &sub_dir, request_keys)).await?;
         } else {
             let out_path = out_dir.join(&decrypted_name);
-            pull_single_file(api, item_id, &out_path).await?;
+            pull_single_file(api, item_id, &out_path, content_key).await?;
         }
     }
 
     Ok(())
 }
 
-async fn pull_single_file(api: &ApiClient, file_id: &str, out_path: &std::path::Path) -> Result<(), String> {
+/// Resolve a row's request content key, lazily loading the shared resolver the
+/// first time a request-uploaded file is seen in the tree.
+async fn resolve_request_key(
+    api: &ApiClient,
+    master_key: &beebeeb_core::kdf::MasterKey,
+    file: &serde_json::Value,
+    request_keys: &mut Option<crate::commands::request::RequestKeyResolver>,
+) -> Option<beebeeb_core::kdf::FileKey> {
+    if !crate::commands::request::is_request_upload(file) {
+        return None;
+    }
+    if request_keys.is_none() {
+        *request_keys = crate::commands::request::RequestKeyResolver::load(api).await.ok();
+    }
+    request_keys.as_mut().and_then(|rk| rk.content_key(master_key, file))
+}
+
+async fn pull_single_file(
+    api: &ApiClient,
+    file_id: &str,
+    out_path: &std::path::Path,
+    request_content_key: Option<beebeeb_core::kdf::FileKey>,
+) -> Result<(), String> {
     let master_key = load_master_key()?;
 
     let file_meta = api.get_file(file_id).await?;
@@ -219,6 +331,43 @@ async fn pull_single_file(api: &ApiClient, file_id: &str, out_path: &std::path::
         .and_then(|n| n.to_str())
         .unwrap_or("file")
         .to_string();
+
+    // File-request uploads are sealed under a per-file content key C, which the
+    // streaming path (master-derived key) can't decrypt — use the buffered
+    // request-key path and return early.
+    if let Some(c) = &request_content_key {
+        let dl_start = std::time::Instant::now();
+        let encrypted_bytes = api.download_file(file_id).await?;
+        let dl_elapsed = dl_start.elapsed();
+        let plaintext = crate::crypto::try_decrypt_all_chunks(c, &encrypted_bytes, chunk_count)?;
+
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("failed to create dir: {e}"))?;
+        }
+        std::fs::write(out_path, &plaintext).map_err(|e| format!("failed to write: {e}"))?;
+
+        if crate::ui::is_quiet() {
+            println!("{}", out_path.display());
+        } else if crate::ui::is_rich() {
+            let dl_speed = if dl_elapsed.as_secs_f64() > 0.0 {
+                encrypted_bytes.len() as f64 / dl_elapsed.as_secs_f64()
+            } else {
+                0.0
+            };
+            println!(
+                "    {} {}  {}  {}",
+                "\u{2713}".custom_color(crate::colors::GREEN_OK),
+                name.custom_color(crate::colors::INK),
+                crate::ui::human_size(plaintext.len() as u64).custom_color(crate::colors::INK_DIM),
+                crate::ui::human_speed(dl_speed).custom_color(crate::colors::GREEN_OK)
+            );
+            println!(
+                "      {}",
+                format!("{}ms · request", dl_elapsed.as_millis()).custom_color(crate::colors::INK_DIM)
+            );
+        }
+        return Ok(());
+    }
 
     // Streaming, constant-memory decrypt. Folder pulls print a per-file line, so
     // use a no-op progress sink (no nested bars).
