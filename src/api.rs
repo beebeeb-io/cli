@@ -69,8 +69,16 @@ pub struct ApiClient {
 impl ApiClient {
     pub fn from_config() -> Self {
         let config = load_config();
+        // 300s per-request timeout, matching beebeeb-upload, so a stalled chunk
+        // PUT fails instead of hanging forever. Long-lived calls that need more
+        // (the SSE sync stream) override this per-request with their own
+        // `.timeout(...)`, so this default is safe for them.
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .unwrap_or_else(|_| Client::new());
         Self {
-            client: Client::new(),
+            client,
             base_url: config.api_url,
             token: config.session_token,
         }

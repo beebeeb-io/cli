@@ -1,0 +1,512 @@
+//! Streaming, constant-memory chunk upload — the one upload driver shared by
+//! `bb sync` (parallel, file-level) and `bb push` (sequential).
+//!
+//! ## Why this exists
+//!
+//! The previous path (`std::fs::read` the whole file → encrypt *every* chunk
+//! into a `Vec` → sequential PUT) peaked at ~2× file size in RAM per file, and
+//! under `bb sync`'s `buffer_unordered(concurrency)` that became ~`8×` the
+//! largest file. It also showed no progress. This module replaces it with a
+//! look-ahead pipeline whose peak memory is bounded by the chunk size, not the
+//! file size.
+//!
+//! ## Pipeline
+//!
+//! ```text
+//!   producer (spawn_blocking, owns ChunkEncryptor)
+//!     → next_chunk()  [AES off the async reactor]
+//!     → bounded mpsc (cap 1) ── backpressure ──>  consumer (async)
+//!                                                   → PUT /files/{id}/chunks/{i}
+//!                                                   → progress.chunk_confirmed()
+//! ```
+//!
+//! The bounded channel gives natural look-ahead: while the consumer PUTs chunk
+//! N, the producer has already encrypted chunk N+1 (buffered) and is encrypting
+//! N+2. Peak ≈ `~4 × chunk_size` per file (read buffer + channel-held ciphertext
+//! + in-flight blocking chunk + PUT body), **never** file-size-proportional.
+//!
+//! ## Key handling
+//!
+//! The master key is used only synchronously on the async side (to encrypt the
+//! name, build the encryptor, and derive the thumbnail key). The
+//! `FileKey`-owning [`ChunkEncryptor`](beebeeb_core::chunk_stream::ChunkEncryptor)
+//! is the only thing moved into the blocking closure — raw `MasterKey` bytes are
+//! never copied (it is held behind an `Arc`).
+//!
+//! ## Cancellation
+//!
+//! `spawn_blocking` cannot be aborted mid-chunk, so a shared `AtomicBool`
+//! shutdown flag is checked at the top of every producer iteration and at the
+//! top of every consumer iteration. On any early exit the consumer **always**
+//! `rx.close()`s before awaiting the producer; closing the receiver wakes a
+//! producer parked on the cap-1 channel, so the pipeline can never deadlock.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
+
+use beebeeb_core::chunk_stream::{ChunkEncryptor, EncryptedChunk};
+use beebeeb_core::kdf::MasterKey;
+use beebeeb_types::ChunkProfile;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use uuid::Uuid;
+
+use crate::api::ApiClient;
+
+/// Sentinel error returned when an upload is cancelled (Ctrl-C / shutdown
+/// flag). Callers compare against this to count "remaining" rather than
+/// reporting a failure. Mirrors the existing `__rate_limited__` convention.
+pub const INTERRUPTED: &str = "__interrupted__";
+
+/// Look-ahead channel depth. `1` keeps peak memory tight while still
+/// overlapping "encrypt N+1" with "PUT N"; bump to `2` for a touch more
+/// overlap at the cost of one extra chunk resident.
+const CHANNEL_CAP: usize = 1;
+
+/// Thumbnails are best-effort. To honour the constant-memory promise we never
+/// read more than this much of a file just to make one.
+const MAX_THUMBNAIL_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Per-chunk AEAD overhead on the wire: `nonce(12) + tag(16)`.
+const CHUNK_OVERHEAD: u64 = 28;
+
+// ── Public surface ──────────────────────────────────────────────────────────
+
+/// Everything needed to upload one file.
+pub struct UploadSpec {
+    /// Local path to read from.
+    pub path: PathBuf,
+    /// Display + name-encryption filename (may be suffixed for keep-both).
+    pub file_name: String,
+    /// The file UUID. A fresh random id for a new file, or the existing id for
+    /// a server-side version replace (`bb push --replace`).
+    pub file_id: Uuid,
+    /// Destination folder, or `None` for the vault root.
+    pub parent_id: Option<Uuid>,
+    /// Shared cancellation flag (set by the Ctrl-C handler).
+    pub shutdown: Arc<AtomicBool>,
+}
+
+/// Result of a completed upload.
+pub struct UploadOutcome {
+    /// Server-confirmed file id.
+    pub server_id: Uuid,
+    /// Plaintext size (bytes).
+    pub plaintext_bytes: u64,
+    /// Total ciphertext uploaded (`plaintext + 28 * chunk_count`).
+    pub ciphertext_bytes: u64,
+}
+
+/// Progress sink. One instance per sync/push run; [`begin_file`] is called once
+/// per file and returns a per-file handle.
+///
+/// [`begin_file`]: ChunkProgress::begin_file
+pub trait ChunkProgress: Send + Sync {
+    /// Start tracking one file. `expected_ciphertext` is the bar length.
+    fn begin_file(&self, file_name: &str, expected_ciphertext: u64) -> Box<dyn FileProgress>;
+    /// Tear down any shared UI (called once after the upload phase). No-op by
+    /// default.
+    fn finish_all(&self) {}
+}
+
+/// Per-file progress handle. `Sync` so a `&dyn FileProgress` can be held across
+/// `.await` in a `Send` future (the watch loops upload from a spawned task).
+pub trait FileProgress: Send + Sync {
+    /// One server-confirmed chunk (called only after a 200 from the server, so
+    /// progress reflects honest, on-the-wire bytes — never queued bytes).
+    fn chunk_confirmed(&self, ciphertext_bytes: u64);
+    /// File finished; clears the transient per-file bar and, on success,
+    /// advances the overall file counter.
+    fn finish(self: Box<Self>, success: bool);
+}
+
+// ── No-op progress (used for --json / --quiet / non-TTY and the watch loops) ──
+
+/// Progress sink that does nothing — the caller keeps its plain `println!`
+/// status lines instead.
+pub struct NoopProgress;
+
+impl ChunkProgress for NoopProgress {
+    fn begin_file(&self, _: &str, _: u64) -> Box<dyn FileProgress> {
+        Box::new(NoopFileProgress)
+    }
+}
+
+struct NoopFileProgress;
+
+impl FileProgress for NoopFileProgress {
+    fn chunk_confirmed(&self, _: u64) {}
+    fn finish(self: Box<Self>, _: bool) {}
+}
+
+// ── indicatif progress (rich + TTY only) ──────────────────────────────────────
+
+/// Amber-accented multi-bar progress: one persistent overall bar plus a pool of
+/// transient per-file bars (at most `concurrency` alive at once, since
+/// `bb sync` only runs that many uploads concurrently).
+///
+/// Brand: the bar fill uses xterm colour 214 (the closest 256-colour match to
+/// brand amber `#f5b800`); everything else is dim. No emojis.
+pub struct BarProgress {
+    mp: MultiProgress,
+    overall: ProgressBar,
+    files_done: Arc<AtomicU64>,
+    files_total: u64,
+}
+
+impl BarProgress {
+    /// Build the multi-bar UI. `files_total` and `total_ciphertext` size the
+    /// overall bar (files counter + byte gauge respectively).
+    pub fn new(files_total: u64, total_ciphertext: u64) -> Self {
+        let mp = MultiProgress::new();
+        let overall = mp.add(ProgressBar::new(total_ciphertext.max(1)));
+        overall.set_style(
+            ProgressStyle::with_template(
+                "  {prefix:.dim} {bar:24.214/238} {bytes}/{total_bytes} · {bytes_per_sec} · ETA {eta}",
+            )
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
+            .progress_chars("━━─"),
+        );
+        overall.set_prefix(format!("0/{files_total} files"));
+        // Steady tick so speed/ETA refresh between confirmations.
+        overall.enable_steady_tick(Duration::from_millis(120));
+        Self {
+            mp,
+            overall,
+            files_done: Arc::new(AtomicU64::new(0)),
+            files_total,
+        }
+    }
+}
+
+impl ChunkProgress for BarProgress {
+    fn begin_file(&self, file_name: &str, expected_ciphertext: u64) -> Box<dyn FileProgress> {
+        let bar = self.mp.add(ProgressBar::new(expected_ciphertext.max(1)));
+        bar.set_style(
+            ProgressStyle::with_template("    {msg:.dim} {bar:20.214/238} {bytes}/{total_bytes}")
+                .unwrap_or_else(|_| ProgressStyle::default_bar())
+                .progress_chars("━━─"),
+        );
+        bar.set_message(display_name(file_name));
+        Box::new(BarFileProgress {
+            bar,
+            overall: self.overall.clone(),
+            files_done: Arc::clone(&self.files_done),
+            files_total: self.files_total,
+        })
+    }
+
+    fn finish_all(&self) {
+        self.overall.finish_and_clear();
+        let _ = self.mp.clear();
+    }
+}
+
+struct BarFileProgress {
+    bar: ProgressBar,
+    overall: ProgressBar,
+    files_done: Arc<AtomicU64>,
+    files_total: u64,
+}
+
+impl FileProgress for BarFileProgress {
+    fn chunk_confirmed(&self, ciphertext_bytes: u64) {
+        self.bar.inc(ciphertext_bytes);
+        self.overall.inc(ciphertext_bytes);
+    }
+
+    fn finish(self: Box<Self>, success: bool) {
+        self.bar.finish_and_clear();
+        if success {
+            let done = self.files_done.fetch_add(1, Ordering::Relaxed) + 1;
+            self.overall.set_prefix(format!("{done}/{} files", self.files_total));
+        }
+    }
+}
+
+/// Truncate a long filename for a progress label, keeping the (informative)
+/// tail.
+fn display_name(name: &str) -> String {
+    const MAX: usize = 40;
+    if name.chars().count() <= MAX {
+        return name.to_string();
+    }
+    let tail: String = name
+        .chars()
+        .rev()
+        .take(MAX - 1)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("…{tail}")
+}
+
+// ── The streaming upload driver ───────────────────────────────────────────────
+
+/// Encrypt and upload one file with constant memory and honest progress.
+///
+/// Shared by `bb sync` (called inside the `buffer_unordered` closure, so files
+/// run in parallel) and `bb push` (called sequentially). The master key is held
+/// behind an `Arc` and used only synchronously here; only the `FileKey`-owning
+/// encryptor crosses into the blocking thread.
+pub async fn stream_encrypt_upload(
+    api: &ApiClient,
+    master_key: Arc<MasterKey>,
+    spec: UploadSpec,
+    progress: &dyn ChunkProgress,
+) -> Result<UploadOutcome, String> {
+    // Cheap cancellation path for files that never started.
+    if spec.shutdown.load(Ordering::Relaxed) {
+        return Err(INTERRUPTED.to_string());
+    }
+
+    let file_id_str = spec.file_id.to_string();
+
+    // 1. Stat for size — no full read.
+    let meta = std::fs::metadata(&spec.path).map_err(|e| format!("stat {}: {e}", spec.path.display()))?;
+    let size = meta.len();
+
+    // 2. Encrypt the name + MIME envelope (master key used synchronously).
+    let mime = beebeeb_core::media::guess_mime_type(&spec.file_name);
+    let name_encrypted = beebeeb_core::encrypt::encrypt_name(&master_key, &file_id_str, &spec.file_name, mime)
+        .map_err(|e| format!("encrypt name: {e}"))?;
+    let is_media = beebeeb_core::media::is_media(mime);
+
+    // 3. Open the file and build the streaming encryptor (derives the file key
+    //    once; the encryptor owns it and is `Send`).
+    let file = std::fs::File::open(&spec.path).map_err(|e| format!("open {}: {e}", spec.path.display()))?;
+    let encryptor = ChunkEncryptor::from_reader(&master_key, &file_id_str, size, ChunkProfile::Desktop, file)
+        .map_err(|e| format!("init encryptor for {}: {e}", spec.file_name))?;
+    let chunk_count = encryptor.chunk_plan().chunk_count as u32;
+    let expected_total = encryptor.expected_total_ciphertext();
+
+    // 4. TOCTOU: re-stat just before init. `finish()` catches a file that
+    //    SHRANK; a same-size grow can slip past and is reconciled by
+    //    content-hash on the next sync run (documented on
+    //    `ChunkEncryptor::finish`). A changed *size* here means the plan is
+    //    stale, so bail and let the next run pick it up.
+    if let Ok(m2) = std::fs::metadata(&spec.path) {
+        if m2.len() != size {
+            return Err(format!(
+                "{} changed size during scan ({size} → {}); will retry next run",
+                spec.file_name,
+                m2.len()
+            ));
+        }
+    }
+
+    // 5. init with the client-computed total (= size + 28·chunk_count). The
+    //    server recomputes the real size from the summed chunks on complete, so
+    //    this is hygiene, not a contract.
+    let init_resp = api
+        .upload_init(
+            Some(spec.file_id),
+            &name_encrypted,
+            spec.parent_id,
+            expected_total as i64,
+            chunk_count as i32,
+            is_media,
+        )
+        .await?;
+    let server_id = init_resp
+        .get("file_id")
+        .or_else(|| init_resp.get("id"))
+        .and_then(|v| v.as_str())
+        .ok_or("server response missing file_id")?
+        .to_string();
+
+    // 6. Run the look-ahead pipeline.
+    let file_prog = progress.begin_file(&spec.file_name, expected_total);
+    let result = run_pipeline(
+        api,
+        &server_id,
+        encryptor,
+        chunk_count,
+        expected_total,
+        &spec.shutdown,
+        file_prog.as_ref(),
+    )
+    .await;
+
+    match &result {
+        Ok(()) => file_prog.finish(true),
+        Err(_) => file_prog.finish(false),
+    }
+    result?;
+
+    // 7. Finalise the version.
+    api.upload_complete(&server_id).await?;
+
+    // 8. Thumbnails: image/* only, one bounded extra read, best-effort.
+    maybe_upload_thumbnail(api, &master_key, &file_id_str, &server_id, &spec.path, mime, size).await;
+
+    let parsed: Uuid = server_id.parse().map_err(|e| format!("invalid server file id: {e}"))?;
+    Ok(UploadOutcome {
+        server_id: parsed,
+        plaintext_bytes: size,
+        ciphertext_bytes: expected_total,
+    })
+}
+
+/// Distinct producer failure causes, kept separate so the driver can surface an
+/// honest reason rather than a generic "upload failed".
+enum ProducerErr {
+    /// A `CoreError` from `next_chunk` (read/encrypt).
+    Core(String),
+    /// The `finish()` integrity guard tripped — the source shrank mid-stream.
+    Finish(String),
+    /// The shutdown flag tripped at the top of an iteration.
+    Cancelled,
+    /// The receiver closed — the consumer hit its own error first (which wins).
+    ChannelClosed,
+}
+
+/// The producer/consumer core. Returns `Ok(())` only when every planned chunk
+/// was emitted, server-confirmed, and the byte totals reconcile.
+async fn run_pipeline(
+    api: &ApiClient,
+    server_id: &str,
+    encryptor: ChunkEncryptor,
+    chunk_count: u32,
+    expected_total: u64,
+    shutdown: &Arc<AtomicBool>,
+    file_prog: &dyn FileProgress,
+) -> Result<(), String> {
+    use tokio::sync::mpsc;
+
+    let (tx, mut rx) = mpsc::channel::<EncryptedChunk>(CHANNEL_CAP);
+    let shutdown_p = Arc::clone(shutdown);
+
+    // Producer: ONE blocking task owns the encryptor for the whole file. AES
+    // runs here, off the async reactor. `blocking_send` provides backpressure.
+    let producer = tokio::task::spawn_blocking(move || -> Result<(), ProducerErr> {
+        let mut enc = encryptor;
+        loop {
+            // spawn_blocking can't be aborted mid-chunk, so check at the top of
+            // each iteration.
+            if shutdown_p.load(Ordering::Relaxed) {
+                return Err(ProducerErr::Cancelled);
+            }
+            match enc.next_chunk() {
+                Ok(Some(chunk)) => {
+                    if tx.blocking_send(chunk).is_err() {
+                        // Receiver gone → consumer failed or we were cancelled;
+                        // let the consumer's cause win.
+                        return Err(ProducerErr::ChannelClosed);
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => return Err(ProducerErr::Core(format!("encrypt chunk: {e}"))),
+            }
+        }
+        // Integrity guard: detects a source that shrank mid-stream.
+        enc.finish().map(|_| ()).map_err(|e| ProducerErr::Finish(e.to_string()))
+    });
+
+    // Consumer: PUT each chunk as it arrives; advance progress only on 200.
+    //
+    // NOTE: this loop uses `break` (never `?`) so that the cleanup below —
+    // `rx.close()` before awaiting the producer — ALWAYS runs. Closing the
+    // receiver wakes a producer parked on the cap-1 channel, so there is no
+    // deadlock; and if this function unwinds, dropping `rx` closes the channel
+    // for the same reason.
+    let mut confirmed_bytes: u64 = 0;
+    let mut confirmed_chunks: u32 = 0;
+    let mut consumer_err: Option<String> = None;
+    while let Some(chunk) = rx.recv().await {
+        if shutdown.load(Ordering::Relaxed) {
+            consumer_err = Some(INTERRUPTED.to_string());
+            break;
+        }
+        let len = chunk.data.len() as u64;
+        let index = chunk.index;
+        match api.upload_chunk(server_id, index, chunk.data).await {
+            Ok(_) => {
+                confirmed_bytes += len;
+                confirmed_chunks += 1;
+                file_prog.chunk_confirmed(len);
+            }
+            Err(e) => {
+                consumer_err = Some(format!("chunk {index} upload: {e}"));
+                break;
+            }
+        }
+    }
+
+    // ── Cleanup (always): unblock + reap the producer before returning. ──
+    rx.close();
+    let producer_join = producer.await;
+
+    // A proximate consumer error (network / cancellation) is what the user
+    // needs to see first.
+    if let Some(e) = consumer_err {
+        return Err(e);
+    }
+    match producer_join {
+        Ok(Ok(())) => {}
+        Ok(Err(ProducerErr::Cancelled)) => return Err(INTERRUPTED.to_string()),
+        Ok(Err(ProducerErr::ChannelClosed)) => {
+            return Err("internal: chunk channel closed before completion".to_string());
+        }
+        Ok(Err(ProducerErr::Core(e))) => return Err(e),
+        Ok(Err(ProducerErr::Finish(e))) => return Err(format!("integrity check failed: {e}")),
+        Err(join_err) => return Err(format!("encrypt task failed: {join_err}")),
+    }
+
+    // Final client-side guards (hygiene; the server recomputes the total).
+    if confirmed_chunks != chunk_count {
+        return Err(format!(
+            "incomplete upload: {confirmed_chunks}/{chunk_count} chunks confirmed"
+        ));
+    }
+    if confirmed_bytes != expected_total {
+        return Err(format!(
+            "ciphertext total mismatch: confirmed {confirmed_bytes}, expected {expected_total}"
+        ));
+    }
+    Ok(())
+}
+
+/// Generate + encrypt + upload a thumbnail for image files, best-effort. Does
+/// exactly one extra bounded read of the source; never holds key material in
+/// the CLI beyond the derived per-file key.
+async fn maybe_upload_thumbnail(
+    api: &ApiClient,
+    master_key: &MasterKey,
+    file_id_str: &str,
+    server_id: &str,
+    path: &Path,
+    mime: Option<&str>,
+    size: u64,
+) {
+    let is_image = mime.map(|m| m.starts_with("image/")).unwrap_or(false);
+    if !is_image || size > MAX_THUMBNAIL_SOURCE_BYTES {
+        return;
+    }
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+    let file_key = beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes());
+
+    if let Some(thumb) = crate::thumbnail::generate_from_file(&bytes, mime) {
+        if let Ok(enc) = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, &thumb.data) {
+            let _ = api.upload_thumbnail(server_id, enc).await;
+        }
+    }
+    if let Some(large) = crate::thumbnail::generate_large_from_file(&bytes, mime) {
+        if let Ok(enc) = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, &large.data) {
+            let _ = api.upload_thumbnail_large(server_id, enc).await;
+        }
+    }
+}
+
+/// Expected ciphertext for a file of `size` under `ChunkProfile::Desktop`:
+/// `size + 28 · chunk_count`. Used by callers to size the overall progress bar
+/// without opening the file.
+pub fn expected_ciphertext_for(size: u64) -> u64 {
+    let plan = beebeeb_types::plan_chunks(size, ChunkProfile::Desktop);
+    size + CHUNK_OVERHEAD * plan.chunk_count
+}

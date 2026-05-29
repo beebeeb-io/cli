@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -144,6 +145,7 @@ pub async fn run(
     stop_session: Option<String>,
     stop_all: bool,
     concurrency: usize,
+    rehash: bool,
 ) -> Result<(), String> {
     // ── --status: show all active sync sessions ────────────────────────────
     if status || stop_session.is_some() || stop_all {
@@ -238,7 +240,27 @@ pub async fn run(
         }
     };
 
-    let master_key = load_master_key()?;
+    // Multiple owners (each parallel upload future) need the key; `MasterKey`
+    // is not `Clone`, so share it behind an `Arc`. The downstream functions
+    // that take `&MasterKey` get it via deref coercion.
+    let master_key = Arc::new(load_master_key()?);
+
+    // Graceful Ctrl-C: the first interrupt asks the upload phase to stop
+    // cleanly (so we can report "interrupted — N done, M remaining" and resume
+    // next run); a second interrupt hard-exits (covers the watch loop and a
+    // wedged upload).
+    let shutdown = Arc::new(AtomicBool::new(false));
+    {
+        let s = Arc::clone(&shutdown);
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                s.store(true, Ordering::Relaxed);
+            }
+            if tokio::signal::ctrl_c().await.is_ok() {
+                std::process::exit(130);
+            }
+        });
+    }
 
     if !ui::is_json() && !ui::is_quiet() {
         println!(
@@ -326,9 +348,18 @@ pub async fn run(
         None
     };
 
-    let local_files = walk_local_files(&local_dir)?;
+    // Scan phase — the dominant "looks frozen" symptom. Show a live spinner so
+    // hashing the local tree + fetching the remote tree never looks like a hang.
+    let scan_active = ui::is_rich() && std::io::stdout().is_terminal();
+
+    let local_spinner = make_scan_spinner(scan_active, "scanning local", "files");
+    let local_files = scan_local_files(&local_dir, &state.files, rehash, local_spinner.as_ref())?;
+    if let Some(pb) = &local_spinner {
+        pb.finish_and_clear();
+    }
     let local_folders = walk_local_folders(&local_dir)?;
 
+    let remote_spinner = make_scan_spinner(scan_active, "scanning remote", "entries");
     let mut remote_files: HashMap<String, RemoteFile> = HashMap::new();
     let mut remote_folders: HashMap<String, Uuid> = HashMap::new();
     walk_remote(
@@ -338,8 +369,12 @@ pub async fn run(
         "",
         &mut remote_files,
         &mut remote_folders,
+        remote_spinner.as_ref(),
     )
     .await?;
+    if let Some(pb) = &remote_spinner {
+        pb.finish_and_clear();
+    }
 
     let mut all_folders: HashSet<String> = HashSet::new();
     all_folders.extend(local_folders.iter().cloned());
@@ -552,19 +587,41 @@ pub async fn run(
         }
     }
 
-    // ── Phase 3: parallel uploads ──────────────────────────────────────────
+    // ── Phase 3: parallel streaming uploads ────────────────────────────────
+    let pending_count = pending_uploads.len();
+    let mut interrupted_count = 0u32;
     {
         use futures_util::stream::{self, StreamExt};
+
+        // Rich + TTY → byte-accurate bars (one overall + transient per-file).
+        // Otherwise a no-op sink, and the plain per-file lines below stay.
+        let show_bars = scan_active && !dry_run && pending_count > 0;
+        let progress: Box<dyn crate::upload::ChunkProgress> = if show_bars {
+            let total_expected: u64 = pending_uploads
+                .iter()
+                .map(|(_, l, _)| crate::upload::expected_ciphertext_for(l.size))
+                .sum();
+            Box::new(crate::upload::BarProgress::new(pending_count as u64, total_expected))
+        } else {
+            Box::new(crate::upload::NoopProgress)
+        };
 
         let upload_results: Vec<Result<(String, FileEntry, u64), String>> =
             stream::iter(pending_uploads.into_iter().map(|(rel, local, replace_id)| {
                 let api = &api;
-                let master_key = &master_key;
+                let master_key = Arc::clone(&master_key);
                 let local_dir = &local_dir;
                 let remote_folders = &remote_folders;
+                let progress = progress.as_ref();
+                let shutdown = Arc::clone(&shutdown);
                 async move {
-                    let size_str = format_size(local.size);
-                    if !ui::is_json() && !ui::is_quiet() {
+                    if shutdown.load(Ordering::Relaxed) {
+                        return Err(crate::upload::INTERRUPTED.to_string());
+                    }
+
+                    // Plain status line only when bars are not showing them.
+                    if !show_bars && !ui::is_json() && !ui::is_quiet() {
+                        let size_str = format_size(local.size);
                         println!(
                             "  {} {} {}",
                             "\u{2191}".custom_color(crate::colors::GREEN_OK),
@@ -597,12 +654,18 @@ pub async fn run(
                     }
                     .or(Some(remote_folder_id));
 
-                    let file_name = rel.rsplit('/').next().unwrap_or(&rel);
-                    let local_path = local_dir.join(&rel);
-                    let new_id = upload_file_to(api, master_key, &local_path, file_name, parent_id).await?;
+                    let file_name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+                    let spec = crate::upload::UploadSpec {
+                        path: local_dir.join(&rel),
+                        file_name,
+                        file_id: Uuid::new_v4(),
+                        parent_id,
+                        shutdown,
+                    };
+                    let outcome = crate::upload::stream_encrypt_upload(api, master_key, spec, progress).await?;
 
                     let entry = FileEntry {
-                        remote_id: new_id,
+                        remote_id: outcome.server_id,
                         last_mtime: local.mtime,
                         last_size: local.size,
                         last_sync: Utc::now(),
@@ -615,6 +678,9 @@ pub async fn run(
             .collect()
             .await;
 
+        // Clear the bars before printing the summary / any errors.
+        progress.finish_all();
+
         for result in upload_results {
             match result {
                 Ok((rel, entry, size)) => {
@@ -624,11 +690,37 @@ pub async fn run(
                     total_bytes += size;
                     up_count += 1;
                 }
+                Err(e) if e == crate::upload::INTERRUPTED => {
+                    interrupted_count += 1;
+                }
                 Err(e) => {
                     eprintln!("  {} upload failed: {}", "!".custom_color(crate::colors::RED_ERR), e);
                 }
             }
         }
+    }
+
+    // If Ctrl-C interrupted the upload phase, persist what we confirmed and
+    // stop cleanly — don't start new downloads/deletes or enter watch mode.
+    // A re-run resumes from the saved state.
+    if shutdown.load(Ordering::Relaxed) {
+        if !dry_run {
+            state.last_sync = Some(Utc::now());
+            let data = serde_json::to_vec_pretty(&state).map_err(|e| format!("serialize state: {e}"))?;
+            std::fs::write(&state_path, data).map_err(|e| format!("write state file: {e}"))?;
+        }
+        let remaining = (pending_count as u32).saturating_sub(up_count);
+        if !ui::is_json() {
+            println!();
+            println!(
+                "  {} {} \u{00b7} {} done, {} remaining \u{00b7} re-run to finish",
+                "\u{25CF}".custom_color(crate::colors::AMBER),
+                "interrupted".custom_color(crate::colors::AMBER),
+                up_count,
+                remaining.max(interrupted_count),
+            );
+        }
+        return Ok(());
     }
 
     // ── Phase 4: sequential downloads ──────────────────────────────────────
@@ -762,9 +854,7 @@ pub async fn run(
     );
 
     // ── Continuous watch mode ───────────────────────────────────────────────
-    if !once && !dry_run {
-        use std::io::IsTerminal;
-
+    if !once && !dry_run && !shutdown.load(Ordering::Relaxed) {
         let use_tui = ui::is_rich() && std::io::stdout().is_terminal();
 
         if use_tui {
@@ -789,6 +879,7 @@ pub async fn run(
                 session_id.as_deref(),
                 local_files.len() as u64,
                 total_bytes,
+                &shutdown,
             )
             .await?;
         }
@@ -809,6 +900,7 @@ async fn run_plain_watch(
     session_id: Option<&str>,
     file_count: u64,
     total_bytes: u64,
+    shutdown: &Arc<AtomicBool>,
 ) -> Result<(), String> {
     let local_display = local_dir
         .file_name()
@@ -858,7 +950,14 @@ async fn run_plain_watch(
     );
 
     loop {
-        match rx.recv() {
+        // Poll the watch channel with a timeout so a Ctrl-C (which sets the
+        // shutdown flag) breaks the loop promptly instead of blocking forever.
+        if shutdown.load(Ordering::Relaxed) {
+            break;
+        }
+        match rx.recv_timeout(std::time::Duration::from_millis(500)) {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             Ok(Ok(events)) => {
                 let changed: Vec<_> = events
                     .iter()
@@ -884,7 +983,7 @@ async fn run_plain_watch(
 
                     // Re-run the sync to upload changes
                     let resync_api = ApiClient::from_config();
-                    let resync_master = load_master_key()?;
+                    let resync_master = Arc::new(load_master_key()?);
                     let resync_local = walk_local_files(local_dir)?;
                     let resync_folders = walk_local_folders(local_dir)?;
                     let mut resync_remote_files: HashMap<String, RemoteFile> = HashMap::new();
@@ -896,6 +995,7 @@ async fn run_plain_watch(
                         "",
                         &mut resync_remote_files,
                         &mut resync_remote_folders,
+                        None,
                     )
                     .await?;
 
@@ -929,7 +1029,7 @@ async fn run_plain_watch(
                             if local_changed {
                                 do_upload(
                                     &resync_api,
-                                    &resync_master,
+                                    Arc::clone(&resync_master),
                                     local_dir,
                                     rel,
                                     &l,
@@ -962,7 +1062,6 @@ async fn run_plain_watch(
                     eprintln!("  {} watch error: {}", "!".custom_color(crate::colors::RED_ERR), e);
                 }
             }
-            Err(_) => break,
         }
     }
     Ok(())
@@ -1101,7 +1200,7 @@ async fn run_tui_watch(
             // Re-run the sync logic.
             let resync_api = ApiClient::from_config();
             let resync_master = match load_master_key() {
-                Ok(k) => k,
+                Ok(k) => Arc::new(k),
                 Err(e) => {
                     let _ = sync_tx.send(TuiEvent::SyncError(e));
                     continue;
@@ -1131,6 +1230,7 @@ async fn run_tui_watch(
                 "",
                 &mut resync_remote_files,
                 &mut resync_remote_folders,
+                None,
             )
             .await
             {
@@ -1175,7 +1275,7 @@ async fn run_tui_watch(
                         let file_name = rel.rsplit('/').next().unwrap_or(rel).to_string();
                         match do_upload(
                             &resync_api,
-                            &resync_master,
+                            Arc::clone(&resync_master),
                             &sync_local_dir,
                             rel,
                             &l,
@@ -1569,6 +1669,94 @@ fn rel_path_str(rel: &Path) -> String {
         .join("/")
 }
 
+/// Build an amber-accented scan spinner with a live `{pos}`-driven counter,
+/// or `None` when progress is suppressed (non-TTY / json / quiet). Draws to
+/// stderr so it never corrupts stdout output.
+fn make_scan_spinner(active: bool, label: &str, unit: &str) -> Option<indicatif::ProgressBar> {
+    if !active {
+        return None;
+    }
+    let pb = indicatif::ProgressBar::new_spinner();
+    let template = format!("  {{spinner:.214}} {label} · {{pos}} {unit}");
+    pb.set_style(
+        indicatif::ProgressStyle::with_template(&template)
+            .unwrap_or_else(|_| indicatif::ProgressStyle::default_spinner()),
+    );
+    pb.enable_steady_tick(std::time::Duration::from_millis(100));
+    Some(pb)
+}
+
+/// Walk the local tree like [`walk_local_files`], but with two scan-phase
+/// optimisations: a live spinner counter, and skip-hashing.
+///
+/// Skip-hashing: hashing every file with SHA-256 is the bulk of the scan cost.
+/// When `rehash` is false and a file's `(mtime, size)` match the prior sync
+/// state, the stored `content_hash` is reused and the read+hash is skipped.
+/// `--rehash` forces a full hash of every file (catches same-size edits).
+fn scan_local_files(
+    root: &Path,
+    prior: &HashMap<String, FileEntry>,
+    rehash: bool,
+    scan: Option<&indicatif::ProgressBar>,
+) -> Result<HashMap<String, LocalFile>, String> {
+    let mut out = HashMap::new();
+    for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let rel = match path.strip_prefix(root) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        if rel
+            .components()
+            .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+        {
+            continue;
+        }
+        let meta = std::fs::metadata(path).map_err(|e| format!("stat {}: {e}", path.display()))?;
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|m| m.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let size = meta.len();
+        let rel_str = rel_path_str(rel);
+
+        // Reuse the stored hash when unchanged (unless --rehash forces a read).
+        let reused = if rehash {
+            None
+        } else {
+            prior.get(&rel_str).and_then(|p| {
+                if p.last_mtime == mtime && p.last_size == size {
+                    p.content_hash.clone()
+                } else {
+                    None
+                }
+            })
+        };
+        let content_hash = match reused {
+            Some(h) => h,
+            None => compute_file_hash(path)?,
+        };
+
+        if let Some(pb) = scan {
+            pb.inc(1);
+        }
+        out.insert(
+            rel_str,
+            LocalFile {
+                mtime,
+                size,
+                content_hash,
+            },
+        );
+    }
+    Ok(out)
+}
+
 fn walk_local_files(root: &Path) -> Result<HashMap<String, LocalFile>, String> {
     let mut out = HashMap::new();
     for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
@@ -1712,6 +1900,7 @@ async fn create_folder(
     id_str.parse().map_err(|e| format!("invalid folder id: {e}"))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn walk_remote(
     api: &ApiClient,
     master_key: &beebeeb_core::kdf::MasterKey,
@@ -1719,6 +1908,7 @@ async fn walk_remote(
     prefix: &str,
     files: &mut HashMap<String, RemoteFile>,
     folders: &mut HashMap<String, Uuid>,
+    scan: Option<&indicatif::ProgressBar>,
 ) -> Result<(), String> {
     let listing = api.list_files(Some(&folder_id.to_string())).await?;
     let items = listing
@@ -1740,6 +1930,10 @@ async fn walk_remote(
             None => continue,
         };
 
+        if let Some(pb) = scan {
+            pb.inc(1);
+        }
+
         let rel = if prefix.is_empty() {
             name.clone()
         } else {
@@ -1748,7 +1942,7 @@ async fn walk_remote(
 
         if is_folder {
             folders.insert(rel.clone(), id);
-            Box::pin(walk_remote(api, master_key, id, &rel, files, folders)).await?;
+            Box::pin(walk_remote(api, master_key, id, &rel, files, folders, scan)).await?;
         } else {
             let updated_at_str = item.get("updated_at").and_then(|v| v.as_str()).unwrap_or("");
             let updated_at = DateTime::parse_from_rfc3339(updated_at_str)
@@ -1772,7 +1966,7 @@ async fn walk_remote(
 #[allow(clippy::too_many_arguments)]
 async fn do_upload(
     api: &ApiClient,
-    master_key: &beebeeb_core::kdf::MasterKey,
+    master_key: Arc<beebeeb_core::kdf::MasterKey>,
     local_dir: &Path,
     rel: &str,
     local: &LocalFile,
@@ -1898,82 +2092,27 @@ async fn do_download(
     Ok(())
 }
 
+/// Streaming, constant-memory upload of a single file. Thin wrapper over
+/// [`crate::upload::stream_encrypt_upload`] used by the watch loops; the main
+/// sync path calls the driver directly so it can attach progress bars. Uploads
+/// here are not tied to the main Ctrl-C flag (watch-mode Ctrl-C hard-exits), so
+/// a fresh, never-tripped shutdown flag is used.
 async fn upload_file_to(
     api: &ApiClient,
-    master_key: &beebeeb_core::kdf::MasterKey,
+    master_key: Arc<beebeeb_core::kdf::MasterKey>,
     file_path: &Path,
     file_name: &str,
     parent_id: Option<Uuid>,
 ) -> Result<Uuid, String> {
-    let file_bytes = std::fs::read(file_path).map_err(|e| format!("read {}: {e}", file_path.display()))?;
-
-    let file_id = Uuid::new_v4();
-    let file_key = beebeeb_core::kdf::derive_file_key(master_key, file_id.to_string().as_bytes());
-
-    let mime = beebeeb_core::media::guess_mime_type(file_name);
-    let name_encrypted = beebeeb_core::encrypt::encrypt_name(master_key, &file_id.to_string(), file_name, mime)
-        .map_err(|e| format!("encrypt name: {e}"))?;
-
-    let plan = beebeeb_types::plan_chunks(file_bytes.len() as u64, beebeeb_types::ChunkProfile::Desktop);
-    let chunk_size = plan.chunk_size_bytes as usize;
-    let chunk_count = plan.chunk_count as i32;
-
-    // Encrypt all chunks
-    let mut encrypted_chunks: Vec<(u32, Vec<u8>)> = Vec::new();
-    let raw_chunks: Vec<&[u8]> = if file_bytes.is_empty() {
-        vec![&[]]
-    } else {
-        file_bytes.chunks(chunk_size).collect()
+    let spec = crate::upload::UploadSpec {
+        path: file_path.to_path_buf(),
+        file_name: file_name.to_string(),
+        file_id: Uuid::new_v4(),
+        parent_id,
+        shutdown: Arc::new(AtomicBool::new(false)),
     };
-
-    let mut total_enc: i64 = 0;
-    for (i, chunk) in raw_chunks.iter().enumerate() {
-        let bytes = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, chunk)
-            .map_err(|e| format!("encrypt chunk {i}: {e}"))?;
-        total_enc += bytes.len() as i64;
-        encrypted_chunks.push((i as u32, bytes));
-    }
-
-    let is_media = beebeeb_core::media::is_media(mime);
-
-    // V2 upload: init → chunks → complete (stores chunk_size in object_versions)
-    let init_resp = api
-        .upload_init(
-            Some(file_id),
-            &name_encrypted,
-            parent_id,
-            total_enc,
-            chunk_count,
-            is_media,
-        )
-        .await?;
-    let server_id = init_resp
-        .get("file_id")
-        .or_else(|| init_resp.get("id"))
-        .and_then(|v| v.as_str())
-        .ok_or("server response missing file_id")?;
-
-    for (idx, data) in encrypted_chunks {
-        api.upload_chunk(server_id, idx, data).await?;
-    }
-
-    api.upload_complete(server_id).await?;
-
-    // ── Thumbnail generation + upload (best-effort, non-fatal) ──────────
-    if let Some(mime_str) = mime {
-        if let Some(thumb) = crate::thumbnail::generate_from_file(&file_bytes, Some(mime_str)) {
-            if let Ok(thumb_encrypted) = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, &thumb.data) {
-                let _ = api.upload_thumbnail(server_id, thumb_encrypted).await;
-            }
-        }
-        if let Some(large_thumb) = crate::thumbnail::generate_large_from_file(&file_bytes, Some(mime_str)) {
-            if let Ok(large_encrypted) = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, &large_thumb.data) {
-                let _ = api.upload_thumbnail_large(server_id, large_encrypted).await;
-            }
-        }
-    }
-
-    server_id.parse().map_err(|e| format!("invalid file id: {e}"))
+    let outcome = crate::upload::stream_encrypt_upload(api, master_key, spec, &crate::upload::NoopProgress).await?;
+    Ok(outcome.server_id)
 }
 
 async fn download_to(

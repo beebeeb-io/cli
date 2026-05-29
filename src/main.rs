@@ -12,6 +12,7 @@ mod thumbnail;
 mod tui;
 mod ui;
 mod update;
+mod upload;
 
 use std::path::PathBuf;
 
@@ -213,6 +214,11 @@ enum Commands {
         /// Number of parallel uploads (default: 4)
         #[arg(long, default_value_t = 4)]
         concurrency: usize,
+
+        /// Re-hash every local file instead of trusting unchanged (size+mtime)
+        /// entries from the last sync — slower, but catches same-size edits
+        #[arg(long)]
+        rehash: bool,
     },
 
     /// Mount vault as a FUSE filesystem (read-only Day 1; requires macFUSE on macOS)
@@ -504,6 +510,7 @@ async fn main() {
                 None,
                 false,
                 4,
+                false,
             )
             .await
         }
@@ -520,6 +527,7 @@ async fn main() {
             stop_session,
             stop_all,
             concurrency,
+            rehash,
         } => {
             commands::sync::run(
                 local_dir,
@@ -534,6 +542,7 @@ async fn main() {
                 stop_session,
                 stop_all,
                 concurrency,
+                rehash,
             )
             .await
         }
