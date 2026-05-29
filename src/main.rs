@@ -149,6 +149,10 @@ enum Commands {
         no_double_encrypt: bool,
     },
 
+    /// Create and manage file requests — links that let anyone upload into your vault
+    #[command(subcommand)]
+    Request(RequestCmd),
+
     /// List all active share links
     Shares,
 
@@ -303,6 +307,59 @@ enum Commands {
         /// Target shell
         #[arg(value_enum)]
         shell: clap_complete::Shell,
+    },
+}
+
+#[derive(Subcommand)]
+enum RequestCmd {
+    /// Create a file request and print its shareable link
+    Create {
+        /// Target folder (UUID or top-level folder name) the uploads land in
+        #[arg(long)]
+        folder: Option<String>,
+
+        /// Maximum number of files the request will accept
+        #[arg(long)]
+        max_files: Option<u32>,
+
+        /// Maximum total bytes (e.g. 100MB, 2GB, 500MiB)
+        #[arg(long)]
+        max_bytes: Option<String>,
+
+        /// Expiry (e.g. 7d, 24h, 30m, 2w; a bare number means days)
+        #[arg(long)]
+        expires: Option<String>,
+
+        /// Title shown to whoever opens the link (defaults to "File request")
+        #[arg(long)]
+        title: Option<String>,
+
+        /// Optional description shown to the uploader
+        #[arg(long)]
+        desc: Option<String>,
+    },
+
+    /// List your file requests with received counts and links
+    List,
+
+    /// Close (default) or hard-delete a file request
+    Rm {
+        /// File request ID
+        id: String,
+
+        /// Hard-delete instead of closing (destructive)
+        #[arg(long)]
+        delete: bool,
+    },
+
+    /// Upload file(s) to a request link — no account needed
+    Send {
+        /// The file-request link (…/r/<token>#<public-key>)
+        url: String,
+
+        /// One or more files to upload
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
     },
 }
 
@@ -491,6 +548,19 @@ async fn main() {
             passphrase,
             no_double_encrypt,
         } => commands::share::run(file_id, expires, max_opens, passphrase, !no_double_encrypt).await,
+        Commands::Request(cmd) => match cmd {
+            RequestCmd::Create {
+                folder,
+                max_files,
+                max_bytes,
+                expires,
+                title,
+                desc,
+            } => commands::request::create(folder, max_files, max_bytes, expires, title, desc).await,
+            RequestCmd::List => commands::request::list().await,
+            RequestCmd::Rm { id, delete } => commands::request::rm(id, delete).await,
+            RequestCmd::Send { url, files } => commands::request::send(url, files).await,
+        },
         Commands::Shares => commands::share::list().await,
         Commands::Unshare { share_id } => commands::share::revoke(share_id).await,
         Commands::Watch { path, parent } => {

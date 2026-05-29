@@ -38,6 +38,17 @@ Generated from `bb --help`. Source of truth is `src/main.rs` (clap derive).
 - `bb shares` — list active share links.
 - `bb unshare [share-id]` — revoke a share link (interactive picker without args).
 
+### File requests
+
+Account-less links that let **anyone** upload an encrypted file *into* your vault. Crypto via the `core` crate's `file_request` module (per-request X25519 keypair; private half wrapped under the master key, public half only in the link fragment).
+
+- `bb request create [--folder <id|name>] [--max-files N] [--max-bytes 100MB] [--expires 7d] [--title ..] [--desc ..]` — mints a request and prints the link `<APP_URL>/r/<token>#<R_pub>`. The keypair is generated locally; only the wrapped private key reaches the server.
+- `bb request list` — table of your requests (title, files, bytes, status, expiry) plus each rebuilt link (derives `R_pub` by unwrapping the stored private key under your master key).
+- `bb request rm <id>` — close the request (stops new uploads). `--delete` hard-deletes (note: the server `DELETE` route is not live yet; until it lands, `--delete` returns a clear error and you should close instead).
+- `bb request send <url> <file>...` — account-less upload **to** a request. Parses the `token` + `#<R_pub>` from the link, seals a per-file content key to `R_pub` via `core`, and POSTs the encrypted blob to the configured API. Fails loudly if the link has no public-key fragment.
+
+**Key-derivation context:** the HKDF context for both the private-key wrap and the per-upload seal is currently the **empty byte string**, because the server assigns the request id / token / file id only *after* the client crypto must already be done. Every client (web/cli/mobile) must use the same constant — see the module docs in `src/commands/request.rs` and the cross-client decision note.
+
 ### Sync & mount
 
 - `bb sync <local> [remote]` — bidirectional folder sync (continuous by default; `--once`, `--daemon`, `--stop`, `--dry-run`, `--force`, `--delete`, `--concurrency`, `--rehash`). V2 **streaming** uploads (constant memory). Remote path auto-strips `~/` home prefix. Gracefully handles 409 stuck uploads and corrupt remote files (trashes + re-uploads next run). Shows a scan spinner, then live per-file + overall progress bars (rich TTY only). `--rehash` forces a full re-hash of every file instead of trusting unchanged `(size, mtime)` entries from the last sync.

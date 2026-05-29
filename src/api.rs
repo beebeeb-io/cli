@@ -419,6 +419,127 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    // ── File requests ────────────────────────────────────────────────────
+    // The inverse of sharing: an account-less link anyone can use to upload an
+    // encrypted file *into* the owner's vault. See `commands::request`.
+
+    /// Create a file request. `wrapped_private_key` + `wrap_nonce` are the
+    /// owner's X25519 request private key sealed under the master key (base64);
+    /// the server stores them as opaque bytes and never unwraps them.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_file_request(
+        &self,
+        title: &str,
+        description: Option<&str>,
+        target_folder_id: Option<uuid::Uuid>,
+        max_files: Option<u32>,
+        max_total_bytes: Option<i64>,
+        expires_in_secs: Option<i64>,
+        wrapped_private_key_b64: &str,
+        wrap_nonce_b64: &str,
+    ) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let mut body = serde_json::json!({
+            "title": title,
+            "wrapped_private_key": wrapped_private_key_b64,
+            "wrap_nonce": wrap_nonce_b64,
+        });
+        if let Some(d) = description {
+            body["description"] = serde_json::json!(d);
+        }
+        if let Some(f) = target_folder_id {
+            body["target_folder_id"] = serde_json::json!(f);
+        }
+        if let Some(n) = max_files {
+            body["max_files"] = serde_json::json!(n);
+        }
+        if let Some(b) = max_total_bytes {
+            body["max_total_bytes"] = serde_json::json!(b);
+        }
+        if let Some(s) = expires_in_secs {
+            body["expires_in_secs"] = serde_json::json!(s);
+        }
+        let resp = self
+            .client
+            .post(self.url("/api/v1/file-requests"))
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(resp).await
+    }
+
+    /// List the owner's file requests (includes wrapped_private_key + wrap_nonce
+    /// so the client can rebuild each link by deriving R_pub).
+    pub async fn list_file_requests(&self) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .get(self.url("/api/v1/file-requests"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(resp).await
+    }
+
+    /// Close a file request (stop accepting uploads). Idempotent.
+    pub async fn close_file_request(&self, id: &str) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .post(self.url(&format!("/api/v1/file-requests/{id}/close")))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(resp).await
+    }
+
+    /// Hard-delete a file request row. NOTE: the server does not yet expose a
+    /// DELETE route for file requests (only `/close`); this is wired for
+    /// forward-compatibility and will surface a clear error until it lands.
+    pub async fn delete_file_request(&self, id: &str) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .delete(self.url(&format!("/api/v1/file-requests/{id}")))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(resp).await
+    }
+
+    /// Upload an encrypted file to a file request via the PUBLIC, account-less
+    /// endpoint (`POST /api/v1/r/:token/upload`). No bearer auth — the upload is
+    /// authorised purely by possession of the token + sealing to the request's
+    /// public key. `metadata_json` carries name_encrypted, size_bytes,
+    /// sender_ephemeral_pubkey, and wrapped_key.
+    pub async fn upload_to_file_request(
+        &self,
+        token: &str,
+        metadata_json: &str,
+        encrypted_chunks: &[(u32, Vec<u8>)],
+    ) -> Result<Value, String> {
+        let mut form = reqwest::multipart::Form::new().text("metadata", metadata_json.to_string());
+        for (idx, data) in encrypted_chunks {
+            let part = reqwest::multipart::Part::bytes(data.clone())
+                .mime_str("application/octet-stream")
+                .map_err(|e| format!("mime error: {e}"))?;
+            form = form.part(format!("chunk_{idx}"), part);
+        }
+        let resp = self
+            .client
+            .post(self.url(&format!("/api/v1/r/{token}/upload")))
+            .multipart(form)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(resp).await
+    }
+
     pub async fn get_subscription(&self) -> Result<Value, String> {
         let token = self.require_auth()?;
         let resp = self

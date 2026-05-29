@@ -11,6 +11,7 @@ pub mod push;
 pub mod qr;
 pub mod quota;
 pub mod repair;
+pub mod request;
 pub mod share;
 pub mod speedtest;
 pub mod status;
