@@ -2123,14 +2123,23 @@ async fn download_to(
     out_path: &Path,
 ) -> Result<(), String> {
     let file_id_str = file_id.to_string();
-    let encrypted_bytes = api.download_file(&file_id_str).await?;
-
-    let plaintext = crate::crypto::decrypt_file_chunks(master_key, &file_id_str, &encrypted_bytes, chunk_count)?;
-
-    if let Some(parent) = out_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
-    }
-    std::fs::write(out_path, &plaintext).map_err(|e| format!("write {}: {e}", out_path.display()))?;
+    let name = out_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&file_id_str)
+        .to_string();
+    // Streaming, constant-memory decrypt. The "↓ rel" line is already printed by
+    // the caller, so use a no-op progress sink here.
+    crate::download::stream_download_decrypt(
+        api,
+        master_key,
+        &file_id_str,
+        chunk_count,
+        out_path,
+        &crate::upload::NoopProgress,
+        &name,
+    )
+    .await?;
 
     Ok(())
 }

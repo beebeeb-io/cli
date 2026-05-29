@@ -829,6 +829,30 @@ impl ApiClient {
         Err("large thumbnail upload rate limited after 3 retries".to_string())
     }
 
+    /// Open a streaming download of a file's encrypted bytes.
+    ///
+    /// Returns the live `Response` (headers + unread body) so the caller can
+    /// read the body incrementally with `Response::chunk()` instead of
+    /// buffering the whole payload. A 600s timeout overrides the client default
+    /// (large files), matching `beebeeb-upload`.
+    pub async fn download_stream(&self, file_id: &str) -> Result<reqwest::Response, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .get(self.url(&format!("/api/v1/files/{file_id}/download")))
+            .bearer_auth(token)
+            .timeout(std::time::Duration::from_secs(600))
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("download failed ({status}): {body}"));
+        }
+        Ok(resp)
+    }
+
     /// Download the raw encrypted bytes for a file.
     pub async fn download_file(&self, file_id: &str) -> Result<Vec<u8>, String> {
         let token = self.require_auth()?;

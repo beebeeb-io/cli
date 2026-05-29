@@ -28,7 +28,7 @@ Generated from `bb --help`. Source of truth is `src/main.rs` (clap derive).
 ### Files
 
 - `bb push <path>` (alias `bb upload`) — encrypt and upload a file or folder. Uses V2 upload path (init → chunks → complete) so chunk metadata is stored in `object_versions`.
-- `bb pull <id-or-path>` (alias `bb download`) — download and decrypt.
+- `bb pull <id-or-path>` (alias `bb download`) — **streaming** download + decrypt (constant memory, live progress bar). Preserves legacy decrypt: JSON-blob chunks and pre-`bb repair` binary-UUID files fall back to the buffered path.
 - `bb ls [path]` — list vault contents.
 - `bb quota` — storage usage with a colour-coded bar.
 
@@ -83,6 +83,29 @@ Generated from `bb --help`. Source of truth is `src/main.rs` (clap derive).
   non-fatal, encrypted with the per-file key derived in the CLI.
 - The `ApiClient` (`api.rs`) now carries a **300 s per-request timeout**; the SSE
   sync stream overrides it per-request with its own 24 h timeout.
+
+## Download pipeline (`src/download.rs`)
+
+`bb pull` and `bb sync`'s `download_to` share `download::stream_download_decrypt`
+— the read-side counterpart to `upload.rs`:
+
+- Reads the response body incrementally with `ApiClient::download_stream` +
+  `reqwest::Response::chunk()` (no whole-payload buffer), reassembles one logical
+  frame at a time, decrypts via `beebeeb_core::chunk_stream::ChunkDecryptor`
+  (`push_frame`), and writes to a `.tmp` + atomic rename. Constant memory
+  (~one chunk; measured ~40 MiB RSS for a 256 MiB download).
+- Frame sizing = `total / chunk_count` for the first N-1 frames, remainder for
+  the last (matches `crypto::decrypt_raw_chunks`); `total` from `Content-Length`
+  or `X-Original-Size + 28·chunk_count`. The download API sends no
+  `X-Chunk-Size`, so `push_frame` (self-describing per frame) is used.
+- **Legacy preserved** (user-data safety): JSON-blob chunks (first byte `{`) and
+  pre-`bb repair` binary-UUID files fall back to the unchanged buffered
+  `crypto::decrypt_file_chunks` (which retries binary-UUID then string-UUID).
+  `ChunkDecryptor` only derives the string-UUID key, so a first-frame decrypt
+  failure triggers the buffered fallback. `bb repair` semantics intact.
+- 600 s download timeout (via `download_stream`), matching `beebeeb-upload`.
+- `bb pull --zip` (batch folder zip) stays buffered by design (the zip streamer
+  needs random access).
 
 ## Dependencies
 

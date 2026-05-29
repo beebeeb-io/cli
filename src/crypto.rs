@@ -274,3 +274,126 @@ fn decrypt_raw_chunks(
 
     Ok(plaintext)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use beebeeb_core::chunk_stream::ChunkDecryptor;
+    use beebeeb_core::encrypt::{encrypt_chunk, encrypt_chunk_raw};
+    use beebeeb_core::kdf::{MasterKey, derive_file_key, derive_master_key};
+
+    // A fixed file id used across the legacy/dual-key tests.
+    const FID: &str = "3e15382b-1111-2222-3333-444455556666";
+
+    fn mk() -> MasterKey {
+        derive_master_key("test-password", b"test-salt-16bytes").unwrap()
+    }
+
+    /// Modern raw format, key derived from the UUID **string** (current CLI +
+    /// web + post-`bb repair`): the common single-chunk case.
+    #[test]
+    fn raw_string_uuid_single_chunk_roundtrip() {
+        let m = mk();
+        let fk = derive_file_key(&m, FID.as_bytes());
+        let pt = b"hello raw world";
+        let frame = encrypt_chunk_raw(&fk, pt).unwrap();
+        let out = decrypt_file_chunks(&m, FID, &frame, 1).unwrap();
+        assert_eq!(out, pt);
+    }
+
+    /// LEGACY pre-`bb repair` file: key derived from the 16-byte **binary**
+    /// UUID. `decrypt_file_chunks` must fall back to the binary-UUID key — this
+    /// is the dual-key path the streaming download relies on for legacy files.
+    #[test]
+    fn raw_binary_uuid_legacy_dual_key_fallback() {
+        let m = mk();
+        let uuid: uuid::Uuid = FID.parse().unwrap();
+        let fk = derive_file_key(&m, uuid.as_bytes());
+        let pt = b"legacy binary-uuid file body";
+        let frame = encrypt_chunk_raw(&fk, pt).unwrap();
+        let out = decrypt_file_chunks(&m, FID, &frame, 1).unwrap();
+        assert_eq!(out, pt);
+    }
+
+    /// LEGACY CLI JSON-blob chunk format (first byte `{`): detected and
+    /// decrypted via the buffered path. The streaming download peeks the first
+    /// byte and routes these here unchanged.
+    #[test]
+    fn json_blob_legacy_format_detected_and_decrypted() {
+        let m = mk();
+        let fk = derive_file_key(&m, FID.as_bytes());
+        let pt = b"legacy json blob chunk";
+        let blob = encrypt_chunk(&fk, pt).unwrap();
+        let json = serde_json::to_vec(&blob).unwrap();
+        assert_eq!(json[0], b'{', "JSON-blob detection relies on a leading brace");
+        let out = decrypt_file_chunks(&m, FID, &json, 1).unwrap();
+        assert_eq!(out, pt);
+    }
+
+    /// JSON-blob format combined with the binary-UUID legacy key — both legacy
+    /// dimensions at once (the worst-case pre-repair file).
+    #[test]
+    fn json_blob_with_binary_uuid_key() {
+        let m = mk();
+        let uuid: uuid::Uuid = FID.parse().unwrap();
+        let fk = derive_file_key(&m, uuid.as_bytes());
+        let pt = b"json + binary uuid";
+        let blob = encrypt_chunk(&fk, pt).unwrap();
+        let json = serde_json::to_vec(&blob).unwrap();
+        let out = decrypt_file_chunks(&m, FID, &json, 1).unwrap();
+        assert_eq!(out, pt);
+    }
+
+    /// Multi-chunk raw roundtrip with uniform (exact-multiple) chunks — the
+    /// `total / count` framing the streaming + buffered paths share.
+    #[test]
+    fn raw_multi_chunk_uniform_roundtrip() {
+        let m = mk();
+        let fk = derive_file_key(&m, FID.as_bytes());
+        let chunk = vec![0xABu8; 4096];
+        let mut payload = Vec::new();
+        for _ in 0..3 {
+            payload.extend_from_slice(&encrypt_chunk_raw(&fk, &chunk).unwrap());
+        }
+        let out = decrypt_file_chunks(&m, FID, &payload, 3).unwrap();
+        let mut expected = Vec::new();
+        for _ in 0..3 {
+            expected.extend_from_slice(&chunk);
+        }
+        assert_eq!(out, expected);
+    }
+
+    /// A wrong master key fails cleanly (no panic) after trying both
+    /// derivations.
+    #[test]
+    fn wrong_key_fails_cleanly() {
+        let m = mk();
+        let fk = derive_file_key(&m, FID.as_bytes());
+        let frame = encrypt_chunk_raw(&fk, b"data").unwrap();
+        let wrong = derive_master_key("other-password", b"other-salt-16byte").unwrap();
+        assert!(decrypt_file_chunks(&wrong, FID, &frame, 1).is_err());
+    }
+
+    /// The streaming download decryptor (`ChunkDecryptor::for_push`, string-UUID
+    /// key) must produce exactly what the buffered path produces for a modern
+    /// raw file — guarantees the streaming rewire is behaviour-preserving.
+    #[test]
+    fn streaming_string_key_matches_buffered() {
+        let m = mk();
+        let fk = derive_file_key(&m, FID.as_bytes());
+        let pt = b"streaming equals buffered";
+        let frame = encrypt_chunk_raw(&fk, pt).unwrap();
+        let mut dec = ChunkDecryptor::for_push(&m, FID);
+        let streamed = dec.push_frame(&frame).unwrap().data;
+        let buffered = decrypt_file_chunks(&m, FID, &frame, 1).unwrap();
+        assert_eq!(streamed, buffered);
+        assert_eq!(streamed, pt);
+    }
+
+    /// `decrypt_name` handles the plaintext fallback (non-JSON value).
+    #[test]
+    fn decrypt_name_plaintext_passthrough() {
+        let m = mk();
+        assert_eq!(decrypt_name(&m, FID, "Documents").as_deref(), Some("Documents"));
+    }
+}

@@ -5,6 +5,7 @@ mod config;
 mod crypto;
 pub mod daemon;
 pub mod device;
+mod download;
 mod env_detect;
 mod loopback;
 mod path;
