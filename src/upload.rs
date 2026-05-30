@@ -41,10 +41,13 @@
 //! `rx.close()`s before awaiting the producer; closing the receiver wakes a
 //! producer parked on the cap-1 channel, so the pipeline can never deadlock.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
+
+use bytes::Bytes;
 
 use beebeeb_core::chunk_stream::{ChunkEncryptor, EncryptedChunk};
 use beebeeb_core::kdf::MasterKey;
@@ -262,11 +265,44 @@ pub async fn stream_encrypt_upload(
         return Err(INTERRUPTED.to_string());
     }
 
-    let file_id_str = spec.file_id.to_string();
-
-    // 1. Stat for size — no full read.
+    // 1. Stat for size + mtime — no full read.
     let meta = std::fs::metadata(&spec.path).map_err(|e| format!("stat {}: {e}", spec.path.display()))?;
     let size = meta.len();
+    let mtime_ns = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+
+    // 1b. Resume decision. A prior run that was interrupted leaves a sidecar
+    //     entry (file_id) for this path; reuse it — and skip already-uploaded
+    //     chunks — only if the file is unchanged AND the server still has the
+    //     upload in progress. Otherwise mint a fresh id (`spec.file_id`). The
+    //     server's init rejects a re-init of an existing id, so a resumed upload
+    //     must skip `upload_init` and go straight to status → missing chunks →
+    //     complete (the same flow web/mobile use).
+    let resume_candidate = crate::resume::resumable_file_id(&spec.path, size, mtime_ns);
+    let mut present: HashSet<u32> = HashSet::new();
+    let resuming = match resume_candidate {
+        Some(fid) => match api.upload_status(&fid.to_string()).await {
+            Ok(set) => {
+                present = set;
+                true
+            }
+            Err(_) => {
+                // Server no longer has it in progress (completed/trashed/gone).
+                crate::resume::clear(&spec.path);
+                false
+            }
+        },
+        None => false,
+    };
+    let file_id = match (resuming, resume_candidate) {
+        (true, Some(fid)) => fid,
+        _ => spec.file_id,
+    };
+    let file_id_str = file_id.to_string();
 
     // 2. Encrypt the name + MIME envelope (master key used synchronously).
     let mime = beebeeb_core::media::guess_mime_type(&spec.file_name);
@@ -297,27 +333,37 @@ pub async fn stream_encrypt_upload(
         }
     }
 
+    // 4b. Record this upload as resumable BEFORE any chunk goes out, so an
+    //     interrupt mid-stream leaves a record the next run can pick up.
+    crate::resume::record(&spec.path, file_id, size, mtime_ns);
+
     // 5. init with the client-computed total (= size + 28·chunk_count). The
     //    server recomputes the real size from the summed chunks on complete, so
-    //    this is hygiene, not a contract.
-    let init_resp = api
-        .upload_init(
-            Some(spec.file_id),
-            &name_encrypted,
-            spec.parent_id,
-            expected_total as i64,
-            chunk_count as i32,
-            is_media,
-        )
-        .await?;
-    let server_id = init_resp
-        .get("file_id")
-        .or_else(|| init_resp.get("id"))
-        .and_then(|v| v.as_str())
-        .ok_or("server response missing file_id")?
-        .to_string();
+    //    this is hygiene, not a contract. On resume the server record already
+    //    exists (re-init would conflict), so skip straight to the pipeline.
+    let server_id = if resuming {
+        file_id_str.clone()
+    } else {
+        let init_resp = api
+            .upload_init(
+                Some(file_id),
+                &name_encrypted,
+                spec.parent_id,
+                expected_total as i64,
+                chunk_count as i32,
+                is_media,
+            )
+            .await?;
+        init_resp
+            .get("file_id")
+            .or_else(|| init_resp.get("id"))
+            .and_then(|v| v.as_str())
+            .ok_or("server response missing file_id")?
+            .to_string()
+    };
 
-    // 6. Run the look-ahead pipeline.
+    // 6. Run the look-ahead pipeline, skipping any chunk indices the server
+    //    already has from a prior interrupted run.
     let file_prog = progress.begin_file(&spec.file_name, expected_total);
     let result = run_pipeline(
         api,
@@ -325,6 +371,7 @@ pub async fn stream_encrypt_upload(
         encryptor,
         chunk_count,
         expected_total,
+        &present,
         &spec.shutdown,
         file_prog.as_ref(),
     )
@@ -338,6 +385,10 @@ pub async fn stream_encrypt_upload(
 
     // 7. Finalise the version.
     api.upload_complete(&server_id).await?;
+
+    // 7b. Upload done — drop the resume record so a future upload of this path
+    //     (e.g. a changed version) starts fresh rather than resuming this id.
+    crate::resume::clear(&spec.path);
 
     // 8. Thumbnails: image/* only, one bounded extra read, best-effort.
     maybe_upload_thumbnail(api, &master_key, &file_id_str, &server_id, &spec.path, mime, size).await;
@@ -365,12 +416,14 @@ enum ProducerErr {
 
 /// The producer/consumer core. Returns `Ok(())` only when every planned chunk
 /// was emitted, server-confirmed, and the byte totals reconcile.
+#[allow(clippy::too_many_arguments)]
 async fn run_pipeline(
     api: &ApiClient,
     server_id: &str,
     encryptor: ChunkEncryptor,
     chunk_count: u32,
     expected_total: u64,
+    present: &HashSet<u32>,
     shutdown: &Arc<AtomicBool>,
     file_prog: &dyn FileProgress,
 ) -> Result<(), String> {
@@ -422,7 +475,15 @@ async fn run_pipeline(
         }
         let len = chunk.data.len() as u64;
         let index = chunk.index;
-        match api.upload_chunk(server_id, index, chunk.data).await {
+        // Resume: a chunk the server already has is counted as confirmed
+        // (advancing the byte totals + progress) without re-PUTting it.
+        if present.contains(&index) {
+            confirmed_bytes += len;
+            confirmed_chunks += 1;
+            file_prog.chunk_confirmed(len);
+            continue;
+        }
+        match api.upload_chunk(server_id, index, Bytes::from(chunk.data)).await {
             Ok(_) => {
                 confirmed_bytes += len;
                 confirmed_chunks += 1;

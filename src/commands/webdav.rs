@@ -669,7 +669,7 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
     };
 
     for (idx, data) in encrypted_chunks {
-        if let Err(e) = state.api.upload_chunk(&server_id, idx, data).await {
+        if let Err(e) = state.api.upload_chunk(&server_id, idx, bytes::Bytes::from(data)).await {
             return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
         }
     }

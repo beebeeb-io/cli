@@ -2043,15 +2043,19 @@ async fn do_download(
     match download_to(api, master_key, remote.id, remote.chunk_count, &out_path).await {
         Ok(()) => {}
         Err(e) if e.contains("still in progress") || e.contains("409") => {
+            // A partially-uploaded remote (this or another device still pushing).
+            // Do NOT trash it — that throws away resumable progress and forces a
+            // restart from byte 0. Leave the partial: the upload side resumes via
+            // /upload/status (skipping present chunks), and a later sync sees the
+            // completed file.
             if !ui::is_quiet() {
                 use colored::Colorize;
                 eprintln!(
-                    "  {} {} — clearing stuck upload, will re-sync next run",
+                    "  {} {} — still uploading, leaving partial to resume",
                     "!".custom_color(crate::colors::AMBER),
                     rel.custom_color(crate::colors::INK_DIM),
                 );
             }
-            let _ = api.trash_file(&remote.id.to_string()).await;
             return Ok(());
         }
         Err(e) if e.contains("key derivation") || e.contains("decrypt") => {

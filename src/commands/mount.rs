@@ -587,7 +587,8 @@ mod fuse_impl {
                 .unwrap_or_else(|| key_uuid.to_string());
 
             for (idx, data) in encrypted_chunks {
-                self.rt.block_on(self.api.upload_chunk(&server_id, idx, data))?;
+                self.rt
+                    .block_on(self.api.upload_chunk(&server_id, idx, bytes::Bytes::from(data)))?;
             }
 
             self.rt.block_on(self.api.upload_complete(&server_id))?;

@@ -9,6 +9,7 @@ mod download;
 mod env_detect;
 mod loopback;
 mod path;
+mod resume;
 mod thumbnail;
 mod tui;
 mod ui;
@@ -530,6 +531,10 @@ async fn main() {
             concurrency,
             rehash,
         } => {
+            // Clamp parallel uploads to a sane window: 0 would stall the pipeline,
+            // and unbounded values blow up peak memory (each in-flight file holds
+            // ~chunk_size worth of buffers). (1, 8) is the supported range.
+            let concurrency = concurrency.clamp(1, 8);
             commands::sync::run(
                 local_dir,
                 remote_path,
