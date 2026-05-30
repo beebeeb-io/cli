@@ -87,6 +87,11 @@ pub struct UploadSpec {
     pub file_id: Uuid,
     /// Destination folder, or `None` for the vault root.
     pub parent_id: Option<Uuid>,
+    /// Number of files uploaded in parallel by the caller (sync `--concurrency`;
+    /// `1` for `bb push`/single-file paths). Threaded into the concurrency-aware
+    /// chunk plan so parallel uploads emit smaller chunks to stay in the memory
+    /// budget.
+    pub concurrency: u32,
     /// Shared cancellation flag (set by the Ctrl-C handler).
     pub shutdown: Arc<AtomicBool>,
 }
@@ -311,9 +316,15 @@ pub async fn stream_encrypt_upload(
     let is_media = beebeeb_core::media::is_media(mime);
 
     // 3. Open the file and build the streaming encryptor (derives the file key
-    //    once; the encryptor owns it and is `Send`).
+    //    once; the encryptor owns it and is `Send`). The CLI uses the Cli
+    //    profile with a concurrency-aware chunk size: parallel `bb sync` uploads
+    //    emit smaller chunks (memory budget), while `bb push` (concurrency 1)
+    //    gets the full Cli 128 MiB cap. The server infers + stores the real
+    //    chunk size at complete, so this is purely a client-side choice.
+    let chunk_size = beebeeb_types::plan_chunks_concurrent(size, ChunkProfile::Cli, spec.concurrency.max(1))
+        .chunk_size_bytes;
     let file = std::fs::File::open(&spec.path).map_err(|e| format!("open {}: {e}", spec.path.display()))?;
-    let encryptor = ChunkEncryptor::from_reader(&master_key, &file_id_str, size, ChunkProfile::Desktop, file)
+    let encryptor = ChunkEncryptor::from_reader_with_chunk_size(&master_key, &file_id_str, size, chunk_size, file)
         .map_err(|e| format!("init encryptor for {}: {e}", spec.file_name))?;
     let chunk_count = encryptor.chunk_plan().chunk_count as u32;
     let expected_total = encryptor.expected_total_ciphertext();
@@ -564,10 +575,11 @@ async fn maybe_upload_thumbnail(
     }
 }
 
-/// Expected ciphertext for a file of `size` under `ChunkProfile::Desktop`:
-/// `size + 28 · chunk_count`. Used by callers to size the overall progress bar
-/// without opening the file.
-pub fn expected_ciphertext_for(size: u64) -> u64 {
-    let plan = beebeeb_types::plan_chunks(size, ChunkProfile::Desktop);
+/// Expected ciphertext for a file of `size` under `ChunkProfile::Cli` at the
+/// given upload `concurrency`: `size + 28 · chunk_count`. Used by callers to
+/// size the overall progress bar without opening the file — matches the
+/// concurrency-aware chunk plan the upload driver actually emits.
+pub fn expected_ciphertext_for(size: u64, concurrency: u32) -> u64 {
+    let plan = beebeeb_types::plan_chunks_concurrent(size, ChunkProfile::Cli, concurrency.max(1));
     size + CHUNK_OVERHEAD * plan.chunk_count
 }

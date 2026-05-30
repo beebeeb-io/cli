@@ -599,7 +599,7 @@ pub async fn run(
         let progress: Box<dyn crate::upload::ChunkProgress> = if show_bars {
             let total_expected: u64 = pending_uploads
                 .iter()
-                .map(|(_, l, _)| crate::upload::expected_ciphertext_for(l.size))
+                .map(|(_, l, _)| crate::upload::expected_ciphertext_for(l.size, concurrency as u32))
                 .sum();
             Box::new(crate::upload::BarProgress::new(pending_count as u64, total_expected))
         } else {
@@ -660,6 +660,7 @@ pub async fn run(
                         file_name,
                         file_id: Uuid::new_v4(),
                         parent_id,
+                        concurrency: concurrency as u32,
                         shutdown,
                     };
                     let outcome = crate::upload::stream_encrypt_upload(api, master_key, spec, progress).await?;
@@ -2113,6 +2114,8 @@ async fn upload_file_to(
         file_name: file_name.to_string(),
         file_id: Uuid::new_v4(),
         parent_id,
+        // Single in-flight file in this watch-loop wrapper → full Cli cap.
+        concurrency: 1,
         shutdown: Arc::new(AtomicBool::new(false)),
     };
     let outcome = crate::upload::stream_encrypt_upload(api, master_key, spec, &crate::upload::NoopProgress).await?;

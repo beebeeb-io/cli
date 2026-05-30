@@ -615,7 +615,7 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
         };
 
     // Encrypt body in chunks using adaptive chunk sizing
-    let plan = beebeeb_types::plan_chunks(body.len() as u64, beebeeb_types::ChunkProfile::Desktop);
+    let plan = beebeeb_types::plan_chunks(body.len() as u64, beebeeb_types::ChunkProfile::Cli);
     let chunk_size = plan.chunk_size_bytes as usize;
 
     let chunks_raw: Vec<&[u8]> = if body.is_empty() {

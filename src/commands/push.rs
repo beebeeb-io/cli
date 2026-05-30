@@ -385,6 +385,8 @@ async fn push_single_file(
         file_name: upload_name,
         file_id,
         parent_id: parent_uuid,
+        // bb push uploads one file at a time → full Cli cap (128 MiB).
+        concurrency: 1,
         shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let outcome = crate::upload::stream_encrypt_upload(
