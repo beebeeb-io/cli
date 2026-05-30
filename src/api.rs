@@ -126,6 +126,17 @@ impl ApiClient {
         }
     }
 
+    /// Test-only constructor: point the client at an arbitrary base URL (e.g. a
+    /// mock server) with a dummy auth token, bypassing the on-disk config.
+    #[cfg(test)]
+    pub(crate) fn new_for_test(base_url: String) -> Self {
+        Self {
+            client: Client::new(),
+            base_url,
+            token: Some("test-token".to_string()),
+        }
+    }
+
     pub fn require_auth(&self) -> Result<&str, String> {
         self.token
             .as_deref()
