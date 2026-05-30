@@ -2,8 +2,8 @@
 //! `src/upload.rs`.
 //!
 //! `GET /api/v1/files/{id}/download` returns the chunks concatenated back to
-//! back (`nonce(12) || ciphertext || tag(16)` per chunk) with `X-Chunk-Count`
-//! + `X-Original-Size` headers but **no** per-chunk-size header. The old path
+//! back (`nonce(12) || ciphertext || tag(16)` per chunk) with `X-Chunk-Count`,
+//! `X-Original-Size`, and (for V2 files) `X-Chunk-Size` headers. The old path
 //! buffered the entire payload (`resp.bytes().await`) before decrypting — peak
 //! RAM ≈ file size. This module reads the body incrementally with
 //! `Response::chunk()`, reassembles one logical frame at a time, decrypts it
@@ -22,9 +22,15 @@
 //!   fails to decrypt we buffer the whole payload and hand it to the buffered
 //!   path, which retries with the binary-UUID key. `bb repair` semantics intact.
 //!
-//! Framing (`total / chunk_count` for the first N-1 frames, remainder for the
-//! last) matches the existing buffered splitter exactly, so there is no
-//! behavioural change for any file — only the memory profile improves.
+//! Framing: the server's `X-Chunk-Size` header (the uniform plaintext chunk
+//! size for the file's version) is authoritative — each wire frame is
+//! `chunk_size + CHUNK_OVERHEAD` for the first N-1 chunks, remainder for the
+//! last. Streaming uploads make every chunk but the last exactly that size, so
+//! the old `total / chunk_count` average mis-sized frame 0 whenever the file
+//! size was not an exact multiple of the chunk size (e.g. a 150 MiB file with
+//! 8 MiB chunks), failing the GCM tag and forcing a buffered fallback. When the
+//! header is absent (legacy V1 responses) we fall back to `total / chunk_count`,
+//! matching the buffered splitter.
 
 use std::io::Write;
 use std::path::Path;
@@ -61,6 +67,9 @@ pub async fn stream_download_decrypt(
     let mut resp = api.download_stream(file_id).await?;
     let content_len = resp.content_length();
     let original_size = header_u64(&resp, "X-Original-Size");
+    // Uniform plaintext chunk size for this file's version (V2 files only). When
+    // present it is authoritative for frame sizing; absent → legacy V1 fallback.
+    let chunk_size = header_u64(&resp, "X-Chunk-Size").filter(|&v| v > 0);
 
     // Best estimate of the total encrypted length, used only to size the first
     // N-1 frames; the last frame always drains the remainder, so a small
@@ -95,6 +104,7 @@ pub async fn stream_download_decrypt(
             file_id,
             count,
             total,
+            chunk_size,
             out_path,
             carry,
             prog.as_ref(),
@@ -118,16 +128,23 @@ async fn stream_raw(
     file_id: &str,
     count: u32,
     total: u64,
+    chunk_size: Option<u64>,
     out_path: &Path,
     mut carry: Vec<u8>,
     prog: &dyn crate::upload::FileProgress,
 ) -> Result<DownloadStats, String> {
     let n = count as usize;
     // Frame size for the first n-1 frames; the last frame takes the remainder.
-    // Matches crypto::decrypt_raw_chunks (total / count). For a single chunk the
-    // whole payload is the frame.
+    // When the server sends `X-Chunk-Size` (V2 files), each wire frame is the
+    // uniform plaintext chunk size + CHUNK_OVERHEAD (nonce + tag) — this is
+    // exact even when the file size is not a multiple of the chunk size. Only
+    // legacy V1 responses (no header) fall back to the `total / count` average,
+    // which matches crypto::decrypt_raw_chunks. For a single chunk the whole
+    // payload is the frame.
     let frame_size = if n <= 1 {
         usize::MAX // sentinel: the single frame is "everything"
+    } else if let Some(cs) = chunk_size {
+        (cs + CHUNK_OVERHEAD) as usize
     } else {
         (total / count as u64) as usize
     };
