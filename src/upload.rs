@@ -322,8 +322,8 @@ pub async fn stream_encrypt_upload(
     //    emit smaller chunks (memory budget), while `bb push` (concurrency 1)
     //    gets the full Cli 128 MiB cap. The server infers + stores the real
     //    chunk size at complete, so this is purely a client-side choice.
-    let chunk_size = beebeeb_types::plan_chunks_concurrent(size, ChunkProfile::Cli, spec.concurrency.max(1))
-        .chunk_size_bytes;
+    let chunk_size =
+        beebeeb_types::plan_chunks_concurrent(size, ChunkProfile::Cli, spec.concurrency.max(1)).chunk_size_bytes;
     let file = std::fs::File::open(&spec.path).map_err(|e| format!("open {}: {e}", spec.path.display()))?;
     let encryptor = ChunkEncryptor::from_reader_with_chunk_size(&master_key, &file_id_str, size, chunk_size, file)
         .map_err(|e| format!("init encryptor for {}: {e}", spec.file_name))?;
