@@ -491,7 +491,7 @@ jobs:
           chmod +x bin/bb
           echo "$PWD/bin" >> "$GITHUB_PATH"
       - name: Setup bun
-        uses: oven-sh/setup-bun@v1
+        uses: oven-sh/setup-bun@v2
       - name: Install playwright + otplib in scripts/
         working-directory: scripts
         run: |
