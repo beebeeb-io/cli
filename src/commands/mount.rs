@@ -542,7 +542,7 @@ mod fuse_impl {
                 .map_err(|e| format!("encrypt name: {e}"))?;
 
             // Encrypt content using the adaptive chunk-size ladder.
-            let plan = beebeeb_types::plan_chunks(plaintext.len() as u64, beebeeb_types::ChunkProfile::Desktop);
+            let plan = beebeeb_types::plan_chunks(plaintext.len() as u64, beebeeb_types::ChunkProfile::Cli);
             let chunk_size = plan.chunk_size_bytes as usize;
 
             let mut encrypted_chunks: Vec<(u32, Vec<u8>)> = Vec::new();
@@ -587,7 +587,8 @@ mod fuse_impl {
                 .unwrap_or_else(|| key_uuid.to_string());
 
             for (idx, data) in encrypted_chunks {
-                self.rt.block_on(self.api.upload_chunk(&server_id, idx, data))?;
+                self.rt
+                    .block_on(self.api.upload_chunk(&server_id, idx, bytes::Bytes::from(data)))?;
             }
 
             self.rt.block_on(self.api.upload_complete(&server_id))?;

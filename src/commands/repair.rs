@@ -106,7 +106,7 @@ fn encrypt_chunks_with_string_key(
 ) -> Result<Vec<(u32, Vec<u8>)>, String> {
     let file_key = beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes());
 
-    let plan = beebeeb_types::plan_chunks(plaintext.len() as u64, beebeeb_types::ChunkProfile::Desktop);
+    let plan = beebeeb_types::plan_chunks(plaintext.len() as u64, beebeeb_types::ChunkProfile::Cli);
     let chunk_size = plan.chunk_size_bytes as usize;
 
     let mut encrypted_chunks = Vec::new();

@@ -9,11 +9,59 @@ mod download;
 mod env_detect;
 mod loopback;
 mod path;
+mod resume;
 mod thumbnail;
 mod tui;
 mod ui;
 mod update;
 mod upload;
+
+// Peak-heap tracking allocator, active ONLY in test builds (`#[cfg(test)]`), so
+// the shipped `bb` binary keeps the default system allocator. Used by the
+// upload RSS/peak-memory regression test (task 0666) to convert the modeled
+// per-file memory multiplier into a measured, guarded fact.
+#[cfg(test)]
+pub(crate) mod test_alloc {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static LIVE: AtomicUsize = AtomicUsize::new(0);
+    static PEAK: AtomicUsize = AtomicUsize::new(0);
+
+    pub struct Tracking;
+
+    unsafe impl GlobalAlloc for Tracking {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let ptr = unsafe { System.alloc(layout) };
+            if !ptr.is_null() {
+                let live = LIVE.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
+                PEAK.fetch_max(live, Ordering::Relaxed);
+            }
+            ptr
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+            unsafe { System.dealloc(ptr, layout) }
+        }
+    }
+
+    /// Current live (allocated-not-freed) bytes across the process.
+    pub fn live() -> usize {
+        LIVE.load(Ordering::Relaxed)
+    }
+    /// High-water mark of `live()` since the last [`reset_peak`].
+    pub fn peak() -> usize {
+        PEAK.load(Ordering::Relaxed)
+    }
+    /// Reset the peak high-water mark to the current live total.
+    pub fn reset_peak() {
+        PEAK.store(LIVE.load(Ordering::Relaxed), Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+#[global_allocator]
+static GLOBAL_ALLOC: test_alloc::Tracking = test_alloc::Tracking;
 
 use std::path::PathBuf;
 
@@ -600,6 +648,10 @@ async fn main() {
             concurrency,
             rehash,
         } => {
+            // Clamp parallel uploads to a sane window: 0 would stall the pipeline,
+            // and unbounded values blow up peak memory (each in-flight file holds
+            // ~chunk_size worth of buffers). (1, 8) is the supported range.
+            let concurrency = concurrency.clamp(1, 8);
             commands::sync::run(
                 local_dir,
                 remote_path,

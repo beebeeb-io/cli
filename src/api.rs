@@ -1,5 +1,7 @@
+use bytes::Bytes;
 use reqwest::Client;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::error::Error;
 use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -60,6 +62,46 @@ fn format_request_error(error: reqwest::Error) -> String {
     message
 }
 
+/// Transport-level failures that are safe to retry on an **idempotent** request.
+/// Covers connection refused/reset, timeouts, and a connection dropped
+/// mid-flight (broken pipe / incomplete message / premature EOF). Deliberately
+/// does NOT cover builder errors or HTTP error statuses (those are handled by
+/// `parse_response` and must fail fast).
+fn is_transient_transport_error(err: &reqwest::Error) -> bool {
+    if err.is_timeout() || err.is_connect() {
+        return true;
+    }
+    // reqwest doesn't expose typed predicates for reset/EOF, so scan the source
+    // chain for the usual hyper/io messages. Only request/body errors qualify —
+    // a builder error won't fix itself on retry.
+    if err.is_request() || err.is_body() {
+        let mut src: Option<&(dyn Error + 'static)> = Some(err);
+        while let Some(e) = src {
+            let s = e.to_string().to_lowercase();
+            if s.contains("connection reset")
+                || s.contains("connection closed")
+                || s.contains("connection aborted")
+                || s.contains("broken pipe")
+                || s.contains("incomplete")
+                || s.contains("unexpected end")
+                || s.contains("end of file")
+                || s.contains("eof")
+            {
+                return true;
+            }
+            src = e.source();
+        }
+    }
+    false
+}
+
+/// Exponential backoff with a 5s cap: ~200ms, 400, 800, 1600, 3200, 5000…
+async fn backoff(attempt: u32) {
+    let shift = attempt.saturating_sub(1).min(5);
+    let ms = (200u64 << shift).min(5_000);
+    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+}
+
 pub struct ApiClient {
     client: Client,
     base_url: String,
@@ -81,6 +123,17 @@ impl ApiClient {
             client,
             base_url: config.api_url,
             token: config.session_token,
+        }
+    }
+
+    /// Test-only constructor: point the client at an arbitrary base URL (e.g. a
+    /// mock server) with a dummy auth token, bypassing the on-disk config.
+    #[cfg(test)]
+    pub(crate) fn new_for_test(base_url: String) -> Self {
+        Self {
+            client: Client::new(),
+            base_url,
+            token: Some("test-token".to_string()),
         }
     }
 
@@ -312,25 +365,74 @@ impl ApiClient {
         Err("rate limited after 3 retries".to_string())
     }
 
-    pub async fn upload_chunk(&self, file_id: &str, index: u32, data: Vec<u8>) -> Result<Value, String> {
+    /// Upload one chunk. Retries the **same** index on transient transport
+    /// failures (conn-reset, timeout, premature EOF) and on rate-limit pauses,
+    /// with exponential backoff. Safe to re-PUT: the endpoint is idempotent
+    /// (index-keyed, `ON CONFLICT DO UPDATE`). `data` is `Bytes` so each retry
+    /// reuses the same allocation (a clone is just an `Arc` refcount bump).
+    pub async fn upload_chunk(&self, file_id: &str, index: u32, data: Bytes) -> Result<Value, String> {
         let token = self.require_auth()?;
-        for attempt in 0..3 {
+        let url = self.url(&format!("/api/v1/files/{file_id}/chunks/{index}"));
+        const MAX_ATTEMPTS: u32 = 5;
+        let mut last_err = String::new();
+        for attempt in 1..=MAX_ATTEMPTS {
             pace_if_needed().await;
-            let resp = self
+            let send = self
                 .client
-                .put(self.url(&format!("/api/v1/files/{file_id}/chunks/{index}")))
+                .put(&url)
                 .bearer_auth(&token)
                 .header("Content-Type", "application/octet-stream")
-                .body(if attempt == 0 { data.clone() } else { data.clone() })
+                .body(data.clone())
                 .send()
-                .await
-                .map_err(format_request_error)?;
-            match parse_response(resp).await {
-                Err(e) if e == "__rate_limited__" => continue,
-                other => return other,
+                .await;
+            match send {
+                Ok(resp) => match parse_response(resp).await {
+                    // parse_response already slept for Retry-After; just re-try.
+                    Err(e) if e == "__rate_limited__" => {
+                        last_err = "rate limited".to_string();
+                        continue;
+                    }
+                    // Success, or a definitive HTTP error (4xx/5xx) — don't retry.
+                    other => return other,
+                },
+                Err(err) if is_transient_transport_error(&err) => {
+                    last_err = format_request_error(err);
+                    backoff(attempt).await;
+                    continue;
+                }
+                // Permanent transport error (TLS/builder/etc.) — fail fast.
+                Err(err) => return Err(format_request_error(err)),
             }
         }
-        Err("rate limited after 3 retries".to_string())
+        Err(format!(
+            "chunk {index} failed after {MAX_ATTEMPTS} attempts: {last_err}"
+        ))
+    }
+
+    /// GET /upload/status — the set of chunk indices already present server-side
+    /// for an in-progress upload. Errors if the file is not in progress
+    /// (completed / trashed / unknown), which the caller treats as
+    /// "not resumable → start a fresh upload".
+    pub async fn upload_status(&self, file_id: &str) -> Result<HashSet<u32>, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .get(self.url(&format!("/api/v1/files/{file_id}/upload/status")))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        let val = parse_response(resp).await?;
+        let present = val
+            .get("uploaded_chunks")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|n| n.as_u64().map(|n| n as u32))
+                    .collect::<HashSet<u32>>()
+            })
+            .unwrap_or_default();
+        Ok(present)
     }
 
     pub async fn upload_complete(&self, file_id: &str) -> Result<Value, String> {

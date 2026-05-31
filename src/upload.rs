@@ -41,10 +41,13 @@
 //! `rx.close()`s before awaiting the producer; closing the receiver wakes a
 //! producer parked on the cap-1 channel, so the pipeline can never deadlock.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
+
+use bytes::Bytes;
 
 use beebeeb_core::chunk_stream::{ChunkEncryptor, EncryptedChunk};
 use beebeeb_core::kdf::MasterKey;
@@ -84,11 +87,17 @@ pub struct UploadSpec {
     pub file_id: Uuid,
     /// Destination folder, or `None` for the vault root.
     pub parent_id: Option<Uuid>,
+    /// Number of files uploaded in parallel by the caller (sync `--concurrency`;
+    /// `1` for `bb push`/single-file paths). Threaded into the concurrency-aware
+    /// chunk plan so parallel uploads emit smaller chunks to stay in the memory
+    /// budget.
+    pub concurrency: u32,
     /// Shared cancellation flag (set by the Ctrl-C handler).
     pub shutdown: Arc<AtomicBool>,
 }
 
 /// Result of a completed upload.
+#[derive(Debug)]
 pub struct UploadOutcome {
     /// Server-confirmed file id.
     pub server_id: Uuid,
@@ -262,11 +271,44 @@ pub async fn stream_encrypt_upload(
         return Err(INTERRUPTED.to_string());
     }
 
-    let file_id_str = spec.file_id.to_string();
-
-    // 1. Stat for size — no full read.
+    // 1. Stat for size + mtime — no full read.
     let meta = std::fs::metadata(&spec.path).map_err(|e| format!("stat {}: {e}", spec.path.display()))?;
     let size = meta.len();
+    let mtime_ns = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+
+    // 1b. Resume decision. A prior run that was interrupted leaves a sidecar
+    //     entry (file_id) for this path; reuse it — and skip already-uploaded
+    //     chunks — only if the file is unchanged AND the server still has the
+    //     upload in progress. Otherwise mint a fresh id (`spec.file_id`). The
+    //     server's init rejects a re-init of an existing id, so a resumed upload
+    //     must skip `upload_init` and go straight to status → missing chunks →
+    //     complete (the same flow web/mobile use).
+    let resume_candidate = crate::resume::resumable_file_id(&spec.path, size, mtime_ns);
+    let mut present: HashSet<u32> = HashSet::new();
+    let resuming = match resume_candidate {
+        Some(fid) => match api.upload_status(&fid.to_string()).await {
+            Ok(set) => {
+                present = set;
+                true
+            }
+            Err(_) => {
+                // Server no longer has it in progress (completed/trashed/gone).
+                crate::resume::clear(&spec.path);
+                false
+            }
+        },
+        None => false,
+    };
+    let file_id = match (resuming, resume_candidate) {
+        (true, Some(fid)) => fid,
+        _ => spec.file_id,
+    };
+    let file_id_str = file_id.to_string();
 
     // 2. Encrypt the name + MIME envelope (master key used synchronously).
     let mime = beebeeb_core::media::guess_mime_type(&spec.file_name);
@@ -275,9 +317,15 @@ pub async fn stream_encrypt_upload(
     let is_media = beebeeb_core::media::is_media(mime);
 
     // 3. Open the file and build the streaming encryptor (derives the file key
-    //    once; the encryptor owns it and is `Send`).
+    //    once; the encryptor owns it and is `Send`). The CLI uses the Cli
+    //    profile with a concurrency-aware chunk size: parallel `bb sync` uploads
+    //    emit smaller chunks (memory budget), while `bb push` (concurrency 1)
+    //    gets the full Cli 128 MiB cap. The server infers + stores the real
+    //    chunk size at complete, so this is purely a client-side choice.
+    let chunk_size =
+        beebeeb_types::plan_chunks_concurrent(size, ChunkProfile::Cli, spec.concurrency.max(1)).chunk_size_bytes;
     let file = std::fs::File::open(&spec.path).map_err(|e| format!("open {}: {e}", spec.path.display()))?;
-    let encryptor = ChunkEncryptor::from_reader(&master_key, &file_id_str, size, ChunkProfile::Desktop, file)
+    let encryptor = ChunkEncryptor::from_reader_with_chunk_size(&master_key, &file_id_str, size, chunk_size, file)
         .map_err(|e| format!("init encryptor for {}: {e}", spec.file_name))?;
     let chunk_count = encryptor.chunk_plan().chunk_count as u32;
     let expected_total = encryptor.expected_total_ciphertext();
@@ -297,27 +345,37 @@ pub async fn stream_encrypt_upload(
         }
     }
 
+    // 4b. Record this upload as resumable BEFORE any chunk goes out, so an
+    //     interrupt mid-stream leaves a record the next run can pick up.
+    crate::resume::record(&spec.path, file_id, size, mtime_ns);
+
     // 5. init with the client-computed total (= size + 28·chunk_count). The
     //    server recomputes the real size from the summed chunks on complete, so
-    //    this is hygiene, not a contract.
-    let init_resp = api
-        .upload_init(
-            Some(spec.file_id),
-            &name_encrypted,
-            spec.parent_id,
-            expected_total as i64,
-            chunk_count as i32,
-            is_media,
-        )
-        .await?;
-    let server_id = init_resp
-        .get("file_id")
-        .or_else(|| init_resp.get("id"))
-        .and_then(|v| v.as_str())
-        .ok_or("server response missing file_id")?
-        .to_string();
+    //    this is hygiene, not a contract. On resume the server record already
+    //    exists (re-init would conflict), so skip straight to the pipeline.
+    let server_id = if resuming {
+        file_id_str.clone()
+    } else {
+        let init_resp = api
+            .upload_init(
+                Some(file_id),
+                &name_encrypted,
+                spec.parent_id,
+                expected_total as i64,
+                chunk_count as i32,
+                is_media,
+            )
+            .await?;
+        init_resp
+            .get("file_id")
+            .or_else(|| init_resp.get("id"))
+            .and_then(|v| v.as_str())
+            .ok_or("server response missing file_id")?
+            .to_string()
+    };
 
-    // 6. Run the look-ahead pipeline.
+    // 6. Run the look-ahead pipeline, skipping any chunk indices the server
+    //    already has from a prior interrupted run.
     let file_prog = progress.begin_file(&spec.file_name, expected_total);
     let result = run_pipeline(
         api,
@@ -325,6 +383,7 @@ pub async fn stream_encrypt_upload(
         encryptor,
         chunk_count,
         expected_total,
+        &present,
         &spec.shutdown,
         file_prog.as_ref(),
     )
@@ -338,6 +397,10 @@ pub async fn stream_encrypt_upload(
 
     // 7. Finalise the version.
     api.upload_complete(&server_id).await?;
+
+    // 7b. Upload done — drop the resume record so a future upload of this path
+    //     (e.g. a changed version) starts fresh rather than resuming this id.
+    crate::resume::clear(&spec.path);
 
     // 8. Thumbnails: image/* only, one bounded extra read, best-effort.
     maybe_upload_thumbnail(api, &master_key, &file_id_str, &server_id, &spec.path, mime, size).await;
@@ -365,12 +428,14 @@ enum ProducerErr {
 
 /// The producer/consumer core. Returns `Ok(())` only when every planned chunk
 /// was emitted, server-confirmed, and the byte totals reconcile.
+#[allow(clippy::too_many_arguments)]
 async fn run_pipeline(
     api: &ApiClient,
     server_id: &str,
     encryptor: ChunkEncryptor,
     chunk_count: u32,
     expected_total: u64,
+    present: &HashSet<u32>,
     shutdown: &Arc<AtomicBool>,
     file_prog: &dyn FileProgress,
 ) -> Result<(), String> {
@@ -422,7 +487,15 @@ async fn run_pipeline(
         }
         let len = chunk.data.len() as u64;
         let index = chunk.index;
-        match api.upload_chunk(server_id, index, chunk.data).await {
+        // Resume: a chunk the server already has is counted as confirmed
+        // (advancing the byte totals + progress) without re-PUTting it.
+        if present.contains(&index) {
+            confirmed_bytes += len;
+            confirmed_chunks += 1;
+            file_prog.chunk_confirmed(len);
+            continue;
+        }
+        match api.upload_chunk(server_id, index, Bytes::from(chunk.data)).await {
             Ok(_) => {
                 confirmed_bytes += len;
                 confirmed_chunks += 1;
@@ -503,10 +576,158 @@ async fn maybe_upload_thumbnail(
     }
 }
 
-/// Expected ciphertext for a file of `size` under `ChunkProfile::Desktop`:
-/// `size + 28 · chunk_count`. Used by callers to size the overall progress bar
-/// without opening the file.
-pub fn expected_ciphertext_for(size: u64) -> u64 {
-    let plan = beebeeb_types::plan_chunks(size, ChunkProfile::Desktop);
+/// Expected ciphertext for a file of `size` under `ChunkProfile::Cli` at the
+/// given upload `concurrency`: `size + 28 · chunk_count`. Used by callers to
+/// size the overall progress bar without opening the file — matches the
+/// concurrency-aware chunk plan the upload driver actually emits.
+pub fn expected_ciphertext_for(size: u64, concurrency: u32) -> u64 {
+    let plan = beebeeb_types::plan_chunks_concurrent(size, ChunkProfile::Cli, concurrency.max(1));
     size + CHUNK_OVERHEAD * plan.chunk_count
+}
+
+#[cfg(test)]
+mod rss_regression {
+    use std::io::Write;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    use axum::body::Body;
+    use axum::extract::Path;
+    use axum::routing::{post, put};
+    use axum::{Json, Router};
+    use beebeeb_core::kdf::MasterKey;
+    use futures_util::StreamExt;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use super::{NoopProgress, UploadSpec, stream_encrypt_upload};
+    use crate::api::ApiClient;
+
+    /// Minimal mock of the V2 upload endpoints. The chunk handler drains the body
+    /// as a stream and discards it, so the mock holds at most one frame — the
+    /// measured peak reflects the CLIENT pipeline, not server-side buffering.
+    async fn spawn_mock() -> String {
+        let app = Router::new()
+            .route(
+                "/api/v1/files/upload/init",
+                post(|| async { Json(json!({ "file_id": Uuid::new_v4().to_string() })) }),
+            )
+            .route(
+                "/api/v1/files/:id/chunks/:idx",
+                put(|_p: Path<(String, u32)>, body: Body| async move {
+                    let mut stream = body.into_data_stream();
+                    let mut n: usize = 0;
+                    while let Some(frame) = stream.next().await {
+                        n += frame.map(|b| b.len()).unwrap_or(0);
+                    }
+                    Json(json!({ "size": n }))
+                }),
+            )
+            .route(
+                "/api/v1/files/:id/upload/complete",
+                post(|_p: Path<String>| async {
+                    Json(json!({ "id": Uuid::new_v4().to_string(), "size_bytes": 0, "chunk_count": 0 }))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    fn write_temp_file(name: &str, size: u64) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("bb-rss-{}-{name}", std::process::id()));
+        let mut f = std::fs::File::create(&path).unwrap();
+        let buf = vec![0xABu8; 1024 * 1024]; // 1 MiB, reused
+        let mut written = 0u64;
+        while written < size {
+            let take = ((size - written) as usize).min(buf.len());
+            f.write_all(&buf[..take]).unwrap();
+            written += take as u64;
+        }
+        f.flush().unwrap();
+        path
+    }
+
+    /// Peak-heap regression guard (task 0666): a conc=4 upload of four 64 MiB
+    /// files (4 MiB chunks under the N=32 ladder) must keep peak heap BOUNDED —
+    /// roughly constant w.r.t. tree size and well under the 2 GiB budget —
+    /// proving the streaming pipeline never buffers whole files. A regression
+    /// (losing the streaming/`Bytes` reuse, or buffering a file) inflates the
+    /// peak and trips the bound. Runs the REAL `stream_encrypt_upload` against an
+    /// in-process mock so the measurement covers the actual path.
+    ///
+    /// `#[ignore]`d because the tracking allocator is PROCESS-GLOBAL: under the
+    /// default parallel `cargo test`, other tests' concurrent allocations
+    /// pollute the peak (measured ~87 MiB in-suite vs ~48 MiB isolated). Run it
+    /// isolated for an accurate measurement:
+    ///   `cargo test upload_peak_heap_is_bounded_at_conc4 -- --ignored --test-threads=1`
+    #[tokio::test]
+    #[ignore = "process-global peak-alloc measurement; run isolated: -- --ignored --test-threads=1"]
+    async fn upload_peak_heap_is_bounded_at_conc4() {
+        const FILE_SIZE: u64 = 64 * 1024 * 1024;
+        const CONC: u32 = 4;
+
+        let base_url = spawn_mock().await;
+        let api = ApiClient::new_for_test(base_url);
+        let master_key = Arc::new(MasterKey::from_bytes([7u8; 32]));
+
+        // Create temp files BEFORE measuring so their creation isn't counted.
+        let paths: Vec<_> = (0..CONC)
+            .map(|i| write_temp_file(&format!("{i}.bin"), FILE_SIZE))
+            .collect();
+
+        let baseline = crate::test_alloc::live();
+        crate::test_alloc::reset_peak();
+
+        let progress = NoopProgress;
+        let futures = paths.iter().map(|path| {
+            let spec = UploadSpec {
+                path: path.clone(),
+                file_name: path.file_name().unwrap().to_string_lossy().into_owned(),
+                file_id: Uuid::new_v4(),
+                parent_id: None,
+                concurrency: CONC,
+                shutdown: Arc::new(AtomicBool::new(false)),
+            };
+            stream_encrypt_upload(&api, master_key.clone(), spec, &progress)
+        });
+        let results = futures_util::future::join_all(futures).await;
+
+        let peak_increase = crate::test_alloc::peak().saturating_sub(baseline);
+
+        for p in &paths {
+            let _ = std::fs::remove_file(p);
+        }
+
+        let mib = peak_increase as f64 / (1024.0 * 1024.0);
+        eprintln!(
+            "[RSS] conc={CONC} x {} MiB files (4 MiB chunks): peak heap increase = {mib:.1} MiB",
+            FILE_SIZE / (1024 * 1024),
+        );
+
+        for (i, r) in results.iter().enumerate() {
+            assert!(r.is_ok(), "upload {i} failed: {r:?}");
+        }
+
+        // CONC × FILE_SIZE = 256 MiB of plaintext crosses the pipeline; a
+        // file-proportional regression (buffering a whole file — the old ~8×
+        // path) would push peak toward/over that. MEASURED isolated steady
+        // state: ~46–50 MiB (logged above) — peak ≈ 1/5th of the data in flight,
+        // i.e. constant-memory streaming. Bound at 80 MiB: ~1.6× over the
+        // measured peak, below the ~110 MiB a single buffered 64 MiB file would
+        // cause and the 256 MiB whole-tree line, and far under the 2 GiB budget.
+        // A multiplicative blowup (lost streaming, a channel buffering whole
+        // files, lost Bytes reuse) trips it. (A subtle single-extra-chunk change
+        // — e.g. CHANNEL_CAP 1→2, ~+16 MiB — is near this 4 MiB-chunk config's
+        // resolution; catching that reliably would need larger chunks.)
+        const BOUND: usize = 80 * 1024 * 1024;
+        assert!(
+            peak_increase < BOUND,
+            "peak heap increase {mib:.1} MiB exceeded {} MiB — upload is not constant-memory",
+            BOUND / (1024 * 1024)
+        );
+    }
 }
