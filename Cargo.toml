@@ -67,3 +67,9 @@ fuse = ["dep:fuser"]
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+# Build against the combined LOCAL core (file-request ECIES + N=32 chunk ladder).
+# Mirrors server/Cargo.toml. CI strips [patch] before building (see release.yml).
+[patch."https://github.com/beebeeb-io/core"]
+beebeeb-core = { path = "../core/beebeeb-core" }
+beebeeb-types = { path = "../core/beebeeb-types" }
