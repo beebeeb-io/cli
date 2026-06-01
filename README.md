@@ -1,7 +1,6 @@
 # Beebeeb CLI
 
-[![CI](https://github.com/beebeeb-io/cli/actions/workflows/release.yml/badge.svg)](https://github.com/beebeeb-io/cli/actions/workflows/release.yml)
-[![Latest Release](https://img.shields.io/github/v/release/beebeeb-io/cli?label=version)](https://github.com/beebeeb-io/cli/releases/latest)
+[![Latest Release](https://img.shields.io/github/v/release/beebeeb-io/cli?label=release)](https://github.com/beebeeb-io/cli/releases/latest)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
 ![Rust](https://img.shields.io/badge/rust-2024-orange)
 [![Install](https://img.shields.io/badge/install-get.beebeeb.io-f5b800)](https://get.beebeeb.io)
