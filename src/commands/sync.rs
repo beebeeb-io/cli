@@ -721,6 +721,12 @@ pub async fn run(
                 remaining.max(interrupted_count),
             );
         }
+        // Ctrl-C during the upload phase: the process is exiting without ever
+        // entering watch mode, so stop the session this run owns (best-effort)
+        // — otherwise the server's heartbeat checker keeps nagging the user.
+        if let Some(ref sid) = session_id {
+            stop_session_best_effort(&api, sid).await;
+        }
         return Ok(());
     }
 
@@ -760,6 +766,19 @@ pub async fn run(
             let _ = api
                 .send_heartbeat(sid, "idle", Some(file_count), None, Some(total_bytes), None, None, None)
                 .await;
+        }
+    }
+
+    // Whether this invocation will enter the long-lived watch loop below.
+    // Everything else — `--once`, `--dry-run`, a Ctrl-C'd pass, or a single
+    // json/quiet pass — is about to exit, so its session must be stopped now;
+    // the continuous watch path stops its session after the loop unwinds.
+    // Computed once and reused for the watch guard so the two stay consistent
+    // (a fresh re-check could leave a Ctrl-C'd run as a zombie).
+    let will_enter_watch = !once && !dry_run && !shutdown.load(Ordering::Relaxed) && !ui::is_json() && !ui::is_quiet();
+    if !will_enter_watch {
+        if let Some(ref sid) = session_id {
+            stop_session_best_effort(&api, sid).await;
         }
     }
 
@@ -855,10 +874,10 @@ pub async fn run(
     );
 
     // ── Continuous watch mode ───────────────────────────────────────────────
-    if !once && !dry_run && !shutdown.load(Ordering::Relaxed) {
+    if will_enter_watch {
         let use_tui = ui::is_rich() && std::io::stdout().is_terminal();
 
-        if use_tui {
+        let daemonized = if use_tui {
             run_tui_watch(
                 &local_dir,
                 &remote_path,
@@ -869,7 +888,7 @@ pub async fn run(
                 local_files.len() as u64,
                 total_bytes,
             )
-            .await?;
+            .await?
         } else {
             run_plain_watch(
                 &local_dir,
@@ -883,6 +902,16 @@ pub async fn run(
                 &shutdown,
             )
             .await?;
+            false
+        };
+
+        // The watch loop has exited (Ctrl-C, or the user quit the TUI). Stop the
+        // session this run owns so the heartbeat checker stops nagging — unless
+        // the user daemonized, in which case the background daemon now owns it.
+        if !daemonized {
+            if let Some(ref sid) = session_id {
+                stop_session_best_effort(&api, sid).await;
+            }
         }
     }
 
@@ -1080,7 +1109,7 @@ async fn run_tui_watch(
     session_id: Option<&str>,
     file_count: u64,
     total_bytes: u64,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     use crate::tui::events::{TuiAction, TuiEvent};
     use crate::tui::state::{FileEventStatus, SyncFileEvent};
 
@@ -1340,18 +1369,21 @@ async fn run_tui_watch(
     let final_state = shared_state.lock().await;
     *state = final_state.clone();
 
-    match tui_result {
+    let daemonized = match tui_result {
         TuiAction::Quit => {
-            // Normal exit.
+            // Normal exit — the caller should stop the session.
+            false
         }
         TuiAction::Daemonize => {
-            // User pressed 'd' — spawn daemon and exit.
+            // User pressed 'd' — spawn daemon and exit. The daemon process now
+            // owns the session, so the caller must NOT stop it.
             let remote_str = remote_path.to_string();
             spawn_sync_daemon(local_dir, Some(&remote_str))?;
+            true
         }
-    }
+    };
 
-    Ok(())
+    Ok(daemonized)
 }
 
 /// Parse the JSON response from list_client_sessions into SessionInfo structs.
@@ -1528,6 +1560,23 @@ fn format_count(n: u64) -> String {
         format!("{},{:03}", n / 1_000, n % 1_000)
     } else {
         format!("{n}")
+    }
+}
+
+/// Best-effort: mark the session this invocation owns as `stopped` so the
+/// server's heartbeat checker stops sending the user "no sync activity"
+/// notifications after the agent exits. Never fails or blocks the caller — a
+/// stop error is logged and swallowed (the request is bounded by the
+/// `ApiClient`'s existing per-request timeout). Only ever called with the
+/// current invocation's own `session_id`, never another user's session.
+async fn stop_session_best_effort(api: &ApiClient, session_id: &str) {
+    if let Err(e) = api.stop_client_session(session_id).await {
+        if !ui::is_quiet() {
+            eprintln!(
+                "  {} could not stop sync session on exit: {e}",
+                "!".custom_color(crate::colors::AMBER),
+            );
+        }
     }
 }
 
