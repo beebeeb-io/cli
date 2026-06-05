@@ -182,6 +182,32 @@ enum Commands {
         parents: bool,
     },
 
+    /// Move a file to the trash (reversible with `bb restore`)
+    Rm {
+        /// Vault path or UUID of the file/folder to trash
+        target: String,
+
+        /// Allow trashing a folder and its contents (mirrors `rm -r`)
+        #[arg(short = 'r', long = "recursive")]
+        recursive: bool,
+
+        /// Skip the confirmation prompt
+        #[arg(short = 'f', long = "yes", visible_alias = "force")]
+        yes: bool,
+    },
+
+    /// Restore a trashed file/folder
+    Restore {
+        /// Trashed entry name or UUID (see `bb trash list`)
+        target: String,
+    },
+
+    /// Browse the trash
+    Trash {
+        #[command(subcommand)]
+        cmd: TrashCmd,
+    },
+
     /// Create an encrypted share link
     Share {
         /// File ID to share
@@ -369,6 +395,12 @@ enum Commands {
 }
 
 #[derive(Subcommand)]
+enum TrashCmd {
+    /// List trashed files and folders
+    List,
+}
+
+#[derive(Subcommand)]
 enum RequestCmd {
     /// Create a file request and print its shareable link
     Create {
@@ -505,6 +537,9 @@ fn print_custom_help() {
     let cmds: &[(&str, &str, &str)] = &[
         ("ls", "[path]", "list files (decrypts names locally)"),
         ("mkdir", "<path>", "create a folder · mirrors mkdir -p"),
+        ("rm", "<path|id>", "move to trash · reversible"),
+        ("restore", "<name|id>", "restore from trash"),
+        ("trash", "list", "browse the trash"),
         ("push", "<path>", "upload · encrypts on the fly"),
         ("pull", "<id|path>", "download and decrypt"),
         ("share", "<id>", "create encrypted link (expiry, passphrase)"),
@@ -601,6 +636,11 @@ async fn main() {
         } => commands::pull::run(file_id, output.or(output_flag), zip).await,
         Commands::Ls { path } => commands::ls::run(path).await,
         Commands::Mkdir { path, parents } => commands::mkdir::run(path, parents).await,
+        Commands::Rm { target, recursive, yes } => commands::rm::run(target, recursive, yes).await,
+        Commands::Restore { target } => commands::restore::run(target).await,
+        Commands::Trash { cmd } => match cmd {
+            TrashCmd::List => commands::trash::list().await,
+        },
         Commands::Share {
             file_id,
             expires,

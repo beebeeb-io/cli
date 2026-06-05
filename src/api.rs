@@ -845,6 +845,35 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    /// Restore a trashed file/folder via `POST /api/v1/files/{id}/restore`.
+    pub async fn restore_file(&self, file_id: &str) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .post(self.url(&format!("/api/v1/files/{file_id}/restore")))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+
+        parse_response(resp).await
+    }
+
+    /// List trashed entries via `GET /api/v1/files?trashed=true`. Same shape as
+    /// the active listing (`{ "files": [...] }`).
+    pub async fn list_trashed(&self) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .get(self.url("/api/v1/files?trashed=true"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+
+        parse_response(resp).await
+    }
+
     /// Mint a short-lived (~1h) bearer token for the SSE sync stream. The
     /// stream cannot use the main session token because SSE auth lives in
     /// the URL query string (browsers can't set headers on EventSource).
