@@ -48,7 +48,7 @@ walkdir = "2"
 axum = "0.7"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "tiff"] }
 mime_guess = "2"
-fuser = { version = "0.14", optional = true }
+fuser = { version = "0.17", optional = true }
 libc = "0.2"
 tar = "0.4"
 xz2 = "0.1"
