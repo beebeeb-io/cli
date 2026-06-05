@@ -863,6 +863,25 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    /// Bulk permanently delete via `POST /api/v1/files/permanent` with `{ids}`
+    /// + one step-up `X-Confirm-Token`. The server erases only items that are
+    /// both owned and already trashed (others come back in `skipped_not_trashed`
+    /// / `missing`); irreversible. Returns `{deleted, skipped_not_trashed, missing}`.
+    pub async fn bulk_permanent_delete(&self, ids: &[String], confirm_token: &str) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .post(self.url("/api/v1/files/permanent"))
+            .bearer_auth(token)
+            .header("X-Confirm-Token", confirm_token)
+            .json(&serde_json::json!({ "ids": ids }))
+            .send()
+            .await
+            .map_err(format_request_error)?;
+
+        parse_response(resp).await
+    }
+
     /// Permanently delete a file/folder via `DELETE /api/v1/files/{id}/permanent`.
     /// Irreversible — erases the row and its blobs. Requires a step-up
     /// `X-Confirm-Token` (minted by `confirm_password`); the server's

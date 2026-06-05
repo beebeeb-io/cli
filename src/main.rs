@@ -454,6 +454,10 @@ enum Commands {
 enum TrashCmd {
     /// List trashed files and folders
     List,
+
+    /// Permanently delete everything in the trash (irreversible; requires
+    /// a step-up password confirmation)
+    Empty,
 }
 
 #[derive(Subcommand)]
@@ -729,6 +733,7 @@ async fn main() {
         Commands::Restore { target } => commands::restore::run(target).await,
         Commands::Trash { cmd } => match cmd {
             TrashCmd::List => commands::trash::list().await,
+            TrashCmd::Empty => commands::trash::empty().await,
         },
         Commands::Search {
             query,

@@ -67,17 +67,6 @@ pub async fn run(targets: Vec<String>, recursive: bool, permanent: bool, yes: bo
     }
 
     if permanent {
-        // The server's step-up confirmation token is single-use, so one
-        // password confirms exactly one permanent delete. Rather than prompt
-        // N times (or silently delete only the first), restrict `--permanent`
-        // to a single target. Bulk permanent-delete / `trash empty` need a
-        // server-side batch token — tracked as a decision (0693).
-        if resolved.len() > 1 {
-            return Err("permanently deleting multiple items at once isn't supported yet \
-                        (the step-up confirmation token is single-use) — run `bb rm --permanent` \
-                        once per item. (tracked: task 0693)"
-                .to_string());
-        }
         return permanent_delete_flow(&api, &resolved).await;
     }
 
@@ -132,15 +121,15 @@ pub async fn run(targets: Vec<String>, recursive: bool, permanent: bool, yes: bo
     Ok(())
 }
 
-/// `bb rm --permanent <single>` — irreversible delete behind a mandatory step-up.
+/// `bb rm --permanent <target>...` — irreversible delete behind a mandatory step-up.
 ///
-/// Prints an unmissable warning, then requires a fresh password confirmation
-/// (`X-Confirm-Token`, minted by `acquire_confirm_token`). `--yes` does NOT
-/// bypass the step-up — that token IS the confirmation. If the token can't be
-/// obtained (wrong password / cancelled), nothing is deleted (the refuse-path);
-/// the server (`ConfirmedTrashAction`) also refuses the `DELETE …/permanent`
-/// call without it. Caller guarantees exactly one target (the token is
-/// single-use; see the guard in `run`).
+/// Prints an unmissable warning WITH the item count, then requires ONE fresh
+/// password confirmation (`X-Confirm-Token`, minted by `acquire_confirm_token`)
+/// and erases the whole batch in a single `POST /files/permanent` call. `--yes`
+/// does NOT bypass the step-up — that token IS the confirmation. If the token
+/// can't be obtained, nothing is deleted (the refuse-path); the server also
+/// refuses without it, and only erases items that are owned AND already trashed
+/// (others come back as `skipped_not_trashed` / `missing`).
 async fn permanent_delete_flow(api: &ApiClient, targets: &[Target]) -> Result<(), String> {
     if !ui::is_quiet() && !ui::is_json() {
         println!(
@@ -154,54 +143,49 @@ async fn permanent_delete_flow(api: &ApiClient, targets: &[Target]) -> Result<()
         );
     }
 
-    // Mandatory step-up. acquire_confirm_token prompts for the password and
-    // exchanges it for a single-use token. On failure we return here, BEFORE
-    // any delete — the refuse-path.
+    // Mandatory step-up (one token for the whole batch). On failure we return
+    // here, BEFORE anything is touched — the refuse-path.
     let confirm_token = crate::commands::confirm::acquire_confirm_token(api).await?;
 
-    let mut deleted = 0u64;
-    let mut failures: Vec<(String, String)> = Vec::new();
-    for t in targets {
-        match api.permanent_delete(&t.id, &confirm_token).await {
-            Ok(_) => deleted += 1,
-            Err(e) => failures.push((t.display.clone(), e)),
-        }
-    }
+    let ids: Vec<String> = targets.iter().map(|t| t.id.clone()).collect();
+    // `rm --permanent` may target LIVE files; the permanent endpoint only erases
+    // already-trashed items. Move them to trash first (idempotent, reversible),
+    // then erase the batch with the one confirm token. Net effect: "delete
+    // forever, skipping the trash step" — but through the owned+trashed gate.
+    api.bulk_trash(&ids).await?;
+    let resp = api.bulk_permanent_delete(&ids, &confirm_token).await?;
     path::invalidate_cache();
+
+    let deleted = count(&resp, "deleted");
+    let skipped = count(&resp, "skipped_not_trashed");
+    let missing = count(&resp, "missing");
 
     if ui::is_json() {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "ok": failures.is_empty(),
+                "ok": skipped == 0 && missing == 0,
                 "permanently_deleted": deleted,
-                "failures": failures
-                    .iter()
-                    .map(|(p, e)| serde_json::json!({ "path": p, "error": e }))
-                    .collect::<Vec<_>>(),
+                "skipped_not_trashed": skipped,
+                "missing": missing,
             }))
             .unwrap()
         );
     } else if !ui::is_quiet() {
+        let mut parts = vec![format!("{deleted} permanently removed")];
+        if skipped > 0 {
+            parts.push(format!("{skipped} skipped (still live)"));
+        }
+        if missing > 0 {
+            parts.push(format!("{missing} not found"));
+        }
         println!(
             "  {} {}",
             "deleted \u{00b7}".custom_color(colors::RED_ERR),
-            format!("{deleted} permanently removed").custom_color(colors::INK),
+            parts.join(" \u{00b7} ").custom_color(colors::INK),
         );
-        for (p, e) in &failures {
-            eprintln!("  {} {p}: {e}", "error:".custom_color(colors::RED_ERR));
-        }
     }
-
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "{} of {} failed",
-            failures.len(),
-            deleted as usize + failures.len()
-        ))
-    }
+    Ok(())
 }
 
 fn count(resp: &serde_json::Value, key: &str) -> u64 {
