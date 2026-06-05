@@ -1,12 +1,12 @@
 # Graph Report - cli  (2026-06-05)
 
 ## Corpus Check
-- 52 files · ~67,777 words
+- 52 files · ~68,080 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 577 nodes · 1575 edges · 16 communities detected
-- Extraction: 67% EXTRACTED · 33% INFERRED · 0% AMBIGUOUS · INFERRED: 521 edges (avg confidence: 0.8)
+- 578 nodes · 1582 edges · 16 communities detected
+- Extraction: 67% EXTRACTED · 33% INFERRED · 0% AMBIGUOUS · INFERRED: 526 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Community Hubs (Navigation)
@@ -31,9 +31,9 @@
 1. `ApiClient` - 61 edges
 2. `parse_response()` - 49 edges
 3. `run()` - 33 edges
-4. `is_json()` - 30 edges
-5. `load_master_key()` - 27 edges
-6. `is_quiet()` - 26 edges
+4. `is_json()` - 31 edges
+5. `is_quiet()` - 27 edges
+6. `load_master_key()` - 27 edges
 7. `load_master_key()` - 23 edges
 8. `main()` - 22 edges
 9. `decrypt_name()` - 22 edges
@@ -54,20 +54,20 @@
 ## Communities
 
 ### Community 0 - "Community 0"
-Cohesion: 0.07
-Nodes (66): run(), decrypt_name(), move_single(), noop(), run(), split_dst(), collect_zip_entries(), looks_like_id_prefix() (+58 more)
+Cohesion: 0.06
+Nodes (59): capitalise(), format_date_human(), format_number(), price_for(), show(), render_otpauth(), renders_a_typical_totp_uri(), renders_empty_for_garbage_that_cannot_encode() (+51 more)
 
 ### Community 1 - "Community 1"
+Cohesion: 0.07
+Nodes (64): run(), decrypt_name(), move_bulk(), move_single(), noop(), run(), split_dst(), collect_zip_entries() (+56 more)
+
+### Community 2 - "Community 2"
 Cohesion: 0.1
 Nodes (7): ApiClient, backoff(), format_request_error(), is_transient_transport_error(), pace_if_needed(), parse_response(), update_rate_state()
 
-### Community 2 - "Community 2"
-Cohesion: 0.09
-Nodes (56): compute_file_hash(), create_folder(), do_download(), do_upload(), download_to(), FileEntry, format_size(), is_ignored_path() (+48 more)
-
 ### Community 3 - "Community 3"
-Cohesion: 0.07
-Nodes (42): render_otpauth(), renders_a_typical_totp_uri(), renders_empty_for_garbage_that_cannot_encode(), build_plan_label(), capitalise(), format_number(), run(), capitalise() (+34 more)
+Cohesion: 0.08
+Nodes (57): b64(), compute_file_hash(), create_folder(), do_download(), do_upload(), download_to(), FileEntry, format_size() (+49 more)
 
 ### Community 4 - "Community 4"
 Cohesion: 0.06
@@ -82,24 +82,24 @@ Cohesion: 0.1
 Nodes (24): run(), browser_login(), print_browser_block(), print_headless_block(), run(), spawn_countdown(), run(), run() (+16 more)
 
 ### Community 7 - "Community 7"
-Cohesion: 0.09
-Nodes (21): build_show_payload(), build_show_payload_assembles_all_sections(), build_show_payload_degrades_gracefully_per_section(), delete(), export_download(), export_start(), export_status(), render_progress_bar() (+13 more)
-
-### Community 8 - "Community 8"
-Cohesion: 0.14
-Nodes (20): b64std(), b64url(), build_link(), decode_any_b64(), generate_request_keypair(), keypair_wrap_unwrap_roundtrip_matches_create_then_list(), link_assembly_roundtrips_through_parse(), parse_expiry_secs() (+12 more)
-
-### Community 9 - "Community 9"
 Cohesion: 0.15
 Nodes (6): BeebeebFs, CachedDir, InodeEntry, PendingCreate, run(), unmount()
 
-### Community 10 - "Community 10"
+### Community 8 - "Community 8"
 Cohesion: 0.13
 Nodes (18): check_and_update(), cooldown_elapsed(), ct_eq_ignore_case(), current_target(), DistArtifact, DistChecksums, DistManifest, extract_binary_from_tarball() (+10 more)
 
+### Community 9 - "Community 9"
+Cohesion: 0.12
+Nodes (16): build_show_payload(), build_show_payload_assembles_all_sections(), build_show_payload_degrades_gracefully_per_section(), delete(), export_download(), export_start(), export_status(), render_progress_bar() (+8 more)
+
+### Community 10 - "Community 10"
+Cohesion: 0.17
+Nodes (13): run(), chrono_now(), ctrlc_channel(), relevant_paths(), run(), sync_batch(), trash_server_file(), event_loop() (+5 more)
+
 ### Community 11 - "Community 11"
-Cohesion: 0.24
-Nodes (17): decrypt_file_chunks(), decrypt_json_chunks(), decrypt_name(), decrypt_name_plaintext_passthrough(), decrypt_name_with_key(), decrypt_raw_chunks(), json_blob_legacy_format_detected_and_decrypted(), json_blob_with_binary_uuid_key() (+9 more)
+Cohesion: 0.29
+Nodes (14): decrypt_file_chunks(), decrypt_name(), decrypt_name_plaintext_passthrough(), decrypt_name_with_key(), json_blob_legacy_format_detected_and_decrypted(), json_blob_with_binary_uuid_key(), mk(), raw_binary_uuid_legacy_dual_key_fallback() (+6 more)
 
 ### Community 12 - "Community 12"
 Cohesion: 0.31
@@ -124,17 +124,17 @@ Nodes (6): FileEventStatus, SessionInfo, SyncFileEvent, SyncStatus, TuiState, Tu
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `ApiClient` connect `Community 1` to `Community 0`, `Community 4`?**
+- **Why does `ApiClient` connect `Community 2` to `Community 1`, `Community 4`?**
   _High betweenness centrality (0.103) - this node is a cross-community bridge._
-- **Why does `run()` connect `Community 2` to `Community 0`, `Community 3`, `Community 4`, `Community 6`, `Community 9`?**
+- **Why does `run()` connect `Community 3` to `Community 0`, `Community 1`, `Community 4`, `Community 6`, `Community 7`?**
   _High betweenness centrality (0.091) - this node is a cross-community bridge._
-- **Why does `main()` connect `Community 7` to `Community 0`, `Community 3`, `Community 4`, `Community 6`, `Community 8`, `Community 9`, `Community 10`?**
+- **Why does `main()` connect `Community 9` to `Community 0`, `Community 1`, `Community 4`, `Community 6`, `Community 7`, `Community 8`, `Community 10`?**
   _High betweenness centrality (0.069) - this node is a cross-community bridge._
 - **Are the 14 inferred relationships involving `run()` (e.g. with `.from_config()` and `uninstall_launchagent()`) actually correct?**
   _`run()` has 14 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 29 inferred relationships involving `is_json()` (e.g. with `run()` and `move_single()`) actually correct?**
-  _`is_json()` has 29 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 22 inferred relationships involving `load_master_key()` (e.g. with `run()` and `create()`) actually correct?**
-  _`load_master_key()` has 22 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 30 inferred relationships involving `is_json()` (e.g. with `run()` and `move_bulk()`) actually correct?**
+  _`is_json()` has 30 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 26 inferred relationships involving `is_quiet()` (e.g. with `parse_response()` and `run()`) actually correct?**
+  _`is_quiet()` has 26 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `CacheEntry`, `ResolvedPath`, `DownloadStats` to the rest of the system?**
   _51 weakly-connected nodes found - possible documentation gaps or missing edges._
