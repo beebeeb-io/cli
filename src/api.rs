@@ -860,7 +860,8 @@ impl ApiClient {
     }
 
     /// List trashed entries via `GET /api/v1/files?trashed=true`. Same shape as
-    /// the active listing (`{ "files": [...] }`).
+    /// the active listing (`{ "files": [...] }`). Used by `bb trash list`,
+    /// `bb restore <name>` (trashed-name match), and `bb ls -a`.
     pub async fn list_trashed(&self) -> Result<Value, String> {
         let token = self.require_auth()?;
         let resp = self
