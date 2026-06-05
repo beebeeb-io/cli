@@ -27,7 +27,83 @@ pub async fn run(srcs: Vec<String>, dst: String) -> Result<(), String> {
     match srcs.len() {
         0 => Err("at least one source required".to_string()),
         1 => move_single(&api, &master_key, &srcs[0], &dst).await,
-        _ => Err("moving multiple sources at once is not implemented yet (task 0500)".to_string()),
+        _ => move_bulk(&api, &master_key, &srcs, &dst).await,
+    }
+}
+
+/// Bulk move: every source moves into an existing destination folder, keeping
+/// its name (no rename in bulk mode — mirrors POSIX `mv` with multiple args).
+/// All sources are resolved up front so a typo fails before anything moves;
+/// per-file errors are collected and the command exits non-zero if any failed.
+async fn move_bulk(
+    api: &ApiClient,
+    master_key: &beebeeb_core::kdf::MasterKey,
+    srcs: &[String],
+    dst: &str,
+) -> Result<(), String> {
+    // dst MUST already be a folder (bulk mode never renames).
+    let resolved_dst = path::resolve_path(api, master_key, dst).await?;
+    if !resolved_dst.is_folder {
+        return Err(format!(
+            "{dst} is a file, not a folder (bulk mv needs a folder destination)"
+        ));
+    }
+    let dst_id: Option<Uuid> = resolved_dst.file_id.as_deref().and_then(|s| s.parse().ok());
+
+    // Resolve every source first so a typo doesn't half-finish the move.
+    let mut resolved_srcs: Vec<(String, String)> = Vec::with_capacity(srcs.len());
+    for s in srcs {
+        let r = path::resolve_path(api, master_key, s).await?;
+        let Some(id) = r.file_id else {
+            return Err(format!("cannot move the vault root ({s})"));
+        };
+        // A folder cannot move into its own descendant.
+        let s_norm = format!("/{}", s.trim_matches('/'));
+        let d_norm = format!("/{}", dst.trim_matches('/'));
+        if r.is_folder && (d_norm == s_norm || d_norm.starts_with(&format!("{s_norm}/"))) {
+            return Err(format!("cannot move {s} into {dst} (would create a cycle)"));
+        }
+        resolved_srcs.push((s.clone(), id));
+    }
+
+    let mut ok = 0u32;
+    let mut failures: Vec<(String, String)> = Vec::new();
+    for (input, id) in resolved_srcs {
+        match api.move_file(&id, None, dst_id).await {
+            Ok(_) => ok += 1,
+            Err(e) => failures.push((input, e)),
+        }
+    }
+
+    path::invalidate_cache();
+
+    if ui::is_json() {
+        let json = serde_json::json!({
+            "ok": failures.is_empty(),
+            "moved": ok,
+            "failures": failures
+                .iter()
+                .map(|(p, e)| serde_json::json!({ "path": p, "error": e }))
+                .collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&json).unwrap());
+    } else {
+        if !ui::is_quiet() {
+            println!(
+                "  {} {}",
+                "ok ·".custom_color(colors::GREEN_OK),
+                format!("{ok} moved → {dst}").custom_color(colors::INK),
+            );
+        }
+        for (p, e) in &failures {
+            eprintln!("  {} {p}: {e}", "error:".custom_color(colors::RED_ERR));
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("{} of {} failed", failures.len(), ok as usize + failures.len()))
     }
 }
 
