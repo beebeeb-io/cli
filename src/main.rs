@@ -182,6 +182,13 @@ enum Commands {
         parents: bool,
     },
 
+    /// Move or rename a file or folder (mirrors `mv`)
+    Mv {
+        /// One or more sources, plus a destination as the final positional
+        #[arg(num_args = 2.., required = true)]
+        paths: Vec<String>,
+    },
+
     /// Move a file to the trash (reversible with `bb restore`)
     Rm {
         /// Vault path or UUID of the file/folder to trash
@@ -537,6 +544,7 @@ fn print_custom_help() {
     let cmds: &[(&str, &str, &str)] = &[
         ("ls", "[path]", "list files (decrypts names locally)"),
         ("mkdir", "<path>", "create a folder · mirrors mkdir -p"),
+        ("mv", "<src> <dst>", "move or rename · mirrors mv"),
         ("rm", "<path|id>", "move to trash · reversible"),
         ("restore", "<name|id>", "restore from trash"),
         ("trash", "list", "browse the trash"),
@@ -636,6 +644,11 @@ async fn main() {
         } => commands::pull::run(file_id, output.or(output_flag), zip).await,
         Commands::Ls { path } => commands::ls::run(path).await,
         Commands::Mkdir { path, parents } => commands::mkdir::run(path, parents).await,
+        Commands::Mv { mut paths } => {
+            // clap enforces num_args = 2.., so there is always a trailing dst.
+            let dst = paths.pop().unwrap_or_default();
+            commands::mv::run(paths, dst).await
+        }
         Commands::Rm { target, recursive, yes } => commands::rm::run(target, recursive, yes).await,
         Commands::Restore { target } => commands::restore::run(target).await,
         Commands::Trash { cmd } => match cmd {

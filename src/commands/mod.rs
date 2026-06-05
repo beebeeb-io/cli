@@ -7,6 +7,7 @@ pub mod logout;
 pub mod ls;
 pub mod mkdir;
 pub mod mount;
+pub mod mv;
 pub mod pull;
 pub mod push;
 pub mod qr;
