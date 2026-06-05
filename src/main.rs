@@ -215,6 +215,24 @@ enum Commands {
         cmd: TrashCmd,
     },
 
+    /// Search file and folder names across your vault (decrypted locally)
+    Search {
+        /// Substring (default) or regex (with --regex) to match against names
+        query: String,
+
+        /// Treat the query as a case-insensitive regular expression
+        #[arg(long)]
+        regex: bool,
+
+        /// Maximum number of matches to return
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+
+        /// Restrict the search to a subtree (vault path of a folder)
+        #[arg(long)]
+        folder: Option<String>,
+    },
+
     /// Create an encrypted share link
     Share {
         /// File ID to share
@@ -548,6 +566,7 @@ fn print_custom_help() {
         ("rm", "<path|id>", "move to trash · reversible"),
         ("restore", "<name|id>", "restore from trash"),
         ("trash", "list", "browse the trash"),
+        ("search", "<query>", "find files by name · --regex"),
         ("push", "<path>", "upload · encrypts on the fly"),
         ("pull", "<id|path>", "download and decrypt"),
         ("share", "<id>", "create encrypted link (expiry, passphrase)"),
@@ -654,6 +673,12 @@ async fn main() {
         Commands::Trash { cmd } => match cmd {
             TrashCmd::List => commands::trash::list().await,
         },
+        Commands::Search {
+            query,
+            regex,
+            limit,
+            folder,
+        } => commands::search::run(query, regex, limit, folder).await,
         Commands::Share {
             file_id,
             expires,
