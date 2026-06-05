@@ -845,6 +845,24 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    /// Bulk-trash files/folders via `POST /api/v1/files/trash` with `{ids:[...]}`.
+    /// The server cascades the trashed flag to folder contents. Returns
+    /// `{trashed, already_trashed, missing}` (each a list of ids). Max 500 ids
+    /// per call — the caller batches.
+    pub async fn bulk_trash(&self, ids: &[String]) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .post(self.url("/api/v1/files/trash"))
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "ids": ids }))
+            .send()
+            .await
+            .map_err(format_request_error)?;
+
+        parse_response(resp).await
+    }
+
     /// Restore a trashed file/folder via `POST /api/v1/files/{id}/restore`.
     pub async fn restore_file(&self, file_id: &str) -> Result<Value, String> {
         let token = self.require_auth()?;

@@ -213,12 +213,13 @@ enum Commands {
         paths: Vec<String>,
     },
 
-    /// Move a file to the trash (reversible with `bb restore`)
+    /// Move files/folders to the trash (reversible with `bb restore`)
     Rm {
-        /// Vault path or UUID of the file/folder to trash
-        target: String,
+        /// One or more vault paths or UUIDs to trash
+        #[arg(required = true, num_args = 1..)]
+        targets: Vec<String>,
 
-        /// Allow trashing a folder and its contents (mirrors `rm -r`)
+        /// Allow trashing folders and their contents (mirrors `rm -r`)
         #[arg(short = 'r', long = "recursive")]
         recursive: bool,
 
@@ -587,7 +588,7 @@ fn print_custom_help() {
         ("ls", "[path]", "list files (decrypts names locally)"),
         ("mkdir", "<path>", "create a folder · mirrors mkdir -p"),
         ("mv", "<src> <dst>", "move or rename · mirrors mv"),
-        ("rm", "<path|id>", "move to trash · reversible"),
+        ("rm", "<path|id>...", "trash files/folders · -r · reversible"),
         ("restore", "<name|id>", "restore from trash"),
         ("trash", "list", "browse the trash"),
         ("search", "<query>", "find files by name · --regex"),
@@ -713,7 +714,11 @@ async fn main() {
             let dst = paths.pop().unwrap_or_default();
             commands::mv::run(paths, dst).await
         }
-        Commands::Rm { target, recursive, yes } => commands::rm::run(target, recursive, yes).await,
+        Commands::Rm {
+            targets,
+            recursive,
+            yes,
+        } => commands::rm::run(targets, recursive, yes).await,
         Commands::Restore { target } => commands::restore::run(target).await,
         Commands::Trash { cmd } => match cmd {
             TrashCmd::List => commands::trash::list().await,
