@@ -170,6 +170,30 @@ enum Commands {
     Ls {
         /// Folder path or ID to list
         path: Option<String>,
+
+        /// Long format — adds a CREATED column
+        #[arg(short = 'l', long = "long")]
+        long: bool,
+
+        /// Include trashed entries (flagged)
+        #[arg(short = 'a', long = "all")]
+        all: bool,
+
+        /// Recurse into subfolders
+        #[arg(short = 'R', long = "recursive")]
+        recursive: bool,
+
+        /// Maximum recursion depth (with --recursive)
+        #[arg(long = "depth", default_value_t = 3)]
+        depth: usize,
+
+        /// Sort field: name | size | modified | created
+        #[arg(long = "sort", default_value = "name")]
+        sort: String,
+
+        /// Reverse the sort order
+        #[arg(short = 'r', long = "reverse")]
+        reverse: bool,
     },
 
     /// Create a folder in your vault (mirrors `mkdir`)
@@ -661,7 +685,28 @@ async fn main() {
             output_flag,
             zip,
         } => commands::pull::run(file_id, output.or(output_flag), zip).await,
-        Commands::Ls { path } => commands::ls::run(path).await,
+        Commands::Ls {
+            path,
+            long,
+            all,
+            recursive,
+            depth,
+            sort,
+            reverse,
+        } => match commands::ls::SortField::parse(&sort) {
+            Ok(sort) => {
+                let opts = commands::ls::LsOpts {
+                    long,
+                    all,
+                    recursive,
+                    depth,
+                    sort,
+                    reverse,
+                };
+                commands::ls::run(path, opts).await
+            }
+            Err(e) => Err(e),
+        },
         Commands::Mkdir { path, parents } => commands::mkdir::run(path, parents).await,
         Commands::Mv { mut paths } => {
             // clap enforces num_args = 2.., so there is always a trailing dst.
