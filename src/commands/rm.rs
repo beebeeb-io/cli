@@ -28,8 +28,10 @@ struct Target {
 
 /// Entry point for `bb rm`.
 /// - `recursive`: allow trashing folders (mirrors `rm -r`).
-/// - `yes`: skip the confirmation prompt (`-f`/`--yes`).
-pub async fn run(targets: Vec<String>, recursive: bool, yes: bool) -> Result<(), String> {
+/// - `permanent`: PERMANENTLY delete (irreversible) instead of soft-trashing —
+///   always requires a step-up password confirmation (`--yes` cannot bypass it).
+/// - `yes`: skip the soft-trash confirmation prompt (`-f`/`--yes`).
+pub async fn run(targets: Vec<String>, recursive: bool, permanent: bool, yes: bool) -> Result<(), String> {
     if targets.is_empty() {
         return Err("at least one target required".to_string());
     }
@@ -37,7 +39,9 @@ pub async fn run(targets: Vec<String>, recursive: bool, yes: bool) -> Result<(),
     api.require_auth()?;
     let master_key = load_master_key()?;
 
-    // Resolve every target up front so a typo fails before anything is trashed.
+    // Resolve every target up front so a typo fails before anything is removed.
+    // (A trashed entry no longer resolves by path — permanently deleting one
+    // means passing its UUID from `bb trash list`; active paths resolve normally.)
     let mut resolved: Vec<Target> = Vec::with_capacity(targets.len());
     for t in &targets {
         let (id, is_folder) = if uuid::Uuid::parse_str(t).is_ok() {
@@ -48,17 +52,22 @@ pub async fn run(targets: Vec<String>, recursive: bool, yes: bool) -> Result<(),
             )
         } else {
             let r = path::resolve_path(&api, &master_key, t).await?;
-            let id = r.file_id.ok_or("cannot trash the vault root")?;
+            let id = r.file_id.ok_or("cannot remove the vault root")?;
             (id, r.is_folder)
         };
         if is_folder && !recursive {
-            return Err(format!("'{t}' is a folder. Use -r to trash it and its contents."));
+            let verb = if permanent { "permanently delete" } else { "trash" };
+            return Err(format!("'{t}' is a folder. Use -r to {verb} it and its contents."));
         }
         resolved.push(Target {
             id,
             display: t.clone(),
             is_folder,
         });
+    }
+
+    if permanent {
+        return permanent_delete_flow(&api, &resolved).await;
     }
 
     // Confirm on an interactive terminal unless opted out.
@@ -110,6 +119,77 @@ pub async fn run(targets: Vec<String>, recursive: bool, yes: bool) -> Result<(),
         );
     }
     Ok(())
+}
+
+/// `bb rm --permanent` — irreversible delete behind a mandatory step-up.
+///
+/// Prints an unmissable warning, then requires a fresh password confirmation
+/// (`X-Confirm-Token`). `--yes` does NOT bypass the step-up — that token IS the
+/// confirmation. If the token can't be obtained (wrong password / cancelled),
+/// nothing is deleted (the refuse-path); the server also refuses the
+/// `DELETE …/permanent` call without the token. The token is reused across
+/// targets until it expires.
+async fn permanent_delete_flow(api: &ApiClient, targets: &[Target]) -> Result<(), String> {
+    if !ui::is_quiet() && !ui::is_json() {
+        println!(
+            "  {} {}",
+            "!".custom_color(colors::RED_ERR),
+            format!(
+                "PERMANENT DELETE \u{00b7} {} item(s) will be erased forever \u{2014} this cannot be undone.",
+                targets.len()
+            )
+            .custom_color(colors::RED_ERR),
+        );
+    }
+
+    // Mandatory step-up. acquire_confirm_token prompts for the password and
+    // exchanges it for a single-use 5-minute token. On failure we return here,
+    // BEFORE any delete call — the refuse-path.
+    let confirm_token = crate::commands::confirm::acquire_confirm_token(api).await?;
+
+    let mut deleted = 0u64;
+    let mut failures: Vec<(String, String)> = Vec::new();
+    for t in targets {
+        match api.permanent_delete(&t.id, &confirm_token).await {
+            Ok(_) => deleted += 1,
+            Err(e) => failures.push((t.display.clone(), e)),
+        }
+    }
+    path::invalidate_cache();
+
+    if ui::is_json() {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": failures.is_empty(),
+                "permanently_deleted": deleted,
+                "failures": failures
+                    .iter()
+                    .map(|(p, e)| serde_json::json!({ "path": p, "error": e }))
+                    .collect::<Vec<_>>(),
+            }))
+            .unwrap()
+        );
+    } else if !ui::is_quiet() {
+        println!(
+            "  {} {}",
+            "deleted \u{00b7}".custom_color(colors::RED_ERR),
+            format!("{deleted} permanently removed").custom_color(colors::INK),
+        );
+        for (p, e) in &failures {
+            eprintln!("  {} {p}: {e}", "error:".custom_color(colors::RED_ERR));
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} of {} failed",
+            failures.len(),
+            deleted as usize + failures.len()
+        ))
+    }
 }
 
 fn count(resp: &serde_json::Value, key: &str) -> u64 {

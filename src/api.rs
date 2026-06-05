@@ -863,6 +863,24 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    /// Permanently delete a file/folder via `DELETE /api/v1/files/{id}/permanent`.
+    /// Irreversible — erases the row and its blobs. Requires a step-up
+    /// `X-Confirm-Token` (minted by `confirm_password`); the server's
+    /// `ConfirmedTrashAction` extractor refuses the call without it.
+    pub async fn permanent_delete(&self, file_id: &str, confirm_token: &str) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .delete(self.url(&format!("/api/v1/files/{file_id}/permanent")))
+            .bearer_auth(token)
+            .header("X-Confirm-Token", confirm_token)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+
+        parse_response(resp).await
+    }
+
     /// Restore a trashed file/folder via `POST /api/v1/files/{id}/restore`.
     pub async fn restore_file(&self, file_id: &str) -> Result<Value, String> {
         let token = self.require_auth()?;

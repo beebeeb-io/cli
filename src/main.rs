@@ -223,7 +223,13 @@ enum Commands {
         #[arg(short = 'r', long = "recursive")]
         recursive: bool,
 
-        /// Skip the confirmation prompt
+        /// PERMANENTLY delete (irreversible) instead of trashing — requires
+        /// a step-up password confirmation
+        #[arg(long = "permanent")]
+        permanent: bool,
+
+        /// Skip the (soft-trash) confirmation prompt. Does not bypass the
+        /// step-up required by --permanent.
         #[arg(short = 'f', long = "yes", visible_alias = "force")]
         yes: bool,
     },
@@ -717,8 +723,9 @@ async fn main() {
         Commands::Rm {
             targets,
             recursive,
+            permanent,
             yes,
-        } => commands::rm::run(targets, recursive, yes).await,
+        } => commands::rm::run(targets, recursive, permanent, yes).await,
         Commands::Restore { target } => commands::restore::run(target).await,
         Commands::Trash { cmd } => match cmd {
             TrashCmd::List => commands::trash::list().await,
