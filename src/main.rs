@@ -172,6 +172,16 @@ enum Commands {
         path: Option<String>,
     },
 
+    /// Create a folder in your vault (mirrors `mkdir`)
+    Mkdir {
+        /// Vault path of the new folder (e.g. `/Photos/2026`)
+        path: String,
+
+        /// Create intermediate folders as needed (mirrors `mkdir -p`)
+        #[arg(short = 'p', long = "parents")]
+        parents: bool,
+    },
+
     /// Create an encrypted share link
     Share {
         /// File ID to share
@@ -494,6 +504,7 @@ fn print_custom_help() {
     println!("  {}", "COMMANDS".custom_color(colors::AMBER));
     let cmds: &[(&str, &str, &str)] = &[
         ("ls", "[path]", "list files (decrypts names locally)"),
+        ("mkdir", "<path>", "create a folder · mirrors mkdir -p"),
         ("push", "<path>", "upload · encrypts on the fly"),
         ("pull", "<id|path>", "download and decrypt"),
         ("share", "<id>", "create encrypted link (expiry, passphrase)"),
@@ -589,6 +600,7 @@ async fn main() {
             zip,
         } => commands::pull::run(file_id, output.or(output_flag), zip).await,
         Commands::Ls { path } => commands::ls::run(path).await,
+        Commands::Mkdir { path, parents } => commands::mkdir::run(path, parents).await,
         Commands::Share {
             file_id,
             expires,

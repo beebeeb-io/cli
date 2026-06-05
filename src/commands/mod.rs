@@ -5,6 +5,7 @@ pub mod confirm;
 pub mod login;
 pub mod logout;
 pub mod ls;
+pub mod mkdir;
 pub mod mount;
 pub mod pull;
 pub mod push;

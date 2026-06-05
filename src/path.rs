@@ -216,3 +216,38 @@ pub async fn list_children_names(
 
     Ok(results)
 }
+
+/// Look up an immediate child by plaintext name. Used by `mkdir` to detect a
+/// pre-existing folder or file before POSTing. Returns `None` when there is no
+/// match; returns an error only if the listing itself fails. Matching is
+/// case-insensitive, consistent with `resolve_path`.
+pub async fn find_child_by_name(
+    api: &ApiClient,
+    master_key: &MasterKey,
+    parent_id: Option<&str>,
+    name: &str,
+) -> Result<Option<ResolvedPath>, String> {
+    let listing = list_files_cached(api, parent_id).await?;
+    let files = listing
+        .get("files")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "unexpected API response: missing files array".to_string())?;
+
+    for entry in files {
+        let id = entry.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+        let name_enc = entry.get("name_encrypted").and_then(|v| v.as_str()).unwrap_or_default();
+        let is_folder = entry.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        let decrypted = crate::crypto::decrypt_name(master_key, id, name_enc).unwrap_or_else(|| name_enc.to_string());
+
+        if decrypted.eq_ignore_ascii_case(name) {
+            return Ok(Some(ResolvedPath {
+                file_id: Some(id.to_string()),
+                name: decrypted,
+                is_folder,
+            }));
+        }
+    }
+
+    Ok(None)
+}
