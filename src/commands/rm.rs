@@ -67,6 +67,17 @@ pub async fn run(targets: Vec<String>, recursive: bool, permanent: bool, yes: bo
     }
 
     if permanent {
+        // The server's step-up confirmation token is single-use, so one
+        // password confirms exactly one permanent delete. Rather than prompt
+        // N times (or silently delete only the first), restrict `--permanent`
+        // to a single target. Bulk permanent-delete / `trash empty` need a
+        // server-side batch token — tracked as a decision (0693).
+        if resolved.len() > 1 {
+            return Err("permanently deleting multiple items at once isn't supported yet \
+                        (the step-up confirmation token is single-use) — run `bb rm --permanent` \
+                        once per item. (tracked: task 0693)"
+                .to_string());
+        }
         return permanent_delete_flow(&api, &resolved).await;
     }
 
@@ -121,14 +132,15 @@ pub async fn run(targets: Vec<String>, recursive: bool, permanent: bool, yes: bo
     Ok(())
 }
 
-/// `bb rm --permanent` — irreversible delete behind a mandatory step-up.
+/// `bb rm --permanent <single>` — irreversible delete behind a mandatory step-up.
 ///
 /// Prints an unmissable warning, then requires a fresh password confirmation
-/// (`X-Confirm-Token`). `--yes` does NOT bypass the step-up — that token IS the
-/// confirmation. If the token can't be obtained (wrong password / cancelled),
-/// nothing is deleted (the refuse-path); the server also refuses the
-/// `DELETE …/permanent` call without the token. The token is reused across
-/// targets until it expires.
+/// (`X-Confirm-Token`, minted by `acquire_confirm_token`). `--yes` does NOT
+/// bypass the step-up — that token IS the confirmation. If the token can't be
+/// obtained (wrong password / cancelled), nothing is deleted (the refuse-path);
+/// the server (`ConfirmedTrashAction`) also refuses the `DELETE …/permanent`
+/// call without it. Caller guarantees exactly one target (the token is
+/// single-use; see the guard in `run`).
 async fn permanent_delete_flow(api: &ApiClient, targets: &[Target]) -> Result<(), String> {
     if !ui::is_quiet() && !ui::is_json() {
         println!(
@@ -143,8 +155,8 @@ async fn permanent_delete_flow(api: &ApiClient, targets: &[Target]) -> Result<()
     }
 
     // Mandatory step-up. acquire_confirm_token prompts for the password and
-    // exchanges it for a single-use 5-minute token. On failure we return here,
-    // BEFORE any delete call — the refuse-path.
+    // exchanges it for a single-use token. On failure we return here, BEFORE
+    // any delete — the refuse-path.
     let confirm_token = crate::commands::confirm::acquire_confirm_token(api).await?;
 
     let mut deleted = 0u64;
