@@ -147,7 +147,7 @@ async fn permanent_delete_flow(api: &ApiClient, targets: &[Target]) -> Result<()
             "  {} {}",
             "!".custom_color(colors::RED_ERR),
             format!(
-                "PERMANENT DELETE \u{00b7} {} item(s) will be erased forever \u{2014} this cannot be undone.",
+                "This permanently deletes {} item(s). We cannot recover them.",
                 targets.len()
             )
             .custom_color(colors::RED_ERR),
