@@ -659,6 +659,9 @@ pub async fn run(
                         path: local_dir.join(&rel),
                         file_name,
                         file_id: Uuid::new_v4(),
+                        // Sync trashes the old file (above) and uploads a fresh
+                        // id, so this is always a new file — no version replace.
+                        base_version_number: None,
                         parent_id,
                         concurrency: concurrency as u32,
                         shutdown,
@@ -2162,6 +2165,8 @@ async fn upload_file_to(
         path: file_path.to_path_buf(),
         file_name: file_name.to_string(),
         file_id: Uuid::new_v4(),
+        // Watch-loop uploads are always new files (fresh id) → no replace.
+        base_version_number: None,
         parent_id,
         // Single in-flight file in this watch-loop wrapper → full Cli cap.
         concurrency: 1,

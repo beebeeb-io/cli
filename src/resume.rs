@@ -4,12 +4,15 @@
 //! interrupted part-way (process killed, link dropped) would otherwise restart
 //! from byte 0 next time — a brand-new `file_id` with zero server-side chunks.
 //!
-//! This sidecar persists the `file_id` of in-progress uploads keyed by the
-//! file's canonical path. On the next run, [`resumable_file_id`] returns that id
-//! **iff** the file's `(size, mtime)` are unchanged — the same signal `bb sync`
-//! itself uses for change detection — so changed content never resumes onto
-//! stale chunks. The upload driver then skips `upload_init` and only PUTs the
-//! chunk indices the server is still missing (see `upload::stream_encrypt_upload`).
+//! This sidecar persists the in-progress `file_id` **and the v2
+//! `upload_session_id`** keyed by the file's canonical path. On the next run,
+//! [`resumable_upload`] returns that pair **iff** the file's `(size, mtime)` are
+//! unchanged — the same signal `bb sync` itself uses for change detection — so
+//! changed content never resumes onto stale chunks. The upload driver then skips
+//! `upload_init` and re-PUTs every chunk to the stored session; the v2 chunk
+//! route is idempotent (an already-stored chunk returns `{skipped:true}` without
+//! re-writing the blob), so the server short-circuits the ones it already has
+//! (see `upload::stream_encrypt_upload`).
 //!
 //! Stored at `<config_dir>/beebeeb/pending-uploads.json`. A process-global mutex
 //! serialises the load-modify-save so the concurrent (`buffer_unordered`) sync
@@ -33,6 +36,11 @@ struct PendingDb {
 #[derive(Serialize, Deserialize, Clone)]
 struct PendingEntry {
     file_id: Uuid,
+    /// The v2 upload session opened for this in-progress upload. Absent on
+    /// entries written by an older CLI (v1 file_id-only); such an entry can't be
+    /// resumed onto the v2 path, so it is treated as non-resumable.
+    #[serde(default)]
+    upload_session_id: Option<Uuid>,
     size: u64,
     mtime_ns: u128,
 }
@@ -75,27 +83,30 @@ fn save(db: &PendingDb) {
     }
 }
 
-/// Return the stored in-progress `file_id` for `path`, but only if the recorded
-/// `(size, mtime_ns)` still match — otherwise the local content changed and the
-/// partial is stale (caller mints a fresh id).
-pub fn resumable_file_id(path: &Path, size: u64, mtime_ns: u128) -> Option<Uuid> {
+/// Return the stored in-progress `(file_id, upload_session_id)` for `path`, but
+/// only if the recorded `(size, mtime_ns)` still match AND a v2 session id is
+/// present — otherwise the local content changed (stale partial) or the entry
+/// predates the v2 driver, and the caller mints a fresh id + session.
+pub fn resumable_upload(path: &Path, size: u64, mtime_ns: u128) -> Option<(Uuid, Uuid)> {
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     load()
         .uploads
         .get(&key(path))
         .filter(|e| e.size == size && e.mtime_ns == mtime_ns)
-        .map(|e| e.file_id)
+        .and_then(|e| e.upload_session_id.map(|sid| (e.file_id, sid)))
 }
 
 /// Record an in-progress upload so an interrupted run can resume it. Called
-/// before the chunk pipeline starts; idempotent (overwrites any prior entry).
-pub fn record(path: &Path, file_id: Uuid, size: u64, mtime_ns: u128) {
+/// once the v2 session is open, before the chunk pipeline starts; idempotent
+/// (overwrites any prior entry).
+pub fn record(path: &Path, file_id: Uuid, upload_session_id: Uuid, size: u64, mtime_ns: u128) {
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut db = load();
     db.uploads.insert(
         key(path),
         PendingEntry {
             file_id,
+            upload_session_id: Some(upload_session_id),
             size,
             mtime_ns,
         },
@@ -133,26 +144,28 @@ mod tests {
         let f = dir.join("file.bin");
         std::fs::write(&f, b"hello").unwrap();
         let id = Uuid::new_v4();
+        let sid = Uuid::new_v4();
 
         // Nothing recorded yet.
-        assert_eq!(resumable_file_id(&f, 5, 100), None);
+        assert_eq!(resumable_upload(&f, 5, 100), None);
 
-        // Record, then an exact (size, mtime) match resumes.
-        record(&f, id, 5, 100);
-        assert_eq!(resumable_file_id(&f, 5, 100), Some(id));
+        // Record, then an exact (size, mtime) match resumes with both ids.
+        record(&f, id, sid, 5, 100);
+        assert_eq!(resumable_upload(&f, 5, 100), Some((id, sid)));
 
         // A changed size or mtime must NOT resume onto stale chunks.
-        assert_eq!(resumable_file_id(&f, 6, 100), None);
-        assert_eq!(resumable_file_id(&f, 5, 101), None);
+        assert_eq!(resumable_upload(&f, 6, 100), None);
+        assert_eq!(resumable_upload(&f, 5, 101), None);
 
-        // Re-record overwrites with a new id.
+        // Re-record overwrites with a new id + session.
         let id2 = Uuid::new_v4();
-        record(&f, id2, 5, 100);
-        assert_eq!(resumable_file_id(&f, 5, 100), Some(id2));
+        let sid2 = Uuid::new_v4();
+        record(&f, id2, sid2, 5, 100);
+        assert_eq!(resumable_upload(&f, 5, 100), Some((id2, sid2)));
 
         // Clear drops it.
         clear(&f);
-        assert_eq!(resumable_file_id(&f, 5, 100), None);
+        assert_eq!(resumable_upload(&f, 5, 100), None);
 
         unsafe {
             std::env::remove_var("BB_PENDING_UPLOADS_PATH");

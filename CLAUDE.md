@@ -27,7 +27,7 @@ Generated from `bb --help`. Source of truth is `src/main.rs` (clap derive).
 
 ### Files
 
-- `bb push <path>` (alias `bb upload`) — encrypt and upload a file or folder. Uses V2 upload path (init → chunks → complete) so chunk metadata is stored in `object_versions`.
+- `bb push <path>` (alias `bb upload`) — encrypt and upload a file or folder. Uses the **v2 upload-session route** `/api/v1/uploads/*` (`init` → `chunks/{i}` → `complete`), keyed by `upload_session_id`. `bb push --replace` sends the existing file's `file_id` + `base_version_number` so the server versions **by file_id** (snapshots the prior version, bumps `version_number`, UPDATEs in place) — no `name_encrypted` byte-match. A fresh push omits `file_id`.
 - `bb pull <id-or-path>` (alias `bb download`) — **streaming** download + decrypt (constant memory, live progress bar). Preserves legacy decrypt: JSON-blob chunks and pre-`bb repair` binary-UUID files fall back to the buffered path.
 - `bb ls [path]` — list vault contents.
 - `bb quota` — storage usage with a colour-coded bar.
@@ -71,6 +71,33 @@ Account-less links that let **anyone** upload an encrypted file *into* your vaul
 
 `bb push` and `bb sync` share **one** streaming upload driver:
 `upload::stream_encrypt_upload(api, Arc<MasterKey>, UploadSpec, &dyn ChunkProgress)`.
+
+- **v2 transport.** The driver runs entirely on the v2 `/api/v1/uploads/*`
+  route: `upload_init` opens an upload **session** (`POST /uploads/init`,
+  returning `upload_session_id` + the durable `file_id` + the server-derived
+  chunk plan), each chunk PUTs to `PUT /uploads/{session}/chunks/{index}`, and
+  `POST /uploads/{session}/complete` finalises the version. The session id keys
+  the chunk/complete calls; the durable `file_id` keys the file (and thumbnails).
+  All other direct upload callers (`webdav.rs`, `mount.rs`) use the same three
+  `ApiClient` methods. The legacy `/api/v1/files/upload/*` route is **no longer
+  called by the CLI** (task 0689 Option B).
+- **Replace = versioning by file_id.** `UploadSpec.base_version_number` is
+  `Some(n)` on a `bb push --replace`; the init sends `file_id` + that base
+  version, and the server versions in place (stale-version → 409). `bb sync` and
+  `bb mount`/`bb webdav` mint fresh ids (sync trashes + re-uploads), so they pass
+  `None`. The init body sends the **plaintext** `file_size_bytes`; the server
+  recomputes the stored encrypted total at complete. `profile` is sent as
+  `"desktop"` (the v2 route has no `"cli"` profile; the CLI sends an explicit
+  `chunk_size_bytes`/`chunk_count` plan which the server uses verbatim, so the
+  wire profile is non-load-bearing) — the driver asserts the init response's plan
+  equals what it sent before streaming.
+- **Resume.** The sidecar (`resume.rs`) persists `(file_id, upload_session_id)`
+  keyed by path. On resume (unchanged `size`+`mtime`) the driver skips `init`
+  (re-init of an in-progress file is a 409) and re-PUTs every chunk to the stored
+  session; the v2 chunk route is **idempotent** (an already-stored chunk returns
+  `{skipped:true}` without re-writing the blob), so re-PUTs are cheap. Entries
+  written by an older (v1) CLI lack a session id and are treated as
+  non-resumable.
 
 - Consumes `beebeeb_core::chunk_stream::ChunkEncryptor` (the shared core
   primitive). A producer task owns the encryptor and runs `next_chunk()` inside

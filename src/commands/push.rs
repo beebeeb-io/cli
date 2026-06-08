@@ -370,8 +370,22 @@ async fn push_single_file(
     // ── Streaming, constant-memory upload ─────────────────────────────────────
     // For a replace, `file_id` already equals the existing id, so the file key,
     // the encrypted name, and the server-side version all derive from one id.
+    // The v2 upload driver versions by `file_id` + `base_version_number`, so on
+    // a replace we fetch the existing file's current `version_number` and pass
+    // it as the optimistic-concurrency base (the server returns a stale-version
+    // 409 if it no longer matches). On a fresh push, `base_version_number` stays
+    // `None` and the absent-`file_id`/new-`file_id` decides "new file".
     let master_key = std::sync::Arc::new(master_key);
-    let _ = replace_file_id; // `file_id` already carries the existing id on replace
+    let base_version_number: Option<i32> = match replace_file_id {
+        Some(existing_id) => {
+            let meta = api.get_file(&existing_id.to_string()).await?;
+            // version_number is the file's current version; default 1 if the
+            // server omits it (older rows) — the v2 init still proceeds and only
+            // a genuine mismatch 409s.
+            Some(meta.get("version_number").and_then(|v| v.as_i64()).unwrap_or(1) as i32)
+        }
+        None => None,
+    };
     let display_name = upload_name.clone();
 
     let parent_uuid: Option<uuid::Uuid> = match &parent_id {
@@ -384,6 +398,7 @@ async fn push_single_file(
         path: path.to_path_buf(),
         file_name: upload_name,
         file_id,
+        base_version_number,
         parent_id: parent_uuid,
         // bb push uploads one file at a time → full Cli cap (128 MiB).
         concurrency: 1,

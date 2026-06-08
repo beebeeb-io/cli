@@ -565,33 +565,34 @@ mod fuse_impl {
                 .and_then(|e| e.file_id.as_deref())
                 .and_then(|s| s.parse().ok());
 
-            let encrypted_size: i64 = encrypted_chunks.iter().map(|(_, b)| b.len() as i64).sum();
             let is_media = beebeeb_core::media::is_media(mime);
             let chunk_count = encrypted_chunks.len() as i32;
 
-            // V2 upload: init → chunks → complete
-            let init_resp = self.rt.block_on(self.api.upload_init(
+            // V2 upload: init (open session) → chunks (by session) → complete.
+            // Mount always mints a fresh `key_uuid` per flush (new file each
+            // write), so there's no version replace → `base_version_number` None.
+            // The v2 init takes the PLAINTEXT size; the server recomputes the
+            // stored encrypted total from the summed chunks.
+            let init = self.rt.block_on(self.api.upload_init(
                 Some(key_uuid),
                 &name_enc,
                 parent_file_id,
-                encrypted_size,
+                plaintext.len() as i64,
+                chunk_size as i64,
                 chunk_count,
                 is_media,
+                None,
             ))?;
 
-            let server_id = init_resp
-                .get("file_id")
-                .or_else(|| init_resp.get("id"))
-                .and_then(|v| v.as_str())
-                .map(String::from)
-                .unwrap_or_else(|| key_uuid.to_string());
+            let server_id = init.file_id.clone();
+            let session_id = init.upload_session_id.clone();
 
             for (idx, data) in encrypted_chunks {
                 self.rt
-                    .block_on(self.api.upload_chunk(&server_id, idx, bytes::Bytes::from(data)))?;
+                    .block_on(self.api.upload_chunk(&session_id, idx, bytes::Bytes::from(data)))?;
             }
 
-            self.rt.block_on(self.api.upload_complete(&server_id))?;
+            self.rt.block_on(self.api.upload_complete(&session_id))?;
 
             // Update inode: server_id for API calls, key_uuid for decryption.
             if let Some(entry) = self.inodes.get_mut(&ino) {

@@ -1,7 +1,6 @@
 use bytes::Bytes;
 use reqwest::Client;
 use serde_json::Value;
-use std::collections::HashSet;
 use std::error::Error;
 use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -106,6 +105,43 @@ pub struct ApiClient {
     client: Client,
     base_url: String,
     token: Option<String>,
+}
+
+/// Parsed response from `POST /api/v1/uploads/init`. The session id keys the
+/// subsequent chunk PUTs + complete; the durable `file_id` identifies the file
+/// (and survives version replaces). `chunk_size_bytes` / `chunk_count` are the
+/// server-derived plan — the client frames its upload from these, not from its
+/// own hint.
+#[derive(Debug, Clone)]
+pub struct UploadInit {
+    pub upload_session_id: String,
+    pub file_id: String,
+    pub chunk_size_bytes: u64,
+    pub chunk_count: u64,
+}
+
+impl UploadInit {
+    fn from_value(v: &Value) -> Result<Self, String> {
+        let upload_session_id = v
+            .get("upload_session_id")
+            .and_then(|x| x.as_str())
+            .ok_or("upload init response missing upload_session_id")?
+            .to_string();
+        let file_id = v
+            .get("file_id")
+            .or_else(|| v.get("id"))
+            .and_then(|x| x.as_str())
+            .ok_or("upload init response missing file_id")?
+            .to_string();
+        let chunk_size_bytes = v.get("chunk_size_bytes").and_then(|x| x.as_u64()).unwrap_or(0);
+        let chunk_count = v.get("chunk_count").and_then(|x| x.as_u64()).unwrap_or(0);
+        Ok(Self {
+            upload_session_id,
+            file_id,
+            chunk_size_bytes,
+            chunk_count,
+        })
+    }
 }
 
 impl ApiClient {
@@ -327,31 +363,62 @@ impl ApiClient {
         parse_response(resp).await
     }
 
-    /// V2 chunked upload: init → upload chunks → complete.
-    /// Stores chunk_size in object_versions so downloads know the exact layout.
+    /// V2 chunked upload init: `POST /api/v1/uploads/init`.
+    ///
+    /// Opens an upload *session* against the v2 route (`routes/uploads.rs`). The
+    /// server derives the real chunk plan (`chunk_size_bytes` × `chunk_count`)
+    /// and returns a per-attempt `upload_session_id` that the chunk PUTs and the
+    /// complete call key off — distinct from the durable `file_id`.
+    ///
+    /// On a **replace**, pass `file_id` = the existing file's id and
+    /// `base_version_number` = its current `version_number`; the server snapshots
+    /// the prior version, bumps `version_number`, and UPDATEs the row in place
+    /// (correct versioning by file_id — no `name_encrypted` byte-match). It
+    /// returns a stale-version 409 if `base_version_number` no longer matches,
+    /// and a 409 if the file already has an upload in progress. On a fresh push,
+    /// pass `file_id = None` and `base_version_number = None`.
+    ///
+    /// `file_name` is the encrypted name blob (the v2 field is `file_name`);
+    /// `size_bytes` is the **plaintext** byte count. `chunk_size_bytes` /
+    /// `chunk_count` are the client's plan hint — sent paired (the server
+    /// validates both-or-neither) so it can mirror the exact framing the CLI's
+    /// `ChunkEncryptor` emits; the response's plan is authoritative.
+    #[allow(clippy::too_many_arguments)]
     pub async fn upload_init(
         &self,
         file_id: Option<uuid::Uuid>,
         name_encrypted: &str,
         parent_id: Option<uuid::Uuid>,
         size_bytes: i64,
+        chunk_size_bytes: i64,
         chunk_count: i32,
         is_media: bool,
-    ) -> Result<Value, String> {
+        base_version_number: Option<i32>,
+    ) -> Result<UploadInit, String> {
         let token = self.require_auth()?;
+        // The v2 server (`routes/uploads.rs::parse_profile`) accepts only
+        // web/mobile/desktop/backup_agent — there is no "cli" wire profile. The
+        // CLI computes its own plan with `ChunkProfile::Cli` and sends explicit
+        // `chunk_size_bytes` + `chunk_count`, which the server uses verbatim
+        // (the profile-derived plan is the fallback for the both-omitted case
+        // only), so the wire profile is non-load-bearing here. We send "desktop"
+        // — the closest accepted profile (same 256 MiB chunk ceiling).
         let body = serde_json::json!({
             "file_id": file_id,
-            "name_encrypted": name_encrypted,
+            "file_name": name_encrypted,
+            "file_size_bytes": size_bytes,
             "parent_id": parent_id,
-            "size_bytes": size_bytes,
+            "profile": "desktop",
+            "chunk_size_bytes": chunk_size_bytes,
             "chunk_count": chunk_count,
             "is_media": is_media,
+            "base_version_number": base_version_number,
         });
         for _ in 0..3 {
             pace_if_needed().await;
             let resp = self
                 .client
-                .post(self.url("/api/v1/files/upload/init"))
+                .post(self.url("/api/v1/uploads/init"))
                 .bearer_auth(&token)
                 .json(&body)
                 .send()
@@ -359,20 +426,25 @@ impl ApiClient {
                 .map_err(format_request_error)?;
             match parse_response(resp).await {
                 Err(e) if e == "__rate_limited__" => continue,
-                other => return other,
+                Err(e) => return Err(e),
+                Ok(v) => return UploadInit::from_value(&v),
             }
         }
         Err("rate limited after 3 retries".to_string())
     }
 
-    /// Upload one chunk. Retries the **same** index on transient transport
-    /// failures (conn-reset, timeout, premature EOF) and on rate-limit pauses,
-    /// with exponential backoff. Safe to re-PUT: the endpoint is idempotent
-    /// (index-keyed, `ON CONFLICT DO UPDATE`). `data` is `Bytes` so each retry
-    /// reuses the same allocation (a clone is just an `Arc` refcount bump).
-    pub async fn upload_chunk(&self, file_id: &str, index: u32, data: Bytes) -> Result<Value, String> {
+    /// Upload one chunk to a v2 session: `PUT /api/v1/uploads/{session}/chunks/{index}`.
+    ///
+    /// Retries the **same** index on transient transport failures (conn-reset,
+    /// timeout, premature EOF) and on rate-limit pauses, with exponential
+    /// backoff. Safe to re-PUT: the endpoint is idempotent — an already-stored
+    /// chunk returns `{skipped: true}` without re-writing the blob — so a resumed
+    /// upload simply re-PUTs every chunk and the server short-circuits the ones
+    /// it already has. `data` is `Bytes` so each retry reuses the same allocation
+    /// (a clone is just an `Arc` refcount bump).
+    pub async fn upload_chunk(&self, upload_session_id: &str, index: u32, data: Bytes) -> Result<Value, String> {
         let token = self.require_auth()?;
-        let url = self.url(&format!("/api/v1/files/{file_id}/chunks/{index}"));
+        let url = self.url(&format!("/api/v1/uploads/{upload_session_id}/chunks/{index}"));
         const MAX_ATTEMPTS: u32 = 5;
         let mut last_err = String::new();
         for attempt in 1..=MAX_ATTEMPTS {
@@ -409,39 +481,17 @@ impl ApiClient {
         ))
     }
 
-    /// GET /upload/status — the set of chunk indices already present server-side
-    /// for an in-progress upload. Errors if the file is not in progress
-    /// (completed / trashed / unknown), which the caller treats as
-    /// "not resumable → start a fresh upload".
-    pub async fn upload_status(&self, file_id: &str) -> Result<HashSet<u32>, String> {
-        let token = self.require_auth()?;
-        let resp = self
-            .client
-            .get(self.url(&format!("/api/v1/files/{file_id}/upload/status")))
-            .bearer_auth(&token)
-            .send()
-            .await
-            .map_err(format_request_error)?;
-        let val = parse_response(resp).await?;
-        let present = val
-            .get("uploaded_chunks")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|n| n.as_u64().map(|n| n as u32))
-                    .collect::<HashSet<u32>>()
-            })
-            .unwrap_or_default();
-        Ok(present)
-    }
-
-    pub async fn upload_complete(&self, file_id: &str) -> Result<Value, String> {
+    /// Finalise a v2 upload session: `POST /api/v1/uploads/{session}/complete`.
+    /// Verifies all chunks landed, flips the file to the new version, and returns
+    /// the full file metadata. Idempotent (a second call on a completed session
+    /// returns `{already_completed: true}`).
+    pub async fn upload_complete(&self, upload_session_id: &str) -> Result<Value, String> {
         let token = self.require_auth()?;
         for _ in 0..3 {
             pace_if_needed().await;
             let resp = self
                 .client
-                .post(self.url(&format!("/api/v1/files/{file_id}/upload/complete")))
+                .post(self.url(&format!("/api/v1/uploads/{upload_session_id}/complete")))
                 .bearer_auth(&token)
                 .send()
                 .await

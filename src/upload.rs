@@ -41,7 +41,6 @@
 //! `rx.close()`s before awaiting the producer; closing the receiver wakes a
 //! producer parked on the cap-1 channel, so the pipeline can never deadlock.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -85,6 +84,12 @@ pub struct UploadSpec {
     /// The file UUID. A fresh random id for a new file, or the existing id for
     /// a server-side version replace (`bb push --replace`).
     pub file_id: Uuid,
+    /// For a `bb push --replace`: the existing file's current `version_number`,
+    /// passed to the v2 init as `base_version_number` so the server enforces an
+    /// optimistic concurrency check (stale-version 409) and bumps the version.
+    /// `None` for a fresh upload (the server then keys off `file_id` absence /
+    /// presence to decide replace vs. new).
+    pub base_version_number: Option<i32>,
     /// Destination folder, or `None` for the vault root.
     pub parent_id: Option<Uuid>,
     /// Number of files uploaded in parallel by the caller (sync `--concurrency`;
@@ -282,35 +287,23 @@ pub async fn stream_encrypt_upload(
         .unwrap_or(0);
 
     // 1b. Resume decision. A prior run that was interrupted leaves a sidecar
-    //     entry (file_id) for this path; reuse it — and skip already-uploaded
-    //     chunks — only if the file is unchanged AND the server still has the
-    //     upload in progress. Otherwise mint a fresh id (`spec.file_id`). The
-    //     server's init rejects a re-init of an existing id, so a resumed upload
-    //     must skip `upload_init` and go straight to status → missing chunks →
-    //     complete (the same flow web/mobile use).
-    let resume_candidate = crate::resume::resumable_file_id(&spec.path, size, mtime_ns);
-    let mut present: HashSet<u32> = HashSet::new();
-    let resuming = match resume_candidate {
-        Some(fid) => match api.upload_status(&fid.to_string()).await {
-            Ok(set) => {
-                present = set;
-                true
-            }
-            Err(_) => {
-                // Server no longer has it in progress (completed/trashed/gone).
-                crate::resume::clear(&spec.path);
-                false
-            }
-        },
-        None => false,
-    };
-    let file_id = match (resuming, resume_candidate) {
-        (true, Some(fid)) => fid,
-        _ => spec.file_id,
+    //     entry (file_id + v2 upload_session_id) for this path; reuse it — and
+    //     let the server short-circuit chunks it already has — only if the file
+    //     is unchanged. Otherwise mint a fresh upload (`spec.file_id` + a new
+    //     init session). The v2 init rejects re-init of an in-progress file
+    //     (409), so a resumed upload must SKIP `upload_init` and re-PUT every
+    //     chunk to the stored session; the v2 chunk route is idempotent
+    //     (already-stored → `{skipped:true}`), so re-PUTs are cheap.
+    let resume_candidate = crate::resume::resumable_upload(&spec.path, size, mtime_ns);
+    let (file_id, resumed_session) = match resume_candidate {
+        Some((fid, sid)) => (fid, Some(sid)),
+        None => (spec.file_id, None),
     };
     let file_id_str = file_id.to_string();
 
-    // 2. Encrypt the name + MIME envelope (master key used synchronously).
+    // 2. Encrypt the name + MIME envelope (master key used synchronously). The
+    //    name key derives from the DURABLE file_id, so a replace re-encrypts the
+    //    name under the same id the server already stores.
     let mime = beebeeb_core::media::guess_mime_type(&spec.file_name);
     let name_encrypted = beebeeb_core::encrypt::encrypt_name(&master_key, &file_id_str, &spec.file_name, mime)
         .map_err(|e| format!("encrypt name: {e}"))?;
@@ -320,8 +313,8 @@ pub async fn stream_encrypt_upload(
     //    once; the encryptor owns it and is `Send`). The CLI uses the Cli
     //    profile with a concurrency-aware chunk size: parallel `bb sync` uploads
     //    emit smaller chunks (memory budget), while `bb push` (concurrency 1)
-    //    gets the full Cli 128 MiB cap. The server infers + stores the real
-    //    chunk size at complete, so this is purely a client-side choice.
+    //    gets the full Cli 128 MiB cap. This same plan is sent to the v2 init so
+    //    the server frames the file exactly as the encryptor emits it.
     let chunk_size =
         beebeeb_types::plan_chunks_concurrent(size, ChunkProfile::Cli, spec.concurrency.max(1)).chunk_size_bytes;
     let file = std::fs::File::open(&spec.path).map_err(|e| format!("open {}: {e}", spec.path.display()))?;
@@ -345,45 +338,63 @@ pub async fn stream_encrypt_upload(
         }
     }
 
-    // 4b. Record this upload as resumable BEFORE any chunk goes out, so an
-    //     interrupt mid-stream leaves a record the next run can pick up.
-    crate::resume::record(&spec.path, file_id, size, mtime_ns);
-
-    // 5. init with the client-computed total (= size + 28·chunk_count). The
-    //    server recomputes the real size from the summed chunks on complete, so
-    //    this is hygiene, not a contract. On resume the server record already
-    //    exists (re-init would conflict), so skip straight to the pipeline.
-    let server_id = if resuming {
-        file_id_str.clone()
+    // 5. v2 init: open an upload SESSION on `/api/v1/uploads/init`. We send the
+    //    PLAINTEXT `size` (the v2 contract — the server recomputes stored bytes
+    //    from the summed chunks at complete) plus the exact chunk plan the
+    //    encryptor uses. On a replace (`spec.base_version_number` is `Some`) the
+    //    server versions by `file_id` and enforces the stale-version 409. On
+    //    resume the session already exists (re-init would 409), so reuse the
+    //    stored session id and skip straight to the pipeline.
+    //
+    //    `upload_session_id` keys the chunk PUTs + complete; `server_id` is the
+    //    durable file id returned by init (equals `file_id` on replace).
+    let (upload_session_id, server_id) = if let Some(sid) = resumed_session {
+        (sid.to_string(), file_id_str.clone())
     } else {
-        let init_resp = api
+        let init = api
             .upload_init(
                 Some(file_id),
                 &name_encrypted,
                 spec.parent_id,
-                expected_total as i64,
+                size as i64,
+                chunk_size as i64,
                 chunk_count as i32,
                 is_media,
+                spec.base_version_number,
             )
             .await?;
-        init_resp
-            .get("file_id")
-            .or_else(|| init_resp.get("id"))
-            .and_then(|v| v.as_str())
-            .ok_or("server response missing file_id")?
-            .to_string()
+        // The server's plan is authoritative — frame the upload against it, not
+        // a hardcoded local guess. We sent our `ChunkEncryptor` plan; the v2
+        // server uses client `chunk_size_bytes`/`chunk_count` verbatim, so the
+        // two MUST agree. A mismatch means the server reframed (e.g. a profile
+        // ceiling), which would desync the chunk PUTs from the encryptor — bail
+        // loudly rather than upload a corrupt frame layout.
+        if init.chunk_count != chunk_count as u64 || init.chunk_size_bytes != chunk_size {
+            return Err(format!(
+                "server reframed the upload plan (sent {chunk_count}×{chunk_size}B, \
+                 got {}×{}B) — refusing to upload a mismatched layout",
+                init.chunk_count, init.chunk_size_bytes
+            ));
+        }
+        // Record this upload as resumable now that the session exists, BEFORE
+        // any chunk goes out, so an interrupt mid-stream leaves a record the
+        // next run can pick up.
+        if let Ok(sid) = init.upload_session_id.parse::<Uuid>() {
+            crate::resume::record(&spec.path, file_id, sid, size, mtime_ns);
+        }
+        (init.upload_session_id, init.file_id)
     };
 
-    // 6. Run the look-ahead pipeline, skipping any chunk indices the server
-    //    already has from a prior interrupted run.
+    // 6. Run the look-ahead pipeline. Every chunk is PUT to the session; on a
+    //    resumed session the server returns `{skipped:true}` for chunks it
+    //    already holds, so re-PUTs are cheap and correct.
     let file_prog = progress.begin_file(&spec.file_name, expected_total);
     let result = run_pipeline(
         api,
-        &server_id,
+        &upload_session_id,
         encryptor,
         chunk_count,
         expected_total,
-        &present,
         &spec.shutdown,
         file_prog.as_ref(),
     )
@@ -396,7 +407,7 @@ pub async fn stream_encrypt_upload(
     result?;
 
     // 7. Finalise the version.
-    api.upload_complete(&server_id).await?;
+    api.upload_complete(&upload_session_id).await?;
 
     // 7b. Upload done — drop the resume record so a future upload of this path
     //     (e.g. a changed version) starts fresh rather than resuming this id.
@@ -428,14 +439,12 @@ enum ProducerErr {
 
 /// The producer/consumer core. Returns `Ok(())` only when every planned chunk
 /// was emitted, server-confirmed, and the byte totals reconcile.
-#[allow(clippy::too_many_arguments)]
 async fn run_pipeline(
     api: &ApiClient,
-    server_id: &str,
+    upload_session_id: &str,
     encryptor: ChunkEncryptor,
     chunk_count: u32,
     expected_total: u64,
-    present: &HashSet<u32>,
     shutdown: &Arc<AtomicBool>,
     file_prog: &dyn FileProgress,
 ) -> Result<(), String> {
@@ -487,15 +496,14 @@ async fn run_pipeline(
         }
         let len = chunk.data.len() as u64;
         let index = chunk.index;
-        // Resume: a chunk the server already has is counted as confirmed
-        // (advancing the byte totals + progress) without re-PUTting it.
-        if present.contains(&index) {
-            confirmed_bytes += len;
-            confirmed_chunks += 1;
-            file_prog.chunk_confirmed(len);
-            continue;
-        }
-        match api.upload_chunk(server_id, index, Bytes::from(chunk.data)).await {
+        // The v2 chunk route is idempotent: on a resumed session a chunk the
+        // server already holds returns `{skipped:true}` cheaply (the blob isn't
+        // re-written). So we always PUT and count the 200 either way — no
+        // client-side "present" set needed.
+        match api
+            .upload_chunk(upload_session_id, index, Bytes::from(chunk.data))
+            .await
+        {
             Ok(_) => {
                 confirmed_bytes += len;
                 confirmed_chunks += 1;
@@ -603,28 +611,42 @@ mod rss_regression {
     use super::{NoopProgress, UploadSpec, stream_encrypt_upload};
     use crate::api::ApiClient;
 
-    /// Minimal mock of the V2 upload endpoints. The chunk handler drains the body
-    /// as a stream and discards it, so the mock holds at most one frame — the
-    /// measured peak reflects the CLIENT pipeline, not server-side buffering.
+    /// Minimal mock of the V2 `/api/v1/uploads/*` endpoints. The chunk handler
+    /// drains the body as a stream and discards it, so the mock holds at most one
+    /// frame — the measured peak reflects the CLIENT pipeline, not server-side
+    /// buffering. `init` echoes back a session id (= file id here) plus the
+    /// client-sent chunk plan so the driver frames the upload from the response.
     async fn spawn_mock() -> String {
         let app = Router::new()
             .route(
-                "/api/v1/files/upload/init",
-                post(|| async { Json(json!({ "file_id": Uuid::new_v4().to_string() })) }),
+                "/api/v1/uploads/init",
+                post(|Json(body): Json<serde_json::Value>| async move {
+                    let file_id = body
+                        .get("file_id")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                        .unwrap_or_else(|| Uuid::new_v4().to_string());
+                    Json(json!({
+                        "upload_session_id": Uuid::new_v4().to_string(),
+                        "file_id": file_id,
+                        "chunk_size_bytes": body.get("chunk_size_bytes").and_then(|v| v.as_u64()).unwrap_or(0),
+                        "chunk_count": body.get("chunk_count").and_then(|v| v.as_u64()).unwrap_or(0),
+                    }))
+                }),
             )
             .route(
-                "/api/v1/files/:id/chunks/:idx",
+                "/api/v1/uploads/:session/chunks/:idx",
                 put(|_p: Path<(String, u32)>, body: Body| async move {
                     let mut stream = body.into_data_stream();
                     let mut n: usize = 0;
                     while let Some(frame) = stream.next().await {
                         n += frame.map(|b| b.len()).unwrap_or(0);
                     }
-                    Json(json!({ "size": n }))
+                    Json(json!({ "index": 0, "size": n, "skipped": false }))
                 }),
             )
             .route(
-                "/api/v1/files/:id/upload/complete",
+                "/api/v1/uploads/:session/complete",
                 post(|_p: Path<String>| async {
                     Json(json!({ "id": Uuid::new_v4().to_string(), "size_bytes": 0, "chunk_count": 0 }))
                 }),
@@ -688,6 +710,7 @@ mod rss_regression {
                 path: path.clone(),
                 file_name: path.file_name().unwrap().to_string_lossy().into_owned(),
                 file_id: Uuid::new_v4(),
+                base_version_number: None,
                 parent_id: None,
                 concurrency: CONC,
                 shutdown: Arc::new(AtomicBool::new(false)),

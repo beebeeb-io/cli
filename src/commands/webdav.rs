@@ -641,17 +641,32 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
     let parent_uuid = parent_id.as_deref().and_then(|s| s.parse::<uuid::Uuid>().ok());
     let is_media = beebeeb_core::media::is_media(mime);
     let effective_file_id = existing_file_id.or(Some(file_uuid));
+    let _ = total_encrypted_size; // v2 init takes plaintext size; server recomputes encrypted total
 
-    // V2 upload: init → chunks → complete
-    let init_resp = match state
+    // On a replace (the path already had a file), pass the existing file's
+    // current version_number as the v2 optimistic-concurrency base so the server
+    // versions by file_id (stale-version → 409).
+    let base_version_number: Option<i32> = if let Some(eid) = existing_file_id {
+        match state.api.get_file(&eid.to_string()).await {
+            Ok(meta) => Some(meta.get("version_number").and_then(|v| v.as_i64()).unwrap_or(1) as i32),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
+    // V2 upload: init (open session) → chunks (by session) → complete (by session).
+    let init = match state
         .api
         .upload_init(
             effective_file_id,
             &name_encrypted,
             parent_uuid,
-            total_encrypted_size,
+            body.len() as i64,
+            chunk_size as i64,
             encrypted_chunks.len() as i32,
             is_media,
+            base_version_number,
         )
         .await
     {
@@ -659,22 +674,15 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
 
-    let server_id = match init_resp
-        .get("file_id")
-        .or_else(|| init_resp.get("id"))
-        .and_then(|v| v.as_str())
-    {
-        Some(id) => id.to_string(),
-        None => return (StatusCode::INTERNAL_SERVER_ERROR, "missing file id").into_response(),
-    };
+    let session_id = init.upload_session_id.clone();
 
     for (idx, data) in encrypted_chunks {
-        if let Err(e) = state.api.upload_chunk(&server_id, idx, bytes::Bytes::from(data)).await {
+        if let Err(e) = state.api.upload_chunk(&session_id, idx, bytes::Bytes::from(data)).await {
             return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
         }
     }
 
-    match state.api.upload_complete(&server_id).await {
+    match state.api.upload_complete(&session_id).await {
         Ok(_) => {
             let mut headers = HeaderMap::new();
             headers.insert("Location", path.parse().unwrap_or_else(|_| "/".parse().unwrap()));
