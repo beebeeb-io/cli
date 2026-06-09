@@ -1,0 +1,38 @@
+name: prod-bot wasm
+
+# Prod bot — wasm-bot (032 Pillar 5 / 0705 Phase 1).
+# Loads app.beebeeb.io/login and asserts WasmGuard reaches ready (login form
+# renders, requires the crypto engine) within the budget, no page errors.
+# White-screen / CSP / WASM-load guard. No creds.
+
+on:
+  schedule:
+    - cron: '*/30 * * * *' # every 30 min (Phase-1 relaxed cadence)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prod-bot-wasm
+  cancel-in-progress: true
+
+jobs:
+  wasm-bot:
+    runs-on: ubuntu-22.04
+    env:
+      BB_BOTS_DISABLED: ${{ vars.BB_BOTS_DISABLED }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v1
+      - name: Install Playwright (chromium)
+        working-directory: scripts
+        run: |
+          set -euo pipefail
+          bun add playwright
+          bunx playwright install --with-deps chromium
+      - name: Run wasm-bot
+        working-directory: scripts
+        run: bun run prod-bots/wasm-bot.mjs
