@@ -19,8 +19,8 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 concurrency:
-  group: prod-bot-vault
-  cancel-in-progress: true
+  group: prod-bot-vault-${{ github.run_id }}
+  cancel-in-progress: false
 
 jobs:
   vault-suite:
@@ -66,6 +66,10 @@ jobs:
           bun add playwright @otplib/preset-default
           bunx playwright install --with-deps chromium
       - name: Run vault suite
+        # Bound the run: a working 1MB up/down is seconds; a network hang (the
+        # GH-runner→prod large-body-PUT drop) fails fast here instead of eating
+        # bb's 5×300s ≈ 25min retry budget.
+        timeout-minutes: 6
         run: bash scripts/prod-bots/vault-suite.sh
       - name: Upload evidence
         if: always()
