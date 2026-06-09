@@ -1,0 +1,45 @@
+name: prod-bot auth
+
+# Prod bot — auth-bot (032 Pillar 5 / 0705 Phase 1).
+# Real OPAQUE web-login round-trip vs prod (bot-probe-1). Standing 0696 guard.
+# Phase 1 = GH-Actions-only; results surface = workflow status + artifacts (+ Telegram later).
+
+on:
+  schedule:
+    - cron: '*/30 * * * *' # every 30 min (Phase-1 relaxed cadence)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prod-bot-auth
+  cancel-in-progress: true
+
+jobs:
+  auth-bot:
+    runs-on: ubuntu-22.04
+    env:
+      BOT_PROBE_1_EMAIL: ${{ secrets.BOT_PROBE_1_EMAIL }}
+      BOT_PROBE_1_PASSWORD: ${{ secrets.BOT_PROBE_1_PASSWORD }}
+      BB_BOTS_DISABLED: ${{ vars.BB_BOTS_DISABLED }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Guard — secrets present
+        run: |
+          if [ -z "$BOT_PROBE_1_EMAIL" ]; then
+            echo "::error::BOT_PROBE_1_EMAIL/PASSWORD not set — auth-bot cannot run."
+            exit 1
+          fi
+      - uses: oven-sh/setup-bun@v1
+      - name: Install Playwright (chromium)
+        working-directory: scripts
+        run: |
+          set -euo pipefail
+          bun add playwright
+          bunx playwright install --with-deps chromium
+      - name: Run auth-bot
+        working-directory: scripts
+        run: bun run prod-bots/auth-bot.mjs

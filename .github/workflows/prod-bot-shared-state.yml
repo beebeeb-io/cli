@@ -1,0 +1,32 @@
+name: prod-bot shared-state canary
+
+# Prod bot — shared-state sanity canary (032 Pillar 5 / 0705 Phase 1).
+# Catches the 0537B class (api silently losing cross-node Redis -> per-node
+# in-memory). Black-box, no creds. cli-auth cross-node probe = robust signal;
+# rate-limit ratio is drift-only (sticky-LB can mask it). Exit 1 = drift.
+
+on:
+  schedule:
+    - cron: '*/15 * * * *' # every 15 min (Phase-1 relaxed cadence)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prod-bot-shared-state
+  cancel-in-progress: true
+
+jobs:
+  shared-state-canary:
+    runs-on: ubuntu-22.04
+    env:
+      BB_BOTS_DISABLED: ${{ vars.BB_BOTS_DISABLED }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v1
+      - name: Run shared-state canary
+        working-directory: scripts
+        run: bun run prod-bots/shared-state-canary.mjs
