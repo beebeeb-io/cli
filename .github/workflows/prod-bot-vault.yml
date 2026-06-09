@@ -1,0 +1,72 @@
+name: prod-bot vault suite
+
+# Prod bot — vault suite (032 Pillar 5 / 0705 Phase 1).
+# ONE bb build + ONE device-auth login (bot-probe-1), then the vault-needing
+# checks. Phase A: transfer (1MB up/down/sha256/delete). Share + revoke layer in.
+
+on:
+  schedule:
+    - cron: '0 * * * *' # hourly (Phase-1; matches transfer/share relaxed cadence)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+concurrency:
+  group: prod-bot-vault
+  cancel-in-progress: true
+
+jobs:
+  vault-suite:
+    runs-on: ubuntu-22.04
+    env:
+      BOT_PROBE_1_EMAIL: ${{ secrets.BOT_PROBE_1_EMAIL }}
+      BOT_PROBE_1_PASSWORD: ${{ secrets.BOT_PROBE_1_PASSWORD }}
+      BOT_PROBE_1_RECOVERY_PHRASE: ${{ secrets.BOT_PROBE_1_RECOVERY_PHRASE }}
+      BB_BOTS_DISABLED: ${{ vars.BB_BOTS_DISABLED }}
+      API_BASE_URL: https://api.beebeeb.io
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Guard — secrets present
+        run: |
+          if [ -z "$BOT_PROBE_1_EMAIL" ]; then
+            echo "::error::BOT_PROBE_1_* secrets not set — vault-suite cannot run."; exit 1
+          fi
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.96.0"
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+      - name: Build bb from source
+        run: |
+          set -euo pipefail
+          cargo build --release
+          echo "$PWD/target/release" >> "$GITHUB_PATH"
+          target/release/bb --version
+      - uses: oven-sh/setup-bun@v1
+      - name: Install Playwright + otplib
+        working-directory: scripts
+        run: |
+          set -euo pipefail
+          bun add playwright @otplib/preset-default
+          bunx playwright install --with-deps chromium
+      - name: Run vault suite
+        run: bash scripts/prod-bots/vault-suite.sh
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vault-bot-evidence
+          path: vault-bot-evidence/
