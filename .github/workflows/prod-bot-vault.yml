@@ -5,8 +5,11 @@ name: prod-bot vault suite
 # checks. Phase A: transfer (1MB up/down/sha256/delete). Share + revoke layer in.
 
 on:
-  schedule:
-    - cron: '0 * * * *' # hourly (Phase-1; matches transfer/share relaxed cadence)
+  # SCHEDULE TEMPORARILY DISABLED (2026-06-09): the chunk-upload PUT hangs ~25min
+  # from GH runners (under investigation — see 0705 / rust-server prod-log check).
+  # Re-enable the hourly cron once the upload path is verified working.
+  # schedule:
+  #   - cron: '0 * * * *'
   workflow_dispatch:
 
 permissions:
