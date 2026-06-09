@@ -13,6 +13,10 @@ on:
 permissions:
   contents: read
 
+# Opt JS actions onto Node 24 ahead of the 2026-06-16 forcing date (checkout/setup-bun ship on Node 20).
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 concurrency:
   group: prod-bot-shared-state
   cancel-in-progress: true
