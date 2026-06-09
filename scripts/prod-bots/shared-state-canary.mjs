@@ -70,7 +70,18 @@ try {
   console.log(`shared-state-canary: cli-auth=${JSON.stringify(ca)}`);
   // Fail only on a definitive drift signal (ok===false). null = inconclusive (don't page).
   const drift = rl.ok === false || ca.ok === false;
-  console.log(`shared-state-canary: DRIFT=${drift} (rate-limit ok=${rl.ok}, cli-auth ok=${ca.ok})`);
+  if (drift) {
+    // Self-diagnosing message: a future drift should explain itself.
+    console.log(
+      `shared-state-canary: DRIFT DETECTED — cross-node shared state is LOST. ` +
+        `Per-node counters / cli-auth split observed (cli-auth found=${ca.found ?? 'n/a'}/${ca.of ?? 'n/a'}, rate-limit ratio=${rl.ratio ?? 'n/a'}). ` +
+        `Most likely cause: REDIS_URL/REDIS_SENTINEL_URLS missing from the api container env, so cli-auth + rate-limit fall back to per-node in-memory. See 0537B (wrong-compose-file env drift). ` +
+        `Triage: confirm api was created from /opt/beebeeb/docker-compose.yml and its env has the REDIS_* keys.`,
+    );
+    console.log('::error::shared-state drift — per-node counters detected, Redis likely missing from api env; see 0537B');
+  } else {
+    console.log(`shared-state-canary: OK (rate-limit ok=${rl.ok}, cli-auth ok=${ca.ok})`);
+  }
   process.exit(drift ? 1 : 0);
 } catch (e) {
   console.error('shared-state-canary error:', String(e));
