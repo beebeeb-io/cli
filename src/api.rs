@@ -776,6 +776,43 @@ impl ApiClient {
         self.get_usage().await
     }
 
+    pub async fn create_billing_portal_session(&self) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .post(self.url("/api/v1/billing/portal-session"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(resp).await
+    }
+
+    pub async fn get_billing_addons(&self) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .get(self.url("/api/v1/billing/addons"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(resp).await
+    }
+
+    pub async fn update_billing_addons(&self, body: Value) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .post(self.url("/api/v1/billing/addons"))
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(resp).await
+    }
+
     /// Return all `{id, name_encrypted}` pairs in a folder so the caller can
     /// decrypt names locally and detect filename conflicts before uploading.
     /// `parent_id = None` queries the root folder.

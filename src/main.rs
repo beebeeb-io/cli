@@ -419,7 +419,7 @@ enum Commands {
         dry_run: bool,
     },
 
-    /// View billing info (read-only — manage plans on the web)
+    /// View and manage billing
     Billing {
         #[command(subcommand)]
         action: BillingAction,
@@ -517,6 +517,13 @@ enum RequestCmd {
 enum AccountCmd {
     /// Show profile, plan, security, sessions, passkeys
     Show,
+    /// Open the billing portal
+    Billing,
+    /// View or purchase billing add-ons
+    Addons {
+        #[command(subcommand)]
+        action: Option<AddonsAction>,
+    },
     /// Change email address (verification sent to the new inbox)
     Update {
         /// New email address
@@ -556,6 +563,22 @@ enum BillingAction {
         /// Output the raw API merge as JSON (use with jq)
         #[arg(long)]
         json: bool,
+    },
+    /// Open the billing portal
+    Portal,
+    /// View or purchase billing add-ons
+    Addons {
+        #[command(subcommand)]
+        action: Option<AddonsAction>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AddonsAction {
+    /// Purchase one unit of an add-on
+    Purchase {
+        /// Server add-on field to increment: extra_storage_tb or extra_users
+        addon_id: String,
     },
 }
 
@@ -838,9 +861,19 @@ async fn main() {
         Commands::Repair { dry_run } => commands::repair::run(dry_run).await,
         Commands::Billing { action } => match action {
             BillingAction::Show { json } => commands::billing::show(json).await,
+            BillingAction::Portal => commands::billing::portal().await,
+            BillingAction::Addons { action } => match action {
+                Some(AddonsAction::Purchase { addon_id }) => commands::billing::purchase_addon(addon_id).await,
+                None => commands::billing::addons().await,
+            },
         },
         Commands::Account(cmd) => match cmd {
             AccountCmd::Show => commands::account::show().await,
+            AccountCmd::Billing => commands::billing::portal().await,
+            AccountCmd::Addons { action } => match action {
+                Some(AddonsAction::Purchase { addon_id }) => commands::billing::purchase_addon(addon_id).await,
+                None => commands::billing::addons().await,
+            },
             AccountCmd::Update { email } => commands::account::update_email(email).await,
             AccountCmd::Export(sub) => match sub {
                 AccountExportCmd::Start => commands::account::export_start().await,

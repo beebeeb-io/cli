@@ -6,9 +6,23 @@
 use beebeeb_types::quota::{Plan, effective_quota, format_storage_si};
 use chrono::DateTime;
 use colored::Colorize;
+use serde_json::Value;
 
 use crate::api::ApiClient;
 use crate::ui;
+
+const ADDON_FIELDS: [&str; 10] = [
+    "plan",
+    "base_storage_tb",
+    "extra_storage_tb",
+    "total_storage_tb",
+    "max_storage_tb",
+    "storage_addon_price_cents",
+    "extra_users",
+    "base_users",
+    "max_users",
+    "user_addon_price_cents",
+];
 
 pub async fn show(json: bool) -> Result<(), String> {
     let api = ApiClient::from_config();
@@ -207,7 +221,86 @@ pub async fn show(json: bool) -> Result<(), String> {
     Ok(())
 }
 
+pub async fn portal() -> Result<(), String> {
+    let api = ApiClient::from_config();
+    api.require_auth()?;
+
+    let response = api.create_billing_portal_session().await?;
+    let url = response
+        .get("url")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "server did not return a url".to_string())?;
+
+    if !crate::env_detect::is_headless() {
+        let _ = open::that(url);
+    }
+
+    println!("Billing portal: {url}");
+    Ok(())
+}
+
+pub async fn addons() -> Result<(), String> {
+    let api = ApiClient::from_config();
+    api.require_auth()?;
+
+    let addons = api.get_billing_addons().await?;
+    print_addons(&addons);
+    Ok(())
+}
+
+pub async fn purchase_addon(addon_id: String) -> Result<(), String> {
+    let api = ApiClient::from_config();
+    api.require_auth()?;
+
+    let addons = api.get_billing_addons().await?;
+    let field = match addon_id.as_str() {
+        "extra_storage_tb" => "extra_storage_tb",
+        "extra_users" => "extra_users",
+        _ => {
+            return Err(
+                "unknown ADDON_ID; use one of the server add-on fields: extra_storage_tb, extra_users".to_string(),
+            );
+        }
+    };
+
+    let current = addons
+        .get(field)
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| format!("server did not return {field}"))?;
+    let next = current
+        .checked_add(1)
+        .ok_or_else(|| format!("{field} is too large to increment"))?;
+
+    let mut body = serde_json::Map::new();
+    body.insert(field.to_string(), serde_json::json!(next));
+    let response = api.update_billing_addons(Value::Object(body)).await?;
+    let confirmed = response.get(field).and_then(|v| v.as_i64()).unwrap_or(next);
+
+    println!("Add-on purchase confirmed: {field}={confirmed}");
+    Ok(())
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+fn print_addons(addons: &Value) {
+    let field_width = ADDON_FIELDS.iter().map(|field| field.len()).max().unwrap_or(5);
+
+    println!("{:<field_width$}  value", "field", field_width = field_width);
+    for field in ADDON_FIELDS {
+        let value = addons.get(field).map(format_json_value).unwrap_or_else(|| "-".into());
+        println!("{:<field_width$}  {value}", field, field_width = field_width);
+    }
+}
+
+fn format_json_value(value: &Value) -> String {
+    match value {
+        Value::Null => "-".into(),
+        Value::String(s) => s.clone(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        other => other.to_string(),
+    }
+}
 
 fn price_for(plan: Plan, billing_cycle: &str) -> Option<String> {
     // Mirror the prices shown in the web billing page. Plan::is_free() doesn't
