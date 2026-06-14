@@ -780,6 +780,109 @@ impl ApiClient {
             .ok_or_else(|| "server did not return a confirmation_token".to_string())
     }
 
+    /// PUT /api/v1/auth/account/email — legacy password-account flow.
+    pub async fn account_email_change_legacy(
+        &self,
+        new_email: &str,
+        password: &str,
+        confirm_token: &str,
+    ) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .put(self.url("/api/v1/auth/account/email"))
+            .bearer_auth(token)
+            .header("X-Confirm-Token", confirm_token)
+            .json(&serde_json::json!({
+                "new_email": new_email,
+                "password": password,
+            }))
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(resp).await
+    }
+
+    /// POST /api/v1/me/email/start — OPAQUE email-change step 1.
+    pub async fn account_email_change_start_opaque(
+        &self,
+        new_email: &str,
+        opaque_client_message_b64: &str,
+        confirm_token: &str,
+    ) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .post(self.url("/api/v1/me/email/start"))
+            .bearer_auth(token)
+            .header("X-Confirm-Token", confirm_token)
+            .json(&serde_json::json!({
+                "new_email": new_email,
+                "opaque_client_message": opaque_client_message_b64,
+            }))
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(resp).await
+    }
+
+    /// POST /api/v1/me/email/finish — OPAQUE email-change step 2.
+    pub async fn account_email_change_finish_opaque(
+        &self,
+        email_change_token: &str,
+        opaque_registration_b64: &str,
+        recovery_check_b64: &str,
+        x25519_public_key_b64: &str,
+    ) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .post(self.url("/api/v1/me/email/finish"))
+            .bearer_auth(token)
+            .json(&serde_json::json!({
+                "email_change_token": email_change_token,
+                "opaque_registration": opaque_registration_b64,
+                "recovery_check": recovery_check_b64,
+                "x25519_public_key": x25519_public_key_b64,
+            }))
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(resp).await
+    }
+
+    /// Best-effort fetch of recovery_check + x25519_public_key for OPAQUE
+    /// email change. Returns `(recovery_check, x25519_pub)` or an error if the
+    /// server has no route or the user has no key material on file.
+    pub async fn get_my_key_material(&self) -> Result<(Vec<u8>, Vec<u8>), String> {
+        use base64::Engine;
+
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .get(self.url("/api/v1/me/keys"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        let body = parse_response(resp).await?;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let recovery_check = body
+            .get("recovery_check")
+            .and_then(|v| v.as_str())
+            .ok_or("no recovery_check in response")?;
+        let x25519_public_key = body
+            .get("x25519_public_key")
+            .and_then(|v| v.as_str())
+            .ok_or("no x25519_public_key in response")?;
+        Ok((
+            b64.decode(recovery_check)
+                .map_err(|e| format!("decode recovery_check: {e}"))?,
+            b64.decode(x25519_public_key)
+                .map_err(|e| format!("decode x25519_public_key: {e}"))?,
+        ))
+    }
+
     /// Alias of `get_subscription` for use from `bb billing show`. The Spec 2
     /// billing tree will move to a dedicated `/api/v1/billing/*` namespace, so
     /// keep the call sites pointed at a billing-named function from day one.

@@ -18,40 +18,63 @@ use colored::Colorize;
 use crate::api::ApiClient;
 use crate::colors;
 
+pub struct ConfirmedPassword {
+    pub password: String,
+    pub token: String,
+}
+
 /// Prompt for the user's password on the same line and exchange it for a
 /// single-use confirmation token (5-minute TTL, returned by
 /// `POST /api/v1/auth/confirm`).
 pub async fn acquire_confirm_token(api: &ApiClient) -> Result<String, String> {
+    Ok(acquire_confirmed_password(api).await?.token)
+}
+
+/// Same step-up prompt as `acquire_confirm_token`, but retains the password for
+/// flows whose legacy endpoint still needs it in the request body.
+pub async fn acquire_confirmed_password(api: &ApiClient) -> Result<ConfirmedPassword, String> {
     let prompt = format!("  {} ", "confirm your password:".custom_color(colors::INK_DIM));
     let password = rpassword::prompt_password(prompt).map_err(|e| format!("could not read password: {e}"))?;
 
-    api.confirm_password(&password).await.map_err(|e| {
-        // The server returns "Unauthorized" for wrong password and a specific
-        // "session too old" error for OPAQUE accounts whose session is stale.
-        if e.contains("session_too_old") || e.contains("SessionTooOld") {
-            "this account has no password (OPAQUE) and your session is older than 15 minutes — \
-             run `bb login` again to refresh, then retry the destructive action"
-                .to_string()
-        } else if e.contains("Unauthorized") || e.contains("401") || e.contains("incorrect") {
-            "incorrect password".to_string()
-        } else {
-            e
-        }
-    })
+    let token = api.confirm_password(&password).await.map_err(map_confirm_error)?;
+    Ok(ConfirmedPassword { password, token })
+}
+
+fn map_confirm_error(e: String) -> String {
+    // The server returns "Unauthorized" for wrong password and a specific
+    // "session too old" error for OPAQUE accounts whose session is stale.
+    if e.contains("session_too_old") || e.contains("SessionTooOld") {
+        "this account has no password (OPAQUE) and your session is older than 15 minutes — \
+         run `bb login` again to refresh, then retry the destructive action"
+            .to_string()
+    } else if e.contains("Unauthorized") || e.contains("401") || e.contains("incorrect") {
+        "incorrect password".to_string()
+    } else {
+        e
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::map_confirm_error;
+
     // We cannot test the rpassword prompt without a TTY mock; the error
     // mapping is the part worth testing.
-    //
-    // The translation function is inlined inside `acquire_confirm_token`
-    // intentionally — extracting it adds public surface area that nothing
-    // else needs. If a future task needs to reuse the mapping, refactor then.
 
     #[test]
     fn confirm_module_compiles() {
         // Smoke test — the file builds and our helper signature is unchanged.
         // Real behaviour is exercised through the integration suite in Task 22.
+    }
+
+    #[test]
+    fn confirm_error_mapping_handles_common_auth_failures() {
+        assert_eq!(map_confirm_error("401 Unauthorized".to_string()), "incorrect password");
+        assert_eq!(
+            map_confirm_error("incorrect password".to_string()),
+            "incorrect password"
+        );
+        assert!(map_confirm_error("session_too_old".to_string()).contains("run `bb login` again"));
+        assert_eq!(map_confirm_error("network failed".to_string()), "network failed");
     }
 }

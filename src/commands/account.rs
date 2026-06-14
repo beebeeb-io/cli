@@ -18,7 +18,9 @@
 //!
 //!   DELETE /api/v1/auth/account
 //!
-//! All mutating endpoints require X-Confirm-Token from POST /api/v1/auth/confirm.
+//! Mutating account endpoints use X-Confirm-Token from POST /api/v1/auth/confirm
+//! where the server route exposes step-up confirmation. The legacy email-change
+//! route still verifies the password body directly, so the CLI sends both.
 
 use std::path::PathBuf;
 
@@ -289,8 +291,121 @@ fn render_progress_bar(used: i64, quota: i64, width: usize) -> String {
     format!("{}{}", "\u{2593}".repeat(filled), "\u{2591}".repeat(empty))
 }
 
-pub async fn update_email(_new_email: String) -> Result<(), String> {
-    Err("bb account update — not implemented yet".to_string())
+pub async fn update_email(new_email: String) -> Result<(), String> {
+    let api = ApiClient::from_config();
+    let _ = api.require_auth()?;
+
+    let new_email = normalize_update_email(&new_email)?;
+    let confirmed = crate::commands::confirm::acquire_confirmed_password(&api).await?;
+
+    match api
+        .account_email_change_legacy(&new_email, &confirmed.password, &confirmed.token)
+        .await
+    {
+        Ok(_) => print_email_change_success("legacy", &new_email),
+        Err(e) if e.contains("OPAQUE accounts must re-register") => {
+            opaque_email_change(&api, &new_email, &confirmed.password, &confirmed.token).await
+        }
+        Err(e) => Err(map_email_change_error(e)),
+    }
+}
+
+fn normalize_update_email(new_email: &str) -> Result<String, String> {
+    let trimmed = new_email.trim().to_lowercase();
+    if !trimmed.contains('@') || trimmed.len() < 5 {
+        return Err("invalid email format".to_string());
+    }
+    Ok(trimmed)
+}
+
+fn map_email_change_error(e: String) -> String {
+    if e.contains("already in use") {
+        "email already in use".to_string()
+    } else {
+        e
+    }
+}
+
+async fn opaque_email_change(
+    api: &ApiClient,
+    new_email: &str,
+    password: &str,
+    confirm_token: &str,
+) -> Result<(), String> {
+    use base64::Engine;
+    use beebeeb_core::opaque_protocol;
+
+    let b64 = base64::engine::general_purpose::STANDARD;
+
+    let registration_start = opaque_protocol::client_registration_start(password.as_bytes())
+        .map_err(|e| format!("opaque client start: {e}"))?;
+
+    let start = api
+        .account_email_change_start_opaque(new_email, &b64.encode(&registration_start.message), confirm_token)
+        .await
+        .map_err(map_email_change_error)?;
+    let server_message_b64 = start
+        .get("server_message")
+        .and_then(|v| v.as_str())
+        .ok_or("server did not return server_message")?;
+    let email_change_token = start
+        .get("email_change_token")
+        .and_then(|v| v.as_str())
+        .ok_or("server did not return email_change_token")?
+        .to_string();
+    let server_message = b64
+        .decode(server_message_b64)
+        .map_err(|e| format!("decode server_message: {e}"))?;
+
+    let registration_upload =
+        opaque_protocol::client_registration_finish(&registration_start.state, password.as_bytes(), &server_message)
+            .map_err(|e| format!("opaque client finish: {e}"))?;
+
+    let (recovery_check, x25519_public_key) = match api.get_my_key_material().await {
+        Ok(material) => material,
+        Err(_) => {
+            // TODO(server-q-11): /api/v1/me/keys is not exposed by the server yet,
+            // so the CLI cannot carry existing vault identity material here.
+            (vec![0u8; 32], vec![0u8; 32])
+        }
+    };
+
+    api.account_email_change_finish_opaque(
+        &email_change_token,
+        &b64.encode(&registration_upload),
+        &b64.encode(&recovery_check),
+        &b64.encode(&x25519_public_key),
+    )
+    .await
+    .map_err(map_email_change_error)?;
+
+    print_email_change_success("opaque", new_email)
+}
+
+fn print_email_change_success(method: &str, new_email: &str) -> Result<(), String> {
+    use crate::{colors, ui};
+    use colored::Colorize;
+
+    if ui::is_json() {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "ok": true,
+                "method": method,
+                "new_email": new_email,
+            }))
+            .unwrap_or_else(|_| "{}".to_string())
+        );
+    } else if !ui::is_quiet() {
+        println!(
+            "  {} verification email sent to {}",
+            "->".custom_color(colors::AMBER),
+            new_email.custom_color(colors::INK)
+        );
+        println!("  the change completes once you click the link in the new inbox (24h ttl).");
+        println!("  other sessions will be revoked when verification finishes.");
+    }
+    Ok(())
 }
 
 pub async fn export_start() -> Result<(), String> {
@@ -355,5 +470,27 @@ mod tests {
         assert_eq!(out["security"]["unavailable"], "network: connection refused");
         assert_eq!(out["session_count"], 0);
         assert_eq!(out["passkey_count"], 0);
+    }
+
+    #[test]
+    fn normalize_update_email_matches_server_contract() {
+        assert_eq!(
+            normalize_update_email("  New.Address@Example.COM  ").unwrap(),
+            "new.address@example.com"
+        );
+        assert_eq!(normalize_update_email("a@b").unwrap_err(), "invalid email format");
+        assert_eq!(
+            normalize_update_email("no-at-example.com").unwrap_err(),
+            "invalid email format"
+        );
+    }
+
+    #[test]
+    fn map_email_change_error_simplifies_conflict() {
+        assert_eq!(
+            map_email_change_error("email already in use".to_string()),
+            "email already in use"
+        );
+        assert_eq!(map_email_change_error("boom".to_string()), "boom");
     }
 }
