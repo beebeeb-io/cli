@@ -332,54 +332,10 @@ async fn opaque_email_change(
     password: &str,
     confirm_token: &str,
 ) -> Result<(), String> {
-    use base64::Engine;
-    use beebeeb_core::opaque_protocol;
+    let _ = (api, new_email, password, confirm_token);
 
-    let b64 = base64::engine::general_purpose::STANDARD;
-
-    let registration_start = opaque_protocol::client_registration_start(password.as_bytes())
-        .map_err(|e| format!("opaque client start: {e}"))?;
-
-    let start = api
-        .account_email_change_start_opaque(new_email, &b64.encode(&registration_start.message), confirm_token)
-        .await
-        .map_err(map_email_change_error)?;
-    let server_message_b64 = start
-        .get("server_message")
-        .and_then(|v| v.as_str())
-        .ok_or("server did not return server_message")?;
-    let email_change_token = start
-        .get("email_change_token")
-        .and_then(|v| v.as_str())
-        .ok_or("server did not return email_change_token")?
-        .to_string();
-    let server_message = b64
-        .decode(server_message_b64)
-        .map_err(|e| format!("decode server_message: {e}"))?;
-
-    let registration_upload =
-        opaque_protocol::client_registration_finish(&registration_start.state, password.as_bytes(), &server_message)
-            .map_err(|e| format!("opaque client finish: {e}"))?;
-
-    let (recovery_check, x25519_public_key) = match api.get_my_key_material().await {
-        Ok(material) => material,
-        Err(_) => {
-            // TODO(server-q-11): /api/v1/me/keys is not exposed by the server yet,
-            // so the CLI cannot carry existing vault identity material here.
-            (vec![0u8; 32], vec![0u8; 32])
-        }
-    };
-
-    api.account_email_change_finish_opaque(
-        &email_change_token,
-        &b64.encode(&registration_upload),
-        &b64.encode(&recovery_check),
-        &b64.encode(&x25519_public_key),
-    )
-    .await
-    .map_err(map_email_change_error)?;
-
-    print_email_change_success("opaque", new_email)
+    // TODO(0473-followup): source existing recovery_check + x25519_public_key for OPAQUE re-registration (local keystore vs a new server endpoint) before enabling this path.
+    Err("Changing the email on an OPAQUE account is not yet supported from the CLI (the server does not expose the key material the re-registration needs). Use the web app for now.".to_string())
 }
 
 fn print_email_change_success(method: &str, new_email: &str) -> Result<(), String> {
