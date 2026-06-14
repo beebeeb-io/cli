@@ -780,6 +780,24 @@ impl ApiClient {
             .ok_or_else(|| "server did not return a confirmation_token".to_string())
     }
 
+    /// POST /api/v1/auth/account/export — queue or resume a GDPR export job.
+    pub async fn request_account_export(&self, confirm_token: &str) -> Result<Value, String> {
+        if confirm_token.trim().is_empty() {
+            return Err("confirmation token is required to request an account export".to_string());
+        }
+
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .post(self.url("/api/v1/auth/account/export"))
+            .bearer_auth(token)
+            .header("X-Confirm-Token", confirm_token)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(resp).await
+    }
+
     /// PUT /api/v1/auth/account/email — legacy password-account flow.
     pub async fn account_email_change_legacy(
         &self,

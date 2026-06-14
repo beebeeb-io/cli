@@ -365,7 +365,84 @@ fn print_email_change_success(method: &str, new_email: &str) -> Result<(), Strin
 }
 
 pub async fn export_start() -> Result<(), String> {
-    Err("bb account export — not implemented yet".to_string())
+    let api = ApiClient::from_config();
+    let _ = api.require_auth()?;
+
+    let confirm_token = crate::commands::confirm::acquire_confirm_token(&api).await?;
+    let response = api.request_account_export(&confirm_token).await?;
+
+    print_export_start_response(&response)
+}
+
+fn print_export_start_response(response: &Value) -> Result<(), String> {
+    use crate::{colors, ui};
+    use colored::Colorize;
+
+    if ui::is_json() {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(response).unwrap_or_else(|_| "{}".to_string())
+        );
+        return Ok(());
+    }
+
+    let job_id = export_job_id(response)?;
+    let status = response.get("status").and_then(|v| v.as_str()).unwrap_or("queued");
+    let resumed = response.get("resumed").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    if ui::is_quiet() {
+        println!("{job_id}");
+        return Ok(());
+    }
+
+    let title = if resumed {
+        "data export already requested"
+    } else {
+        "data export queued"
+    };
+    println!("  {} {}", "->".custom_color(colors::AMBER), title);
+    println!(
+        "  {} {}",
+        "job id  ".custom_color(colors::INK_DIM),
+        job_id.custom_color(colors::INK)
+    );
+    println!(
+        "  {} {}",
+        "status  ".custom_color(colors::INK_DIM),
+        status.custom_color(colors::INK)
+    );
+
+    if let Some(minutes) = response.get("estimated_minutes").and_then(|v| v.as_i64()) {
+        println!(
+            "  {} {}",
+            "eta     ".custom_color(colors::INK_DIM),
+            format!("{minutes} minute(s)").custom_color(colors::INK)
+        );
+    }
+
+    if let Some(download_url) = response.get("download_url").and_then(|v| v.as_str()) {
+        println!(
+            "  {} {}",
+            "download".custom_color(colors::INK_DIM),
+            download_url.custom_color(colors::INK)
+        );
+    }
+
+    println!(
+        "  {} {}",
+        "next    ".custom_color(colors::INK_DIM),
+        format!("bb account export status {job_id}").custom_color(colors::INK_WARM)
+    );
+
+    Ok(())
+}
+
+fn export_job_id(response: &Value) -> Result<&str, String> {
+    response
+        .get("job_id")
+        .or_else(|| response.get("export_id"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "server response missing job_id/export_id".to_string())
 }
 
 pub async fn export_status(_job_id: String) -> Result<(), String> {
@@ -448,5 +525,20 @@ mod tests {
             "email already in use"
         );
         assert_eq!(map_email_change_error("boom".to_string()), "boom");
+    }
+
+    #[test]
+    fn export_job_id_accepts_fresh_and_resumed_shapes() {
+        let fresh = json!({ "job_id": "new-job", "status": "queued" });
+        let resumed = json!({ "export_id": "old-job", "status": "processing", "resumed": true });
+
+        assert_eq!(export_job_id(&fresh).unwrap(), "new-job");
+        assert_eq!(export_job_id(&resumed).unwrap(), "old-job");
+    }
+
+    #[test]
+    fn export_job_id_requires_server_identifier() {
+        let out = export_job_id(&json!({ "status": "queued" })).unwrap_err();
+        assert_eq!(out, "server response missing job_id/export_id");
     }
 }
