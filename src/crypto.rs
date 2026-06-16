@@ -72,6 +72,27 @@ pub fn decrypt_name(
     None
 }
 
+/// Batch [`decrypt_name`] — decrypt many `(file_id, name_encrypted)` pairs in
+/// PARALLEL (rayon, task 0810). Per-item semantics are IDENTICAL to
+/// [`decrypt_name`] (all three blob formats + both UUID-key derivations + the
+/// plaintext fast-path); `None` for an item that looks encrypted but won't
+/// decrypt. Result order matches the input.
+///
+/// Deliberately wraps the CLI's own all-format `decrypt_name`, NOT
+/// `beebeeb_core::encrypt::decrypt_names`: core only parses the Rust
+/// `EncryptedBlob` (number-array) format. Current web AND mobile emit exactly
+/// that format, so core would handle them — but the CLI also reads the LEGACY
+/// base64 `WebAppBlob` (format 2) from OLD web uploads, which core can't parse.
+/// Keeping the CLI's all-format coverage is what keeps `bb ls`/`bb search` output
+/// byte-identical for those legacy files.
+pub fn decrypt_names(master_key: &beebeeb_core::kdf::MasterKey, items: &[(&str, &str)]) -> Vec<Option<String>> {
+    use rayon::prelude::*;
+    items
+        .par_iter()
+        .map(|(file_id, name_encrypted)| decrypt_name(master_key, file_id, name_encrypted))
+        .collect()
+}
+
 /// Decrypt a `name_encrypted` value with a **known** file key (rather than one
 /// derived from the master key + file id). Used for file-request uploads, whose
 /// content key `C` is recovered via the request-key path — the filename is then
@@ -415,5 +436,35 @@ mod tests {
     fn decrypt_name_plaintext_passthrough() {
         let m = mk();
         assert_eq!(decrypt_name(&m, FID, "Documents").as_deref(), Some("Documents"));
+    }
+
+    /// Batch `decrypt_names` is byte-identical to per-item `decrypt_name`, order-
+    /// preserving, across encrypted / plaintext / undecryptable items (task 0810).
+    #[test]
+    fn decrypt_names_batch_matches_single() {
+        use beebeeb_core::encrypt::encrypt_name;
+        let m = mk();
+        let id1 = "11111111-1111-2222-3333-444455556666";
+        let id2 = "22222222-1111-2222-3333-444455556666";
+        let id3 = "33333333-1111-2222-3333-444455556666";
+        // id1: Rust-format encrypted name (string-UUID key form, as encrypt_name uses).
+        let enc1 = encrypt_name(&m, id1, "report.pdf", Some("application/pdf")).unwrap();
+        // id2: plaintext name (fast path). id3: well-formed-but-undecryptable blob.
+        let enc2 = "Documents".to_string();
+        let enc3 = r#"{"cipher_suite":"V1Aes256Gcm","nonce":[1,2,3],"ciphertext":[9,9,9,9]}"#.to_string();
+
+        let items: Vec<(&str, &str)> = vec![(id1, enc1.as_str()), (id2, enc2.as_str()), (id3, enc3.as_str())];
+        let batch = decrypt_names(&m, &items);
+        assert_eq!(batch.len(), 3);
+        for ((id, enc), got) in items.iter().zip(&batch) {
+            assert_eq!(
+                *got,
+                decrypt_name(&m, id, enc),
+                "batch item must equal single decrypt_name"
+            );
+        }
+        assert_eq!(batch[0].as_deref(), Some("report.pdf"));
+        assert_eq!(batch[1].as_deref(), Some("Documents"));
+        assert_eq!(batch[2], None);
     }
 }

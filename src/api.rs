@@ -316,6 +316,23 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    /// Fetch the whole-vault file index in ONE request (task 0810). Returns the
+    /// flat array of every non-trashed file with `id`, `parent_id`,
+    /// `name_encrypted`, `is_folder`, `size_bytes`, `created_at` — the client
+    /// builds the tree. Used by `bb search` to avoid an HTTP request per folder.
+    pub async fn files_index(&self) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .get(self.url("/api/v1/files/index"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+
+        parse_response(resp).await
+    }
+
     /// Get file metadata by ID.
     pub async fn get_file(&self, file_id: &str) -> Result<Value, String> {
         let token = self.require_auth()?;
