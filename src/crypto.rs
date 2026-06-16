@@ -80,9 +80,11 @@ pub fn decrypt_name(
 ///
 /// Deliberately wraps the CLI's own all-format `decrypt_name`, NOT
 /// `beebeeb_core::encrypt::decrypt_names`: core only parses the Rust
-/// `EncryptedBlob` (byte-array) format, so it would fail to decrypt web-origin
-/// names stored as the base64 `WebAppBlob` (format 2) — keeping the CLI's
-/// mixed-origin coverage is what makes `bb ls`/`bb search` output byte-identical.
+/// `EncryptedBlob` (number-array) format. Current web AND mobile emit exactly
+/// that format, so core would handle them — but the CLI also reads the LEGACY
+/// base64 `WebAppBlob` (format 2) from OLD web uploads, which core can't parse.
+/// Keeping the CLI's all-format coverage is what keeps `bb ls`/`bb search` output
+/// byte-identical for those legacy files.
 pub fn decrypt_names(master_key: &beebeeb_core::kdf::MasterKey, items: &[(&str, &str)]) -> Vec<Option<String>> {
     use rayon::prelude::*;
     items
