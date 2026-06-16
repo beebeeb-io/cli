@@ -2,7 +2,6 @@ use colored::Colorize;
 
 use crate::api::ApiClient;
 use crate::commands::push::load_master_key;
-use crate::crypto::decrypt_name;
 use crate::{colors, ui};
 
 /// Field to sort a listing by.
@@ -206,17 +205,42 @@ async fn decrypt_listing(
             None
         };
 
-    let mut out = Vec::with_capacity(files.len());
+    // Name decryption (task 0810): request-upload names use the per-file request
+    // content key (stateful resolver — kept sequential); all other names use the
+    // master key and are decrypted in ONE parallel batch. Output order preserved.
+    let mut request_names: Vec<Option<String>> = Vec::with_capacity(files.len());
     for file in &files {
-        let file_id = file.get("id").and_then(|v| v.as_str()).unwrap_or("");
         let name_encrypted = file.get("name_encrypted").and_then(|v| v.as_str()).unwrap_or("");
-        let request_name = request_keys
-            .as_mut()
-            .and_then(|rk| rk.content_key(master_key, file))
-            .and_then(|c| crate::crypto::decrypt_name_with_key(&c, name_encrypted));
-        let name = request_name
-            .or_else(|| decrypt_name(master_key, file_id, name_encrypted))
-            .unwrap_or_else(|| format!("(encrypted) {}", &file_id[..8.min(file_id.len())]));
+        request_names.push(
+            request_keys
+                .as_mut()
+                .and_then(|rk| rk.content_key(master_key, file))
+                .and_then(|c| crate::crypto::decrypt_name_with_key(&c, name_encrypted)),
+        );
+    }
+    let batch_items: Vec<(&str, &str)> = files
+        .iter()
+        .zip(&request_names)
+        .filter(|(_, rn)| rn.is_none())
+        .map(|(file, _)| {
+            (
+                file.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                file.get("name_encrypted").and_then(|v| v.as_str()).unwrap_or(""),
+            )
+        })
+        .collect();
+    let mut batch = crate::crypto::decrypt_names(master_key, &batch_items).into_iter();
+
+    let mut out = Vec::with_capacity(files.len());
+    for (i, file) in files.iter().enumerate() {
+        let file_id = file.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let name = match request_names[i].take() {
+            Some(rn) => rn,
+            None => batch
+                .next()
+                .flatten()
+                .unwrap_or_else(|| format!("(encrypted) {}", &file_id[..8.min(file_id.len())])),
+        };
 
         out.push(DecryptedFile {
             id: file_id.to_string(),

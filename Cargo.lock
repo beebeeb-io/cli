@@ -298,6 +298,7 @@ dependencies = [
  "qrcode",
  "rand 0.8.6",
  "ratatui",
+ "rayon",
  "regex",
  "reqwest",
  "rpassword",
@@ -317,7 +318,7 @@ dependencies = [
 [[package]]
 name = "beebeeb-core"
 version = "0.1.0"
-source = "git+https://github.com/beebeeb-io/core#e26fc621352aa82855ebcab735ffa2b9d2aabfbb"
+source = "git+https://github.com/beebeeb-io/core?rev=45a612c#45a612c426170bbc4dd68622530773e1c5f02bff"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -331,12 +332,14 @@ dependencies = [
  "image",
  "opaque-ke",
  "rand 0.8.6",
+ "rayon",
  "reed-solomon-erasure",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
  "thiserror 2.0.18",
+ "unicode-normalization",
  "uuid",
  "webp",
  "x25519-dalek",
@@ -347,7 +350,7 @@ dependencies = [
 [[package]]
 name = "beebeeb-types"
 version = "0.1.0"
-source = "git+https://github.com/beebeeb-io/core#e26fc621352aa82855ebcab735ffa2b9d2aabfbb"
+source = "git+https://github.com/beebeeb-io/core?rev=45a612c#45a612c426170bbc4dd68622530773e1c5f02bff"
 dependencies = [
  "serde",
 ]
@@ -662,6 +665,31 @@ checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
 dependencies = [
  "cfg-if",
 ]
+
+[[package]]
+name = "crossbeam-deque"
+version = "0.8.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9dd111b7b7f7d55b72c0a6ae361660ee5853c9af73f70c3c2ef6858b950e2e51"
+dependencies = [
+ "crossbeam-epoch",
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-epoch"
+version = "0.9.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-utils"
+version = "0.8.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
 name = "crossterm"
@@ -2458,6 +2486,26 @@ dependencies = [
  "unicode-segmentation",
  "unicode-truncate",
  "unicode-width 0.2.0",
+]
+
+[[package]]
+name = "rayon"
+version = "1.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb39b166781f92d482534ef4b4b1b2568f42613b53e5b6c160e24cfbfa30926d"
+dependencies = [
+ "either",
+ "rayon-core",
+]
+
+[[package]]
+name = "rayon-core"
+version = "1.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
+dependencies = [
+ "crossbeam-deque",
+ "crossbeam-utils",
 ]
 
 [[package]]

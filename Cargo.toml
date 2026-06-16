@@ -15,8 +15,8 @@ name = "bb"
 path = "src/main.rs"
 
 [dependencies]
-beebeeb-core = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-core" }
-beebeeb-types = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-types" }
+beebeeb-core = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-core", rev = "45a612c" }
+beebeeb-types = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-types", rev = "45a612c" }
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 tokio = { version = "1", features = ["full"] }
@@ -31,6 +31,7 @@ colored = "3"
 crossterm = "0.28"
 dirs = "6"
 regex = "1"
+rayon = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 rpassword = "7"
 hostname = "0.4"
