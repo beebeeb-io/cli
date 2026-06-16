@@ -125,6 +125,145 @@ fn compute_file_hash(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+/// Is the on-disk file byte-identical to what the manifest recorded at the last
+/// sync? Prefer the content hash (catches same-size edits); fall back to
+/// `(mtime, size)` for manifest entries written before content hashing existed.
+///
+/// This is the data-safety gate for remote-delete reconciliation: we only ever
+/// remove a local mirror file when this returns `true`, so a file the user
+/// edited offline is never destroyed by a remote deletion.
+fn local_matches_entry(local: &LocalFile, entry: &FileEntry) -> bool {
+    match &entry.content_hash {
+        Some(h) => *h == local.content_hash,
+        None => local.mtime == entry.last_mtime && local.size == entry.last_size,
+    }
+}
+
+/// Has the on-disk file changed relative to the manifest entry recorded at the
+/// last sync? This is the strict inverse of [`local_matches_entry`]: it prefers
+/// the content hash (catches a same-size/same-mtime edit) and only falls back to
+/// `(mtime, size)` for manifest entries written before content hashing existed.
+///
+/// ALL upload paths — the one-shot classifier and both continuous-watch resync
+/// loops — call this so their change detection can never drift apart again. An
+/// earlier divergence (the watch loops compared only `(mtime, size)`) meant a
+/// same-size offline edit that was remote-deleted got correctly kept but then
+/// never re-uploaded; routing every site through this helper closes that gap.
+fn local_changed_vs_manifest(local: &LocalFile, entry: &FileEntry) -> bool {
+    !local_matches_entry(local, entry)
+}
+
+/// What to do with a prior-synced manifest key whose remote counterpart has
+/// disappeared (trashed or permanently deleted on the server).
+#[derive(Debug, PartialEq, Eq)]
+enum RemoteAbsent {
+    /// Manifest entry exists and the local file is byte-identical to it: this is
+    /// a genuine REMOTE DELETE. The server is authoritative and the file is
+    /// recoverable from server trash, so the safe default is to remove the
+    /// local mirror file and drop the manifest entry. Removing local is
+    /// deliberately NOT gated behind a flag (deletions propagate by default).
+    DeleteLocal,
+    /// Manifest entry exists but the local file DIFFERS (the user edited it
+    /// offline while it was deleted remotely). Never destroy unsynced local
+    /// edits — surface it and re-upload the local copy as a new file.
+    ReAddLocal,
+    /// No manifest entry: the local file is genuinely new (never synced), so
+    /// this is not a remote delete at all — upload it as new (caller's default).
+    NotADelete,
+}
+
+/// Classify a manifest key that is absent from the current remote listing.
+///
+/// `local` is the on-disk file (if it still exists), `prior` the manifest entry
+/// from `SyncState.files`. This is the ONE place the remote-delete vs offline-edit
+/// decision lives; the one-shot classifier and both continuous-watch resync loops
+/// call it so they stay byte-for-byte consistent.
+fn classify_remote_absent(local: Option<&LocalFile>, prior: Option<&FileEntry>) -> RemoteAbsent {
+    match (local, prior) {
+        // Synced before + still on disk → compare against the manifest.
+        (Some(l), Some(p)) => {
+            if local_matches_entry(l, p) {
+                RemoteAbsent::DeleteLocal
+            } else {
+                RemoteAbsent::ReAddLocal
+            }
+        }
+        // Synced before, already gone locally too → nothing to delete, just a
+        // stale manifest entry to drop (treat as a completed remote delete).
+        (None, Some(_)) => RemoteAbsent::DeleteLocal,
+        // No prior manifest entry → genuinely new local file, not a delete.
+        (Some(_), None) => RemoteAbsent::NotADelete,
+        (None, None) => RemoteAbsent::NotADelete,
+    }
+}
+
+/// Apply remote-delete reconciliation for every manifest key that is absent
+/// from `remote_files`. Used by both continuous-watch resync loops (the one-shot
+/// path threads the same decision through its classifier instead).
+///
+/// For each prior-synced key no longer present remotely:
+/// - byte-identical local → delete the local mirror file + drop the manifest
+///   entry (the safe, default direction: server is authoritative + recoverable);
+/// - locally modified offline → leave the file, keep the manifest entry, and the
+///   caller's normal upload pass re-adds it (never silently destroy local edits).
+///
+/// Returns the rels whose local file was removed (for dashboard/notification).
+fn reconcile_remote_deletions(
+    local_dir: &Path,
+    state: &mut SyncState,
+    local_files: &HashMap<String, LocalFile>,
+    remote_files: &HashMap<String, RemoteFile>,
+    dry_run: bool,
+) -> Vec<String> {
+    let mut removed = Vec::new();
+    // Snapshot the keys up front — we mutate state.files inside the loop.
+    let manifest_keys: Vec<String> = state.files.keys().cloned().collect();
+    for rel in manifest_keys {
+        if remote_files.contains_key(&rel) {
+            continue; // still present remotely — not a delete
+        }
+        let prior = state.files.get(&rel).cloned();
+        match classify_remote_absent(local_files.get(&rel), prior.as_ref()) {
+            RemoteAbsent::DeleteLocal => {
+                if !dry_run {
+                    let path = local_dir.join(&rel);
+                    // Best-effort unlink: a NotFound means the user already
+                    // deleted it locally, which is fine.
+                    if let Err(e) = std::fs::remove_file(&path) {
+                        if e.kind() != std::io::ErrorKind::NotFound {
+                            eprintln!(
+                                "  {} could not remove {}: {e}",
+                                "!".custom_color(crate::colors::AMBER),
+                                rel,
+                            );
+                            // Leave the manifest entry so we retry next pass.
+                            continue;
+                        }
+                    }
+                    state.files.remove(&rel);
+                }
+                removed.push(rel);
+            }
+            RemoteAbsent::ReAddLocal => {
+                // Local diverged from the manifest while the remote was deleted.
+                // Do NOT delete. Surface it; the normal upload pass re-adds it as
+                // a new file (the manifest entry stays so it is treated as a
+                // local change, not a fresh upload conflict).
+                if !ui::is_json() && !ui::is_quiet() {
+                    eprintln!(
+                        "  {} {} {}",
+                        "\u{26A1}".custom_color(crate::colors::AMBER),
+                        "deleted remotely, kept (edited locally)".custom_color(crate::colors::AMBER),
+                        rel.custom_color(crate::colors::INK),
+                    );
+                }
+            }
+            RemoteAbsent::NotADelete => {}
+        }
+    }
+    removed
+}
+
 #[derive(Clone)]
 struct RemoteFile {
     id: Uuid,
@@ -421,6 +560,12 @@ pub async fn run(
     let mut all_files: HashSet<String> = HashSet::new();
     all_files.extend(local_files.keys().cloned());
     all_files.extend(remote_files.keys().cloned());
+    // Include manifest keys so a prior-synced file gone from BOTH local and
+    // remote (deleted on both sides) is still visited — otherwise its stale
+    // entry persists and is silently resurrected on a later round-trip. This
+    // makes the `(None, None, prior)` RemoteDelete arm below reachable in the
+    // one-shot path (the watch loops reach it via reconcile_remote_deletions).
+    all_files.extend(state.files.keys().cloned());
     let mut sorted_files: Vec<String> = all_files.into_iter().collect();
     sorted_files.sort();
 
@@ -451,6 +596,12 @@ pub async fn run(
         MissingLocal {
             rel: String,
         },
+        /// A prior-synced file that disappeared from the remote (trashed or
+        /// permanently deleted). The local mirror is byte-identical to the
+        /// manifest, so it is safe to remove locally + drop the manifest entry.
+        RemoteDelete {
+            rel: String,
+        },
         Skip,
     }
 
@@ -463,10 +614,7 @@ pub async fn run(
 
         match (local, remote, prior) {
             (Some(l), Some(r), Some(p)) => {
-                let local_changed = match &p.content_hash {
-                    Some(h) => *h != l.content_hash,
-                    None => l.mtime != p.last_mtime || l.size != p.last_size,
-                };
+                let local_changed = local_changed_vs_manifest(&l, &p);
                 let remote_changed = r.updated_at > p.last_sync + chrono::Duration::seconds(1);
                 match (local_changed, remote_changed) {
                     (false, false) => {
@@ -513,12 +661,34 @@ pub async fn run(
                     });
                 }
             }
-            (Some(l), None, _) => {
-                actions.push(SyncAction::Upload {
-                    rel: rel.clone(),
-                    local: l,
-                    replace_id: None,
-                });
+            (Some(l), None, prior) => {
+                // Local file present, remote absent. The prior manifest entry
+                // distinguishes "user just created this" from "this was synced
+                // before and has since been deleted on the server".
+                match classify_remote_absent(Some(&l), prior.as_ref()) {
+                    RemoteAbsent::DeleteLocal => {
+                        // Synced before + byte-identical to the manifest →
+                        // genuine remote delete. Remove the local mirror.
+                        actions.push(SyncAction::RemoteDelete { rel: rel.clone() });
+                    }
+                    RemoteAbsent::ReAddLocal => {
+                        // Synced before but edited offline → never destroy the
+                        // local edit; re-upload it as a new file.
+                        actions.push(SyncAction::Upload {
+                            rel: rel.clone(),
+                            local: l,
+                            replace_id: None,
+                        });
+                    }
+                    RemoteAbsent::NotADelete => {
+                        // No prior entry → genuinely new local file: upload.
+                        actions.push(SyncAction::Upload {
+                            rel: rel.clone(),
+                            local: l,
+                            replace_id: None,
+                        });
+                    }
+                }
             }
             (None, Some(r), prior) => {
                 if prior.is_some() {
@@ -537,8 +707,16 @@ pub async fn run(
                     });
                 }
             }
-            (None, None, _) => {
-                actions.push(SyncAction::Skip);
+            (None, None, prior) => {
+                if prior.is_some() {
+                    // Synced before, now gone from BOTH sides (user deleted it
+                    // locally and it's also gone remotely). The local file is
+                    // already absent — nothing to unlink — but the stale
+                    // manifest entry must be dropped so it isn't resurrected.
+                    actions.push(SyncAction::RemoteDelete { rel: rel.clone() });
+                } else {
+                    actions.push(SyncAction::Skip);
+                }
             }
         }
     }
@@ -548,6 +726,8 @@ pub async fn run(
     let mut pending_uploads: Vec<(String, LocalFile, Option<Uuid>)> = Vec::new();
     let mut pending_downloads: Vec<(String, RemoteFile)> = Vec::new();
     let mut pending_deletes: Vec<(String, RemoteFile)> = Vec::new();
+    // Prior-synced files deleted on the server: remove the local mirror.
+    let mut pending_remote_deletes: Vec<String> = Vec::new();
 
     for action in actions {
         match action {
@@ -583,6 +763,9 @@ pub async fn run(
             }
             SyncAction::Delete { rel, remote } => {
                 pending_deletes.push((rel, remote));
+            }
+            SyncAction::RemoteDelete { rel } => {
+                pending_remote_deletes.push(rel);
             }
         }
     }
@@ -750,6 +933,44 @@ pub async fn run(
                 "  {} {} {}",
                 "\u{2717}".custom_color(crate::colors::RED_ERR),
                 "trashing remote".custom_color(crate::colors::RED_ERR),
+                rel.custom_color(crate::colors::INK),
+            );
+        }
+        deletes += 1;
+    }
+
+    // ── Phase 6: remote-delete reconciliation ──────────────────────────────
+    // A file that was synced before but is now gone from the remote listing
+    // (trashed or permanently deleted on the web app) must have its local
+    // mirror removed — otherwise the next scan re-uploads it and resurrects the
+    // deleted file. The byte-identical guard (inside the helper, already applied
+    // by the classifier) means an offline-edited file is never destroyed here;
+    // those were routed to an upload instead. Safe-by-default direction: the
+    // server is authoritative and the file is recoverable from server trash.
+    for rel in &pending_remote_deletes {
+        if !dry_run {
+            let path = local_dir.join(rel);
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                // Already gone locally (e.g. user deleted both sides): fine.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    eprintln!(
+                        "  {} could not remove {}: {e}",
+                        "!".custom_color(crate::colors::AMBER),
+                        rel,
+                    );
+                    // Keep the manifest entry so we retry on the next pass.
+                    continue;
+                }
+            }
+            state.files.remove(rel);
+        }
+        if !ui::is_json() && !ui::is_quiet() {
+            println!(
+                "  {} {} {}",
+                "\u{2717}".custom_color(crate::colors::RED_ERR),
+                "removed (deleted remotely)".custom_color(crate::colors::INK_DIM),
                 rel.custom_color(crate::colors::INK),
             );
         }
@@ -1017,7 +1238,7 @@ async fn run_plain_watch(
                     // Re-run the sync to upload changes
                     let resync_api = ApiClient::from_config();
                     let resync_master = Arc::new(load_master_key()?);
-                    let resync_local = walk_local_files(local_dir)?;
+                    let mut resync_local = walk_local_files(local_dir)?;
                     let resync_folders = walk_local_folders(local_dir)?;
                     let mut resync_remote_files: HashMap<String, RemoteFile> = HashMap::new();
                     let mut resync_remote_folders: HashMap<String, Uuid> = HashMap::new();
@@ -1047,16 +1268,54 @@ async fn run_plain_watch(
                         }
                     }
 
+                    // Reconcile remote deletions FIRST: any prior-synced file no
+                    // longer present remotely + byte-identical locally is removed
+                    // (shared helper — same decision as the one-shot path). This
+                    // must run before the upload loop so a remotely-deleted file
+                    // is not re-uploaded (resurrected) by the change scan below.
+                    let removed = reconcile_remote_deletions(
+                        local_dir,
+                        state,
+                        &resync_local,
+                        &resync_remote_files,
+                        false,
+                    );
+                    let now_del = chrono::Local::now().format("%H:%M:%S");
+                    for rel in &removed {
+                        eprintln!(
+                            "  {} {} {}",
+                            now_del.to_string().custom_color(crate::colors::INK_DIM),
+                            "\u{2717}".custom_color(crate::colors::RED_ERR),
+                            rel.custom_color(crate::colors::INK),
+                        );
+                    }
+                    // Drop the just-removed keys from the pre-reconcile snapshot.
+                    // The upload loop below iterates this snapshot; without this,
+                    // a removed key (local=Some in the stale snapshot, remote=None,
+                    // prior=None after the manifest drop) would look like a fresh
+                    // change and re-upload the file we just unlinked (resurrecting
+                    // a remote delete, and erroring on the missing file).
+                    for rel in &removed {
+                        resync_local.remove(rel);
+                    }
+
                     // Upload changed files
                     let mut resync_bytes: u64 = 0;
-                    for rel in resync_local.keys() {
+                    let resync_keys: Vec<String> = resync_local.keys().cloned().collect();
+                    for rel in &resync_keys {
                         let local = resync_local.get(rel).cloned();
                         let remote = resync_remote_files.get(rel).cloned();
                         let prior = state.files.get(rel).cloned();
 
                         if let Some(l) = local {
+                            // Use the SAME content-hash-aware change detection as
+                            // the one-shot path (local_changed_vs_manifest). A
+                            // same-size/same-mtime offline edit that was remote-
+                            // deleted is kept by the reconcile above (ReAddLocal)
+                            // and MUST still be re-uploaded here — a bare
+                            // (mtime,size) compare would miss it.
                             let local_changed = match &prior {
-                                Some(p) => l.mtime != p.last_mtime || l.size != p.last_size,
+                                Some(p) => local_changed_vs_manifest(&l, p),
                                 None => remote.is_none(),
                             };
                             if local_changed {
@@ -1239,7 +1498,7 @@ async fn run_tui_watch(
                     continue;
                 }
             };
-            let resync_local = match walk_local_files(&sync_local_dir) {
+            let mut resync_local = match walk_local_files(&sync_local_dir) {
                 Ok(f) => f,
                 Err(e) => {
                     let _ = sync_tx.send(TuiEvent::SyncError(e));
@@ -1294,14 +1553,49 @@ async fn run_tui_watch(
 
             // Upload changed files.
             let mut sync_state = sync_shared_state.lock().await;
-            for rel in resync_local.keys() {
+
+            // Reconcile remote deletions FIRST (shared helper — identical
+            // decision to the one-shot path and the plain-watch loop): a
+            // prior-synced file gone from the remote + byte-identical locally is
+            // removed, so the upload loop below cannot resurrect it. Offline-
+            // edited files are left for the upload pass to re-add.
+            let removed = reconcile_remote_deletions(
+                &sync_local_dir,
+                &mut sync_state,
+                &resync_local,
+                &resync_remote_files,
+                false,
+            );
+            for rel in &removed {
+                let file_name = rel.rsplit('/').next().unwrap_or(rel).to_string();
+                let _ = sync_tx.send(TuiEvent::SyncUpdate(SyncFileEvent {
+                    status: FileEventStatus::Done,
+                    filename: format!("removed {file_name}"),
+                    size: 0,
+                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                }));
+            }
+            // Drop the just-removed keys from the pre-reconcile snapshot so the
+            // upload loop below cannot re-upload (resurrect) a file we just
+            // unlinked — otherwise that key (stale local=Some, remote=None,
+            // prior=None) looks like a fresh change and emits a spurious error
+            // event when do_upload fails on the missing file.
+            for rel in &removed {
+                resync_local.remove(rel);
+            }
+
+            let resync_keys: Vec<String> = resync_local.keys().cloned().collect();
+            for rel in &resync_keys {
                 let local = resync_local.get(rel).cloned();
                 let remote = resync_remote_files.get(rel).cloned();
                 let prior = sync_state.files.get(rel).cloned();
 
                 if let Some(l) = local {
+                    // Same content-hash-aware detection as the one-shot + plain-
+                    // watch paths (local_changed_vs_manifest): a same-size offline
+                    // edit that survived the reconcile (ReAddLocal) is re-uploaded.
                     let local_changed = match &prior {
-                        Some(p) => l.mtime != p.last_mtime || l.size != p.last_size,
+                        Some(p) => local_changed_vs_manifest(&l, p),
                         None => remote.is_none(),
                     };
                     if local_changed {
@@ -2323,4 +2617,362 @@ fn spawn_sync_daemon(local_dir: &Path, remote_path: Option<&str>) -> Result<(), 
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Make a unique scratch directory under the system temp dir (no extra
+    /// test-only dependency). Caller removes it.
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("bb-sync-test-{tag}-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_file(dir: &Path, rel: &str, contents: &[u8]) -> LocalFile {
+        let path = dir.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&path, contents).unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|m| m.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        LocalFile {
+            mtime,
+            size: meta.len(),
+            content_hash: compute_file_hash(&path).unwrap(),
+        }
+    }
+
+    /// A manifest entry matching the given local file (the post-sync state).
+    fn entry_for(local: &LocalFile) -> FileEntry {
+        FileEntry {
+            remote_id: Uuid::new_v4(),
+            last_mtime: local.mtime,
+            last_size: local.size,
+            last_sync: Utc::now(),
+            content_hash: Some(local.content_hash.clone()),
+        }
+    }
+
+    fn remote_file() -> RemoteFile {
+        RemoteFile {
+            id: Uuid::new_v4(),
+            chunk_count: 1,
+            updated_at: Utc::now(),
+        }
+    }
+
+    // ── pure decision function ─────────────────────────────────────────────
+
+    #[test]
+    fn classify_prior_synced_unchanged_is_remote_delete() {
+        let dir = scratch_dir("classify-del");
+        let local = write_file(&dir, "a.txt", b"hello");
+        let entry = entry_for(&local);
+        assert_eq!(
+            classify_remote_absent(Some(&local), Some(&entry)),
+            RemoteAbsent::DeleteLocal,
+            "a prior-synced, byte-identical local file gone from remote is a remote delete"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn classify_prior_synced_modified_is_readd() {
+        let dir = scratch_dir("classify-readd");
+        let original = write_file(&dir, "a.txt", b"hello");
+        let entry = entry_for(&original);
+        // Simulate an offline edit: same path, different bytes → different hash.
+        let edited = write_file(&dir, "a.txt", b"hello, edited offline");
+        assert_ne!(edited.content_hash, entry.content_hash.clone().unwrap());
+        assert_eq!(
+            classify_remote_absent(Some(&edited), Some(&entry)),
+            RemoteAbsent::ReAddLocal,
+            "a locally-modified file must NOT be deleted on remote-absence"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn classify_new_local_is_not_a_delete() {
+        let dir = scratch_dir("classify-new");
+        let local = write_file(&dir, "fresh.txt", b"brand new");
+        assert_eq!(
+            classify_remote_absent(Some(&local), None),
+            RemoteAbsent::NotADelete,
+            "a genuinely-new local file (no manifest entry) is an upload, not a delete"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn local_matches_entry_uses_hash_then_size_mtime() {
+        let dir = scratch_dir("match");
+        let local = write_file(&dir, "a.txt", b"data");
+        let mut entry = entry_for(&local);
+        assert!(local_matches_entry(&local, &entry));
+        // Hash mismatch → not a match (even if size/mtime line up).
+        entry.content_hash = Some("deadbeef".into());
+        assert!(!local_matches_entry(&local, &entry));
+        // No stored hash → fall back to (mtime, size).
+        entry.content_hash = None;
+        assert!(local_matches_entry(&local, &entry));
+        entry.last_size += 1;
+        assert!(!local_matches_entry(&local, &entry));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── reconcile helper (used by both watch loops) ────────────────────────
+
+    /// (a) prior-synced + remote gone + local byte-identical
+    ///     ⇒ local removed, manifest entry removed, nothing re-uploaded.
+    #[test]
+    fn reconcile_removes_byte_identical_remote_delete() {
+        let dir = scratch_dir("reconcile-del");
+        let local = write_file(&dir, "a.txt", b"hello");
+        let mut state = SyncState::default();
+        state.files.insert("a.txt".to_string(), entry_for(&local));
+
+        let mut local_files = HashMap::new();
+        local_files.insert("a.txt".to_string(), local);
+        let remote_files: HashMap<String, RemoteFile> = HashMap::new(); // remote gone
+
+        let removed = reconcile_remote_deletions(&dir, &mut state, &local_files, &remote_files, false);
+
+        assert_eq!(removed, vec!["a.txt".to_string()]);
+        assert!(!dir.join("a.txt").exists(), "local mirror must be deleted");
+        assert!(!state.files.contains_key("a.txt"), "manifest entry must be dropped");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// (b) prior-synced + remote gone but local MODIFIED offline
+    ///     ⇒ NOT deleted, manifest entry retained (re-add path).
+    #[test]
+    fn reconcile_keeps_offline_modified_file() {
+        let dir = scratch_dir("reconcile-keep");
+        let original = write_file(&dir, "a.txt", b"hello");
+        let entry = entry_for(&original);
+        // Edit offline AFTER the manifest snapshot.
+        let edited = write_file(&dir, "a.txt", b"hello, locally edited");
+
+        let mut state = SyncState::default();
+        state.files.insert("a.txt".to_string(), entry);
+
+        let mut local_files = HashMap::new();
+        local_files.insert("a.txt".to_string(), edited);
+        let remote_files: HashMap<String, RemoteFile> = HashMap::new();
+
+        let removed = reconcile_remote_deletions(&dir, &mut state, &local_files, &remote_files, false);
+
+        assert!(removed.is_empty(), "an offline-edited file must NOT be removed");
+        assert!(dir.join("a.txt").exists(), "local edit must survive reconciliation");
+        assert!(
+            state.files.contains_key("a.txt"),
+            "manifest entry retained so the upload pass re-adds it"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// (c) genuinely-new local file (no manifest entry)
+    ///     ⇒ untouched by reconciliation (it is uploaded by the normal pass).
+    #[test]
+    fn reconcile_ignores_new_local_file() {
+        let dir = scratch_dir("reconcile-new");
+        let local = write_file(&dir, "new.txt", b"fresh content");
+
+        let mut state = SyncState::default(); // no manifest entry for new.txt
+        let mut local_files = HashMap::new();
+        local_files.insert("new.txt".to_string(), local);
+        let remote_files: HashMap<String, RemoteFile> = HashMap::new();
+
+        let removed = reconcile_remote_deletions(&dir, &mut state, &local_files, &remote_files, false);
+
+        assert!(removed.is_empty(), "a new local file is never a remote delete");
+        assert!(dir.join("new.txt").exists(), "new local file must remain on disk");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A file still present remotely is never touched by reconciliation.
+    #[test]
+    fn reconcile_leaves_present_remote_alone() {
+        let dir = scratch_dir("reconcile-present");
+        let local = write_file(&dir, "a.txt", b"hello");
+        let mut state = SyncState::default();
+        state.files.insert("a.txt".to_string(), entry_for(&local));
+
+        let mut local_files = HashMap::new();
+        local_files.insert("a.txt".to_string(), local);
+        let mut remote_files = HashMap::new();
+        remote_files.insert("a.txt".to_string(), remote_file()); // still on server
+
+        let removed = reconcile_remote_deletions(&dir, &mut state, &local_files, &remote_files, false);
+
+        assert!(removed.is_empty());
+        assert!(dir.join("a.txt").exists());
+        assert!(state.files.contains_key("a.txt"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Manifest entry whose local file is already gone (deleted both sides):
+    /// no local unlink needed, but the stale manifest entry is dropped.
+    #[test]
+    fn reconcile_drops_manifest_when_local_already_gone() {
+        let dir = scratch_dir("reconcile-gone");
+        // Build an entry for a file that does NOT exist on disk.
+        let phantom = LocalFile {
+            mtime: 0,
+            size: 5,
+            content_hash: "00".into(),
+        };
+        let mut state = SyncState::default();
+        state.files.insert("gone.txt".to_string(), entry_for(&phantom));
+
+        let local_files: HashMap<String, LocalFile> = HashMap::new(); // not on disk
+        let remote_files: HashMap<String, RemoteFile> = HashMap::new(); // not on server
+
+        let removed = reconcile_remote_deletions(&dir, &mut state, &local_files, &remote_files, false);
+
+        assert_eq!(removed, vec!["gone.txt".to_string()]);
+        assert!(!state.files.contains_key("gone.txt"), "stale manifest entry dropped");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// dry_run must be side-effect-free: no unlink, no manifest mutation.
+    #[test]
+    fn reconcile_dry_run_is_side_effect_free() {
+        let dir = scratch_dir("reconcile-dry");
+        let local = write_file(&dir, "a.txt", b"hello");
+        let mut state = SyncState::default();
+        state.files.insert("a.txt".to_string(), entry_for(&local));
+
+        let mut local_files = HashMap::new();
+        local_files.insert("a.txt".to_string(), local);
+        let remote_files: HashMap<String, RemoteFile> = HashMap::new();
+
+        let removed = reconcile_remote_deletions(&dir, &mut state, &local_files, &remote_files, true);
+
+        // It still reports the rel, but touches nothing.
+        assert_eq!(removed, vec!["a.txt".to_string()]);
+        assert!(dir.join("a.txt").exists(), "dry-run must not unlink");
+        assert!(state.files.contains_key("a.txt"), "dry-run must not mutate manifest");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── reconcile → upload-snapshot prune (the watch-loop integration) ─────
+
+    /// Models exactly what both watch loops do after a remote delete: capture the
+    /// `removed` Vec, prune those keys from the pre-reconcile `resync_local`
+    /// snapshot, then run the change-detection that drives the upload loop. The
+    /// deleted file must be ABSENT from the pruned snapshot, so no upload is even
+    /// considered for it (the BLOCKER: a stale snapshot re-uploaded the unlinked
+    /// file every cycle, resurrecting the remote delete and erroring on the
+    /// now-missing path).
+    #[test]
+    fn reconcile_then_prune_drops_deleted_key_from_upload_snapshot() {
+        let dir = scratch_dir("prune-snapshot");
+        let local = write_file(&dir, "a.txt", b"hello");
+        let mut state = SyncState::default();
+        state.files.insert("a.txt".to_string(), entry_for(&local));
+
+        // The pre-reconcile snapshot the upload loop iterates.
+        let mut resync_local = HashMap::new();
+        resync_local.insert("a.txt".to_string(), local);
+        let remote_files: HashMap<String, RemoteFile> = HashMap::new(); // remote gone
+
+        let removed = reconcile_remote_deletions(&dir, &mut state, &resync_local, &remote_files, false);
+        assert_eq!(removed, vec!["a.txt".to_string()]);
+        // Local mirror + manifest entry are gone after reconcile.
+        assert!(!dir.join("a.txt").exists());
+        assert!(!state.files.contains_key("a.txt"));
+
+        // The fix: prune removed keys from the snapshot BEFORE the upload loop.
+        for rel in &removed {
+            resync_local.remove(rel);
+        }
+        assert!(
+            !resync_local.contains_key("a.txt"),
+            "deleted file must be absent from the pruned upload snapshot"
+        );
+
+        // Replay the watch upload loop's decision over the pruned snapshot: it
+        // must consider ZERO uploads (nothing left to resurrect).
+        let mut would_upload: Vec<String> = Vec::new();
+        for (rel, l) in &resync_local {
+            let remote_present = remote_files.contains_key(rel);
+            let changed = match state.files.get(rel) {
+                Some(p) => local_changed_vs_manifest(l, p),
+                None => !remote_present,
+            };
+            if changed {
+                would_upload.push(rel.clone());
+            }
+        }
+        assert!(
+            would_upload.is_empty(),
+            "no upload may be attempted for the just-deleted file; got {would_upload:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Data-safety invariant + the HIGH change-detection fix together: a
+    /// SAME-SIZE offline edit (identical byte length, different content → different
+    /// hash) of a remote-deleted file must (a) survive reconciliation (ReAddLocal,
+    /// never deleted) and (b) be detected as changed by `local_changed_vs_manifest`
+    /// so the watch upload loop re-uploads it. A bare `(mtime,size)` compare —
+    /// the old watch-loop bug — would have missed it and silently lost the edit.
+    #[test]
+    fn same_size_offline_edit_survives_and_is_re_uploaded() {
+        let dir = scratch_dir("same-size-edit");
+        // 5-byte original, manifest snapshot taken against it.
+        let original = write_file(&dir, "a.txt", b"aaaaa");
+        let entry = entry_for(&original);
+        // Offline edit: SAME 5-byte size, different content → different hash.
+        // Force the mtime to match the manifest so a (mtime,size) compare can't
+        // tell them apart — only the content hash distinguishes them.
+        let mut edited = write_file(&dir, "a.txt", b"bbbbb");
+        edited.mtime = entry.last_mtime;
+        assert_eq!(edited.size, original.size, "test premise: identical size");
+        assert_eq!(edited.mtime, entry.last_mtime, "test premise: identical mtime");
+        assert_ne!(edited.content_hash, original.content_hash, "content differs");
+
+        // (a) reconcile must KEEP it (ReAddLocal), not delete it.
+        let mut state = SyncState::default();
+        state.files.insert("a.txt".to_string(), entry.clone());
+        let mut resync_local = HashMap::new();
+        resync_local.insert("a.txt".to_string(), edited.clone());
+        let remote_files: HashMap<String, RemoteFile> = HashMap::new(); // remote gone
+
+        let removed = reconcile_remote_deletions(&dir, &mut state, &resync_local, &remote_files, false);
+        assert!(removed.is_empty(), "an offline edit must never be deleted");
+        assert!(dir.join("a.txt").exists(), "the local edit must survive on disk");
+        assert!(state.files.contains_key("a.txt"), "manifest entry retained for re-add");
+
+        // Pruning removes nothing (it wasn't deleted), so the key stays.
+        for rel in &removed {
+            resync_local.remove(rel);
+        }
+        assert!(resync_local.contains_key("a.txt"));
+
+        // (b) the change detector that gates the upload loop must flag it.
+        assert!(
+            local_changed_vs_manifest(&edited, &entry),
+            "a same-size/same-mtime content edit MUST be detected as changed (hash compare)"
+        );
+        // And the bare (mtime,size) compare the old watch loop used would NOT
+        // have — proving the bug this fix closes.
+        let old_buggy_compare = edited.mtime != entry.last_mtime || edited.size != entry.last_size;
+        assert!(
+            !old_buggy_compare,
+            "the old (mtime,size)-only watch compare misses this edit — that was the bug"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
