@@ -78,9 +78,10 @@ Account-less links that let **anyone** upload an encrypted file *into* your vaul
   chunk plan), each chunk PUTs to `PUT /uploads/{session}/chunks/{index}`, and
   `POST /uploads/{session}/complete` finalises the version. The session id keys
   the chunk/complete calls; the durable `file_id` keys the file (and thumbnails).
-  All other direct upload callers (`webdav.rs`, `mount.rs`) use the same three
-  `ApiClient` methods. The legacy `/api/v1/files/upload/*` route is **no longer
-  called by the CLI** (task 0689 Option B).
+  All other direct upload callers (`webdav.rs`, `mount.rs`, `repair.rs`) use the
+  same three `ApiClient` methods. The legacy `/api/v1/files/upload` route is **no
+  longer called by the CLI** — `repair.rs` was the last caller; it was migrated to
+  v2 in the fix/cli-repair-v2-upload branch (task 0689 follow-up).
 - **Replace = versioning by file_id.** `UploadSpec.base_version_number` is
   `Some(n)` on a `bb push --replace`; the init sends `file_id` + that base
   version, and the server versions in place (stale-version → 409). `bb sync` and

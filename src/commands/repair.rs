@@ -400,7 +400,7 @@ async fn repair_folder(
 }
 
 /// Repair a file: download, decrypt with binary key, re-encrypt with string key,
-/// trash the old version, and re-upload.
+/// trash the old version, and re-upload via the V2 chunked upload route.
 async fn repair_file(
     api: &ApiClient,
     master_key: &beebeeb_core::kdf::MasterKey,
@@ -408,7 +408,7 @@ async fn repair_file(
     decrypted_name: &str,
     chunk_count: u32,
 ) -> Result<(), String> {
-    // Get full metadata (need parent_id, size). The plaintext mime_type column
+    // Get full metadata (need parent_id). The plaintext mime_type column
     // was dropped server-side — the server no longer returns it, and the
     // encrypted MIME type lives inside `name_encrypted`. We re-encrypt with
     // None and let the client recover MIME from the filename if it ever needs
@@ -418,7 +418,6 @@ async fn repair_file(
         .get("parent_id")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    let mime_type: Option<String> = None;
 
     // Step 1: Download encrypted content
     let encrypted_bytes = api.download_file(file_id).await?;
@@ -427,33 +426,48 @@ async fn repair_file(
     let plaintext = decrypt_chunks_with_binary_key(master_key, file_id, &encrypted_bytes, chunk_count)?;
 
     // Step 3: Re-encrypt name + chunks with string-UUID key
-    let new_name_encrypted = encrypt_name_with_string_key(master_key, file_id, decrypted_name, mime_type.as_deref())?;
+    let new_name_encrypted = encrypt_name_with_string_key(master_key, file_id, decrypted_name, None)?;
     let new_chunks = encrypt_chunks_with_string_key(master_key, file_id, &plaintext)?;
-
-    let total_encrypted_size: i64 = new_chunks.iter().map(|(_, data)| data.len() as i64).sum();
 
     // Step 4: Trash old file
     api.trash_file(file_id).await?;
 
-    // Step 5: Re-upload with the same file_id so links/shares are preserved
+    // Step 5: Re-upload via V2 chunked route, preserving the same file_id
+    // so existing links/shares remain valid. This is a FRESH upload (not a
+    // version replace): the old row is trashed, so we pass base_version_number
+    // = None. The file_id is supplied so the server issues the durable id we
+    // need — matching the behaviour of the old V1 multipart path.
     let file_uuid: uuid::Uuid = file_id.parse().map_err(|e| format!("invalid file ID: {e}"))?;
+    let parent_uuid: Option<uuid::Uuid> = parent_id.as_deref().and_then(|s| s.parse().ok());
 
-    let mut metadata = serde_json::json!({
-        "name_encrypted": new_name_encrypted,
-        "size_bytes": total_encrypted_size,
-        "file_id": file_uuid,
-    });
-    if let Some(pid) = &parent_id {
-        if let Ok(parent_uuid) = pid.parse::<uuid::Uuid>() {
-            metadata["parent_id"] = serde_json::json!(parent_uuid);
-        }
+    // Derive the chunk plan that matches what encrypt_chunks_with_string_key used,
+    // so the init hint and the actual chunk layout agree.
+    let plan = beebeeb_types::plan_chunks(plaintext.len() as u64, beebeeb_types::ChunkProfile::Cli);
+    let new_chunk_count = new_chunks.len() as i32;
+    let chunk_size_bytes = plan.chunk_size_bytes as i64;
+    let is_media = beebeeb_core::media::is_media(beebeeb_core::media::guess_mime_type(decrypted_name));
+
+    let init = api
+        .upload_init(
+            Some(file_uuid),
+            &new_name_encrypted,
+            parent_uuid,
+            plaintext.len() as i64,
+            chunk_size_bytes,
+            new_chunk_count,
+            is_media,
+            None, // fresh upload, not a version replace
+        )
+        .await?;
+
+    // Upload each pre-encrypted chunk.
+    for (idx, data) in &new_chunks {
+        api.upload_chunk(&init.upload_session_id, *idx, bytes::Bytes::from(data.clone()))
+            .await?;
     }
-    // MIME type is encrypted inside name_encrypted; the server has no
-    // mime_type column to receive it. Leave the field out entirely.
 
-    let metadata_json = serde_json::to_string(&metadata).map_err(|e| format!("failed to serialize metadata: {e}"))?;
-
-    api.upload_encrypted(&metadata_json, &new_chunks).await?;
+    // Finalise the upload session.
+    api.upload_complete(&init.upload_session_id).await?;
 
     if !ui::is_json() && !ui::is_quiet() {
         println!(
