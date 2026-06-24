@@ -1,9 +1,19 @@
-use aes_gcm::aead::Aead;
-use aes_gcm::aead::generic_array::GenericArray;
-use aes_gcm::{Aes256Gcm, KeyInit};
+//! Cross-platform compatibility vectors for the CLI login handshake, validated
+//! against `beebeeb_core::cli_auth`.
+//!
+//! These vectors were captured from a real browser **Node.js WebCrypto** run
+//! (the old `test_ecdh_compat.mjs`): a fixed CLI P-256 private key + a fixed browser
+//! P-256 public key, the WebCrypto-derived ECDH shared secret, the HKDF-SHA256
+//! (info "beebeeb-cli-auth-v1") AES key, and a real `{nonce, ciphertext}` for the
+//! `{session_token, master_key_b64, email}` payload. They are the strongest drift
+//! guard we have: they prove `beebeeb-core` produces output BYTE-IDENTICAL to the
+//! browser web client, so a `bb login` against any web build keeps working.
+//!
+//! The handshake crypto itself now lives ENTIRELY in `beebeeb_core::cli_auth` — this
+//! test no longer hand-rolls P-256/HKDF/AES; it only drives the core API.
+
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use hkdf::Hkdf;
-use sha2::Sha256;
+use beebeeb_core::cli_auth::{CliEphemeralKey, decrypt_cli_payload, derive_cli_auth_key};
 
 fn hex_decode(hex: &str) -> Vec<u8> {
     (0..hex.len())
@@ -12,139 +22,73 @@ fn hex_decode(hex: &str) -> Vec<u8> {
         .collect()
 }
 
+fn hex32(hex: &str) -> [u8; 32] {
+    hex_decode(hex).try_into().unwrap()
+}
+
+// ---- WebCrypto-captured vector ---------------------------------------------
+// Fixed CLI P-256 private scalar (the JWK `d`, base64url-decoded → hex).
+const CLI_PRIV_HEX: &str = "3ee0dc854e89db9cd0f877fcc82bd1f3955ac7496f0e8dabd452ce2c6d987a66";
+// Fixed browser ephemeral P-256 public key (SEC1 uncompressed, base64).
+const BROWSER_PUB_B64: &str =
+    "BNFx/4Z8lzU++XyRv+uXz4yavlaXFGxKJQ765zysItlS0cop5JUOkwKXnD0Ez0At/rklj/DetH7mQFSeFONtUqg=";
+// Expected ECDH shared secret (32-byte X coordinate) from those two keys.
+const EXPECTED_SHARED_HEX: &str = "f27228cf21fdcc6e2e3370bdb71a3e7e09ef251d0ad2ea42a4881417b95dc397";
+// Expected HKDF-SHA256(shared, info="beebeeb-cli-auth-v1") AES key.
+const EXPECTED_AES_KEY_HEX: &str = "d6f84bc0b0d28dd0f7b9959c16662d54a0df753a47c5f4ef6e59b10ca29b9e1c";
+// A real WebCrypto AES-256-GCM payload encrypted under that AES key.
+const NONCE_B64: &str = "AQIDBAUGBwgJCgsM";
+const CIPHERTEXT_B64: &str = "zPY+LzA6/FJLZH5z/AR+orn3ZmWicxT4+m/ssstYzp0nVvWXjmmS4ndKfZsR15C8WMXUxuaEFxVhqgkelub+32NwZgyL2pJfwPS8LfBdax1J+qXVRKef+Xbm/+2Ngpb38FKbtoS+lJQ=";
+const EXPECTED_PLAINTEXT: &str =
+    r#"{"session_token":"test-token","master_key_b64":"dGVzdC1rZXk=","email":"test@beebeeb.io"}"#;
+
 #[test]
-fn hkdf_matches_webcrypto() {
-    // Test vector from Node.js WebCrypto (test_ecdh_compat.mjs)
-    let shared_secret = hex_decode("f27228cf21fdcc6e2e3370bdb71a3e7e09ef251d0ad2ea42a4881417b95dc397");
-    let expected_aes_key = hex_decode("d6f84bc0b0d28dd0f7b9959c16662d54a0df753a47c5f4ef6e59b10ca29b9e1c");
-
-    // Replicate the CLI's HKDF derivation
-    let hk = Hkdf::<Sha256>::new(None, &shared_secret);
-    let mut key_bytes = [0u8; 32];
-    hk.expand(b"beebeeb-cli-auth-v1", &mut key_bytes)
-        .expect("HKDF expand failed");
-
+fn ecdh_shared_secret_matches_webcrypto() {
+    // core's CliEphemeralKey, seeded with the fixed CLI private key, must reproduce
+    // the exact ECDH shared secret WebCrypto computed.
+    let cli = CliEphemeralKey::from_secret_bytes(&hex32(CLI_PRIV_HEX)).unwrap();
+    let browser_pub = B64.decode(BROWSER_PUB_B64).unwrap();
+    let shared = cli.shared_secret(&browser_pub).unwrap();
     assert_eq!(
-        key_bytes.to_vec(),
-        expected_aes_key,
-        "HKDF-derived AES key must match WebCrypto output"
+        shared.as_slice(),
+        hex_decode(EXPECTED_SHARED_HEX).as_slice(),
+        "core P-256 ECDH must match WebCrypto"
     );
 }
 
 #[test]
-fn aes_gcm_decrypt_matches_webcrypto() {
-    // Same test vector: use the known AES key, nonce, and ciphertext
-    let aes_key = hex_decode("d6f84bc0b0d28dd0f7b9959c16662d54a0df753a47c5f4ef6e59b10ca29b9e1c");
-    let nonce_b64 = "AQIDBAUGBwgJCgsM";
-    let ciphertext_b64 = "zPY+LzA6/FJLZH5z/AR+orn3ZmWicxT4+m/ssstYzp0nVvWXjmmS4ndKfZsR15C8WMXUxuaEFxVhqgkelub+32NwZgyL2pJfwPS8LfBdax1J+qXVRKef+Xbm/+2Ngpb38FKbtoS+lJQ=";
-    let expected_plaintext =
-        r#"{"session_token":"test-token","master_key_b64":"dGVzdC1rZXk=","email":"test@beebeeb.io"}"#;
-
-    let cipher = Aes256Gcm::new(GenericArray::from_slice(&aes_key));
-    let nonce_bytes = B64.decode(nonce_b64).unwrap();
-    let ciphertext = B64.decode(ciphertext_b64).unwrap();
-
-    let plaintext = cipher
-        .decrypt(GenericArray::from_slice(&nonce_bytes), ciphertext.as_ref())
-        .expect("AES-GCM decryption should succeed with matching key/nonce/ciphertext");
-
+fn hkdf_aes_key_matches_webcrypto() {
+    let key = derive_cli_auth_key(&hex32(EXPECTED_SHARED_HEX));
     assert_eq!(
-        String::from_utf8(plaintext).unwrap(),
-        expected_plaintext,
-        "Decrypted plaintext must match original"
+        key.to_vec(),
+        hex_decode(EXPECTED_AES_KEY_HEX),
+        "core HKDF AES key must match WebCrypto (info MUST be beebeeb-cli-auth-v1)"
     );
 }
 
 #[test]
-fn full_ecdh_hkdf_decrypt_flow() {
-    // Full flow: start from browser's public key, do ECDH, HKDF, decrypt
-    use p256::PublicKey;
-    use p256::ecdh::EphemeralSecret;
-
-    // Browser's public key from the test vector (base64)
-    let browser_pub_b64 = "BNFx/4Z8lzU++XyRv+uXz4yavlaXFGxKJQ765zysItlS0cop5JUOkwKXnD0Ez0At/rklj/DetH7mQFSeFONtUqg=";
-    let browser_pub_bytes = B64.decode(browser_pub_b64).unwrap();
-    let browser_pub_key =
-        PublicKey::from_sec1_bytes(&browser_pub_bytes).expect("Browser public key must be valid SEC1");
-
-    // CLI private key (d parameter from JWK, base64url-encoded)
-    // We can't construct EphemeralSecret from bytes, but we can use SecretKey
-    let d_b64url = "PuDchU6J25zQ-Hf8yCvR85Vax0lvDo2r1FLOLG2YemY";
-    let d_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(d_b64url)
-        .unwrap();
-    let secret_key =
-        p256::SecretKey::from_bytes(GenericArray::from_slice(&d_bytes)).expect("CLI secret key must be valid");
-
-    // ECDH
-    let shared_secret = p256::ecdh::diffie_hellman(secret_key.to_nonzero_scalar(), browser_pub_key.as_affine());
-    let shared_bytes = shared_secret.raw_secret_bytes();
-
-    // Verify ECDH shared secret matches
-    let expected_shared = hex_decode("f27228cf21fdcc6e2e3370bdb71a3e7e09ef251d0ad2ea42a4881417b95dc397");
-    assert_eq!(
-        shared_bytes.as_slice(),
-        expected_shared.as_slice(),
-        "ECDH shared secret must match WebCrypto"
-    );
-
-    // HKDF
-    let hk = Hkdf::<Sha256>::new(None, shared_bytes.as_slice());
-    let mut key_bytes = [0u8; 32];
-    hk.expand(b"beebeeb-cli-auth-v1", &mut key_bytes).unwrap();
-
-    // AES-GCM decrypt
-    let cipher = Aes256Gcm::new(GenericArray::from_slice(&key_bytes));
-    let nonce_bytes = B64.decode("AQIDBAUGBwgJCgsM").unwrap();
-    let ciphertext = B64.decode("zPY+LzA6/FJLZH5z/AR+orn3ZmWicxT4+m/ssstYzp0nVvWXjmmS4ndKfZsR15C8WMXUxuaEFxVhqgkelub+32NwZgyL2pJfwPS8LfBdax1J+qXVRKef+Xbm/+2Ngpb38FKbtoS+lJQ=").unwrap();
-
-    let plaintext = cipher
-        .decrypt(GenericArray::from_slice(&nonce_bytes), ciphertext.as_ref())
-        .expect("Full ECDH+HKDF+AES-GCM decryption must succeed");
-
-    let expected = r#"{"session_token":"test-token","master_key_b64":"dGVzdC1rZXk=","email":"test@beebeeb.io"}"#;
-    assert_eq!(String::from_utf8(plaintext).unwrap(), expected);
+fn decrypt_payload_matches_webcrypto() {
+    // Decrypt the real WebCrypto ciphertext via the core helper, starting from the
+    // shared secret (HKDF path).
+    let nonce = B64.decode(NONCE_B64).unwrap();
+    let ciphertext = B64.decode(CIPHERTEXT_B64).unwrap();
+    let plaintext = decrypt_cli_payload(&hex32(EXPECTED_SHARED_HEX), &nonce, &ciphertext).unwrap();
+    assert_eq!(String::from_utf8(plaintext).unwrap(), EXPECTED_PLAINTEXT);
 }
 
 #[test]
-fn fallback_to_raw_shared_secret() {
-    use p256::PublicKey;
+fn full_flow_ecdh_to_plaintext_via_core() {
+    // The exact path `bb login` runs: a fixed CLI key + the browser's public key,
+    // nonce, and ciphertext → core does ECDH + HKDF + AES-GCM and returns plaintext.
+    let cli = CliEphemeralKey::from_secret_bytes(&hex32(CLI_PRIV_HEX)).unwrap();
+    let browser_pub = B64.decode(BROWSER_PUB_B64).unwrap();
+    let nonce = B64.decode(NONCE_B64).unwrap();
+    let ciphertext = B64.decode(CIPHERTEXT_B64).unwrap();
 
-    // Simulate a v0.4 web app: encrypt with raw ECDH shared secret (no HKDF)
-    let browser_pub_b64 = "BNFx/4Z8lzU++XyRv+uXz4yavlaXFGxKJQ765zysItlS0cop5JUOkwKXnD0Ez0At/rklj/DetH7mQFSeFONtUqg=";
-    let browser_pub_bytes = B64.decode(browser_pub_b64).unwrap();
-    let browser_pub_key = PublicKey::from_sec1_bytes(&browser_pub_bytes).unwrap();
-
-    let d_b64url = "PuDchU6J25zQ-Hf8yCvR85Vax0lvDo2r1FLOLG2YemY";
-    let d_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(d_b64url)
-        .unwrap();
-    let secret_key = p256::SecretKey::from_bytes(GenericArray::from_slice(&d_bytes)).unwrap();
-
-    let shared_secret = p256::ecdh::diffie_hellman(secret_key.to_nonzero_scalar(), browser_pub_key.as_affine());
-    let shared_bytes = shared_secret.raw_secret_bytes();
-
-    // Encrypt with RAW shared secret (v0.4 web behavior)
-    let nonce = GenericArray::from_slice(&[1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
-    let payload = b"test-payload";
-    let raw_cipher = Aes256Gcm::new(GenericArray::from_slice(&shared_bytes[..32]));
-    let ciphertext = raw_cipher.encrypt(nonce, payload.as_ref()).unwrap();
-
-    // CLI's new fallback logic: try HKDF first, then raw
-    let hk = Hkdf::<Sha256>::new(None, shared_bytes.as_slice());
-    let mut hkdf_key = [0u8; 32];
-    hk.expand(b"beebeeb-cli-auth-v1", &mut hkdf_key).unwrap();
-
-    let plaintext = {
-        let cipher = Aes256Gcm::new(GenericArray::from_slice(&hkdf_key));
-        cipher
-            .decrypt(nonce, ciphertext.as_ref())
-            .or_else(|_| {
-                let cipher = Aes256Gcm::new(GenericArray::from_slice(&shared_bytes[..32]));
-                cipher.decrypt(nonce, ciphertext.as_ref())
-            })
-            .expect("Fallback to raw shared secret must work")
-    };
-
-    assert_eq!(plaintext, payload, "Must decrypt v0.4 web app payload via fallback");
+    let plaintext = cli.decrypt_browser_payload(&browser_pub, &nonce, &ciphertext).unwrap();
+    assert_eq!(String::from_utf8(plaintext).unwrap(), EXPECTED_PLAINTEXT);
 }
+
+// The legacy v0.4 raw-shared-secret fallback is exercised by core's own unit test
+// `beebeeb_core::cli_auth::tests::raw_secret_fallback_roundtrip` (so the CLI test
+// suite no longer needs to pull aes-gcm to construct a fallback ciphertext).

@@ -6,23 +6,16 @@ use crate::env_detect::is_headless;
 // ─── WebSocket device-auth login ─────────────────────────────────────────────
 
 async fn browser_login(headless_flag: bool) -> Result<(), String> {
-    use aes_gcm::aead::Aead;
-    use aes_gcm::aead::generic_array::GenericArray;
-    use aes_gcm::{Aes256Gcm, KeyInit};
     use base64::{Engine, engine::general_purpose::STANDARD as B64};
+    use beebeeb_core::cli_auth::CliEphemeralKey;
     use futures_util::{SinkExt, StreamExt};
-    use p256::PublicKey;
-    use p256::ecdh::EphemeralSecret;
-    use p256::elliptic_curve::sec1::ToEncodedPoint;
-    use rand::rngs::OsRng;
     use tokio_tungstenite::{connect_async, tungstenite::Message};
 
     let headless = headless_flag || is_headless();
 
-    // 1. Generate ephemeral P-256 key pair
-    let secret = EphemeralSecret::random(&mut OsRng);
-    let public_key = secret.public_key();
-    let pub_key_b64 = B64.encode(public_key.to_encoded_point(false).as_bytes());
+    // 1. Generate ephemeral P-256 key pair (handshake crypto lives in beebeeb-core).
+    let cli_key = CliEphemeralKey::generate();
+    let pub_key_b64 = B64.encode(cli_key.public_key_bytes());
 
     // 2. Connect WebSocket
     let config = load_config();
@@ -113,16 +106,12 @@ async fn browser_login(headless_flag: bool) -> Result<(), String> {
         .as_str()
         .ok_or("Missing browser_ecdh_public_b64")?;
 
-    // 7. ECDH key agreement + AES-256-GCM decrypt.
+    // 7. ECDH key agreement + AES-256-GCM decrypt — delegated to beebeeb-core
+    //    (P-256 ECDH + HKDF-SHA256 "beebeeb-cli-auth-v1", with the raw-shared-secret
+    //    fallback for the legacy v0.4 web app). No crypto is hand-rolled here.
     let browser_pub_bytes = B64
         .decode(browser_pub_b64)
         .map_err(|e| format!("Invalid browser public key encoding: {e}"))?;
-    let browser_pub_key = PublicKey::from_sec1_bytes(&browser_pub_bytes)
-        .map_err(|e| format!("Invalid browser public key (not on curve): {e}"))?;
-
-    let shared_secret = secret.diffie_hellman(&browser_pub_key);
-    let shared_bytes = shared_secret.raw_secret_bytes();
-
     let nonce_bytes = B64
         .decode(nonce_b64)
         .map_err(|e| format!("Invalid nonce encoding: {e}"))?;
@@ -130,26 +119,9 @@ async fn browser_login(headless_flag: bool) -> Result<(), String> {
         .decode(payload_b64)
         .map_err(|e| format!("Invalid payload encoding: {e}"))?;
 
-    // Try HKDF-derived key first (v0.5+ web app), then raw shared secret
-    // (v0.4 web app) for backward compatibility during the transition.
-    use hkdf::Hkdf;
-    use sha2::Sha256;
-
-    let hk = Hkdf::<Sha256>::new(None, shared_bytes);
-    let mut hkdf_key = [0u8; 32];
-    hk.expand(b"beebeeb-cli-auth-v1", &mut hkdf_key)
-        .expect("HKDF expand failed — output length is valid");
-
-    let plaintext = {
-        let cipher = Aes256Gcm::new(GenericArray::from_slice(&hkdf_key));
-        cipher
-            .decrypt(GenericArray::from_slice(&nonce_bytes), ciphertext.as_ref())
-            .or_else(|_| {
-                let cipher = Aes256Gcm::new(GenericArray::from_slice(&shared_bytes[..32]));
-                cipher.decrypt(GenericArray::from_slice(&nonce_bytes), ciphertext.as_ref())
-            })
-            .map_err(|_| "Decryption failed — ECDH key mismatch or corrupted ciphertext")?
-    };
+    let plaintext = cli_key
+        .decrypt_browser_payload(&browser_pub_bytes, &nonce_bytes, &ciphertext)
+        .map_err(|_| "Decryption failed — ECDH key mismatch or corrupted ciphertext")?;
 
     // 8. Parse credentials and persist — unchanged.
     let creds: serde_json::Value =
