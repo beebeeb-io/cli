@@ -19,7 +19,7 @@ Generated from `bb --help`. Source of truth is `src/main.rs` (clap derive).
 
 ### Auth & session
 
-- `bb login` — browser-based device authorisation (P-256 ECDH + HKDF-SHA256 + AES-GCM handoff, with raw fallback for v0.4 web apps). Supports `--headless` for SSH boxes. CLI auth sessions stored in Redis (HA-safe across API servers).
+- `bb login` — browser-based device authorisation. The handshake crypto (P-256 ECDH + HKDF-SHA256 + AES-GCM handoff, with raw fallback for v0.4 web apps) lives in `beebeeb_core::cli_auth` (`CliEphemeralKey` / `decrypt_browser_payload`) — `login.rs` no longer hand-rolls it (task 0861). Supports `--headless` for SSH boxes. CLI auth sessions stored in Redis (HA-safe across API servers).
 - `bb logout` — end the current session.
 - `bb whoami` — show email, device, region, quota.
 - `bb status` — connection + session + storage status.
