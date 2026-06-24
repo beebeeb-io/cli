@@ -38,9 +38,9 @@ hostname = "0.4"
 rand = "0.8"
 base64 = "0.22"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
-p256 = { version = "0.13", features = ["ecdh"] }
-aes-gcm = "0.10"
-hkdf = "0.12"
+# Login handshake crypto (P-256 ECDH + HKDF-SHA256 + AES-256-GCM) now lives in
+# beebeeb-core::cli_auth — the CLI no longer pulls p256/aes-gcm/hkdf directly.
+# (sha2 is retained below: still used for content hashing in sync.rs / update.rs.)
 sha2 = "0.10"
 open = "5"
 notify = "7"

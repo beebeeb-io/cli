@@ -270,7 +270,6 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 name = "beebeeb-cli"
 version = "0.9.1"
 dependencies = [
- "aes-gcm",
  "axum",
  "base64",
  "beebeeb-core",
@@ -284,7 +283,6 @@ dependencies = [
  "dirs",
  "fuser",
  "futures-util",
- "hkdf",
  "hostname",
  "image",
  "indicatif",
@@ -293,7 +291,6 @@ dependencies = [
  "notify",
  "notify-debouncer-full",
  "open",
- "p256",
  "percent-encoding",
  "qrcode",
  "rand 0.8.6",
@@ -318,7 +315,6 @@ dependencies = [
 [[package]]
 name = "beebeeb-core"
 version = "0.1.0"
-source = "git+https://github.com/beebeeb-io/core?rev=45a612c#45a612c426170bbc4dd68622530773e1c5f02bff"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -331,6 +327,7 @@ dependencies = [
  "hkdf",
  "image",
  "opaque-ke",
+ "p256",
  "rand 0.8.6",
  "rayon",
  "reed-solomon-erasure",
@@ -350,7 +347,6 @@ dependencies = [
 [[package]]
 name = "beebeeb-types"
 version = "0.1.0"
-source = "git+https://github.com/beebeeb-io/core?rev=45a612c#45a612c426170bbc4dd68622530773e1c5f02bff"
 dependencies = [
  "serde",
 ]
