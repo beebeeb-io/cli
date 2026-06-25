@@ -347,39 +347,6 @@ impl ApiClient {
         parse_response(resp).await
     }
 
-    /// Upload an encrypted file via multipart.
-    ///
-    /// The server expects:
-    /// - A "metadata" text field containing JSON with name_encrypted, parent_id, mime_type, size_bytes
-    /// - One or more "chunk_N" binary fields containing the encrypted chunk data
-    pub async fn upload_encrypted(
-        &self,
-        metadata_json: &str,
-        encrypted_chunks: &[(u32, Vec<u8>)],
-    ) -> Result<Value, String> {
-        let token = self.require_auth()?;
-
-        let mut form = reqwest::multipart::Form::new().text("metadata", metadata_json.to_string());
-
-        for (idx, data) in encrypted_chunks {
-            let part = reqwest::multipart::Part::bytes(data.clone())
-                .mime_str("application/octet-stream")
-                .map_err(|e| format!("mime error: {e}"))?;
-            form = form.part(format!("chunk_{idx}"), part);
-        }
-
-        let resp = self
-            .client
-            .post(self.url("/api/v1/files/upload"))
-            .bearer_auth(token)
-            .multipart(form)
-            .send()
-            .await
-            .map_err(format_request_error)?;
-
-        parse_response(resp).await
-    }
-
     /// V2 chunked upload init: `POST /api/v1/uploads/init`.
     ///
     /// Opens an upload *session* against the v2 route (`routes/uploads.rs`). The
