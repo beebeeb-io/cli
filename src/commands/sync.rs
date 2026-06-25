@@ -1273,13 +1273,8 @@ async fn run_plain_watch(
                     // (shared helper — same decision as the one-shot path). This
                     // must run before the upload loop so a remotely-deleted file
                     // is not re-uploaded (resurrected) by the change scan below.
-                    let removed = reconcile_remote_deletions(
-                        local_dir,
-                        state,
-                        &resync_local,
-                        &resync_remote_files,
-                        false,
-                    );
+                    let removed =
+                        reconcile_remote_deletions(local_dir, state, &resync_local, &resync_remote_files, false);
                     let now_del = chrono::Local::now().format("%H:%M:%S");
                     for rel in &removed {
                         eprintln!(
