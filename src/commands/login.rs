@@ -1,4 +1,5 @@
 use colored::Colorize;
+use zeroize::Zeroizing;
 
 use crate::config::{load_config, save_config};
 use crate::env_detect::is_headless;
@@ -119,9 +120,14 @@ async fn browser_login(headless_flag: bool) -> Result<(), String> {
         .decode(payload_b64)
         .map_err(|e| format!("Invalid payload encoding: {e}"))?;
 
-    let plaintext = cli_key
-        .decrypt_browser_payload(&browser_pub_bytes, &nonce_bytes, &ciphertext)
-        .map_err(|_| "Decryption failed — ECDH key mismatch or corrupted ciphertext")?;
+    // Wrap the decrypted plaintext in Zeroizing so the key material (master_key_b64
+    // + session_token) is wiped from memory on drop. The serde_json parse borrows
+    // the slice, so no copy is made at this step.
+    let plaintext = Zeroizing::new(
+        cli_key
+            .decrypt_browser_payload(&browser_pub_bytes, &nonce_bytes, &ciphertext)
+            .map_err(|_| "Decryption failed — ECDH key mismatch or corrupted ciphertext")?,
+    );
 
     // 8. Parse credentials and persist — unchanged.
     let creds: serde_json::Value =
