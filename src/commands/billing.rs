@@ -28,16 +28,20 @@ pub async fn show(json: bool) -> Result<(), String> {
     let api = ApiClient::from_config();
     api.require_auth()?;
 
-    // Parallel-fetch both endpoints — they're independent.
-    let (sub_res, usage_res, count_res) = tokio::join!(
+    // Parallel-fetch the endpoints — they're independent. The plan catalog
+    // (`/billing/plans`) is best-effort: it's only needed to price a *pending
+    // downgrade* plan, so a failure there must not break `bb billing`.
+    let (sub_res, usage_res, count_res, plans_res) = tokio::join!(
         api.get_billing_subscription(),
         api.get_billing_usage(),
         api.get_file_count(),
+        api.get_billing_plans(),
     );
 
     let sub = sub_res?;
     let usage = usage_res?;
     let count = count_res.unwrap_or_default();
+    let plans = plans_res.unwrap_or_default();
 
     // ── JSON mode ────────────────────────────────────────────────────────────
 
@@ -89,7 +93,10 @@ pub async fn show(json: bool) -> Result<(), String> {
     println!("  {}", "PLAN".custom_color(crate::colors::AMBER));
 
     let plan_name = capitalise(plan.slug());
-    let price_label = price_for(plan, billing_cycle);
+    // Current plan price: the server's authoritative billed amount (task 0947
+    // fields on the subscription response), NOT a hardcoded table. Includes the
+    // user's storage/seat add-ons.
+    let price_label = price_from_subscription(&sub, billing_cycle);
     if let Some(pending) = pending_downgrade_plan {
         let pending_plan = Plan::from_slug(pending);
         let pending_name = capitalise(pending_plan.slug());
@@ -99,7 +106,10 @@ pub async fn show(json: bool) -> Result<(), String> {
             plan_name.custom_color(crate::colors::INK),
             pending_name.custom_color(crate::colors::INK),
             renew_date.custom_color(crate::colors::INK_WARM),
-            price_for(pending_plan, billing_cycle)
+            // Pending-downgrade plan price comes from the public catalog
+            // (`/billing/plans`), since the subscription only carries the
+            // *current* plan's billed amount.
+            price_from_catalog(&plans, pending, billing_cycle)
                 .map(|p| format!("{p} after"))
                 .unwrap_or_default()
                 .custom_color(crate::colors::INK_DIM),
@@ -302,20 +312,49 @@ fn format_json_value(value: &Value) -> String {
     }
 }
 
-fn price_for(plan: Plan, billing_cycle: &str) -> Option<String> {
-    // Mirror the prices shown in the web billing page. Plan::is_free() doesn't
-    // tell us the dollar amount, so we hardcode it here — Spec 2 introduces a
-    // server-driven catalog that this function will pull from.
-    match (plan.slug(), billing_cycle) {
-        ("free", _) => None,
-        ("basic", "yearly") => Some("€109.99 / year".into()),
-        ("basic", _) => Some("€10.99 / month".into()),
-        ("pro", "yearly") => Some("€199.99 / year".into()),
-        ("pro", _) => Some("€19.99 / month".into()),
-        ("ultra", "yearly") => Some("€399.99 / year".into()),
-        ("ultra", _) => Some("€39.99 / month".into()),
-        _ => None,
+/// Price for the user's *current* plan, taken from the server's authoritative
+/// billing fields on the subscription response (task 0947) — never a hardcoded
+/// table. Prefers `mollie_amount_cents` (the amount actually billed, add-ons
+/// included); falls back to `base_plan_cents + addon_cents`. Returns `None` for
+/// free / zero-cost subscriptions so the caller omits the price line.
+fn price_from_subscription(sub: &Value, billing_cycle: &str) -> Option<String> {
+    let cents = sub.get("mollie_amount_cents").and_then(|v| v.as_i64()).or_else(|| {
+        let base = sub.get("base_plan_cents").and_then(|v| v.as_i64());
+        let addon = sub.get("addon_cents").and_then(|v| v.as_i64()).unwrap_or(0);
+        base.map(|b| b + addon)
+    })?;
+    if cents <= 0 {
+        return None;
     }
+    Some(format_price(cents, billing_cycle))
+}
+
+/// Price for an arbitrary plan slug, read from the public plan catalog
+/// (`GET /api/v1/billing/plans`). Used to price a *pending downgrade* plan,
+/// whose amount isn't on the current subscription. Returns `None` when the slug
+/// isn't in the catalog or the price is zero/free.
+fn price_from_catalog(plans: &Value, slug: &str, billing_cycle: &str) -> Option<String> {
+    let list = plans.get("plans").and_then(|v| v.as_array())?;
+    let plan = list
+        .iter()
+        .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(slug))?;
+    let key = if billing_cycle == "yearly" {
+        "price_yearly_eur"
+    } else {
+        "price_eur"
+    };
+    let eur = plan.get(key).and_then(|v| v.as_f64())?;
+    let cents = (eur * 100.0).round() as i64;
+    if cents <= 0 {
+        return None;
+    }
+    Some(format_price(cents, billing_cycle))
+}
+
+/// Format an integer cents amount as `€X.XX / month` (or `/ year`).
+fn format_price(cents: i64, billing_cycle: &str) -> String {
+    let period = if billing_cycle == "yearly" { "year" } else { "month" };
+    format!("€{}.{:02} / {}", cents / 100, cents % 100, period)
 }
 
 fn region_human(slug: &str) -> String {
@@ -361,5 +400,82 @@ fn colour_pct(pct: f64, s: &str) -> colored::ColoredString {
         s.custom_color(crate::colors::AMBER)
     } else {
         s.custom_color(crate::colors::GREEN_OK)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn format_price_renders_cents() {
+        assert_eq!(format_price(399, "monthly"), "€3.99 / month");
+        assert_eq!(format_price(1099, "monthly"), "€10.99 / month");
+        assert_eq!(format_price(5495, "monthly"), "€54.95 / month");
+        assert_eq!(format_price(10990, "yearly"), "€109.90 / year");
+        // Single-digit cents must zero-pad.
+        assert_eq!(format_price(1005, "monthly"), "€10.05 / month");
+    }
+
+    #[test]
+    fn price_from_subscription_prefers_billed_total() {
+        // mollie_amount_cents (add-ons included) wins over base + addon.
+        let sub = json!({
+            "mollie_amount_cents": 5495,
+            "base_plan_cents": 1099,
+            "addon_cents": 4396,
+        });
+        assert_eq!(
+            price_from_subscription(&sub, "monthly").as_deref(),
+            Some("€54.95 / month")
+        );
+    }
+
+    #[test]
+    fn price_from_subscription_falls_back_to_base_plus_addon() {
+        let sub = json!({
+            "mollie_amount_cents": null,
+            "base_plan_cents": 1099,
+            "addon_cents": 1099,
+        });
+        assert_eq!(
+            price_from_subscription(&sub, "monthly").as_deref(),
+            Some("€21.98 / month")
+        );
+    }
+
+    #[test]
+    fn price_from_subscription_free_is_none() {
+        let sub = json!({ "mollie_amount_cents": null, "base_plan_cents": 0, "addon_cents": 0 });
+        assert_eq!(price_from_subscription(&sub, "monthly"), None);
+    }
+
+    #[test]
+    fn price_from_catalog_matches_slug() {
+        // Shape mirrors GET /api/v1/billing/plans (pricing-v2 fallback).
+        let plans = json!({
+            "plans": [
+                { "id": "free", "price_eur": 0, "price_yearly_eur": 0 },
+                { "id": "basic", "price_eur": 3.99, "price_yearly_eur": 39.90 },
+                { "id": "pro", "price_eur": 10.99, "price_yearly_eur": 109.90 },
+                { "id": "business", "price_eur": 54.95, "price_yearly_eur": 549.50 },
+            ]
+        });
+        assert_eq!(
+            price_from_catalog(&plans, "basic", "monthly").as_deref(),
+            Some("€3.99 / month")
+        );
+        assert_eq!(
+            price_from_catalog(&plans, "pro", "monthly").as_deref(),
+            Some("€10.99 / month")
+        );
+        assert_eq!(
+            price_from_catalog(&plans, "business", "yearly").as_deref(),
+            Some("€549.50 / year")
+        );
+        // free → None (zero price); unknown slug → None.
+        assert_eq!(price_from_catalog(&plans, "free", "monthly"), None);
+        assert_eq!(price_from_catalog(&plans, "ultra", "monthly"), None);
     }
 }

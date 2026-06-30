@@ -948,6 +948,20 @@ impl ApiClient {
         self.get_usage().await
     }
 
+    /// GET /api/v1/billing/plans — the public plan catalog (no auth). Returns
+    /// `{ "plans": [ { "id", "name", "price_eur", "price_yearly_eur",
+    /// "storage_label", … }, … ] }`. This is the catalog source of truth used to
+    /// render plan prices instead of a hardcoded CLI table.
+    pub async fn get_billing_plans(&self) -> Result<Value, String> {
+        let resp = self
+            .client
+            .get(self.url("/api/v1/billing/plans"))
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(resp).await
+    }
+
     pub async fn create_billing_portal_session(&self) -> Result<Value, String> {
         let token = self.require_auth()?;
         let resp = self
