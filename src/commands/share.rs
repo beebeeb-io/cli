@@ -578,12 +578,10 @@ fn run_picker(entries: &[ShareEntry]) -> Result<usize, String> {
 
         let ev = event::read().map_err(|e| e.to_string())?;
 
-        match ev {
-            Event::Key(key_event) => match key_event.code {
+        if let Event::Key(key_event) = ev {
+            match key_event.code {
                 KeyCode::Up | KeyCode::Char('k') => {
-                    if selected > 0 {
-                        selected -= 1;
-                    }
+                    selected = selected.saturating_sub(1);
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
                     if selected + 1 < entries.len() {
@@ -605,8 +603,7 @@ fn run_picker(entries: &[ShareEntry]) -> Result<usize, String> {
                     return Err("cancelled".to_string());
                 }
                 _ => {}
-            },
-            _ => {}
+            }
         }
 
         // Redraw: move cursor up to overwrite previous list, then draw again.

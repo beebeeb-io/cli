@@ -1,18 +1,27 @@
-//! Loopback-suppression registry for `bb watch`.
+//! Loopback-suppression registry — currently only half-wired.
 //!
-//! When `bb watch` uploads a local file, the server echoes a `file.uploaded`
-//! event back through the SSE stream. Without coordination, the remote-event
-//! handler would then download the file we just sent — clobbering the
-//! original or duplicating it.
+//! When a continuous `bb sync` uploads a local file, the server echoes a
+//! `file.uploaded` event back through the SSE stream. Without coordination,
+//! the remote-event handler would then download the file we just sent —
+//! clobbering the original or duplicating it.
 //!
 //! This module is a process-global, time-bounded set of recently-uploaded
-//! file IDs. The push handler calls [`mark_uploaded`] after every successful
-//! upload; the SSE handler calls [`was_recently_uploaded`] before downloading.
-//! Entries expire after [`SUPPRESS_TTL`] so a real remote update for the same
-//! file from another device is still picked up after the window closes.
+//! file IDs, intended so the push handler calls [`mark_uploaded`] after every
+//! successful upload and the remote-event handler calls
+//! [`was_recently_uploaded`] before downloading. Entries expire after
+//! [`SUPPRESS_TTL`] so a real remote update for the same file from another
+//! device is still picked up after the window closes.
 //!
-//! All functions are no-ops when not inside a `bb watch` session — the
-//! registry stays empty and lookups always return `false`.
+//! **Current state (found 2026-08-13 during a CI/lint cleanup pass):** only
+//! the write side is wired up — `push.rs` calls [`mark_uploaded`] — but
+//! nothing calls [`was_recently_uploaded`]. It was originally written for
+//! the now-removed `bb watch` command's SSE handler; `bb sync`'s continuous
+//! watcher (the current equivalent) never adopted the check. This means
+//! echo-suppression as described above is NOT actually happening today —
+//! `bb sync --continuous` may re-download a file right after uploading it.
+//! Left as `#[allow(dead_code)]` rather than deleted, since wiring this into
+//! `sync.rs`'s watcher is a real fix worth doing deliberately, not a
+//! drive-by lint change.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -47,6 +56,9 @@ pub fn mark_uploaded(file_id: &str) {
 
 /// Returns `true` if `file_id` was uploaded by this process within the
 /// suppression window. Also lazily evicts expired entries.
+///
+/// Not currently called anywhere — see the module doc for why.
+#[allow(dead_code)]
 pub fn was_recently_uploaded(file_id: &str) -> bool {
     let mut guard = match registry().lock() {
         Ok(g) => g,

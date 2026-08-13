@@ -260,6 +260,8 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    /// Not called by any current command — reserved API surface.
+    #[allow(dead_code)]
     pub async fn get_region(&self) -> Result<Value, String> {
         let resp = self
             .client
@@ -470,7 +472,7 @@ impl ApiClient {
             let resp = self
                 .client
                 .post(self.url("/api/v1/uploads/init"))
-                .bearer_auth(&token)
+                .bearer_auth(token)
                 .json(&body)
                 .send()
                 .await
@@ -503,7 +505,7 @@ impl ApiClient {
             let send = self
                 .client
                 .put(&url)
-                .bearer_auth(&token)
+                .bearer_auth(token)
                 .header("Content-Type", "application/octet-stream")
                 .body(data.clone())
                 .send()
@@ -543,7 +545,7 @@ impl ApiClient {
             let resp = self
                 .client
                 .post(self.url(&format!("/api/v1/uploads/{upload_session_id}/complete")))
-                .bearer_auth(&token)
+                .bearer_auth(token)
                 .send()
                 .await
                 .map_err(format_request_error)?;
@@ -815,6 +817,8 @@ impl ApiClient {
     }
 
     /// POST /api/v1/auth/account/export — queue or resume a GDPR export job.
+    /// Not called by any current command — reserved API surface.
+    #[allow(dead_code)]
     pub async fn request_account_export(&self, confirm_token: &str) -> Result<Value, String> {
         if confirm_token.trim().is_empty() {
             return Err("confirmation token is required to request an account export".to_string());
@@ -856,6 +860,8 @@ impl ApiClient {
     }
 
     /// POST /api/v1/me/email/start — OPAQUE email-change step 1.
+    /// Not called by any current command — reserved API surface.
+    #[allow(dead_code)]
     pub async fn account_email_change_start_opaque(
         &self,
         new_email: &str,
@@ -879,6 +885,8 @@ impl ApiClient {
     }
 
     /// POST /api/v1/me/email/finish — OPAQUE email-change step 2.
+    /// Not called by any current command — reserved API surface.
+    #[allow(dead_code)]
     pub async fn account_email_change_finish_opaque(
         &self,
         email_change_token: &str,
@@ -906,6 +914,8 @@ impl ApiClient {
     /// Best-effort fetch of recovery_check + x25519_public_key for OPAQUE
     /// email change. Returns `(recovery_check, x25519_pub)` or an error if the
     /// server has no route or the user has no key material on file.
+    /// Not called by any current command — reserved API surface.
+    #[allow(dead_code)]
     pub async fn get_my_key_material(&self) -> Result<(Vec<u8>, Vec<u8>), String> {
         use base64::Engine;
 
@@ -1137,7 +1147,7 @@ impl ApiClient {
     }
 
     /// Bulk permanently delete via `POST /api/v1/files/permanent` with `{ids}`
-    /// + one step-up `X-Confirm-Token`. The server erases only items that are
+    /// and one step-up `X-Confirm-Token`. The server erases only items that are
     /// both owned and already trashed (others come back in `skipped_not_trashed`
     /// / `missing`); irreversible. Returns `{deleted, skipped_not_trashed, missing}`.
     pub async fn bulk_permanent_delete(&self, ids: &[String], confirm_token: &str) -> Result<Value, String> {
@@ -1159,6 +1169,8 @@ impl ApiClient {
     /// Irreversible — erases the row and its blobs. Requires a step-up
     /// `X-Confirm-Token` (minted by `confirm_password`); the server's
     /// `ConfirmedTrashAction` extractor refuses the call without it.
+    /// Not called by any current command — reserved API surface.
+    #[allow(dead_code)]
     pub async fn permanent_delete(&self, file_id: &str, confirm_token: &str) -> Result<Value, String> {
         let token = self.require_auth()?;
         let resp = self
@@ -1199,6 +1211,14 @@ impl ApiClient {
     /// Mint a short-lived (~1h) bearer token for the SSE sync stream. The
     /// stream cannot use the main session token because SSE auth lives in
     /// the URL query string (browsers can't set headers on EventSource).
+    ///
+    /// Not currently called — `sync.rs`'s continuous watcher doesn't
+    /// establish an SSE connection today (no `EventSource`/`/sessions/live`
+    /// reference anywhere in it), so this looks like reserved API surface
+    /// for an SSE-based live-sync mode that hasn't landed in the CLI yet.
+    /// See also [`Self::stream_url`], [`Self::list_ops_since`],
+    /// [`Self::open_sync_stream`] — same unused SSE cluster.
+    #[allow(dead_code)]
     pub async fn create_stream_token(&self) -> Result<String, String> {
         let token = self.require_auth()?;
         let resp = self
@@ -1216,6 +1236,12 @@ impl ApiClient {
     }
 
     /// Build the absolute URL of the SSE endpoint for a given stream token.
+    ///
+    /// Part of the same unused SSE live-sync surface as
+    /// [`Self::create_stream_token`] — see that method's doc for context.
+    /// Only used internally by [`Self::open_sync_stream`], which is itself
+    /// unused.
+    #[allow(dead_code)]
     pub fn stream_url(&self, stream_token: &str) -> String {
         // Use a query-string token because SSE doesn't allow custom headers.
         // URL-encoding is unnecessary — the server-issued token is base64url
@@ -1225,6 +1251,10 @@ impl ApiClient {
 
     /// Fetch sync ops with `seq_id > since` so we can catch up after an SSE
     /// reconnect. The server caps `limit` at 5000.
+    ///
+    /// Part of the same unused SSE live-sync surface as
+    /// [`Self::create_stream_token`] — see that method's doc for context.
+    #[allow(dead_code)]
     pub async fn list_ops_since(&self, since: i64) -> Result<Value, String> {
         let token = self.require_auth()?;
         let resp = self
@@ -1239,6 +1269,12 @@ impl ApiClient {
 
     /// Build a streaming SSE response for the sync endpoint. Caller is
     /// responsible for parsing event frames out of the byte stream.
+    ///
+    /// Part of the same unused SSE live-sync surface as
+    /// [`Self::create_stream_token`] — see that method's doc for context.
+    /// This was `bb watch`'s SSE consumer before that command was removed
+    /// (2026-08-13, CI cleanup) in favor of `bb sync`'s polling watcher.
+    #[allow(dead_code)]
     pub async fn open_sync_stream(&self, stream_token: &str) -> Result<reqwest::Response, String> {
         let resp = self
             .client
@@ -1365,7 +1401,7 @@ impl ApiClient {
             let resp = self
                 .client
                 .put(self.url(&format!("/api/v1/files/{file_id}/thumbnail")))
-                .bearer_auth(&token)
+                .bearer_auth(token)
                 .header("Content-Type", "application/octet-stream")
                 .body(encrypted_data.clone())
                 .send()
@@ -1388,7 +1424,7 @@ impl ApiClient {
             let resp = self
                 .client
                 .put(self.url(&format!("/api/v1/files/{file_id}/thumbnail/large")))
-                .bearer_auth(&token)
+                .bearer_auth(token)
                 .header("Content-Type", "application/octet-stream")
                 .body(encrypted_data.clone())
                 .send()
@@ -1465,7 +1501,7 @@ impl ApiClient {
             let resp = self
                 .client
                 .post(self.url("/api/v1/clients/devices"))
-                .bearer_auth(&token)
+                .bearer_auth(token)
                 .json(&body)
                 .send()
                 .await
@@ -1500,7 +1536,7 @@ impl ApiClient {
             let resp = self
                 .client
                 .post(self.url("/api/v1/clients/sessions"))
-                .bearer_auth(&token)
+                .bearer_auth(token)
                 .json(&body)
                 .send()
                 .await
@@ -1514,6 +1550,7 @@ impl ApiClient {
     }
 
     /// Fire-and-forget heartbeat — no retry on rate limit.
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_heartbeat(
         &self,
         session_id: &str,
@@ -1568,7 +1605,7 @@ impl ApiClient {
         let resp = self
             .client
             .patch(self.url(&format!("/api/v1/clients/sessions/{session_id}")))
-            .bearer_auth(&token)
+            .bearer_auth(token)
             .json(&body)
             .send()
             .await

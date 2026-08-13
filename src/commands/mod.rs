@@ -22,7 +22,5 @@ pub mod speedtest;
 pub mod status;
 pub mod sync;
 pub mod trash;
-pub mod watch;
-pub mod watch_remote;
 pub mod webdav;
 pub mod whoami;

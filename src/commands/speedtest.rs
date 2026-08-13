@@ -28,7 +28,7 @@ pub async fn run() -> Result<(), String> {
         .as_ref()
         .and_then(|r| r.get("preferred_region"))
         .and_then(|v| v.as_str())
-        .map(|s| capitalise(s))
+        .map(capitalise)
         .unwrap_or_else(|| "Europe".to_string());
     println!(
         "{}",
@@ -242,7 +242,7 @@ async fn run_json(api: &ApiClient) -> Result<(), String> {
         .as_ref()
         .and_then(|r| r.get("preferred_region"))
         .and_then(|v| v.as_str())
-        .map(|s| capitalise(s))
+        .map(capitalise)
         .unwrap_or_else(|| "Europe".to_string());
 
     // Latency

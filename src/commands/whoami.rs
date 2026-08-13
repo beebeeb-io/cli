@@ -48,7 +48,7 @@ pub async fn run() -> Result<(), String> {
     let region_label = my_region
         .get("preferred_region")
         .and_then(|v| v.as_str())
-        .map(|s| capitalise(s))
+        .map(capitalise)
         .unwrap_or_else(|| "Europe".to_string());
 
     let used_bytes = usage.get("used_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -153,8 +153,7 @@ pub async fn run() -> Result<(), String> {
     // Storage line + visual quota bar
     println!("  {} {}", dim("storage "), val(&storage_label));
     println!(
-        "  {} {} {:.1}%",
-        "         ", // align under "storage"
+        "            {} {:.1}%", // align under "storage"
         ui::quota_bar(used_bytes.max(0) as u64, total_bytes.max(0) as u64, 40),
         percentage * 100.0,
     );

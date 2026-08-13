@@ -188,35 +188,6 @@ pub async fn resolve_path(api: &ApiClient, master_key: &MasterKey, path: &str) -
     Ok(current)
 }
 
-/// List decrypted child names for a directory (useful for tab-completion).
-///
-/// Returns `(decrypted_name, file_id, is_folder)` triples.
-pub async fn list_children_names(
-    api: &ApiClient,
-    master_key: &MasterKey,
-    parent_id: Option<&str>,
-) -> Result<Vec<(String, String, bool)>, String> {
-    let listing = list_files_cached(api, parent_id).await?;
-    let files = listing
-        .get("files")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| "unexpected API response: missing files array".to_string())?;
-
-    let mut results = Vec::with_capacity(files.len());
-
-    for entry in files {
-        let id = entry.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-        let name_enc = entry.get("name_encrypted").and_then(|v| v.as_str()).unwrap_or_default();
-        let is_folder = entry.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
-
-        let name = crate::crypto::decrypt_name(master_key, id, name_enc).unwrap_or_else(|| name_enc.to_string());
-
-        results.push((name, id.to_string(), is_folder));
-    }
-
-    Ok(results)
-}
-
 /// Look up an immediate child by plaintext name. Used by `mkdir` to detect a
 /// pre-existing folder or file before POSTing. Returns `None` when there is no
 /// match; returns an error only if the listing itself fails. Matching is

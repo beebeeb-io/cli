@@ -87,12 +87,10 @@ fn event_loop(
                         state.selected_session -= 1;
                     }
                 }
-                KeyCode::Down => {
-                    if state.view == TuiView::Dashboard {
-                        let max = state.sessions.len().saturating_sub(1);
-                        if state.selected_session < max {
-                            state.selected_session += 1;
-                        }
+                KeyCode::Down if state.view == TuiView::Dashboard => {
+                    let max = state.sessions.len().saturating_sub(1);
+                    if state.selected_session < max {
+                        state.selected_session += 1;
                     }
                 }
                 _ => {}

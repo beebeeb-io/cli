@@ -218,8 +218,7 @@ pub async fn run(file_id: String, output: Option<PathBuf>, zip: bool) -> Result<
 /// `bb ls` as well as longer partial UUIDs.
 fn looks_like_id_prefix(s: &str) -> bool {
     let len = s.len();
-    len >= 8
-        && len <= 36
+    (8..=36).contains(&len)
         && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
         && s.chars().any(|c| c.is_ascii_hexdigit())
 }

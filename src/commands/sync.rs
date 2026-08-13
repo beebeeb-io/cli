@@ -271,6 +271,7 @@ struct RemoteFile {
     updated_at: DateTime<Utc>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     local_dir: Option<PathBuf>,
     remote_path_arg: Option<String>,
@@ -1747,7 +1748,6 @@ async fn print_session_status(api: &ApiClient) -> Result<(), String> {
     for session in sessions {
         let name = session.get("name").and_then(|v| v.as_str()).unwrap_or("unnamed");
         let session_status = session.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
-        let local_path = session.get("local_path").and_then(|v| v.as_str()).unwrap_or("");
         let remote_path = session.get("remote_path").and_then(|v| v.as_str()).unwrap_or("");
         let device_name = session.get("device_name").and_then(|v| v.as_str()).unwrap_or("");
         let files_synced = session.get("files_synced").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -1781,11 +1781,7 @@ async fn print_session_status(api: &ApiClient) -> Result<(), String> {
         };
 
         // Line 1: indicator + name + device → remote + status
-        let path_display = if !local_path.is_empty() {
-            format!("{remote_path}")
-        } else {
-            remote_path.to_string()
-        };
+        let path_display = remote_path.to_string();
 
         let line1 = if !device_name.is_empty() {
             format!(

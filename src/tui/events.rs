@@ -5,9 +5,14 @@ use super::state::{SessionInfo, SyncFileEvent};
 
 /// Events consumed by the TUI app loop.
 pub enum TuiEvent {
-    /// A keyboard/mouse event from crossterm.
+    /// A keyboard/mouse event from crossterm. Never actually constructed —
+    /// `app.rs` polls `poll_key` directly and handles Ctrl+C inline instead
+    /// of routing through this channel; kept as a placeholder variant with
+    /// a deliberate no-op match arm in `app.rs`.
+    #[allow(dead_code)]
     Key(KeyEvent),
-    /// Timer tick for redraw.
+    /// Timer tick for redraw. Never actually constructed — see `Key` above.
+    #[allow(dead_code)]
     Tick,
     /// A file sync event from the watcher.
     SyncUpdate(SyncFileEvent),

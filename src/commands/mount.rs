@@ -217,7 +217,7 @@ pub async fn run(_mountpoint: PathBuf, _foreground: bool, _cache_ttl: u64) -> Re
                     let status = std::process::Command::new("sudo")
                         .args(["apt", "install", "-y", "libfuse3-dev"])
                         .status();
-                    if status.map_or(false, |s| s.success()) {
+                    if status.is_ok_and(|s| s.success()) {
                         println!(
                             "  {} {}",
                             "✓".green(),

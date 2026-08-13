@@ -107,8 +107,7 @@ pub async fn run() -> Result<(), String> {
 
     // Visual quota bar
     println!(
-        "  {} {} {:.1}%",
-        "         ", // align under labels
+        "            {} {:.1}%", // align under labels
         ui::quota_bar(used_bytes.max(0) as u64, quota_bytes.max(0) as u64, 40),
         percentage * 100.0,
     );

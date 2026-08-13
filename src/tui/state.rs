@@ -14,9 +14,15 @@ pub enum TuiView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileEventStatus {
     Uploading,
+    /// Rendered in `compact.rs` but `sync.rs` never constructs it — the
+    /// TUI log currently only reports uploads, not downloads, even though
+    /// `bb sync` is bidirectional.
+    #[allow(dead_code)]
     Downloading,
     Done,
     Error,
+    /// Rendered in `compact.rs` but `sync.rs` never constructs it.
+    #[allow(dead_code)]
     Skipped,
 }
 

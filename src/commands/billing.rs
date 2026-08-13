@@ -170,7 +170,7 @@ pub async fn show(json: bool) -> Result<(), String> {
     );
 
     if let Some(deadline) = storage_grace_deadline {
-        let pending = pending_downgrade_plan.map(|p| Plan::from_slug(p)).unwrap_or(plan);
+        let pending = pending_downgrade_plan.map(Plan::from_slug).unwrap_or(plan);
         let new_quota = effective_quota(pending, 0, 0);
         let over_by = (used_bytes - new_quota).max(0);
         if over_by > 0 {

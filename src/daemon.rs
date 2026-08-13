@@ -211,6 +211,7 @@ pub fn spawn_daemon(local_dir: &Path, remote_path: &str, slug: &str) -> Result<u
 // ── Platform-specific auto-start integration ──────────────────────────────
 
 /// Escape user-controllable text for XML plist inclusion.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")

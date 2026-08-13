@@ -15,6 +15,7 @@ use colored::CustomColor;
 pub const AMBER: CustomColor = CustomColor { r: 245, g: 184, b: 0 };
 
 /// Slightly darker amber — used for tray/status icons.
+#[cfg_attr(not(feature = "fuse"), allow(dead_code))]
 pub const AMBER_DARK: CustomColor = CustomColor { r: 212, g: 168, b: 67 };
 
 // ── Status ────────────────────────────────────────────────────────────────────
