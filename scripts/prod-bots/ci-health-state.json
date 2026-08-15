@@ -1,0 +1,8 @@
+{
+  "admin": "ok",
+  "cli": "ok",
+  "core": "ok",
+  "mobile": "ok",
+  "server": "broken",
+  "web": "ok"
+}

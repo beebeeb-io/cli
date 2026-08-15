@@ -1,0 +1,42 @@
+name: prod-bot CI health
+
+# Org-wide CI health monitor. See scripts/prod-bots/ci-health-check.sh for
+# the why (two ~2-month-unnoticed red-CI incidents, 2026-08-13/14).
+
+on:
+  schedule:
+    - cron: '17 */4 * * *' # every 4 hours, offset to avoid the top of the hour
+  workflow_dispatch:
+
+permissions:
+  contents: write # needs to commit the state file back to this repo
+
+concurrency:
+  group: prod-bot-ci-health
+  cancel-in-progress: false # never skip a check mid-flight for a newer one
+
+jobs:
+  ci-health:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run CI health check
+        id: check
+        env:
+          CI_HEALTH_READ_TOKEN: ${{ secrets.CI_HEALTH_READ_TOKEN }}
+          BB_TELEGRAM_BOT_TOKEN: ${{ secrets.BB_TELEGRAM_BOT_TOKEN }}
+          BB_TELEGRAM_CHAT_ID: ${{ secrets.BB_TELEGRAM_CHAT_ID }}
+        run: bash scripts/prod-bots/ci-health-check.sh
+
+      - name: Commit state file if changed
+        run: |
+          if ! git diff --quiet -- scripts/prod-bots/ci-health-state.json; then
+            git config user.name "beebeeb-ci-health-bot"
+            git config user.email "noreply@beebeeb.io"
+            git add scripts/prod-bots/ci-health-state.json
+            git commit -m "ci-health: update state"
+            git push
+          else
+            echo "no state change to commit"
+          fi
