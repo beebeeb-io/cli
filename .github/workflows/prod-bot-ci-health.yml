@@ -15,6 +15,11 @@ on:
   schedule:
     - cron: '17 */4 * * *' # every 4 hours, offset to avoid the top of the hour
   workflow_dispatch:
+    inputs:
+      test_alert:
+        description: "Send one clearly-labeled test Telegram message and exit (doesn't touch real state or send a false repo-status alert)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -45,6 +50,7 @@ jobs:
           CI_HEALTH_READ_TOKEN: ${{ secrets.CI_HEALTH_READ_TOKEN }}
           BB_TELEGRAM_BOT_TOKEN: ${{ secrets.BB_TELEGRAM_BOT_TOKEN }}
           BB_TELEGRAM_CHAT_ID: ${{ secrets.BB_TELEGRAM_CHAT_ID }}
+          CI_HEALTH_TEST_ALERT: ${{ inputs.test_alert }}
         run: bash scripts/prod-bots/ci-health-check.sh
 
       # Always save (even if the check step reported "no state change") so

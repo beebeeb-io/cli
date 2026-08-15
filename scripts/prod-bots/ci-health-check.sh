@@ -39,11 +39,27 @@ CHAT="${BB_TELEGRAM_CHAT_ID:-}"
 send_telegram() {
   local text="$1"
   [ -n "$BOT" ] && [ -n "$CHAT" ] || { echo "no telegram creds, would send: $text"; return 0; }
-  curl -s --max-time 10 "https://api.telegram.org/bot${BOT}/sendMessage" \
+  local resp
+  resp=$(curl -s --max-time 10 "https://api.telegram.org/bot${BOT}/sendMessage" \
     --data-urlencode "chat_id=${CHAT}" \
     --data-urlencode "text=${text}" \
-    --data-urlencode "parse_mode=HTML" >/dev/null 2>&1 || true
+    --data-urlencode "parse_mode=HTML" 2>&1) || true
+  # Log delivery result (ok:true/false from Telegram itself) without ever
+  # printing $resp raw -- it can echo the bot token back in error cases.
+  if echo "$resp" | grep -q '"ok":true'; then
+    echo "telegram: delivered"
+  else
+    echo "telegram: send failed (see Telegram API docs for error codes; response withheld from logs)"
+  fi
 }
+
+# Manual test path: confirms the actual credentials + curl call work end to
+# end, without faking a real repo's CI status to do it. Doesn't touch
+# STATE_FILE or the cache at all.
+if [ "${CI_HEALTH_TEST_ALERT:-false}" = "true" ]; then
+  send_telegram "🧪 Test message from beebeeb-io/cli's prod-bot CI health — this confirms Telegram delivery works. Not a real CI status alert, safe to ignore."
+  exit 0
+fi
 
 # Unquoted on purpose (no spaces/special chars in a PAT) -- a quoted
 # `GH_TOKEN="$VAR"` assignment trips scripts/check-secrets.sh's
