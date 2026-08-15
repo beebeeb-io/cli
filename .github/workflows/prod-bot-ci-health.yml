@@ -2,6 +2,14 @@ name: prod-bot CI health
 
 # Org-wide CI health monitor. See scripts/prod-bots/ci-health-check.sh for
 # the why (two ~2-month-unnoticed red-CI incidents, 2026-08-13/14).
+#
+# State persists via actions/cache, NOT a commit back to main -- main is a
+# protected branch (correctly so) and the default GITHUB_TOKEN has no bypass
+# rights, unlike an admin's own git credentials. Cache avoids fighting that
+# entirely: no push, no branch-protection interaction at all. The committed
+# ci-health-state.json in this repo is only the seed for the very first run
+# (or if the cache is ever evicted after 7 days unused) -- day-to-day the
+# cache is the live copy.
 
 on:
   schedule:
@@ -9,7 +17,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write # needs to commit the state file back to this repo
+  contents: read
 
 concurrency:
   group: prod-bot-ci-health
@@ -21,22 +29,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Overwrites the checked-out (seed) file with the last run's actual
+      # state, if a cache entry exists. restore-keys prefix-matches so this
+      # finds the most recent entry regardless of exact run id.
+      - name: Restore previous state
+        uses: actions/cache/restore@v4
+        with:
+          path: scripts/prod-bots/ci-health-state.json
+          key: ci-health-state-${{ github.run_id }}
+          restore-keys: |
+            ci-health-state-
+
       - name: Run CI health check
-        id: check
         env:
           CI_HEALTH_READ_TOKEN: ${{ secrets.CI_HEALTH_READ_TOKEN }}
           BB_TELEGRAM_BOT_TOKEN: ${{ secrets.BB_TELEGRAM_BOT_TOKEN }}
           BB_TELEGRAM_CHAT_ID: ${{ secrets.BB_TELEGRAM_CHAT_ID }}
         run: bash scripts/prod-bots/ci-health-check.sh
 
-      - name: Commit state file if changed
-        run: |
-          if ! git diff --quiet -- scripts/prod-bots/ci-health-state.json; then
-            git config user.name "beebeeb-ci-health-bot"
-            git config user.email "noreply@beebeeb.io"
-            git add scripts/prod-bots/ci-health-state.json
-            git commit -m "ci-health: update state"
-            git push
-          else
-            echo "no state change to commit"
-          fi
+      # Always save (even if the check step reported "no state change") so
+      # this run's cache entry exists for the next run's restore-keys match
+      # -- a cache key can only be written once, so every run needs its own.
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: scripts/prod-bots/ci-health-state.json
+          key: ci-health-state-${{ github.run_id }}

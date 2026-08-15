@@ -53,7 +53,10 @@ export GH_TOKEN=$CI_HEALTH_READ_TOKEN
 
 [ -f "$STATE_FILE" ] || echo '{}' > "$STATE_FILE"
 
-prev_state=$(cat "$STATE_FILE")
+# -S: sort keys, -c: compact — so two states with identical VALUES but
+# different key insertion order compare equal (avoids a spurious "state
+# changed" write/re-cache on every single run).
+prev_state=$(jq -S -c '.' "$STATE_FILE")
 new_state="{}"
 changed=0
 
@@ -98,8 +101,9 @@ ${url}"
   fi
 done
 
-if [ "$new_state" != "$prev_state" ]; then
-  echo "$new_state" | jq '.' > "$STATE_FILE"
+new_state_norm=$(echo "$new_state" | jq -S -c '.')
+if [ "$new_state_norm" != "$prev_state" ]; then
+  echo "$new_state" | jq -S '.' > "$STATE_FILE"
   echo "state changed, wrote $STATE_FILE"
 else
   echo "no state change"
