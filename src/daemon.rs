@@ -237,7 +237,7 @@ pub fn install_launchagent(local_dir: &Path, remote_path: &str, slug: &str) -> R
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
     let logs = log_dir()?;
 
-    let args = vec![
+    let args = [
         exe.to_string_lossy().to_string(),
         "sync".to_string(),
         local_dir.to_string_lossy().to_string(),
