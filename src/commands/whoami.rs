@@ -227,16 +227,29 @@ fn capitalise(s: &str) -> String {
     }
 }
 
+/// Default per-plan hourly upload volume caps, as displayed by `bb whoami`.
+///
+/// Source of truth: `repos/server/beebeeb-api/src/upload_throttle.rs`
+/// (`UploadThrottle::new`, the `gb(slug, default_gb)` table) — free 50,
+/// starter/basic 200, pro 500, business 1000 GB/hr. These are the server's
+/// *compile-time defaults*, not a guarantee: each is overridable per-plan
+/// without a redeploy via `BB_UPLOAD_VOLUME_<PLAN>_GB`, so the figure shown
+/// here can drift from what a given deployment actually enforces. The
+/// call site already prefixes this with "up to" (see `run` above).
 fn upload_limit_for_plan(plan: Plan) -> &'static str {
     match plan {
-        Plan::Free => "5 GB/hr",
+        Plan::Free => "50 GB/hr",
         // Starter groups with Basic, mirroring the pre-`Plan`-enum mapping
-        // (`"starter" | "basic" => "20 GB/hr"`, commit 2083636) that was
+        // (`"starter" | "basic" => "200 GB/hr"`, commit 2083636) that was
         // dropped when core didn't yet have `Plan::Starter` to match on.
-        Plan::Starter => "20 GB/hr",
-        Plan::Basic => "20 GB/hr",
-        Plan::Pro => "50 GB/hr",
-        Plan::Business => "100 GB/hr",
+        Plan::Starter => "200 GB/hr",
+        Plan::Basic => "200 GB/hr",
+        Plan::Pro => "500 GB/hr",
+        // 1000 GB/hr in the server table; shown as "1 TB/hr" to match this
+        // CLI's TB-at-1000-GB display convention (see
+        // `beebeeb_types::quota::format_storage_si`, which switches from GB
+        // to TB at the same threshold) rather than a bare "1000 GB/hr".
+        Plan::Business => "1 TB/hr",
     }
 }
 
@@ -261,11 +274,14 @@ mod tests {
     fn upload_limit_for_plan_covers_every_plan() {
         // No `_ =>` catch-all above: adding a new `Plan` variant must fail
         // this match (and `cargo build`) again, not silently fall through.
-        assert_eq!(upload_limit_for_plan(Plan::Free), "5 GB/hr");
-        assert_eq!(upload_limit_for_plan(Plan::Starter), "20 GB/hr");
-        assert_eq!(upload_limit_for_plan(Plan::Basic), "20 GB/hr");
-        assert_eq!(upload_limit_for_plan(Plan::Pro), "50 GB/hr");
-        assert_eq!(upload_limit_for_plan(Plan::Business), "100 GB/hr");
+        // Values match the server's enforced defaults in
+        // `upload_throttle.rs::UploadThrottle::new` (free/starter/basic/pro/
+        // business = 50/200/200/500/1000 GB/hr).
+        assert_eq!(upload_limit_for_plan(Plan::Free), "50 GB/hr");
+        assert_eq!(upload_limit_for_plan(Plan::Starter), "200 GB/hr");
+        assert_eq!(upload_limit_for_plan(Plan::Basic), "200 GB/hr");
+        assert_eq!(upload_limit_for_plan(Plan::Pro), "500 GB/hr");
+        assert_eq!(upload_limit_for_plan(Plan::Business), "1 TB/hr");
     }
 
     #[test]
