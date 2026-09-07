@@ -230,6 +230,10 @@ fn capitalise(s: &str) -> String {
 fn upload_limit_for_plan(plan: Plan) -> &'static str {
     match plan {
         Plan::Free => "5 GB/hr",
+        // Starter groups with Basic, mirroring the pre-`Plan`-enum mapping
+        // (`"starter" | "basic" => "20 GB/hr"`, commit 2083636) that was
+        // dropped when core didn't yet have `Plan::Starter` to match on.
+        Plan::Starter => "20 GB/hr",
         Plan::Basic => "20 GB/hr",
         Plan::Pro => "50 GB/hr",
         Plan::Business => "100 GB/hr",
@@ -247,4 +251,27 @@ fn format_number(n: i64) -> String {
         result.push(ch);
     }
     result.chars().rev().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upload_limit_for_plan_covers_every_plan() {
+        // No `_ =>` catch-all above: adding a new `Plan` variant must fail
+        // this match (and `cargo build`) again, not silently fall through.
+        assert_eq!(upload_limit_for_plan(Plan::Free), "5 GB/hr");
+        assert_eq!(upload_limit_for_plan(Plan::Starter), "20 GB/hr");
+        assert_eq!(upload_limit_for_plan(Plan::Basic), "20 GB/hr");
+        assert_eq!(upload_limit_for_plan(Plan::Pro), "50 GB/hr");
+        assert_eq!(upload_limit_for_plan(Plan::Business), "100 GB/hr");
+    }
+
+    #[test]
+    fn upload_limit_for_starter_matches_basic() {
+        // Starter (100 GB base, task 1386) shares Basic's throttle tier —
+        // same intent as the pre-enum-refactor string match.
+        assert_eq!(upload_limit_for_plan(Plan::Starter), upload_limit_for_plan(Plan::Basic));
+    }
 }

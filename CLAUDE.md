@@ -148,7 +148,11 @@ Account-less links that let **anyone** upload an encrypted file *into* your vaul
 
 ## Dependencies
 
-Uses `beebeeb-core` and `beebeeb-types` from the `core` repo via Cargo git dependency. For local development, add to `.cargo/config.toml`:
+Uses `beebeeb-core` and `beebeeb-types` from the `core` repo via Cargo git dependency, pinned to a full 40-char commit SHA in `[dependencies]` (`rev = "..."`) — **not** a floating branch. This is deliberate: an unpinned `branch = "main"` dependency would let an unrelated core commit change the CLI's build (or behaviour) without a corresponding CLI commit, and CI has no separate core-freshness gate the way `repos/server`'s `CORE_REV` file + `ci.yml` check does.
+
+**Keep the pin aligned with `repos/server/CORE_REV`** (not core `main` tip) — that file names the core commit already deploy-verified in production, so pinning the CLI to the same SHA means every backend-consuming Rust client builds against one shared, known-good core snapshot. Bumping core introduces new types/variants (e.g. `Plan::Starter`, task 1386) that the CLI must handle explicitly — non-exhaustive `match` on a core enum is intentional (no `_ =>` catch-all) so a new variant is a compile error here, not a silent gap. To bump: update the `rev` in both `beebeeb-core` and `beebeeb-types` lines below, `cargo build` to refresh `Cargo.lock`, fix whatever the compiler flags, then commit both files together.
+
+For local development, add to `.cargo/config.toml`:
 
 ```toml
 [patch."https://github.com/beebeeb-io/core"]
