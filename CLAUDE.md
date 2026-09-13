@@ -178,6 +178,18 @@ Terminal mockups: `../../design/hifi/hifi-cli.jsx`.
 
 Defined in `src/colors.rs` — amber `#f5b800` for branding, sage green `#8fc18b` for success, coral red `#e07a6a` for errors. Always use the `colors::*` constants, not raw `.truecolor()`.
 
+## How we work (evidence, design, done, parallel agents)
+
+The full rules live in the workspace `CLAUDE.md` → "How we work" (also summarised in the workspace `AGENTS.md`). Read them; they apply here. The repo-specific instantiation:
+
+- **The count-shaped truth line:** `cargo test 2>&1 | tee /tmp/bb-cli-test.log` → per-binary
+  `test result: ok. N passed; 0 failed`; assert the Ns. `cargo clippy -- -D warnings` /
+  `cargo fmt -- --check` assert the exit code.
+- **CLI tasks are verified by running the command and pasting its output** into the task file —
+  the binary compiling is not a verification.
+- **The core pin is a reviewed number:** bump `rev` only together with `repos/server/CORE_REV`,
+  `cargo build` to refresh the lock, and fix what the compiler flags in the SAME commit.
+
 ## Graphify
 
 This repo has a knowledge graph at `graphify-out/`:
