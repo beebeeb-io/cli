@@ -122,6 +122,13 @@ Account-less links that let **anyone** upload an encrypted file *into* your vaul
   non-fatal, encrypted with the per-file key derived in the CLI.
 - The `ApiClient` (`api.rs`) now carries a **300 s per-request timeout**; the SSE
   sync stream overrides it per-request with its own 24 h timeout.
+- Every request the `ApiClient` sends carries `X-Beebeeb-Client: cli` and
+  `X-Beebeeb-Client-Version: <CARGO_PKG_VERSION>` (set as `default_headers` on
+  the shared `reqwest::Client` in `build_client()`, task 1392) — the same
+  version string `bb --version` prints. The server records both on every
+  `object_versions` row (server PR #23 / task 1369) for writer-provenance
+  queries. The self-update checker's separate client (`update.rs`, talking to
+  `api.github.com`, not the beebeeb API) intentionally does not send these.
 
 ## Download pipeline (`src/download.rs`)
 

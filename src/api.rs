@@ -144,6 +144,35 @@ impl UploadInit {
     }
 }
 
+/// Writer-provenance headers sent on every request: `X-Beebeeb-Client` names
+/// this client (`cli`), `X-Beebeeb-Client-Version` carries the exact string
+/// `bb --version` prints (`CARGO_PKG_VERSION`, via clap's `#[command(version)]`
+/// with no override — see `src/main.rs`). The server records both on every
+/// `object_versions` row (server PR #23 / task 1369) so a blast-radius query
+/// can tell which client wrote a version. No user data goes in either value.
+const CLIENT_HEADER_NAME: &str = "X-Beebeeb-Client";
+const CLIENT_HEADER_VALUE: &str = "cli";
+const CLIENT_VERSION_HEADER_NAME: &str = "X-Beebeeb-Client-Version";
+const CLIENT_VERSION_HEADER_VALUE: &str = env!("CARGO_PKG_VERSION");
+
+/// Builds the shared `reqwest::Client` with the writer-provenance headers set
+/// as `default_headers`, so every request made through it — real traffic and
+/// tests alike — carries them without each call site adding them by hand.
+fn build_client(timeout: std::time::Duration) -> Client {
+    use reqwest::header::{HeaderMap, HeaderValue};
+    let mut headers = HeaderMap::new();
+    headers.insert(CLIENT_HEADER_NAME, HeaderValue::from_static(CLIENT_HEADER_VALUE));
+    headers.insert(
+        CLIENT_VERSION_HEADER_NAME,
+        HeaderValue::from_static(CLIENT_VERSION_HEADER_VALUE),
+    );
+    Client::builder()
+        .timeout(timeout)
+        .default_headers(headers)
+        .build()
+        .unwrap_or_else(|_| Client::new())
+}
+
 impl ApiClient {
     pub fn from_config() -> Self {
         let config = load_config();
@@ -151,10 +180,7 @@ impl ApiClient {
         // PUT fails instead of hanging forever. Long-lived calls that need more
         // (the SSE sync stream) override this per-request with their own
         // `.timeout(...)`, so this default is safe for them.
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
-            .build()
-            .unwrap_or_else(|_| Client::new());
+        let client = build_client(std::time::Duration::from_secs(300));
         Self {
             client,
             base_url: config.api_url,
@@ -163,11 +189,13 @@ impl ApiClient {
     }
 
     /// Test-only constructor: point the client at an arbitrary base URL (e.g. a
-    /// mock server) with a dummy auth token, bypassing the on-disk config.
+    /// mock server) with a dummy auth token, bypassing the on-disk config. Uses
+    /// the same `build_client` as production so tests exercise the real
+    /// header-setting path, not a hand-rolled stand-in.
     #[cfg(test)]
     pub(crate) fn new_for_test(base_url: String) -> Self {
         Self {
-            client: Client::new(),
+            client: build_client(std::time::Duration::from_secs(300)),
             base_url,
             token: Some("test-token".to_string()),
         }
@@ -1777,5 +1805,70 @@ mod list_pagination_tests {
         // by confirming exactly ACTIVE_TOTAL (terminated cleanly, no hang/loop).
         let got = ids(&api.list_files(None).await.unwrap());
         assert_eq!(got.len(), ACTIVE_TOTAL);
+    }
+}
+
+#[cfg(test)]
+mod client_header_tests {
+    //! Confirms every request through `ApiClient` carries the writer-provenance
+    //! headers (`X-Beebeeb-Client` / `X-Beebeeb-Client-Version`) that the
+    //! server records on `object_versions` rows (task 1392 / server PR #23).
+    //! Uses the same in-process axum mock pattern as `list_pagination_tests`
+    //! above, echoing the *incoming* request headers back so the assertion is
+    //! against what `ApiClient` actually sent over the wire, not a re-derived
+    //! value.
+
+    use axum::extract::Request as AxumRequest;
+    use axum::routing::get;
+    use axum::{Json, Router};
+    use serde_json::{Map, Value, json};
+
+    use super::ApiClient;
+
+    async fn spawn_header_echo_mock() -> String {
+        let app = Router::new().route(
+            "/api/v1/auth/me",
+            get(|req: AxumRequest| async move {
+                let echoed: Map<String, Value> = req
+                    .headers()
+                    .iter()
+                    .filter_map(|(name, value)| value.to_str().ok().map(|v| (name.as_str().to_string(), json!(v))))
+                    .collect();
+                Json(json!({ "headers": echoed }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn every_request_carries_client_and_version_headers() {
+        let api = ApiClient::new_for_test(spawn_header_echo_mock().await);
+        let resp = api.get_me().await.expect("mock request should succeed");
+        let headers = resp.get("headers").expect("mock echoed no headers back");
+
+        let client = headers
+            .get("x-beebeeb-client")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let version = headers
+            .get("x-beebeeb-client-version")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+
+        assert_eq!(
+            client, "cli",
+            "X-Beebeeb-Client header missing or wrong on an ApiClient request"
+        );
+        assert_eq!(
+            version,
+            env!("CARGO_PKG_VERSION"),
+            "X-Beebeeb-Client-Version header missing or stale on an ApiClient request \
+             (must match `bb --version`'s CARGO_PKG_VERSION)"
+        );
     }
 }
