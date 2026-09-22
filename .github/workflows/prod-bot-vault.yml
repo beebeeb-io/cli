@@ -5,11 +5,14 @@ name: prod-bot vault suite
 # checks. Phase A: transfer (1MB up/down/sha256/delete). Share + revoke layer in.
 
 on:
-  # SCHEDULE TEMPORARILY DISABLED (2026-06-09): the chunk-upload PUT hangs ~25min
-  # from GH runners (under investigation — see 0705 / rust-server prod-log check).
-  # Re-enable the hourly cron once the upload path is verified working.
-  # schedule:
-  #   - cron: '0 * * * *'
+  # NO SCHEDULE HERE, ON PURPOSE (settled 2026-09-06, pre-mortem 11).
+  # GitHub-hosted runners cannot complete the large-body chunk PUT against
+  # prod: 4/4 parallel attempts hung ~25 minutes, while the same `bb push`
+  # succeeds from any non-GitHub network (decision 0730 item 10). The
+  # server-side half of that class -- an unbounded S3 PutObject -- was fixed
+  # and verified by task 0732. The scheduled run therefore lives on the
+  # prober host instead: see `prober/README.md` in this repo.
+  # `workflow_dispatch` stays as the manual escape hatch.
   workflow_dispatch:
 
 permissions:
