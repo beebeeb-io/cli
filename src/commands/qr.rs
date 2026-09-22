@@ -14,12 +14,7 @@ use qrcode::render::unicode;
 /// display. Returns an empty string if QR generation fails (extremely unlikely
 /// — `otpauth://` URIs always fit in a Version 2 QR).
 ///
-/// NOT currently called from the `bb 2fa setup` command flow despite the
-/// module doc above — `commands/account.rs` prints the `otpauth://` URI as
-/// text only. Tested and working; just not wired in. Flagged 2026-08-13
-/// during a CI cleanup pass rather than silently wiring it in (a real UX
-/// decision, not a lint fix).
-#[allow(dead_code)]
+/// Wired into `bb 2fa setup` (`commands::twofa::render_setup`, task 0478).
 pub fn render_otpauth(uri: &str) -> String {
     match QrCode::new(uri.as_bytes()) {
         Ok(code) => code
