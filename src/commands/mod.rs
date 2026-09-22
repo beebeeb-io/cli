@@ -22,5 +22,6 @@ pub mod speedtest;
 pub mod status;
 pub mod sync;
 pub mod trash;
+pub mod twofa;
 pub mod webdav;
 pub mod whoami;

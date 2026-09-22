@@ -432,6 +432,10 @@ enum Commands {
     #[command(subcommand)]
     Account(AccountCmd),
 
+    /// Manage two-factor authentication (TOTP)
+    #[command(name = "2fa", subcommand)]
+    Twofa(TwofaCmd),
+
     /// Print shell completion script to stdout
     ///
     /// Pipe the output into the correct file for your shell:
@@ -529,6 +533,32 @@ enum AccountCmd {
         /// New email address
         #[arg(long)]
         email: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum TwofaCmd {
+    /// Show 2FA status (enabled/disabled)
+    Status,
+    /// Begin 2FA setup — returns secret, QR, and backup codes
+    Setup,
+    /// Confirm a TOTP code to enable 2FA after setup
+    Enable {
+        /// 6-digit TOTP code from your authenticator
+        #[arg(long)]
+        code: String,
+    },
+    /// Disable 2FA — requires a valid TOTP code
+    Disable {
+        #[arg(long)]
+        code: String,
+    },
+    /// Internal: exchange a partial token + code during login (used by `bb login`)
+    Verify {
+        #[arg(long)]
+        partial_token: String,
+        #[arg(long)]
+        code: String,
     },
 }
 
@@ -851,6 +881,13 @@ async fn main() {
                 None => commands::billing::addons().await,
             },
             AccountCmd::Update { email } => commands::account::update_email(email).await,
+        },
+        Commands::Twofa(cmd) => match cmd {
+            TwofaCmd::Status => commands::twofa::status().await,
+            TwofaCmd::Setup => commands::twofa::setup().await,
+            TwofaCmd::Enable { code } => commands::twofa::enable(code).await,
+            TwofaCmd::Disable { code } => commands::twofa::disable(code).await,
+            TwofaCmd::Verify { partial_token, code } => commands::twofa::verify(partial_token, code).await,
         },
         Commands::Logout => commands::logout::run().await,
         Commands::Completions { shell } => {
