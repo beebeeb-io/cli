@@ -31,13 +31,34 @@ write_heartbeat() {
       echo "# TYPE bb_prodbot_vault_last_success_timestamp gauge"
       echo "bb_prodbot_vault_last_success_timestamp $(date +%s)"
     elif [ -f "$out" ]; then
-      grep '^bb_prodbot_vault_last_success_timestamp' "$out" 2>/dev/null || true
+      # Prometheus text exposition requires HELP/TYPE metadata BEFORE the
+      # first sample of a metric; node_exporter's textfile-collector parser
+      # rejects a TYPE line seen after a sample, making the WHOLE file
+      # unparsable (so last_exit_code never exports either) instead of just
+      # dropping the retained success timestamp (Codex P1, PR #15). Emit
+      # metadata first, sample last — same order as every other metric above.
       grep '^# HELP bb_prodbot_vault_last_success_timestamp' "$out" 2>/dev/null || true
       grep '^# TYPE bb_prodbot_vault_last_success_timestamp' "$out" 2>/dev/null || true
+      grep '^bb_prodbot_vault_last_success_timestamp' "$out" 2>/dev/null || true
     fi
   } > "$tmp"
   mv "$tmp" "$out"
 }
+# GNU `timeout` (used by the off-GitHub prober wrapper, prober/run-vault-suite.sh,
+# with a 600s guard) sends SIGTERM to this process on expiry. Without an
+# explicit trap, bash's EXIT trap below sees $? as whatever the last
+# completed foreground command returned — which can be 0 (e.g. a successful
+# `bb login` moments before the timeout fires mid-`bb push`) even though the
+# run as a whole was killed for hanging. That forges a healthy heartbeat for
+# the exact hang this timeout exists to catch (Codex P1, PR #15). Map both
+# termination signals to an unambiguous nonzero status BEFORE the EXIT trap
+# is registered, so `write_heartbeat` always records the real outcome. This
+# keeps vault-suite.sh the ONE writer of the heartbeat on every invocation
+# path (GitHub workflow_dispatch, a direct run, and under the prober's
+# `timeout 600`) — the wrapper never writes a competing heartbeat itself.
+trap 'exit 143' TERM
+trap 'exit 130' INT
+
 # Registered here (before the BB_BOTS_DISABLED early-exit below) so the
 # disabled/kill-switch path also refreshes the heartbeat — see the deviation
 # note in this task's notes: registering it only at the WORK= trap below (as

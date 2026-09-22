@@ -13,6 +13,16 @@ export PROM_TEXTFILE_DIR="${PROM_TEXTFILE_DIR:-/var/lib/node_exporter/textfile_c
 export API_BASE_URL="${API_BASE_URL:-https://api.beebeeb.io}"
 export EVIDENCE_DIR="${EVIDENCE_DIR:-/var/lib/beebeeb-prober/evidence}"
 
+# The systemd service (beebeeb-prober.service) runs with User=prober and no
+# login shell, so it never sources the prober user's shell rc files. install.sh
+# installs rustup + bun FOR the prober user via `su - prober -c ...`, which
+# rustup/bun put under that user's $HOME (systemd itself sets $HOME from the
+# passwd entry for User=, per systemd.exec(5) — the same /var/lib/beebeeb-prober
+# install.sh's `useradd --home-dir` created). Without this, `cargo build` below
+# fails on every timer run (Codex P1, PR #15) and, even bypassed, `bun run`
+# further down (vault-suite.sh's device-auth driver) would fail the same way.
+export PATH="${BB_PROBER_CARGO_BIN:-${HOME:-/var/lib/beebeeb-prober}/.cargo/bin}:${BB_PROBER_BUN_BIN:-${HOME:-/var/lib/beebeeb-prober}/.bun/bin}:$PATH"
+
 mkdir -p "$PROM_TEXTFILE_DIR" "$EVIDENCE_DIR"
 
 cd "$REPO" || { echo "prober: repo not found at $REPO"; exit 2; }
