@@ -1,0 +1,16 @@
+[Unit]
+Description=Beebeeb prod-bot vault suite (upload canary)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=prober
+EnvironmentFile=/etc/beebeeb-prober/prober.env
+ExecStart=/opt/beebeeb-prober/cli/prober/run-vault-suite.sh
+TimeoutStartSec=900
+Nice=10
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/node_exporter/textfile_collector /var/lib/beebeeb-prober /opt/beebeeb-prober
