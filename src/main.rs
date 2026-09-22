@@ -553,13 +553,11 @@ enum TwofaCmd {
         #[arg(long)]
         code: String,
     },
-    /// Internal: exchange a partial token + code during login (used by `bb login`)
-    Verify {
-        #[arg(long)]
-        partial_token: String,
-        #[arg(long)]
-        code: String,
-    },
+    // `Verify` (exchange a login-time partial token + code) was REMOVED
+    // (eng-0479): the live POST /api/v1/auth/2fa/verify is the LOGIN-time
+    // exchange, but `bb login`'s browser handshake never produces or needs a
+    // partial token — see the module doc in `commands/twofa.rs` for the full
+    // grep evidence. A visible command with no live semantics is a dead end.
 }
 
 #[derive(Subcommand)]
@@ -887,7 +885,6 @@ async fn main() {
             TwofaCmd::Setup => commands::twofa::setup().await,
             TwofaCmd::Enable { code } => commands::twofa::enable(code).await,
             TwofaCmd::Disable { code } => commands::twofa::disable(code).await,
-            TwofaCmd::Verify { partial_token, code } => commands::twofa::verify(partial_token, code).await,
         },
         Commands::Logout => commands::logout::run().await,
         Commands::Completions { shell } => {

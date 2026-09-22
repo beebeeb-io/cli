@@ -3,10 +3,25 @@
 //! Routes used today:
 //!   GET  /api/v1/auth/me         — `totp_enabled` (TOTP-specific bool); used by `status`
 //!   POST /api/v1/auth/2fa/setup   — `{secret, qr_uri, backup_codes}`; used by `setup` (task 0478)
-//!   POST /api/v1/auth/2fa/enable  — not wired here yet (plan Task 11 / task 0479)
-//!   POST /api/v1/auth/2fa/disable — not wired here yet (plan Task 11 / task 0479)
-//!   POST /api/v1/auth/2fa/verify  — login-only, exercised inside `bb login`'s
-//!                                    handshake (`login.rs`), not this module
+//!   POST /api/v1/auth/2fa/enable  — `{code}` → `{message}`; used by `enable` (task 0479)
+//!   POST /api/v1/auth/2fa/disable — `{code}` → `{message}`; used by `disable` (task 0479)
+//!
+//! **`verify` was REMOVED from the clap tree (eng-0479).** The plan speced it
+//! as "re-verify to refresh a last-verified timestamp" — no such endpoint
+//! exists. The live `POST /api/v1/auth/2fa/verify` (`routes/totp.rs` ~L253) is
+//! the LOGIN-time `{partial_token, code}` → session exchange: it looks up the
+//! partial token in `sessions`, checks the TOTP/backup code, and mints a full
+//! session + `Set-Cookie`. `bb login` (`login.rs`) is a browser-based device
+//! handshake (`beebeeb_core::cli_auth`) that never sees a partial token or
+//! calls anything 2FA/TOTP-shaped — grepped for `2fa`/`totp`/`partial`: zero
+//! matches. No other command constructs or receives a `partial_token` either.
+//! A visible command with no live semantics is a dead end for whoever runs
+//! `bb 2fa verify --help` — same reasoning as Guus's 2026-06-24 stub removal
+//! (cli commit 84e70e1, `bb account export`/`delete`). If a future CLI flow
+//! ever needs the login-time 2FA exchange (e.g. a headless `bb login` variant
+//! that surfaces the partial-token step instead of hiding it in the browser
+//! handshake), re-add `verify` wired to that flow specifically — not as a
+//! bare pass-through of `/2fa/verify`.
 //!
 //! `setup` was speced (plan Task 10) against `POST /api/v1/auth/account/2fa/setup`,
 //! which does not exist server-side either — same deviation as `status` below,
@@ -306,16 +321,127 @@ pub async fn setup() -> Result<(), String> {
     Ok(())
 }
 
-pub async fn enable(_code: String) -> Result<(), String> {
-    Err("bb 2fa enable — not implemented yet".to_string())
+/// A 6-digit TOTP/authenticator code, or `--code must be 6 digits`.
+fn validate_code(code: &str) -> Result<(), String> {
+    if !code.chars().all(|c| c.is_ascii_digit()) || code.len() != 6 {
+        return Err("--code must be 6 digits".to_string());
+    }
+    Ok(())
 }
 
-pub async fn disable(_code: String) -> Result<(), String> {
-    Err("bb 2fa disable — not implemented yet".to_string())
+/// Map a raw `POST /api/v1/auth/2fa/enable` error string to a user-facing
+/// message. Pure and testable without a live HTTP call — mirrors
+/// `commands::confirm::map_confirm_error` / `commands::account::map_email_change_error`.
+///
+/// eng-0479: the raw string here is `parse_response`'s (`api.rs`) extracted
+/// `error` field — e.g. `"2FA is already enabled"` or bare `"unauthorized"`,
+/// NEVER a `"{status}: {body}"`-prefixed string. The server's blanket
+/// `IntoResponse for ApiError` (`repos/server/beebeeb-api/src/error.rs:591`)
+/// wraps every case in `{"error": message}` JSON, which `parse_response`
+/// unwraps straight to that bare `message` before this function ever sees it
+/// — confirmed live: `curl … /2fa/enable` with a wrong code returned exactly
+/// `{"error":"unauthorized"}` (401), matching
+/// `ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized")`
+/// verbatim, lowercase, no prefix. Matched case-insensitively as a defensive
+/// belt (a non-JSON body — e.g. from a proxy in front of a misconfigured
+/// `--api` — would fall through `parse_response`'s `format!("{status}: ..")`
+/// path instead, which DOES carry "Unauthorized"/"401").
+fn map_enable_error(e: String) -> String {
+    if e.contains("has not been set up") {
+        "run `bb 2fa setup` first".to_string()
+    } else if e.contains("already enabled") {
+        "2FA is already enabled".to_string()
+    } else if e.to_lowercase().contains("unauthorized") || e.contains("401") {
+        "incorrect code — try again".to_string()
+    } else {
+        e
+    }
 }
 
-pub async fn verify(_partial_token: String, _code: String) -> Result<(), String> {
-    Err("bb 2fa verify — not implemented yet".to_string())
+/// Map a raw `POST /api/v1/auth/2fa/disable` error string to a user-facing
+/// message. Same pure/testable shape as `map_enable_error` — see its doc
+/// comment for the confirmed live wire format.
+fn map_disable_error(e: String) -> String {
+    if e.contains("not currently enabled") || e.contains("not set up") {
+        "2FA is not currently enabled".to_string()
+    } else if e.to_lowercase().contains("unauthorized") || e.contains("401") {
+        "incorrect code — try again".to_string()
+    } else {
+        e
+    }
+}
+
+/// The `bb 2fa enable` success line (non-json, non-quiet mode).
+fn render_enable_success() -> String {
+    use crate::colors;
+    use colored::Colorize;
+    format!(
+        "  {} 2fa is now active. you'll be asked for a code on next login.",
+        "ok".custom_color(colors::GREEN_OK)
+    )
+}
+
+/// The `bb 2fa disable` success line (non-json, non-quiet mode).
+fn render_disable_success() -> String {
+    use crate::colors;
+    use colored::Colorize;
+    format!("  {} 2fa disabled.", "ok".custom_color(colors::GREEN_OK))
+}
+
+/// `bb 2fa enable --code <6 digits>` — activates a pending `bb 2fa setup`
+/// by POSTing the live TOTP code to `POST /api/v1/auth/2fa/enable`
+/// (`ApiClient::totp_enable`). No step-up token: the code itself is the
+/// route's proof of possession (`routes/totp.rs::enable`).
+pub async fn enable(code: String) -> Result<(), String> {
+    use crate::ui;
+
+    let api = ApiClient::from_config();
+    api.require_auth()?;
+    validate_code(&code)?;
+
+    let resp = api.totp_enable(&code).await.map_err(map_enable_error)?;
+
+    if ui::is_json() {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&resp).unwrap_or_else(|_| "{}".to_string())
+        );
+    } else if !ui::is_quiet() {
+        println!("{}", render_enable_success());
+    }
+    Ok(())
+}
+
+/// `bb 2fa disable --code <6 digits>` — turns TOTP off by POSTing the live
+/// code to `POST /api/v1/auth/2fa/disable` (`ApiClient::totp_disable`).
+///
+/// **Deviation (eng-0479):** the plan describes this as "DELETE, requires
+/// step-up confirm" (like `commands::confirm::acquire_confirm_token` /
+/// `X-Confirm-Token`). The LIVE handler
+/// (`repos/server/beebeeb-api/src/routes/totp.rs::disable`, ~L155-244) takes
+/// `auth: AuthUser` + `Json<CodeRequest>` only — no
+/// `crate::confirmation::consume_confirmation_from_headers` call anywhere in
+/// that function, unlike `setup`'s step-up gate a few lines above it. The
+/// TOTP code IS the step-up proof here; sending anything beyond the code
+/// would not match what the server checks. Followed the server, not the plan.
+pub async fn disable(code: String) -> Result<(), String> {
+    use crate::ui;
+
+    let api = ApiClient::from_config();
+    api.require_auth()?;
+    validate_code(&code)?;
+
+    let resp = api.totp_disable(&code).await.map_err(map_disable_error)?;
+
+    if ui::is_json() {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&resp).unwrap_or_else(|_| "{}".to_string())
+        );
+    } else if !ui::is_quiet() {
+        println!("{}", render_disable_success());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -530,5 +656,125 @@ mod tests {
             !joined.chars().any(|c| c == '█' || c == '▄' || c == '▀' || c == '━'),
             "quiet output must not contain decorative/QR characters: {lines:?}"
         );
+    }
+
+    // ── eng-0479: `bb 2fa enable` / `bb 2fa disable` ────────────────────
+
+    #[test]
+    fn validate_code_rejects_wrong_length() {
+        assert!(validate_code("12345").is_err(), "5 digits must be rejected");
+        assert!(validate_code("1234567").is_err(), "7 digits must be rejected");
+    }
+
+    #[test]
+    fn validate_code_rejects_non_digits() {
+        assert!(validate_code("12a456").is_err(), "letters must be rejected");
+    }
+
+    #[test]
+    fn validate_code_accepts_six_digits() {
+        assert!(validate_code("000000").is_ok());
+        assert!(validate_code("654321").is_ok());
+    }
+
+    /// Live server: `routes/totp.rs::enable` → `ok_or(ApiError::BadRequest(
+    /// "2FA has not been set up yet".into()))` when no `totp_secrets` row
+    /// exists. `error.rs`'s blanket `IntoResponse for ApiError` wraps EVERY
+    /// case in `{"error": message}` (confirmed at `error.rs:591`), and
+    /// `parse_response` (api.rs) unwraps that straight to the bare message —
+    /// no `"{status}: {body}"` prefix. Confirmed live (eng-0479 manual run,
+    /// isolated HOME): a real 400 from this branch reaches the CLI as
+    /// exactly `"2FA has not been set up yet"`.
+    #[test]
+    fn map_enable_error_reports_setup_required() {
+        let mapped = map_enable_error("2FA has not been set up yet".to_string());
+        assert_eq!(mapped, "run `bb 2fa setup` first", "got: {mapped}");
+    }
+
+    /// Live server: `routes/totp.rs::enable` → `BadRequest("2FA is already
+    /// enabled")` when `totp.enabled` is already true. Confirmed live
+    /// (eng-0479 manual run): `bb 2fa enable --code 000000` on an
+    /// already-enabled account printed exactly `error: 2FA is already
+    /// enabled`, exit 1.
+    #[test]
+    fn map_enable_error_reports_already_enabled() {
+        let mapped = map_enable_error("2FA is already enabled".to_string());
+        assert_eq!(mapped, "2FA is already enabled", "got: {mapped}");
+    }
+
+    /// Live server: `verify_totp_code` → `ApiError::Unauthorized`, which
+    /// `error.rs`'s match arm renders as `(401, "unauthorized")` — wrapped to
+    /// `{"error":"unauthorized"}` and unwrapped by `parse_response` to the
+    /// bare, lowercase `"unauthorized"`. Confirmed live via raw curl
+    /// (eng-0479): `POST /2fa/enable` with a wrong code on a pending-setup
+    /// account returned exactly `{"error":"unauthorized"}`, status 401 — NOT
+    /// a `"401 Unauthorized: ..."`-prefixed string (an earlier draft of this
+    /// mapping assumed that prefix and silently failed to match; caught by
+    /// the manual exercise, not by a unit test — see task Notes).
+    #[test]
+    fn map_enable_error_reports_wrong_code_as_incorrect() {
+        let mapped = map_enable_error("unauthorized".to_string());
+        assert_eq!(mapped, "incorrect code — try again", "got: {mapped}");
+    }
+
+    /// Defensive belt: a non-JSON-body error (e.g. a proxy 401 in front of a
+    /// misconfigured `--api`) falls through `parse_response`'s
+    /// `format!("{status}: {body}")` path instead, which DOES carry the
+    /// capitalized/status-coded form — must still map correctly.
+    #[test]
+    fn map_enable_error_reports_wrong_code_as_incorrect_status_prefixed_form() {
+        let mapped = map_enable_error("401 Unauthorized: unauthorized".to_string());
+        assert_eq!(mapped, "incorrect code — try again", "got: {mapped}");
+    }
+
+    #[test]
+    fn map_enable_error_passes_through_unrecognized_errors() {
+        let mapped = map_enable_error("network failed".to_string());
+        assert_eq!(mapped, "network failed");
+    }
+
+    /// Live server: `routes/totp.rs::disable` → `ok_or(BadRequest("2FA is
+    /// not set up"))` when no row exists at all. See
+    /// `map_enable_error_reports_setup_required` for the confirmed bare-message
+    /// wire format.
+    #[test]
+    fn map_disable_error_reports_not_enabled_when_never_set_up() {
+        let mapped = map_disable_error("2FA is not set up".to_string());
+        assert_eq!(mapped, "2FA is not currently enabled", "got: {mapped}");
+    }
+
+    /// Live server: `routes/totp.rs::disable` → `BadRequest("2FA is not
+    /// currently enabled")` when a row exists but `enabled` is false.
+    /// Confirmed live (eng-0479 manual run): `bb 2fa disable --code 000000`
+    /// on a disabled account printed exactly `error: 2FA is not currently
+    /// enabled`, exit 1.
+    #[test]
+    fn map_disable_error_reports_not_enabled_when_row_disabled() {
+        let mapped = map_disable_error("2FA is not currently enabled".to_string());
+        assert_eq!(mapped, "2FA is not currently enabled", "got: {mapped}");
+    }
+
+    #[test]
+    fn map_disable_error_reports_wrong_code_as_incorrect() {
+        let mapped = map_disable_error("unauthorized".to_string());
+        assert_eq!(mapped, "incorrect code — try again", "got: {mapped}");
+    }
+
+    #[test]
+    fn map_disable_error_passes_through_unrecognized_errors() {
+        let mapped = map_disable_error("network failed".to_string());
+        assert_eq!(mapped, "network failed");
+    }
+
+    #[test]
+    fn render_enable_success_confirms_2fa_is_active() {
+        let line = render_enable_success();
+        assert!(line.contains("2fa is now active"), "line was: {line:?}");
+    }
+
+    #[test]
+    fn render_disable_success_confirms_2fa_disabled() {
+        let line = render_disable_success();
+        assert!(line.contains("2fa disabled"), "line was: {line:?}");
     }
 }
