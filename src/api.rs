@@ -288,6 +288,31 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    /// POST /api/v1/auth/2fa/setup → `{secret, qr_uri, backup_codes}`.
+    ///
+    /// NOTE the route is `/api/v1/auth/2fa/setup`, not the plan's
+    /// `/api/v1/auth/account/2fa/setup` — `repos/server/beebeeb-api/src/routes/totp.rs`
+    /// is nested at `/api/v1/auth/2fa` in `router.rs`; the CLI follows the live
+    /// server (task 0477 already documented this deviation for `status`).
+    ///
+    /// No request body: an empty body is a fresh (first-time) setup. The
+    /// server's step-up gate for an *already-enabled* account (a `code` field
+    /// in the body, or a confirmed-password header) is out of scope for this
+    /// command — `commands::twofa::setup()` refuses locally before ever
+    /// reaching this call when `bb 2fa status` already reports enabled.
+    pub async fn totp_setup(&self) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .post(self.url("/api/v1/auth/2fa/setup"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+
+        parse_response(resp).await
+    }
+
     /// Not called by any current command — reserved API surface.
     #[allow(dead_code)]
     pub async fn get_region(&self) -> Result<Value, String> {
