@@ -61,6 +61,10 @@ Account-less links that let **anyone** upload an encrypted file *into* your vaul
 
 - `bb billing show` — read-only plan, storage, and renewal info. `--json` outputs the raw API merge.
 
+### Two-factor authentication
+
+- `bb 2fa status` — TOTP enabled/disabled. Reads `totp_enabled` off `GET /api/v1/auth/me` (TOTP-specific), not `GET /api/v1/account/security-score`'s `two_factor_enabled` factor (which is `has_totp || has_passkey` — would misreport a passkey-only account). No live route exposes backup-codes-remaining or a last-verified timestamp yet, so `status` shows enabled/disabled only. `bb 2fa setup/enable/disable` are scaffolded in the clap tree (`src/commands/twofa.rs`) but not yet implemented (plan Task 10). `bb 2fa verify` is internal — exercised inside `bb login`'s handshake, not a user-facing command.
+
 ### Utilities
 
 - `bb speedtest` — benchmark network throughput + crypto speed against the API.
