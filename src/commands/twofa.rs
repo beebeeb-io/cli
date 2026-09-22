@@ -57,6 +57,12 @@ impl TwofaStatus {
     }
 }
 
+/// Render the `--quiet` line: a single, uncolored, greppable word — no hint
+/// line, matching the `quota`/`whoami` quiet-mode convention.
+fn render_status_quiet(status: TwofaStatus) -> &'static str {
+    if status.totp_enabled { "enabled" } else { "disabled" }
+}
+
 /// Render the human `bb 2fa status` lines.
 fn render_status(status: TwofaStatus) -> Vec<String> {
     use crate::colors;
@@ -86,6 +92,11 @@ pub async fn status() -> Result<(), String> {
             "{}",
             serde_json::to_string_pretty(&status.to_json()).unwrap_or_else(|_| "{}".to_string())
         );
+        return Ok(());
+    }
+
+    if ui::is_quiet() {
+        println!("{}", render_status_quiet(status));
         return Ok(());
     }
 
@@ -167,5 +178,11 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("disabled"), "line was: {:?}", lines[0]);
         assert!(lines[1].contains("bb 2fa setup"), "line was: {:?}", lines[1]);
+    }
+
+    #[test]
+    fn render_status_quiet_is_a_single_bare_word() {
+        assert_eq!(render_status_quiet(TwofaStatus { totp_enabled: true }), "enabled");
+        assert_eq!(render_status_quiet(TwofaStatus { totp_enabled: false }), "disabled");
     }
 }
