@@ -329,45 +329,89 @@ fn validate_code(code: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Map a raw `POST /api/v1/auth/2fa/enable` error string to a user-facing
-/// message. Pure and testable without a live HTTP call — mirrors
-/// `commands::confirm::map_confirm_error` / `commands::account::map_email_change_error`.
+/// Outcome of classifying a raw `2fa/enable`/`2fa/disable` error string —
+/// pure and testable without a live HTTP call, mirroring
+/// `commands::confirm::map_confirm_error` / `commands::account::map_email_change_error`
+/// EXCEPT for `AmbiguousUnauthorized`, which the caller must resolve with a
+/// live follow-up call (see `diagnose_unauthorized`).
 ///
-/// eng-0479: the raw string here is `parse_response`'s (`api.rs`) extracted
-/// `error` field — e.g. `"2FA is already enabled"` or bare `"unauthorized"`,
-/// NEVER a `"{status}: {body}"`-prefixed string. The server's blanket
-/// `IntoResponse for ApiError` (`repos/server/beebeeb-api/src/error.rs:591`)
-/// wraps every case in `{"error": message}` JSON, which `parse_response`
-/// unwraps straight to that bare `message` before this function ever sees it
-/// — confirmed live: `curl … /2fa/enable` with a wrong code returned exactly
+/// eng-0479: the raw string classified here is `parse_response`'s (`api.rs`)
+/// extracted `error` field — e.g. `"2FA is already enabled"` or bare
+/// `"unauthorized"`, NEVER a `"{status}: {body}"`-prefixed string. The
+/// server's blanket `IntoResponse for ApiError`
+/// (`repos/server/beebeeb-api/src/error.rs:591`) wraps every case in
+/// `{"error": message}` JSON, which `parse_response` unwraps straight to
+/// that bare `message` before this function ever sees it — confirmed live:
+/// `curl … /2fa/enable` with a wrong code returned exactly
 /// `{"error":"unauthorized"}` (401), matching
 /// `ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized")`
 /// verbatim, lowercase, no prefix. Matched case-insensitively as a defensive
 /// belt (a non-JSON body — e.g. from a proxy in front of a misconfigured
 /// `--api` — would fall through `parse_response`'s `format!("{status}: ..")`
 /// path instead, which DOES carry "Unauthorized"/"401").
-fn map_enable_error(e: String) -> String {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TotpErrorOutcome {
+    /// A known, final user-facing message.
+    Message(String),
+    /// The raw string was the bare `"unauthorized"`/401 shape. Codex review
+    /// (PR #19, `PRRT_kwDOSLX6I86k5ddl`) caught that this SAME body comes
+    /// from two different causes on the live server: a wrong TOTP code
+    /// (`verify_totp_code`, `routes/totp.rs`) OR a dead/expired session —
+    /// this route's own `AuthUser` extractor runs FIRST and rejects an
+    /// invalid session with the byte-identical `{"error":"unauthorized"}`
+    /// (`repos/server/beebeeb-api/src/auth.rs` ~L105:
+    /// `row_opt.ok_or(ApiError::Unauthorized)?`) before the TOTP check ever
+    /// runs. Blaming the code unconditionally would mislead a user whose
+    /// real problem is a dead session. Caller resolves via
+    /// `diagnose_unauthorized`.
+    AmbiguousUnauthorized,
+}
+
+/// Classify a raw `POST /api/v1/auth/2fa/enable` error string.
+fn classify_enable_error(e: String) -> TotpErrorOutcome {
     if e.contains("has not been set up") {
-        "run `bb 2fa setup` first".to_string()
+        TotpErrorOutcome::Message("run `bb 2fa setup` first".to_string())
     } else if e.contains("already enabled") {
-        "2FA is already enabled".to_string()
+        TotpErrorOutcome::Message("2FA is already enabled".to_string())
     } else if e.to_lowercase().contains("unauthorized") || e.contains("401") {
-        "incorrect code — try again".to_string()
+        TotpErrorOutcome::AmbiguousUnauthorized
     } else {
-        e
+        TotpErrorOutcome::Message(e)
     }
 }
 
-/// Map a raw `POST /api/v1/auth/2fa/disable` error string to a user-facing
-/// message. Same pure/testable shape as `map_enable_error` — see its doc
-/// comment for the confirmed live wire format.
-fn map_disable_error(e: String) -> String {
+/// Classify a raw `POST /api/v1/auth/2fa/disable` error string. Same
+/// pure/testable shape as `classify_enable_error` — see its doc comment for
+/// the confirmed live wire format and the ambiguous-unauthorized rationale.
+fn classify_disable_error(e: String) -> TotpErrorOutcome {
     if e.contains("not currently enabled") || e.contains("not set up") {
-        "2FA is not currently enabled".to_string()
+        TotpErrorOutcome::Message("2FA is not currently enabled".to_string())
     } else if e.to_lowercase().contains("unauthorized") || e.contains("401") {
-        "incorrect code — try again".to_string()
+        TotpErrorOutcome::AmbiguousUnauthorized
     } else {
-        e
+        TotpErrorOutcome::Message(e)
+    }
+}
+
+/// Resolve `TotpErrorOutcome::AmbiguousUnauthorized` with a live follow-up
+/// call. `GET /api/v1/auth/me` runs through the exact same `AuthUser`
+/// extractor as `/2fa/enable`/`/2fa/disable` — if IT also fails, the session
+/// itself is the problem (dead/expired/revoked), not the 6-digit code; if it
+/// succeeds, the session is alive and the code really was wrong. One extra
+/// request, but only on the already-slow error path — never on success.
+async fn diagnose_unauthorized(api: &ApiClient) -> String {
+    match api.get_me().await {
+        Ok(_) => "incorrect code — try again".to_string(),
+        Err(_) => "your session has expired — run `bb login` again".to_string(),
+    }
+}
+
+/// Resolve a `TotpErrorOutcome` to the final user-facing message, calling
+/// `diagnose_unauthorized` only for the ambiguous case.
+async fn resolve_totp_error(api: &ApiClient, outcome: TotpErrorOutcome) -> String {
+    match outcome {
+        TotpErrorOutcome::Message(msg) => msg,
+        TotpErrorOutcome::AmbiguousUnauthorized => diagnose_unauthorized(api).await,
     }
 }
 
@@ -399,7 +443,10 @@ pub async fn enable(code: String) -> Result<(), String> {
     api.require_auth()?;
     validate_code(&code)?;
 
-    let resp = api.totp_enable(&code).await.map_err(map_enable_error)?;
+    let resp = match api.totp_enable(&code).await {
+        Ok(resp) => resp,
+        Err(e) => return Err(resolve_totp_error(&api, classify_enable_error(e)).await),
+    };
 
     if ui::is_json() {
         println!(
@@ -431,7 +478,10 @@ pub async fn disable(code: String) -> Result<(), String> {
     api.require_auth()?;
     validate_code(&code)?;
 
-    let resp = api.totp_disable(&code).await.map_err(map_disable_error)?;
+    let resp = match api.totp_disable(&code).await {
+        Ok(resp) => resp,
+        Err(e) => return Err(resolve_totp_error(&api, classify_disable_error(e)).await),
+    };
 
     if ui::is_json() {
         println!(
@@ -686,9 +736,13 @@ mod tests {
     /// isolated HOME): a real 400 from this branch reaches the CLI as
     /// exactly `"2FA has not been set up yet"`.
     #[test]
-    fn map_enable_error_reports_setup_required() {
-        let mapped = map_enable_error("2FA has not been set up yet".to_string());
-        assert_eq!(mapped, "run `bb 2fa setup` first", "got: {mapped}");
+    fn classify_enable_error_reports_setup_required() {
+        let outcome = classify_enable_error("2FA has not been set up yet".to_string());
+        assert_eq!(
+            outcome,
+            TotpErrorOutcome::Message("run `bb 2fa setup` first".to_string()),
+            "got: {outcome:?}"
+        );
     }
 
     /// Live server: `routes/totp.rs::enable` → `BadRequest("2FA is already
@@ -697,9 +751,13 @@ mod tests {
     /// already-enabled account printed exactly `error: 2FA is already
     /// enabled`, exit 1.
     #[test]
-    fn map_enable_error_reports_already_enabled() {
-        let mapped = map_enable_error("2FA is already enabled".to_string());
-        assert_eq!(mapped, "2FA is already enabled", "got: {mapped}");
+    fn classify_enable_error_reports_already_enabled() {
+        let outcome = classify_enable_error("2FA is already enabled".to_string());
+        assert_eq!(
+            outcome,
+            TotpErrorOutcome::Message("2FA is already enabled".to_string()),
+            "got: {outcome:?}"
+        );
     }
 
     /// Live server: `verify_totp_code` → `ApiError::Unauthorized`, which
@@ -709,38 +767,45 @@ mod tests {
     /// (eng-0479): `POST /2fa/enable` with a wrong code on a pending-setup
     /// account returned exactly `{"error":"unauthorized"}`, status 401 — NOT
     /// a `"401 Unauthorized: ..."`-prefixed string (an earlier draft of this
-    /// mapping assumed that prefix and silently failed to match; caught by
-    /// the manual exercise, not by a unit test — see task Notes).
+    /// classification assumed that prefix and silently failed to match;
+    /// caught by the manual exercise, not by a unit test — see task Notes).
+    /// This is the AMBIGUOUS case (Codex PR #19 finding
+    /// `PRRT_kwDOSLX6I86k5ddl`) — the classifier does NOT resolve it to a
+    /// final message; see `diagnose_unauthorized_*` below for that.
     #[test]
-    fn map_enable_error_reports_wrong_code_as_incorrect() {
-        let mapped = map_enable_error("unauthorized".to_string());
-        assert_eq!(mapped, "incorrect code — try again", "got: {mapped}");
+    fn classify_enable_error_reports_ambiguous_on_bare_unauthorized() {
+        let outcome = classify_enable_error("unauthorized".to_string());
+        assert_eq!(outcome, TotpErrorOutcome::AmbiguousUnauthorized, "got: {outcome:?}");
     }
 
     /// Defensive belt: a non-JSON-body error (e.g. a proxy 401 in front of a
     /// misconfigured `--api`) falls through `parse_response`'s
     /// `format!("{status}: {body}")` path instead, which DOES carry the
-    /// capitalized/status-coded form — must still map correctly.
+    /// capitalized/status-coded form — must still classify as ambiguous.
     #[test]
-    fn map_enable_error_reports_wrong_code_as_incorrect_status_prefixed_form() {
-        let mapped = map_enable_error("401 Unauthorized: unauthorized".to_string());
-        assert_eq!(mapped, "incorrect code — try again", "got: {mapped}");
+    fn classify_enable_error_reports_ambiguous_on_status_prefixed_form() {
+        let outcome = classify_enable_error("401 Unauthorized: unauthorized".to_string());
+        assert_eq!(outcome, TotpErrorOutcome::AmbiguousUnauthorized, "got: {outcome:?}");
     }
 
     #[test]
-    fn map_enable_error_passes_through_unrecognized_errors() {
-        let mapped = map_enable_error("network failed".to_string());
-        assert_eq!(mapped, "network failed");
+    fn classify_enable_error_passes_through_unrecognized_errors() {
+        let outcome = classify_enable_error("network failed".to_string());
+        assert_eq!(outcome, TotpErrorOutcome::Message("network failed".to_string()));
     }
 
     /// Live server: `routes/totp.rs::disable` → `ok_or(BadRequest("2FA is
     /// not set up"))` when no row exists at all. See
-    /// `map_enable_error_reports_setup_required` for the confirmed bare-message
-    /// wire format.
+    /// `classify_enable_error_reports_setup_required` for the confirmed
+    /// bare-message wire format.
     #[test]
-    fn map_disable_error_reports_not_enabled_when_never_set_up() {
-        let mapped = map_disable_error("2FA is not set up".to_string());
-        assert_eq!(mapped, "2FA is not currently enabled", "got: {mapped}");
+    fn classify_disable_error_reports_not_enabled_when_never_set_up() {
+        let outcome = classify_disable_error("2FA is not set up".to_string());
+        assert_eq!(
+            outcome,
+            TotpErrorOutcome::Message("2FA is not currently enabled".to_string()),
+            "got: {outcome:?}"
+        );
     }
 
     /// Live server: `routes/totp.rs::disable` → `BadRequest("2FA is not
@@ -749,21 +814,25 @@ mod tests {
     /// on a disabled account printed exactly `error: 2FA is not currently
     /// enabled`, exit 1.
     #[test]
-    fn map_disable_error_reports_not_enabled_when_row_disabled() {
-        let mapped = map_disable_error("2FA is not currently enabled".to_string());
-        assert_eq!(mapped, "2FA is not currently enabled", "got: {mapped}");
+    fn classify_disable_error_reports_not_enabled_when_row_disabled() {
+        let outcome = classify_disable_error("2FA is not currently enabled".to_string());
+        assert_eq!(
+            outcome,
+            TotpErrorOutcome::Message("2FA is not currently enabled".to_string()),
+            "got: {outcome:?}"
+        );
     }
 
     #[test]
-    fn map_disable_error_reports_wrong_code_as_incorrect() {
-        let mapped = map_disable_error("unauthorized".to_string());
-        assert_eq!(mapped, "incorrect code — try again", "got: {mapped}");
+    fn classify_disable_error_reports_ambiguous_on_bare_unauthorized() {
+        let outcome = classify_disable_error("unauthorized".to_string());
+        assert_eq!(outcome, TotpErrorOutcome::AmbiguousUnauthorized, "got: {outcome:?}");
     }
 
     #[test]
-    fn map_disable_error_passes_through_unrecognized_errors() {
-        let mapped = map_disable_error("network failed".to_string());
-        assert_eq!(mapped, "network failed");
+    fn classify_disable_error_passes_through_unrecognized_errors() {
+        let outcome = classify_disable_error("network failed".to_string());
+        assert_eq!(outcome, TotpErrorOutcome::Message("network failed".to_string()));
     }
 
     #[test]
@@ -776,5 +845,52 @@ mod tests {
     fn render_disable_success_confirms_2fa_disabled() {
         let line = render_disable_success();
         assert!(line.contains("2fa disabled"), "line was: {line:?}");
+    }
+
+    // ── eng-0479 code-review fix (Codex PR #19, `PRRT_kwDOSLX6I86k5ddl`):
+    // `diagnose_unauthorized` disambiguates a dead session from a wrong code
+    // via a live `GET /api/v1/auth/me` follow-up call, through the SAME
+    // in-process axum mock pattern `api.rs`'s test modules use. ───────────
+
+    async fn spawn_me_mock(status: axum::http::StatusCode, body: serde_json::Value) -> String {
+        let app = axum::Router::new().route(
+            "/api/v1/auth/me",
+            axum::routing::get(move || {
+                let body = body.clone();
+                async move { (status, axum::Json(body)) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn diagnose_unauthorized_blames_the_code_when_the_session_is_alive() {
+        let url = spawn_me_mock(
+            axum::http::StatusCode::OK,
+            json!({ "email": "a@b.com", "totp_enabled": false }),
+        )
+        .await;
+        let api = ApiClient::new_for_test(url);
+        let msg = diagnose_unauthorized(&api).await;
+        assert_eq!(
+            msg, "incorrect code — try again",
+            "a live session (GET /auth/me succeeded) must blame the code, not the session"
+        );
+    }
+
+    #[tokio::test]
+    async fn diagnose_unauthorized_blames_the_session_when_it_is_dead() {
+        let url = spawn_me_mock(axum::http::StatusCode::UNAUTHORIZED, json!({ "error": "unauthorized" })).await;
+        let api = ApiClient::new_for_test(url);
+        let msg = diagnose_unauthorized(&api).await;
+        assert_eq!(
+            msg, "your session has expired — run `bb login` again",
+            "a dead session (GET /auth/me ALSO 401s) must not be blamed on the code"
+        );
     }
 }

@@ -63,7 +63,9 @@ Account-less links that let **anyone** upload an encrypted file *into* your vaul
 
 ### Two-factor authentication
 
-- `bb 2fa status` — TOTP enabled/disabled. Reads `totp_enabled` off `GET /api/v1/auth/me` (TOTP-specific), not `GET /api/v1/account/security-score`'s `two_factor_enabled` factor (which is `has_totp || has_passkey` — would misreport a passkey-only account). No live route exposes backup-codes-remaining or a last-verified timestamp yet, so `status` shows enabled/disabled only. `bb 2fa setup/enable/disable` are scaffolded in the clap tree (`src/commands/twofa.rs`) but not yet implemented (plan Task 10). `bb 2fa verify` is internal — exercised inside `bb login`'s handshake, not a user-facing command.
+- `bb 2fa status` — TOTP enabled/disabled. Reads `totp_enabled` off `GET /api/v1/auth/me` (TOTP-specific), not `GET /api/v1/account/security-score`'s `two_factor_enabled` factor (which is `has_totp || has_passkey` — would misreport a passkey-only account). No live route exposes backup-codes-remaining or a last-verified timestamp yet, so `status` shows enabled/disabled only.
+- `bb 2fa setup` — begins setup, prints the QR/secret/backup codes (`src/commands/twofa.rs`, task 0478). `bb 2fa enable --code <6 digits>` activates it; `bb 2fa disable --code <6 digits>` turns it off (task 0479) — both POST only the code, no step-up token (the live server routes enforce the code alone, not the plan's assumed `X-Confirm-Token`).
+- `bb 2fa verify` **does not exist** — removed from the clap tree (task 0479). The live `POST /api/v1/auth/2fa/verify` is the login-time `{partial_token, code}` exchange, but `bb login`'s browser handshake never produces a partial token, so there was no CLI caller for it.
 
 ### Utilities
 
