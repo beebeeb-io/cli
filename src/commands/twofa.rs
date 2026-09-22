@@ -59,19 +59,50 @@ pub struct TwofaSetup {
 }
 
 impl TwofaSetup {
-    /// Parse from the raw `POST /api/v1/auth/2fa/setup` JSON body. Missing
-    /// or wrong-typed fields default to empty — fail closed, never fabricate
-    /// a secret, QR URI, or backup code the server didn't actually send.
-    pub fn from_setup_response(resp: &Value) -> Self {
-        Self {
-            secret: resp.get("secret").and_then(Value::as_str).unwrap_or("").to_string(),
-            qr_uri: resp.get("qr_uri").and_then(Value::as_str).unwrap_or("").to_string(),
-            backup_codes: resp
-                .get("backup_codes")
-                .and_then(Value::as_array)
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_default(),
+    /// Parse from the raw `POST /api/v1/auth/2fa/setup` JSON body.
+    ///
+    /// Unlike `TwofaStatus::from_me_response` (where a missing/wrong-typed
+    /// boolean safely defaults to "disabled"), there is no safe default for
+    /// a missing secret, QR URI, or backup code: a 2xx response with schema
+    /// skew or a server regression must NOT turn into a "successful" setup
+    /// with an empty/incomplete credential the user can't actually use to
+    /// enable 2FA. Every field is REQUIRED and non-empty, and every backup
+    /// code must be a non-empty string — anything else is a hard `Err`.
+    pub fn from_setup_response(resp: &Value) -> Result<Self, String> {
+        let secret = resp
+            .get("secret")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "2fa setup response is missing a secret".to_string())?
+            .to_string();
+
+        let qr_uri = resp
+            .get("qr_uri")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "2fa setup response is missing a qr_uri".to_string())?
+            .to_string();
+
+        let raw_codes = resp
+            .get("backup_codes")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "2fa setup response is missing backup_codes".to_string())?;
+        if raw_codes.is_empty() {
+            return Err("2fa setup response carried zero backup codes".to_string());
         }
+        let mut backup_codes = Vec::with_capacity(raw_codes.len());
+        for (i, v) in raw_codes.iter().enumerate() {
+            match v.as_str().filter(|s| !s.is_empty()) {
+                Some(s) => backup_codes.push(s.to_string()),
+                None => return Err(format!("2fa setup response's backup_codes[{i}] is missing or empty")),
+            }
+        }
+
+        Ok(Self {
+            secret,
+            qr_uri,
+            backup_codes,
+        })
     }
 
     /// Reserialize to the exact `--json` contract: `{secret, qr_uri,
@@ -151,6 +182,17 @@ pub async fn status() -> Result<(), String> {
         println!("{line}");
     }
     Ok(())
+}
+
+/// Render the `--quiet` lines for `bb 2fa setup`: bare, uncolored, one value
+/// per line — the secret, then each backup code — matching the
+/// `quota`/`share` quiet-mode convention (greppable values, no decoration,
+/// no hint line). No ASCII QR (a decorative block, not a bare value).
+fn render_setup_quiet(setup: &TwofaSetup) -> Vec<String> {
+    let mut lines = Vec::with_capacity(1 + setup.backup_codes.len());
+    lines.push(setup.secret.clone());
+    lines.extend(setup.backup_codes.iter().cloned());
+    lines
 }
 
 /// Render the human `bb 2fa setup` lines: the ASCII QR block, the secret,
@@ -241,13 +283,20 @@ pub async fn setup() -> Result<(), String> {
     }
 
     let resp = api.totp_setup().await?;
-    let setup = TwofaSetup::from_setup_response(&resp);
+    let setup = TwofaSetup::from_setup_response(&resp)?;
 
     if ui::is_json() {
         println!(
             "{}",
             serde_json::to_string_pretty(&setup.to_json()).unwrap_or_else(|_| "{}".to_string())
         );
+        return Ok(());
+    }
+
+    if ui::is_quiet() {
+        for line in render_setup_quiet(&setup) {
+            println!("{line}");
+        }
         return Ok(());
     }
 
@@ -347,7 +396,7 @@ mod tests {
 
     #[test]
     fn from_setup_response_parses_the_live_server_shape() {
-        let parsed = TwofaSetup::from_setup_response(&setup_fixture());
+        let parsed = TwofaSetup::from_setup_response(&setup_fixture()).expect("valid fixture must parse");
         assert_eq!(
             parsed,
             TwofaSetup {
@@ -369,7 +418,7 @@ mod tests {
 
     #[test]
     fn to_json_round_trips_exactly_secret_qr_uri_backup_codes() {
-        let parsed = TwofaSetup::from_setup_response(&setup_fixture());
+        let parsed = TwofaSetup::from_setup_response(&setup_fixture()).expect("valid fixture must parse");
         assert_eq!(
             parsed.to_json(),
             json!({
@@ -382,7 +431,7 @@ mod tests {
 
     #[test]
     fn render_setup_contains_secret_qr_block_all_codes_and_enable_hint() {
-        let parsed = TwofaSetup::from_setup_response(&setup_fixture());
+        let parsed = TwofaSetup::from_setup_response(&setup_fixture()).expect("valid fixture must parse");
         let lines = render_setup(&parsed);
         let joined = lines.join("\n");
 
@@ -407,6 +456,79 @@ mod tests {
         assert!(
             joined.contains("bb 2fa enable"),
             "missing the `bb 2fa enable` next-step hint:\n{joined}"
+        );
+    }
+
+    // ── eng-0478 code-review fixes (Codex PR #18) ───────────────────────
+
+    #[test]
+    fn from_setup_response_rejects_a_missing_secret() {
+        // A 2xx with schema skew (secret dropped/renamed) must be a hard
+        // error, never a "successful" setup with an empty secret the user
+        // can't actually use (Codex PRRT_kwDOSLX6I86k4hWV).
+        let mut resp = setup_fixture();
+        resp.as_object_mut().unwrap().remove("secret");
+        let err = TwofaSetup::from_setup_response(&resp).expect_err("missing secret must be rejected");
+        assert!(err.contains("secret"), "error should mention the missing field: {err}");
+    }
+
+    #[test]
+    fn from_setup_response_rejects_an_empty_qr_uri() {
+        let mut resp = setup_fixture();
+        resp["qr_uri"] = json!("");
+        let err = TwofaSetup::from_setup_response(&resp).expect_err("empty qr_uri must be rejected");
+        assert!(err.contains("qr_uri"), "error should mention the missing field: {err}");
+    }
+
+    #[test]
+    fn from_setup_response_rejects_missing_backup_codes() {
+        let mut resp = setup_fixture();
+        resp.as_object_mut().unwrap().remove("backup_codes");
+        let err = TwofaSetup::from_setup_response(&resp).expect_err("missing backup_codes must be rejected");
+        assert!(err.contains("backup"), "error should mention backup codes: {err}");
+    }
+
+    #[test]
+    fn from_setup_response_rejects_an_empty_backup_codes_list() {
+        let mut resp = setup_fixture();
+        resp["backup_codes"] = json!([]);
+        let err = TwofaSetup::from_setup_response(&resp).expect_err("empty backup_codes must be rejected");
+        assert!(err.contains("backup"), "error should mention backup codes: {err}");
+    }
+
+    #[test]
+    fn from_setup_response_rejects_a_non_string_backup_code() {
+        // A partially-malformed list (e.g. one code came back as `null` due
+        // to server-side truncation) must not silently drop that entry and
+        // hand the user an incomplete recovery-code list — reject the whole
+        // response instead.
+        let mut resp = setup_fixture();
+        resp["backup_codes"] = json!(["81720394", null, "56213409"]);
+        let err = TwofaSetup::from_setup_response(&resp).expect_err("a non-string backup code must be rejected");
+        assert!(err.contains("backup"), "error should mention backup codes: {err}");
+    }
+
+    #[test]
+    fn render_setup_quiet_is_bare_secret_and_codes_no_decoration() {
+        let parsed = TwofaSetup::from_setup_response(&setup_fixture()).expect("valid fixture must parse");
+        let lines = render_setup_quiet(&parsed);
+
+        assert_eq!(lines[0], parsed.secret, "first line should be the bare secret");
+        assert_eq!(
+            lines.len(),
+            1 + parsed.backup_codes.len(),
+            "should be exactly secret + one line per backup code, no decoration: {lines:?}"
+        );
+        for code in &parsed.backup_codes {
+            assert!(
+                lines.contains(code),
+                "missing backup code {code} in quiet output: {lines:?}"
+            );
+        }
+        let joined = lines.join("\n");
+        assert!(
+            !joined.chars().any(|c| c == '█' || c == '▄' || c == '▀' || c == '━'),
+            "quiet output must not contain decorative/QR characters: {lines:?}"
         );
     }
 }
