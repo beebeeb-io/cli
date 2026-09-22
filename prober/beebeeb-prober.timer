@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Beebeeb vault upload canary hourly
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=300
+Persistent=true
+Unit=beebeeb-prober.service
+
+[Install]
+WantedBy=timers.target

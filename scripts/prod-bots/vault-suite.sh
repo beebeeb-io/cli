@@ -9,6 +9,45 @@
 # PASSWORD/RECOVERY_PHRASE, optional BB_BOTS_DISABLED, API_BASE_URL.
 set -euo pipefail
 
+# Heartbeat for the Prometheus node_exporter textfile collector. Only written
+# when PROM_TEXTFILE_DIR is set, so the GitHub `workflow_dispatch` path is
+# byte-for-byte unchanged. Mirrors the pg_backup_last_success_timestamp
+# pattern that backs the BackupStale alert.
+VAULT_STARTED_AT="$(date +%s)"
+write_heartbeat() {
+  local code="$1"
+  [ -n "${PROM_TEXTFILE_DIR:-}" ] || return 0
+  local out="$PROM_TEXTFILE_DIR/bb_prodbot_vault.prom"
+  local tmp="$out.$$"
+  {
+    echo "# HELP bb_prodbot_vault_last_run_timestamp Unix time the vault suite last started."
+    echo "# TYPE bb_prodbot_vault_last_run_timestamp gauge"
+    echo "bb_prodbot_vault_last_run_timestamp $VAULT_STARTED_AT"
+    echo "# HELP bb_prodbot_vault_last_exit_code Exit code of the last vault suite run."
+    echo "# TYPE bb_prodbot_vault_last_exit_code gauge"
+    echo "bb_prodbot_vault_last_exit_code $code"
+    if [ "$code" = "0" ]; then
+      echo "# HELP bb_prodbot_vault_last_success_timestamp Unix time the vault suite last passed."
+      echo "# TYPE bb_prodbot_vault_last_success_timestamp gauge"
+      echo "bb_prodbot_vault_last_success_timestamp $(date +%s)"
+    elif [ -f "$out" ]; then
+      grep '^bb_prodbot_vault_last_success_timestamp' "$out" 2>/dev/null || true
+      grep '^# HELP bb_prodbot_vault_last_success_timestamp' "$out" 2>/dev/null || true
+      grep '^# TYPE bb_prodbot_vault_last_success_timestamp' "$out" 2>/dev/null || true
+    fi
+  } > "$tmp"
+  mv "$tmp" "$out"
+}
+# Registered here (before the BB_BOTS_DISABLED early-exit below) so the
+# disabled/kill-switch path also refreshes the heartbeat — see the deviation
+# note in this task's notes: registering it only at the WORK= trap below (as
+# the plan's literal text places it) means the BB_BOTS_DISABLED=1 exit at
+# line ~43 runs before any EXIT trap exists, so write_heartbeat never fires
+# and the heartbeat goes stale during an intentional pause, contradicting
+# this same commit's README ("the heartbeat stays fresh, so no alert fires").
+# $WORK does not exist yet on this path, so guard it.
+trap 'code=$?; [ -n "${WORK:-}" ] && rm -rf "$WORK"; write_heartbeat "$code"' EXIT
+
 if [[ "${BB_BOTS_DISABLED:-}" == "1" || "${BB_BOTS_DISABLED:-}" == "true" ]]; then
   echo "vault-suite: BB_BOTS_DISABLED set — skipping."; exit 0
 fi
@@ -23,7 +62,9 @@ mkdir -p "$EVIDENCE_DIR"
 
 WORK="$(mktemp -d)"
 cleanup_ids=()
-trap 'rm -rf "$WORK"' EXIT
+# Cleanup + heartbeat trap already registered above (before the disabled
+# check) so it covers every exit path; WORK now being set is handled by that
+# trap's guard.
 
 echo "== vault-suite : login"
 echo "   api: $API_BASE_URL  user: $BOT_PROBE_1_EMAIL"
