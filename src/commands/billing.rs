@@ -422,6 +422,19 @@ pub async fn invoices(open: Option<String>) -> Result<(), String> {
         return Ok(());
     }
 
+    if ui::is_quiet() {
+        // No headers, no summary line, no color — same convention as
+        // `passkey list`/`sessions list`'s quiet branch: one bare, stable
+        // field per line, safe for xargs/mapfile. The invoice id is what
+        // `--open <id>` consumes, so a quiet-mode pipeline
+        // (`bb --quiet billing invoices | xargs -n1 bb billing invoices
+        // --open`) composes directly (Codex review, PR #27).
+        for line in render_quiet_invoices(&invoices) {
+            println!("{line}");
+        }
+        return Ok(());
+    }
+
     if invoices.is_empty() {
         println!("  {}", "no invoices yet".custom_color(crate::colors::INK_DIM));
         return Ok(());
@@ -463,9 +476,7 @@ async fn open_invoice_pdf(api: &ApiClient, invoices: &[Value], input: &str) -> R
         .to_string();
 
     let pdf_bytes = api.download_invoice_pdf(&resolved_id).await?;
-    let filename = format!("{}.pdf", sanitize_filename(&number));
-    let path = std::env::temp_dir().join(filename);
-    std::fs::write(&path, &pdf_bytes).map_err(|e| format!("failed to save invoice pdf: {e}"))?;
+    let path = write_private_temp_pdf(&number, &pdf_bytes)?;
 
     if !crate::env_detect::is_headless() {
         let _ = open::that(&path);
@@ -485,6 +496,17 @@ async fn open_invoice_pdf(api: &ApiClient, invoices: &[Value], input: &str) -> R
         println!("Invoice saved: {}", path.display());
     }
     Ok(())
+}
+
+/// `--quiet` rendering: one bare invoice id per line, no header, no summary,
+/// no color. Mirrors `commands::passkey::render_quiet` /
+/// `commands::sessions::render_quiet` — the repo's established
+/// quiet-list-mode convention (Codex review, PR #27).
+fn render_quiet_invoices(invoices: &[Value]) -> Vec<String> {
+    invoices
+        .iter()
+        .map(|inv| inv.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string())
+        .collect()
 }
 
 /// Build one invoice table row from a raw `GET /billing/invoices` entry.
@@ -601,6 +623,49 @@ fn sanitize_filename(s: &str) -> String {
             }
         })
         .collect()
+}
+
+/// Write `bytes` to a fresh, private, collision-safe file under the OS temp
+/// dir and return its path.
+///
+/// **Security (Codex review, PR #27 P1).** The OS temp dir is commonly
+/// world-writable and shared across accounts (`/tmp` on most Unix hosts). The
+/// original version wrote to a PREDICTABLE `<invoice number>.pdf` path with a
+/// plain `std::fs::write`, which (a) follows an existing symlink at that path
+/// instead of refusing, letting another local account pre-plant a symlink to
+/// truncate a victim-writable file the CLI process can write to, and (b)
+/// creates the file at the process umask — typically world-readable `0644` —
+/// letting another local account read the persisted VAT invoice PDF.
+///
+/// Fixed by generating an UNPREDICTABLE filename (a random UUID suffix, so
+/// there is no fixed path to pre-plant a symlink at) and opening it with
+/// `create_new(true)` (`O_CREAT | O_EXCL` — refuses if anything, including a
+/// symlink, already exists at the path; never follows) and, on Unix, mode
+/// `0o600` (owner read/write only, applied by the kernel through the umask —
+/// `0o600 & !umask` stays `0o600` under any typical `022`/`077` umask since
+/// those only ever clear group/other bits that are already zero).
+fn write_private_temp_pdf(stem: &str, bytes: &[u8]) -> Result<std::path::PathBuf, String> {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    let unique = uuid::Uuid::new_v4().simple().to_string();
+    let filename = format!("{}-{}.pdf", sanitize_filename(stem), &unique[..8]);
+    let path = std::env::temp_dir().join(filename);
+
+    let mut opts = OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+
+    let mut file = opts
+        .open(&path)
+        .map_err(|e| format!("failed to create invoice pdf file at {}: {e}", path.display()))?;
+    file.write_all(bytes)
+        .map_err(|e| format!("failed to write invoice pdf: {e}"))?;
+    Ok(path)
 }
 
 pub async fn portal() -> Result<(), String> {
@@ -1026,6 +1091,116 @@ mod tests {
     fn sanitize_filename_replaces_non_ascii_alnum_characters() {
         assert_eq!(sanitize_filename("BB-2026_0001"), "BB-2026_0001");
         assert_eq!(sanitize_filename("BB/2026 0001"), "BB_2026_0001");
+    }
+
+    // ── render_quiet_invoices / write_private_temp_pdf (Codex review, PR #27) ──
+
+    #[test]
+    fn render_quiet_invoices_emits_one_bare_id_per_line() {
+        let invoices = vec![
+            sample_invoice(),
+            json!({ "id": "22222222-2222-2222-2222-222222222222", "number": "BB-2026-0002" }),
+        ];
+        let lines = render_quiet_invoices(&invoices);
+        assert_eq!(lines.len(), 2, "one line per invoice, no header, no summary: {lines:?}");
+        assert_eq!(lines[0], "11111111-1111-1111-1111-111111111111");
+        assert_eq!(lines[1], "22222222-2222-2222-2222-222222222222");
+    }
+
+    #[test]
+    fn render_quiet_invoices_lines_are_single_whitespace_free_tokens() {
+        let invoices = vec![sample_invoice()];
+        for line in render_quiet_invoices(&invoices) {
+            assert!(
+                !line.contains(char::is_whitespace),
+                "quiet line must be one token, safe for xargs/mapfile: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_quiet_invoices_on_empty_list_emits_no_lines() {
+        assert_eq!(render_quiet_invoices(&[]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn write_private_temp_pdf_writes_the_exact_bytes_and_returns_a_pdf_path() {
+        let path = write_private_temp_pdf("BB-2026-0001", b"%PDF-1.4 fake").unwrap();
+        assert!(
+            path.extension().and_then(|e| e.to_str()) == Some("pdf"),
+            "path was: {path:?}"
+        );
+        let written = std::fs::read(&path).unwrap();
+        assert_eq!(written, b"%PDF-1.4 fake");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn write_private_temp_pdf_never_collides_across_repeated_calls_for_the_same_invoice() {
+        // The predictable-path bug this fixes (P1, PR #27) meant calling
+        // `--open` twice for the SAME invoice number wrote to the identical
+        // path each time. Two calls with the same stem must now produce two
+        // DIFFERENT paths (the random suffix), not a collision/overwrite.
+        let path1 = write_private_temp_pdf("BB-2026-0001", b"one").unwrap();
+        let path2 = write_private_temp_pdf("BB-2026-0001", b"two").unwrap();
+        assert_ne!(path1, path2, "repeated calls for the same invoice must not collide");
+        assert_eq!(std::fs::read(&path1).unwrap(), b"one");
+        assert_eq!(std::fs::read(&path2).unwrap(), b"two");
+        let _ = std::fs::remove_file(&path1);
+        let _ = std::fs::remove_file(&path2);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_private_temp_pdf_is_owner_only_mode_0600_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = write_private_temp_pdf("BB-2026-0001", b"x").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "invoice pdf must be owner-only (0600), was {:o} — world/group-readable on a shared temp dir leaks the VAT invoice",
+            mode & 0o777
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_private_temp_pdf_refuses_to_follow_an_existing_symlink_at_the_target_path() {
+        // Simulate the attack this fixes: pre-plant a symlink at the exact
+        // path `write_private_temp_pdf` would use, pointing at a file the
+        // "victim" (this test) does NOT want truncated. create_new(true)
+        // must refuse (O_EXCL semantics) rather than follow the symlink.
+        use std::os::unix::fs::symlink;
+
+        let victim = std::env::temp_dir().join(format!("bb-0487-victim-{}.txt", uuid::Uuid::new_v4().simple()));
+        std::fs::write(&victim, b"do not touch").unwrap();
+
+        // Reproduce the exact filename write_private_temp_pdf would compute
+        // for a fixed, attacker-guessable stem + a KNOWN random suffix by
+        // pre-computing it is impossible (that's the whole point of the
+        // fix) — so instead this test proves the underlying OS-level
+        // mechanism directly: create_new(true) against a path that is
+        // ALREADY a symlink must error, never follow it.
+        let trap_path = std::env::temp_dir().join(format!("bb-0487-trap-{}.pdf", uuid::Uuid::new_v4().simple()));
+        symlink(&victim, &trap_path).unwrap();
+
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        let result = opts.open(&trap_path);
+        assert!(
+            result.is_err(),
+            "create_new(true) must refuse an existing symlink, not follow it and overwrite the victim file"
+        );
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"do not touch",
+            "the victim file must be untouched"
+        );
+
+        let _ = std::fs::remove_file(&trap_path);
+        let _ = std::fs::remove_file(&victim);
     }
 
     #[test]
