@@ -17,6 +17,7 @@ pub mod request;
 pub mod restore;
 pub mod rm;
 pub mod search;
+pub mod sessions;
 pub mod share;
 pub mod speedtest;
 pub mod status;
