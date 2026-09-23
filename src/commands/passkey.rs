@@ -67,9 +67,22 @@
 //! `revoke_all_others_may_proceed_without_prompt`).** Removing a passkey is
 //! irreversible from this CLI's perspective (no `bb passkey un-remove`), so
 //! an output-format flag must not double as consent: on a rich/interactive
-//! terminal without `--yes`, this prompts `y/N`; in `--json`/`--quiet`/
-//! non-TTY without `--yes`, this refuses outright rather than silently
-//! proceeding. See `remove_may_proceed_without_prompt`.
+//! terminal (`--json`/`--quiet` unset **and** stdin is a real tty — see
+//! `stdin_is_tty` below) without `--yes`, this prompts `y/N`; otherwise
+//! without `--yes`, this refuses outright rather than silently proceeding.
+//! See `remove_may_proceed_without_prompt`.
+//!
+//! **Fix (Codex review, PR #24) — a piped/redirected stdin is not
+//! interactive.** `ui::is_rich()` alone only reflects the absence of
+//! `--json`/`--quiet`; it does not check whether stdin is an actual
+//! terminal. The first version of this command passed `ui::is_rich()`
+//! straight through, so `echo y | bb passkey remove <id>` (no `--yes`)
+//! reached the `y/N` prompt, consumed the piped `y`, and removed the
+//! passkey — bypassing the explicit-`--yes` requirement this refuse-path
+//! exists to enforce. `remove()` now ANDs `ui::is_rich()` with
+//! `stdin_is_tty()` (the existing `std::io::IsTerminal` idiom from
+//! `commands::sync`/`commands::pull`, applied to stdin instead of stdout)
+//! before deciding whether to prompt.
 //!
 //! ## `add` — browser handoff (0483)
 //!
@@ -458,9 +471,29 @@ fn remove_may_proceed_without_prompt(yes: bool, is_rich: bool) -> Result<bool, S
     Ok(false)
 }
 
+/// Whether stdin is an actual terminal, not a pipe/redirect. `ui::is_rich()`
+/// alone only reflects the absence of `--json`/`--quiet` — it says nothing
+/// about whether there is a human on the other end of stdin to answer a
+/// prompt. Without this check, a non-interactive invocation like
+/// `echo y | bb passkey remove <id>` (no `--yes`) would reach
+/// `confirm_remove`, consume the piped `y`, and remove the passkey —
+/// silently bypassing the explicit-`--yes` requirement the refuse-path
+/// exists to enforce (Codex review, PR #24). Same `std::io::IsTerminal`
+/// idiom already used for stdout in `commands::sync`/`commands::pull`
+/// (`ui::is_rich() && std::io::stdout().is_terminal()`), applied to stdin
+/// here since stdin is the stream this path actually reads from. Not unit
+/// tested directly — it wraps a real OS terminal check that a test harness
+/// (stdin never a real tty under `cargo test`) can't meaningfully fake
+/// either way; `remove_may_proceed_without_prompt`'s own tests cover the
+/// downstream decision logic given either boolean.
+fn stdin_is_tty() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal()
+}
+
 /// Minimal interactive y/N confirmation, mirroring
 /// `commands::sessions::confirm_revoke_all` (no extra deps; only called on a
-/// rich/interactive terminal).
+/// rich/interactive terminal with a real tty on stdin).
 fn confirm_remove(name: &str) -> Result<bool, String> {
     use std::io::Write;
 
@@ -518,7 +551,8 @@ pub async fn remove(id: String, yes: bool) -> Result<(), String> {
         .expect("resolve_passkey_id only ever returns an id present in `passkeys`");
     let name = target.name.clone();
 
-    if !remove_may_proceed_without_prompt(yes, ui::is_rich())? && !confirm_remove(&name)? {
+    let interactive = ui::is_rich() && stdin_is_tty();
+    if !remove_may_proceed_without_prompt(yes, interactive)? && !confirm_remove(&name)? {
         if !ui::is_quiet() {
             println!("  {}", "cancelled".custom_color(colors::INK_DIM));
         }
