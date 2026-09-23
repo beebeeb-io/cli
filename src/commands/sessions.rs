@@ -389,6 +389,40 @@ pub async fn revoke(id: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Decision for whether `bb sessions revoke-all-others` may proceed without
+/// an interactive prompt. `yes` pre-authorizes it explicitly (`Ok(true)`,
+/// meaning: skip the prompt AND proceed). Otherwise `is_rich` (mirrors
+/// `ui::is_rich()`) decides: in rich/interactive mode there's a terminal to
+/// prompt on, so the caller still runs `confirm_revoke_all()` (`Ok(false)`,
+/// meaning: not yet authorized, go prompt). In `--json`/`--quiet` mode there
+/// is no prompt to fall back on — this REFUSES outright rather than
+/// silently proceeding.
+///
+/// **Fix (Codex review, PR #21, P1 "Require --yes when confirmation is
+/// suppressed"):** the original code mirrored `commands::rm::confirm`'s
+/// soft-trash pattern (`!yes && ui::is_rich() && !confirm(...)`), which
+/// silently skips confirmation in `--json`/`--quiet` mode. That's correct
+/// for `rm`'s soft-trash — reversible via `bb restore`, so a script opting
+/// into structured output is read as opting into non-interactive execution
+/// too. Revoking every other session is not equivalently reversible (the
+/// other devices are signed out immediately, with no `bb un-revoke`), so an
+/// output-format flag must not double as consent for a destructive action
+/// the caller never typed `--yes` for. Choosing `--json` no longer implies
+/// "also skip the safety check."
+fn revoke_all_others_may_proceed_without_prompt(yes: bool, is_rich: bool) -> Result<bool, String> {
+    if yes {
+        return Ok(true);
+    }
+    if !is_rich {
+        return Err(
+            "refusing to revoke every other session without a prompt — pass --yes to run this \
+             in --json/--quiet mode"
+                .to_string(),
+        );
+    }
+    Ok(false)
+}
+
 /// Minimal interactive y/N confirmation, mirroring `commands::rm::confirm`
 /// (no extra deps; only called on a rich/interactive terminal).
 fn confirm_revoke_all() -> Result<bool, String> {
@@ -419,7 +453,7 @@ pub async fn revoke_all_others(yes: bool) -> Result<(), String> {
     let api = ApiClient::from_config();
     api.require_auth()?;
 
-    if !yes && ui::is_rich() && !confirm_revoke_all()? {
+    if !revoke_all_others_may_proceed_without_prompt(yes, ui::is_rich())? && !confirm_revoke_all()? {
         if !ui::is_quiet() {
             println!("  {}", "cancelled".custom_color(colors::INK_DIM));
         }
@@ -859,5 +893,34 @@ mod tests {
     #[test]
     fn classify_revoke_error_passes_through_unrelated_errors() {
         assert_eq!(classify_revoke_error("network failed".to_string()), "network failed");
+    }
+
+    // ── PR #21 Codex review fix: revoke_all_others_may_proceed_without_prompt ──
+
+    #[test]
+    fn yes_flag_always_proceeds_without_a_prompt_rich_or_not() {
+        assert_eq!(revoke_all_others_may_proceed_without_prompt(true, true), Ok(true));
+        assert_eq!(revoke_all_others_may_proceed_without_prompt(true, false), Ok(true));
+    }
+
+    #[test]
+    fn no_yes_but_rich_terminal_falls_through_to_the_prompt() {
+        assert_eq!(revoke_all_others_may_proceed_without_prompt(false, true), Ok(false));
+    }
+
+    #[test]
+    fn no_yes_and_not_rich_refuses_instead_of_silently_proceeding() {
+        // This is the exact bug the Codex review caught: --json/--quiet
+        // (is_rich == false) must NOT silently skip the safety check just
+        // because there's no terminal to prompt on.
+        let err = revoke_all_others_may_proceed_without_prompt(false, false).unwrap_err();
+        assert!(
+            err.contains("--yes"),
+            "err must tell the caller how to proceed: {err:?}"
+        );
+        assert!(
+            err.contains("refusing"),
+            "must refuse, not silently proceed, when not rich and not --yes: {err:?}"
+        );
     }
 }
