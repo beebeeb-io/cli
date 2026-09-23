@@ -59,10 +59,16 @@ pub async fn show(json: bool) -> Result<(), String> {
 
     let plan_slug = sub.get("plan").and_then(|v| v.as_str()).unwrap_or("free");
     let plan = Plan::from_slug(plan_slug);
-    let extra_tb = sub.get("extra_storage_tb").and_then(|v| v.as_i64()).unwrap_or(0);
-    let bonus_bytes = sub.get("bonus_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
-    let quota_bytes = effective_quota(plan, extra_tb, bonus_bytes);
-
+    // 0485: quota_bytes comes from the server's `/billing/usage` response, NOT
+    // a client-side `effective_quota(plan, extra_tb, bonus_bytes)` recompute.
+    // The server's `get_user_quota()` folds in the DB `plans` catalog's
+    // storage_bytes (which can diverge from this crate's hardcoded per-Plan
+    // constants) AND a referral `bonus_storage_bytes` that the subscription
+    // response never exposed under a `bonus_bytes` key in the first place (it
+    // read back as 0 always) — so the old computation silently under-reported
+    // quota for any bonus-storage or catalog-overridden account. See
+    // `beebeeb-api/src/quota.rs::get_user_quota` (server, read-only reference).
+    let quota_bytes = usage.get("quota_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
     let used_bytes = usage.get("used_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
     let file_count = count
         .get("total_files")
@@ -359,7 +365,12 @@ fn format_price(cents: i64, billing_cycle: &str) -> String {
 
 fn region_human(slug: &str) -> String {
     match slug {
-        "europe" | "eu" => "europe (Falkenstein, Germany)".into(),
+        // "falkenstein" is the live server's literal fallback value
+        // (`beebeeb-api/src/routes/billing.rs::subscription`'s no-subscription-
+        // row branch, returned for every fresh free-tier account — the exact
+        // account this command's manual verification rung uses) — not just
+        // "europe"/"eu" from an actual subscriptions row.
+        "europe" | "eu" | "falkenstein" => "europe (Falkenstein, Germany)".into(),
         other => other.to_string(),
     }
 }
@@ -407,6 +418,17 @@ fn colour_pct(pct: f64, s: &str) -> colored::ColoredString {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn region_human_maps_the_live_no_subscription_fallback() {
+        // The live server's no-subscription-row branch
+        // (beebeeb-api/src/routes/billing.rs::subscription) returns the
+        // literal string "falkenstein" — exactly what a fresh free-tier
+        // account (this command's manual verification rung) sees.
+        assert_eq!(region_human("falkenstein"), "europe (Falkenstein, Germany)");
+        assert_eq!(region_human("europe"), "europe (Falkenstein, Germany)");
+        assert_eq!(region_human("eu"), "europe (Falkenstein, Germany)");
+    }
 
     #[test]
     fn format_price_renders_cents() {

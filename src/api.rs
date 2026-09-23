@@ -1080,10 +1080,26 @@ impl ApiClient {
         self.get_subscription().await
     }
 
-    /// Same idea — billing-named alias so `bb billing show` doesn't reach into
-    /// the files API directly.
+    /// GET /api/v1/billing/usage — `{ used_bytes, quota_bytes, percentage }`,
+    /// server-authoritative (`crate::quota::get_user_quota` on the live
+    /// server: base plan quota from the DB `plans` catalog + referral
+    /// `bonus_storage_bytes` + `extra_storage_tb`, capped at `MAX_TOTAL_STORAGE`).
+    /// 0485: this used to alias `get_usage()`, which actually calls
+    /// `/api/v1/files/usage` — a DIFFERENT route returning `plan_limit_bytes`/
+    /// `plan_name` instead of `quota_bytes`, so `bb billing show` never had a
+    /// `quota_bytes` field to read and fell back to recomputing the quota
+    /// client-side (see `commands::billing::show`). Hits the real billing
+    /// route directly so `bb billing show` doesn't reach into the files API.
     pub async fn get_billing_usage(&self) -> Result<Value, String> {
-        self.get_usage().await
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .get(self.url("/api/v1/billing/usage"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(resp).await
     }
 
     /// GET /api/v1/billing/plans — the public plan catalog (no auth). Returns
@@ -2119,6 +2135,76 @@ mod session_revoke_request_tests {
             headers.get("x-confirm-token").is_none(),
             "must NOT send X-Confirm-Token — the live revoke_all_other_sessions handler takes \
              only AuthUser, no ConfirmedAction extractor (deviation eng-0481): {headers}"
+        );
+    }
+}
+
+/// Task 0485 — regression coverage for a real bug found while wiring `bb
+/// billing show` against the live server: `get_billing_usage()` used to
+/// alias `get_usage()`, which hits `/api/v1/files/usage` (a DIFFERENT route
+/// that returns `plan_limit_bytes`/`plan_name`, never `quota_bytes`). The two
+/// mock routes below return DIFFERENT bodies so a regression to the old
+/// aliasing shows up as a missing `quota_bytes` field, not a coincidental
+/// pass.
+#[cfg(test)]
+mod billing_usage_route_tests {
+    use axum::routing::get;
+    use axum::{Json, Router};
+    use serde_json::json;
+
+    use super::ApiClient;
+
+    async fn spawn_billing_usage_mock() -> String {
+        let app = Router::new()
+            .route(
+                "/api/v1/billing/usage",
+                get(|| async {
+                    Json(json!({
+                        "used_bytes": 42,
+                        "quota_bytes": 1_000_000_000_000i64,
+                        "percentage": 0.000042,
+                    }))
+                }),
+            )
+            .route(
+                "/api/v1/files/usage",
+                // A DIFFERENT shape (the real live /files/usage handler,
+                // beebeeb-api/src/routes/files.rs::storage_usage) — no
+                // `quota_bytes` key. If `get_billing_usage()` ever aliases
+                // back to this route, the assertion below fails loudly
+                // instead of silently reading a stale field name.
+                get(|| async {
+                    Json(json!({
+                        "used_bytes": 42,
+                        "plan_limit_bytes": 1_000_000_000_000i64,
+                        "plan_name": "free",
+                    }))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn get_billing_usage_hits_the_billing_route_not_files_usage() {
+        let api = ApiClient::new_for_test(spawn_billing_usage_mock().await);
+        let resp = api.get_billing_usage().await.expect("mock request should succeed");
+
+        assert_eq!(
+            resp.get("quota_bytes").and_then(|v| v.as_i64()),
+            Some(1_000_000_000_000),
+            "get_billing_usage() must read /api/v1/billing/usage's quota_bytes field \
+             (bb billing show reads this directly — see commands::billing::show), \
+             not /api/v1/files/usage's plan_limit_bytes: {resp}"
+        );
+        assert!(
+            resp.get("plan_limit_bytes").is_none(),
+            "response carries plan_limit_bytes — get_billing_usage() hit /api/v1/files/usage \
+             instead of /api/v1/billing/usage: {resp}"
         );
     }
 }
