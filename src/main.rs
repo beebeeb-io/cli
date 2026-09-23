@@ -587,13 +587,19 @@ enum SessionsCmd {
     },
 }
 
-/// `add`/`remove` are plan Tasks 15/16 (eng-0482: not this task's scope) —
-/// only `List` is wired so they don't appear in `bb passkey --help` as
-/// silent stubs.
+/// `remove` is plan Task 16 (not this task's scope) — only `List`/`Add` are
+/// wired so `bb passkey remove` doesn't appear in `bb passkey --help` as a
+/// silent stub.
 #[derive(Subcommand)]
 enum PasskeyCmd {
     /// List your registered passkeys
     List,
+    /// Register a new passkey (opens the web app — WebAuthn only runs in a browser)
+    Add {
+        /// Print the enrollment URL instead of opening a browser (for SSH / headless use)
+        #[arg(long)]
+        print_url: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -929,6 +935,7 @@ async fn main() {
         },
         Commands::Passkey(cmd) => match cmd {
             PasskeyCmd::List => commands::passkey::list().await,
+            PasskeyCmd::Add { print_url } => commands::passkey::add(print_url).await,
         },
         Commands::Logout => commands::logout::run().await,
         Commands::Completions { shell } => {
