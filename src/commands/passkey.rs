@@ -26,14 +26,40 @@
 //! is nothing to render — the CREATED column is the only timestamp this CLI
 //! can show honestly. Not rendered; never invented.
 //!
-//! **Scope (eng-0482) — `list` only (plan Task 14).** `add` (Task 15) opens
-//! a browser for WebAuthn registration — the CLI process itself can never
-//! perform a WebAuthn ceremony — and `remove` (Task 16) needs the step-up /
-//! id-resolution treatment `bb sessions revoke` got in task 0481. Neither
-//! subcommand is wired into the clap tree here; only `PasskeyCmd::List`
-//! exists, so `bb passkey add`/`bb passkey remove` do not appear in
-//! `bb passkey --help` and are not silent stubs that print a "not yet
-//! implemented" error — they simply aren't commands yet.
+//! **Scope (0483) — `list` + `add` (plan Tasks 14/15).** `add` opens a
+//! browser for WebAuthn registration — the CLI process itself can never
+//! perform a WebAuthn ceremony, so it only launches the web app's passkey
+//! page and confirms the user navigated there. `remove` (Task 16) still
+//! needs the step-up / id-resolution treatment `bb sessions revoke` got in
+//! task 0481 and is not wired into the clap tree, so `bb passkey remove`
+//! does not appear in `bb passkey --help` and is not a silent stub that
+//! prints a "not yet implemented" error — it simply isn't a command yet.
+//!
+//! ## `add` — browser handoff (0483)
+//!
+//! Route used: the **web app**, not the API — `GET /settings/passkeys`
+//! (`repos/web/src/app.tsx:554`, component `PasskeySetup` at
+//! `repos/web/src/pages/passkey-setup.tsx:79`). That page runs the actual
+//! `navigator.credentials.create()` ceremony against
+//! `POST /api/v1/auth/passkey/register-start` + `register-finish`
+//! (`repos/web/src/lib/api.ts` `startPasskeyRegistration`/
+//! `finishPasskeyRegistration`, server-side `repos/server/beebeeb-api/src/
+//! router.rs:541` nests `passkeys::router()` at `/api/v1/auth/passkey`);
+//! this command never touches those routes.
+//!
+//! **No handoff token (plan's Open question 6, still open).** No
+//! `POST /api/v1/auth/passkey/handoff`-shaped route exists on the live
+//! server (`repos/server/beebeeb-api/src/routes/passkeys.rs` has no such
+//! handler), so v1 opens a bare URL — the user re-authenticates in the
+//! browser if their web session has expired. Documented in `--help` and the
+//! in-terminal output; do not invent a token param that the server can't
+//! consume.
+//!
+//! **URL derivation follows the configured API, never a hard-coded prod
+//! host** (`passkey_enrollment_url_from_api`, mirrors the localhost/`api.`→
+//! `app.` mapping the plan sketched, generalized to any `api.<host>`, not
+//! just `beebeeb.io`) — a `--api`/config pointed at a local or staging
+//! server must not silently hand the user a `app.beebeeb.io` link.
 
 use serde_json::Value;
 
@@ -190,6 +216,144 @@ pub async fn list() -> Result<(), String> {
         passkeys.len(),
         if passkeys.len() == 1 { "" } else { "s" }
     );
+
+    Ok(())
+}
+
+// ── `bb passkey add` ────────────────────────────────────────────────────────
+
+/// The web app's dedicated passkey-registration route. Pure path constant —
+/// kept separate from the host so `passkey_enrollment_url_from_api` (below)
+/// is the only place that decides the host.
+const PASSKEY_ENROLLMENT_PATH: &str = "/settings/passkeys";
+
+/// Derive the web app's passkey-enrollment URL from a configured API base
+/// URL, never a hard-coded production host. Pure function of the API URL
+/// string so it's unit-testable without touching the real (possibly-live)
+/// on-disk config.
+///
+/// - `localhost`/`127.0.0.1` (any port) → the local dev web app,
+///   `localhost:5173` (`repos/web` `bun dev` default — see `repos/web/CLAUDE.md`).
+/// - `https://api.<host>` / `http://api.<host>` → the same scheme + host
+///   with `api.` swapped for `app.` — the convention every other
+///   Beebeeb-operated environment (prod `api.beebeeb.io` → `app.beebeeb.io`,
+///   and any future staging `api.<env>.beebeeb.io` → `app.<env>.beebeeb.io`)
+///   already follows.
+/// - Anything else (an API host with no recognizable `api.` prefix) → the
+///   API's own scheme+host, so an unrecognized `--api` never silently
+///   resolves to Beebeeb's production web app. It may well 404, but a 404
+///   is honest; a link to the wrong company's data is not.
+fn passkey_enrollment_url_from_api(api_url: &str) -> String {
+    let api = api_url.trim_end_matches('/');
+
+    if api.contains("localhost") || api.contains("127.0.0.1") {
+        return format!("http://localhost:5173{PASSKEY_ENROLLMENT_PATH}");
+    }
+    if let Some(host) = api.strip_prefix("https://api.") {
+        return format!("https://app.{host}{PASSKEY_ENROLLMENT_PATH}");
+    }
+    if let Some(host) = api.strip_prefix("http://api.") {
+        return format!("http://app.{host}{PASSKEY_ENROLLMENT_PATH}");
+    }
+    format!("{api}{PASSKEY_ENROLLMENT_PATH}")
+}
+
+/// Read the configured API URL (respecting `--api`, same as every other
+/// command) and derive the enrollment URL from it.
+fn passkey_enrollment_url() -> String {
+    let config = crate::config::load_config();
+    passkey_enrollment_url_from_api(&config.api_url)
+}
+
+/// What `add` should do, given its flags and the environment. Pure — no I/O
+/// — so every branch is unit-tested directly; `add()` below is the thin,
+/// untested wrapper that performs the actual printing/opening.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AddAction {
+    /// `--json`: a structured blob, never touch the browser.
+    Json,
+    /// `--print-url` (or `--quiet`, which is the same "give me the bare
+    /// value, no side effects" contract as everywhere else in this CLI):
+    /// the bare URL, never touch the browser.
+    PrintUrl,
+    /// No display reachable (SSH without X forwarding, bare Linux TTY):
+    /// show the URL for copying to another device, don't attempt to open.
+    Headless,
+    /// Normal interactive case: best-effort open the URL in a browser.
+    Open,
+}
+
+/// Decide the `AddAction` for `add`'s flags + environment. `is_json` wins
+/// over everything (a script asked for a machine-readable contract);
+/// `print_url`/`is_quiet` both mean "just the value"; otherwise branch on
+/// whether a display is reachable.
+fn plan_add(print_url: bool, is_json: bool, is_quiet: bool, headless: bool) -> AddAction {
+    if is_json {
+        AddAction::Json
+    } else if print_url || is_quiet {
+        AddAction::PrintUrl
+    } else if headless {
+        AddAction::Headless
+    } else {
+        AddAction::Open
+    }
+}
+
+/// `bb passkey add`. The CLI process can never run a WebAuthn ceremony
+/// itself (no browser, no platform authenticator API) — this command's
+/// entire job is getting the user to the right web page with the right
+/// context, then getting out of the way.
+pub async fn add(print_url: bool) -> Result<(), String> {
+    use crate::{colors, env_detect, ui};
+    use colored::Colorize;
+
+    let api = ApiClient::from_config();
+    api.require_auth()?;
+
+    let url = passkey_enrollment_url();
+    let action = plan_add(print_url, ui::is_json(), ui::is_quiet(), env_detect::is_headless());
+
+    match action {
+        AddAction::Json => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "url": url,
+                    "note": "open in a WebAuthn-capable browser to register a passkey",
+                })
+            );
+        }
+        AddAction::PrintUrl => {
+            println!("{url}");
+        }
+        AddAction::Headless => {
+            println!("  passkeys need a browser with WebAuthn support.");
+            println!();
+            println!("  no display detected — open this URL in a browser (this device or another):");
+            println!();
+            println!("  {}", url.custom_color(colors::INK));
+            println!();
+            println!(
+                "  (next time, use {} to skip this hint)",
+                "bb passkey add --print-url".custom_color(colors::INK_DIM)
+            );
+            println!();
+            println!("  after registration completes in the browser, run:");
+            println!("    {}", "bb passkey list".custom_color(colors::INK_DIM));
+        }
+        AddAction::Open => {
+            println!("  passkeys need a browser with WebAuthn support.");
+            println!();
+            println!("  opening {} ...", url.custom_color(colors::INK));
+            // Best-effort — the URL is already printed above, so a failed
+            // launch (no default browser configured, etc.) still leaves the
+            // user with something to click or paste.
+            let _ = open::that(&url);
+            println!();
+            println!("  after registration completes in the browser, run:");
+            println!("    {}", "bb passkey list".custom_color(colors::INK_DIM));
+        }
+    }
 
     Ok(())
 }
@@ -411,5 +575,121 @@ mod tests {
     #[test]
     fn short_id_returns_the_whole_string_when_shorter_than_eight() {
         assert_eq!(short_id("abc"), "abc");
+    }
+
+    // ── passkey_enrollment_url_from_api ─────────────────────────────────────
+
+    #[test]
+    fn enrollment_url_for_prod_api_points_at_the_prod_web_app() {
+        let url = passkey_enrollment_url_from_api("https://api.beebeeb.io");
+        assert_eq!(url, "https://app.beebeeb.io/settings/passkeys");
+    }
+
+    #[test]
+    fn enrollment_url_for_local_api_points_at_the_local_dev_web_app() {
+        let url = passkey_enrollment_url_from_api("http://localhost:3001");
+        assert_eq!(url, "http://localhost:5173/settings/passkeys");
+    }
+
+    #[test]
+    fn local_api_enrollment_url_is_never_the_prod_host() {
+        // The concrete regression this task exists to prevent: a CLI pointed
+        // at a local/dev API must never hand the user a link to production.
+        let prod = passkey_enrollment_url_from_api("https://api.beebeeb.io");
+        let local = passkey_enrollment_url_from_api("http://localhost:3001");
+        assert_ne!(prod, local);
+        assert!(
+            !local.contains("beebeeb.io"),
+            "local --api must not resolve to any beebeeb.io host: {local}"
+        );
+    }
+
+    #[test]
+    fn enrollment_url_strips_trailing_slash_before_appending_the_path() {
+        let url = passkey_enrollment_url_from_api("https://api.beebeeb.io/");
+        assert_eq!(url, "https://app.beebeeb.io/settings/passkeys");
+    }
+
+    #[test]
+    fn enrollment_url_handles_http_scheme_api_host_too() {
+        let url = passkey_enrollment_url_from_api("http://api.beebeeb.io");
+        assert_eq!(url, "http://app.beebeeb.io/settings/passkeys");
+    }
+
+    #[test]
+    fn enrollment_url_generalizes_beyond_the_literal_beebeeb_io_host() {
+        // A non-prod environment that still follows the api./app. convention
+        // (e.g. a staging deploy) must resolve correctly too — this must not
+        // be special-cased to the string "beebeeb.io".
+        let url = passkey_enrollment_url_from_api("https://api.staging.example.net");
+        assert_eq!(url, "https://app.staging.example.net/settings/passkeys");
+    }
+
+    #[test]
+    fn enrollment_url_for_unrecognized_host_stays_on_that_hosts_origin() {
+        // No "api." prefix to swap for "app." — must NOT silently fall back
+        // to app.beebeeb.io (that would point a custom/unknown API at
+        // production's web app). Staying on the same origin is honest even
+        // if it 404s.
+        let url = passkey_enrollment_url_from_api("https://weird-custom-host.example.com");
+        assert_eq!(url, "https://weird-custom-host.example.com/settings/passkeys");
+        assert!(!url.contains("beebeeb.io"));
+    }
+
+    #[test]
+    fn enrollment_url_matches_127_0_0_1_as_local_too() {
+        let url = passkey_enrollment_url_from_api("http://127.0.0.1:3001");
+        assert_eq!(url, "http://localhost:5173/settings/passkeys");
+    }
+
+    // ── plan_add ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn plan_add_json_wins_over_every_other_flag() {
+        assert_eq!(plan_add(true, true, true, true), AddAction::Json);
+        assert_eq!(plan_add(false, true, false, false), AddAction::Json);
+    }
+
+    #[test]
+    fn plan_add_print_url_flag_never_opens_a_browser() {
+        // The exact regression this flag exists for: --print-url must route
+        // to PrintUrl, never Open — Open is the only variant that calls
+        // `open::that`.
+        assert_eq!(plan_add(true, false, false, false), AddAction::PrintUrl);
+        assert_eq!(plan_add(true, false, false, true), AddAction::PrintUrl);
+    }
+
+    #[test]
+    fn plan_add_quiet_mode_behaves_like_print_url() {
+        // --quiet is "bare value, no side effects" everywhere else in this
+        // CLI (`sessions list`, `ls`, `quota`, ...) — add must match that
+        // convention rather than opening a browser mid-script.
+        assert_eq!(plan_add(false, false, true, false), AddAction::PrintUrl);
+    }
+
+    #[test]
+    fn plan_add_headless_without_print_url_shows_the_url_but_does_not_open() {
+        assert_eq!(plan_add(false, false, false, true), AddAction::Headless);
+    }
+
+    #[test]
+    fn plan_add_default_interactive_case_opens_the_browser() {
+        assert_eq!(plan_add(false, false, false, false), AddAction::Open);
+    }
+
+    // ── add() JSON body shape ────────────────────────────────────────────
+
+    #[test]
+    fn add_json_body_carries_the_url_and_a_note_never_a_token() {
+        // Guards the "no handoff token" deviation documented at the top of
+        // this file: v1 has nothing to embed, so the JSON body must not
+        // fabricate a `token` field a future server route might expect.
+        let url = passkey_enrollment_url_from_api("https://api.beebeeb.io");
+        let body = serde_json::json!({
+            "url": url,
+            "note": "open in a WebAuthn-capable browser to register a passkey",
+        });
+        assert_eq!(body["url"], "https://app.beebeeb.io/settings/passkeys");
+        assert!(body.get("token").is_none());
     }
 }
