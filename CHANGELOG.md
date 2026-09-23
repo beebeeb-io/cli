@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-24
+
+### Added
+- `bb mkdir <path>` (`-p` for recursive) — create folders.
+- `bb mv <src> <dst>` — rename/move a file or folder; bulk form moves several sources into one destination.
+- `bb rm` / `bb restore` / `bb trash list` / `bb trash empty` — trash lifecycle, including multi-target and recursive `rm`, and a `--permanent` irreversible delete gated behind a mandatory step-up token (single target only, since the token is single-use).
+- `bb search <query>` — client-side filename search, now backed by a single index fetch + parallel decrypt instead of a per-folder walk.
+- `bb ls` gains `-l`/`-a`/`-R`/`--depth`/`--sort`/`-r` and batches name decryption in parallel.
+- `bb 2fa status` / `setup` / `enable` / `disable` — TOTP management (ASCII QR + backup codes on setup).
+- `bb sessions list` / `revoke` / `revoke-all-others` — session management from the CLI.
+- `bb passkey list` / `add` / `remove` — passkey management (`add` opens the environment-correct web passkey page; WebAuthn registration is browser-only).
+- `bb billing show` / `usage` / `invoices` — live plan, quota, approximate per-region usage, and invoice PDF download.
+- `bb account billing` / `addons` — open the billing portal, view/purchase storage add-ons.
+- `bb account update --email <new>` — change account email.
+
+### Changed
+- Upload driver (`push`/`sync`/`mount`/`webdav`/`repair`) fully migrated to the v2 `/api/v1/uploads/*` session route.
+- `bb sync` reconciles remote deletions instead of resurrecting them, and stops its session cleanly on exit.
+- `bb login`'s browser handshake now uses `beebeeb_core::cli_auth` instead of a hand-rolled P-256/AES-GCM/HKDF implementation.
+- `bb ls` / `bb search` / `bb trash list` no longer truncate at 200 entries (full cursor pagination).
+- Billing prices are now read from the server instead of a local price table.
+- Every API request sends `X-Beebeeb-Client` / `X-Beebeeb-Client-Version` headers.
+- `bb whoami` handles the `Plan::Starter` variant.
+
+### Removed
+- Non-functional `bb account export`/`bb account delete` stub subcommands (those flows live in the web app).
+
+### Security
+- The OPAQUE zero-key fallback was removed from login — a failed key derivation now fails loudly instead of silently degrading.
+- Decrypted login credentials are wrapped in `Zeroizing` and wiped from memory on drop.
+
 ## [0.9.1] - 2026-05-31
 
 ### Fixed
