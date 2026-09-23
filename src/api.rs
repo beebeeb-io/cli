@@ -1182,6 +1182,53 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    /// GET /api/v1/billing/invoices — the caller's VAT-compliant invoices
+    /// (task 0916; the Mollie-backed `invoices` table, NOT the legacy Stripe
+    /// stub). Returns `{ invoices: [...], stripe_configured: false }` — see
+    /// `beebeeb-api/src/routes/billing.rs::invoices`. `stripe_configured` is
+    /// hardcoded `false` on every response post-Mollie-cutover; it is kept in
+    /// the envelope only for client-shape compatibility and is NEVER a live
+    /// signal of "no invoices" (see `commands::billing::invoices`, task 0487).
+    pub async fn get_billing_invoices(&self) -> Result<Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .get(self.url("/api/v1/billing/invoices"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(resp).await
+    }
+
+    /// GET /api/v1/billing/invoices/{id}/pdf — download one invoice as a PDF
+    /// (task 0916). Auth-scoped to the caller (the server 404s another user's
+    /// invoice id, no cross-user existence leak). Returns the raw PDF bytes —
+    /// this is NOT a public link; a bare `curl <pdf_url>` with no bearer token
+    /// gets a 401, which is why `bb billing invoices --open <id>` downloads
+    /// through this authenticated client instead of opening a browser URL.
+    pub async fn download_invoice_pdf(&self, invoice_id: &str) -> Result<Vec<u8>, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .get(self.url(&format!("/api/v1/billing/invoices/{invoice_id}/pdf")))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("invoice pdf download failed ({status}): {body}"));
+        }
+
+        resp.bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| format!("failed to read response: {e}"))
+    }
+
     /// Return all `{id, name_encrypted}` pairs in a folder so the caller can
     /// decrypt names locally and detect filename conflicts before uploading.
     /// `parent_id = None` queries the root folder.
@@ -2305,5 +2352,115 @@ mod billing_usage_route_tests {
             "response carries plan_limit_bytes — get_billing_usage() hit /api/v1/files/usage \
              instead of /api/v1/billing/usage: {resp}"
         );
+    }
+}
+
+/// Task 0487 — `get_billing_invoices()` / `download_invoice_pdf()` against a
+/// mock of the live server's `/api/v1/billing/invoices[/…/pdf]` routes
+/// (`beebeeb-api/src/routes/billing.rs::invoices` / `invoice_pdf`).
+#[cfg(test)]
+mod billing_invoices_route_tests {
+    use axum::extract::Path;
+    use axum::http::{StatusCode, header};
+    use axum::routing::get;
+    use axum::{Json, Router};
+    use serde_json::json;
+
+    use super::ApiClient;
+
+    async fn spawn_billing_invoices_mock() -> String {
+        let app = Router::new()
+            .route(
+                "/api/v1/billing/invoices",
+                get(|| async {
+                    // Exact live-server field shape (billing.rs::invoices) —
+                    // `number` (not `invoice_number`), `amount_gross_cents`
+                    // (not `amount_paid`), ISO date strings (not epoch
+                    // seconds), and `stripe_configured: false` (vestigial,
+                    // always false post-Mollie-cutover — never gate on it).
+                    Json(json!({
+                        "invoices": [{
+                            "id": "11111111-1111-1111-1111-111111111111",
+                            "number": "BB-2026-0001",
+                            "invoice_date": "2026-01-15",
+                            "period_start": "2026-01-01",
+                            "period_end": "2026-01-31",
+                            "currency": "eur",
+                            "amount_net_cents": 999,
+                            "vat_rate_bps": 2100,
+                            "vat_amount_cents": 210,
+                            "amount_gross_cents": 1209,
+                            "vat_treatment": "domestic",
+                            "description": "Pro plan",
+                            "status": "paid",
+                            "pdf_url": "/api/v1/billing/invoices/11111111-1111-1111-1111-111111111111/pdf",
+                        }],
+                        "stripe_configured": false,
+                    }))
+                }),
+            )
+            .route(
+                "/api/v1/billing/invoices/:id/pdf",
+                get(|Path(id): Path<String>| async move {
+                    assert_eq!(id, "11111111-1111-1111-1111-111111111111");
+                    (
+                        StatusCode::OK,
+                        [(header::CONTENT_TYPE, "application/pdf")],
+                        b"%PDF-1.4 fake invoice pdf".to_vec(),
+                    )
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn get_billing_invoices_reads_the_live_field_shape() {
+        let api = ApiClient::new_for_test(spawn_billing_invoices_mock().await);
+        let body = api.get_billing_invoices().await.expect("mock request should succeed");
+        let invoices = body.get("invoices").and_then(|v| v.as_array()).expect("invoices array");
+        assert_eq!(invoices.len(), 1);
+        let inv = &invoices[0];
+        assert_eq!(inv.get("number").and_then(|v| v.as_str()), Some("BB-2026-0001"));
+        assert_eq!(inv.get("amount_gross_cents").and_then(|v| v.as_i64()), Some(1209));
+        assert_eq!(inv.get("invoice_date").and_then(|v| v.as_str()), Some("2026-01-15"));
+        assert_eq!(
+            body.get("stripe_configured").and_then(|v| v.as_bool()),
+            Some(false),
+            "stripe_configured must round-trip as false — it's vestigial, never a live signal"
+        );
+    }
+
+    #[tokio::test]
+    async fn download_invoice_pdf_returns_the_raw_bytes() {
+        let api = ApiClient::new_for_test(spawn_billing_invoices_mock().await);
+        let bytes = api
+            .download_invoice_pdf("11111111-1111-1111-1111-111111111111")
+            .await
+            .expect("mock pdf download should succeed");
+        assert_eq!(bytes, b"%PDF-1.4 fake invoice pdf".to_vec());
+    }
+
+    #[tokio::test]
+    async fn download_invoice_pdf_surfaces_a_404_for_an_unknown_id() {
+        let app = Router::new().route(
+            "/api/v1/billing/invoices/:id/pdf",
+            get(|| async { StatusCode::NOT_FOUND }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let api = ApiClient::new_for_test(format!("http://{addr}"));
+        let err = api
+            .download_invoice_pdf("00000000-0000-0000-0000-000000000000")
+            .await
+            .expect_err("a 404 must surface as an Err, not silently return empty bytes");
+        assert!(err.contains("404"), "error should mention the status: {err}");
     }
 }
