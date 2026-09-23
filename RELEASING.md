@@ -29,9 +29,12 @@ cargo check
 # 3. Author RELEASE_NOTES.md at the repo root for the exact version being cut
 #    (intro → What's New → Bug Fixes/Hardening → Verification → Install/Update →
 #    changelog link — see the workspace CLAUDE.md "Release notes" section for the
-#    canonical format). The release workflow's `set-release-notes` job FAILS the
-#    release if this file is missing or doesn't mention the exact version string —
-#    there is no silent fallback to the auto-generated changelog body.
+#    canonical format). scripts/check-release-notes.sh gates this file TWICE:
+#    first as the opening step of the `plan` job, on the tag push itself, BEFORE
+#    anything is built or the GitHub Release is even created — a missing or
+#    stale RELEASE_NOTES.md stops the whole pipeline right there — and again in
+#    `set-release-notes` right before it overwrites the release body. There is
+#    no silent fallback to the auto-generated changelog body.
 vim RELEASE_NOTES.md
 
 # 4. Verify the release plan looks right (no build — dry run)
@@ -44,10 +47,13 @@ git tag v1.0.0
 git push && git push --tags
 
 # → GitHub Actions fires automatically on the tag push:
+#   - `plan` job's FIRST step re-validates RELEASE_NOTES.md against the tag's exact
+#     version — fails closed before anything is built or the release is created
 #   - Builds binaries for 5 targets (macOS arm64+x86, Linux arm64+x86, Windows x86)
 #   - Creates GitHub Release with all archives + SHA-256 checksums
 #   - Overwrites the release body with the authored RELEASE_NOTES.md (`set-release-notes` job;
-#     fails loudly if RELEASE_NOTES.md is missing/stale, but never blocks the two jobs below)
+#     re-validates + fails loudly if RELEASE_NOTES.md is missing/stale, but never blocks the
+#     two jobs below — by this point the plan-job gate has already proven it's fine)
 #   - Opens a PR (branch `release/scoop-v1.0.0`) bumping `scoop/bb.json` to the new
 #     version + Windows artifact SHA-256 (`open-scoop-manifest-pr` job) — review and
 #     merge it manually; it no longer pushes straight to `main` (that used to fail

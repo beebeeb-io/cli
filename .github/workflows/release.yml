@@ -66,6 +66,22 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+      # Fail-closed BEFORE anything is built or published (task 1497 follow-up).
+      # This used to run only in `set-release-notes`, which is AFTER `host` has
+      # already created the GitHub Release and uploaded artifacts to it — a
+      # missing/stale RELEASE_NOTES.md still shipped a real release with
+      # cargo-dist's auto-generated changelog body. Running it as the first
+      # step of `plan`, on tag pushes, stops `dist host --steps=create` below
+      # (and every build job downstream) from ever running. No-op on
+      # pull_request runs — PRs never publish, so there is nothing to gate.
+      - name: Validate release notes (fail-closed, before build/publish)
+        if: ${{ !github.event.pull_request }}
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          bash scripts/check-release-notes.sh "${TAG#v}"
       - name: Install dist
         shell: bash
         # W3: replaced curl|sh with `cargo install` from crates.io. The crates.io
@@ -375,35 +391,15 @@ jobs:
         with:
           persist-credentials: false
       - name: Validate authored release notes
+        # Re-validates the same commit `plan` already gated on before any
+        # build/publish happened (see the early step there). Kept here too so
+        # this job stays self-contained and still fails loudly (belt and
+        # suspenders — cheap to run twice) right before it overwrites the
+        # release body.
         shell: bash
         run: |
           set -euo pipefail
-          VERSION="${RELEASE_TAG#v}"
-          notes_path="RELEASE_NOTES.md"
-
-          if [[ ! -f "$notes_path" ]]; then
-            echo "::error file=$notes_path::Missing RELEASE_NOTES.md for cli $RELEASE_TAG. Author it at the repo root (see RELEASING.md) and commit it before tagging — the release body will NOT fall back to the auto-generated changelog."
-            exit 1
-          fi
-
-          python3 - "$VERSION" <<'PY'
-          import pathlib
-          import re
-          import sys
-
-          version = sys.argv[1]
-          notes_path = pathlib.Path("RELEASE_NOTES.md")
-          notes = notes_path.read_text(encoding="utf-8")
-          exact_version = re.compile(rf"(?<![0-9A-Za-z.-]){re.escape(version)}(?![0-9A-Za-z-]|\.[0-9A-Za-z])")
-
-          if not exact_version.search(notes):
-              print(
-                  f"::error file=RELEASE_NOTES.md::RELEASE_NOTES.md must mention the exact release version {version}. "
-                  "Update the title/body for this release and commit it before tagging. See RELEASING.md.",
-                  file=sys.stderr,
-              )
-              sys.exit(1)
-          PY
+          bash scripts/check-release-notes.sh "${RELEASE_TAG#v}"
       - name: Set release body from RELEASE_NOTES.md
         shell: bash
         run: |
