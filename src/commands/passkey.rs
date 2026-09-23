@@ -29,11 +29,60 @@
 //! **Scope (0483) — `list` + `add` (plan Tasks 14/15).** `add` opens a
 //! browser for WebAuthn registration — the CLI process itself can never
 //! perform a WebAuthn ceremony, so it only launches the web app's passkey
-//! page and confirms the user navigated there. `remove` (Task 16) still
-//! needs the step-up / id-resolution treatment `bb sessions revoke` got in
-//! task 0481 and is not wired into the clap tree, so `bb passkey remove`
-//! does not appear in `bb passkey --help` and is not a silent stub that
-//! prints a "not yet implemented" error — it simply isn't a command yet.
+//! page and confirms the user navigated there.
+//!
+//! ## `remove` (task 0484, plan Task 16)
+//!
+//! Route: `DELETE /api/v1/auth/passkeys/{id}`
+//! (`repos/server/beebeeb-api/src/routes/passkeys.rs::delete_passkey`,
+//! ~L388-406; `ApiClient::delete_passkey`).
+//!
+//! **Deviation — no step-up.** The plan's Task 16 pseudocode assumed
+//! `X-Confirm-Token` step-up (`acquire_confirm_token`). The live handler
+//! takes only `AuthUser` + `NotImpersonated` + `Path(id)` — no
+//! `ConfirmedAction` extractor — same shape as `bb sessions revoke`
+//! (eng-0481). No token is sent; proven by
+//! `api::passkey_delete_request_tests`.
+//!
+//! **Deviation — no "last sign-in method" refusal.** The task text says
+//! "Server may 400 if it is the last sign-in method — surface the error
+//! verbatim." Reading the handler body in full: it is exactly `DELETE FROM
+//! passkeys WHERE id = $1 AND user_id = $2`, with **no** count-of-remaining-
+//! credentials check anywhere before or after — a passkey-only account CAN
+//! delete its only passkey and lock itself out. There is no server-side
+//! refusal to surface (a real gap, out of scope for this CLI-only task).
+//! Since the server won't stop it, this command still confirms
+//! client-side before calling the route (destructive-action pattern below),
+//! so a bare `bb passkey remove <id>` in a script can't silently strand an
+//! account without an explicit `--yes`.
+//!
+//! **No interactive picker** — same reasoning as `bb sessions revoke`
+//! (eng-0481): the repo's one hand-rolled picker
+//! (`commands::share::pick_share_interactively`) is not a reusable
+//! primitive, and porting it is out of scope here. `id` (full UUID or a
+//! unique prefix, resolved via `resolve_passkey_id`) is a required
+//! positional argument.
+//!
+//! **Confirmation (`--yes`/`-f`, Codex PR #21 precedent from eng-0481's
+//! `revoke_all_others_may_proceed_without_prompt`).** Removing a passkey is
+//! irreversible from this CLI's perspective (no `bb passkey un-remove`), so
+//! an output-format flag must not double as consent: on a rich/interactive
+//! terminal (`--json`/`--quiet` unset **and** stdin is a real tty — see
+//! `stdin_is_tty` below) without `--yes`, this prompts `y/N`; otherwise
+//! without `--yes`, this refuses outright rather than silently proceeding.
+//! See `remove_may_proceed_without_prompt`.
+//!
+//! **Fix (Codex review, PR #24) — a piped/redirected stdin is not
+//! interactive.** `ui::is_rich()` alone only reflects the absence of
+//! `--json`/`--quiet`; it does not check whether stdin is an actual
+//! terminal. The first version of this command passed `ui::is_rich()`
+//! straight through, so `echo y | bb passkey remove <id>` (no `--yes`)
+//! reached the `y/N` prompt, consumed the piped `y`, and removed the
+//! passkey — bypassing the explicit-`--yes` requirement this refuse-path
+//! exists to enforce. `remove()` now ANDs `ui::is_rich()` with
+//! `stdin_is_tty()` (the existing `std::io::IsTerminal` idiom from
+//! `commands::sync`/`commands::pull`, applied to stdin instead of stdout)
+//! before deciding whether to prompt.
 //!
 //! ## `add` — browser handoff (0483)
 //!
@@ -374,6 +423,157 @@ pub async fn add(print_url: bool) -> Result<(), String> {
         }
     }
 
+    Ok(())
+}
+
+// ── `bb passkey remove` ─────────────────────────────────────────────────────
+
+/// Resolve `input` against `passkeys`' ids: an exact match first, else a
+/// unique id-prefix match. Same 0/1/ambiguous contract as
+/// `commands::sessions::resolve_session_id` — 0 matches is an error (not
+/// `None`) because every caller here is about to act on the result
+/// immediately.
+fn resolve_passkey_id(passkeys: &[PasskeyRow], input: &str) -> Result<String, String> {
+    if passkeys.iter().any(|p| p.id == input) {
+        return Ok(input.to_string());
+    }
+    let matches: Vec<&PasskeyRow> = passkeys.iter().filter(|p| p.id.starts_with(input)).collect();
+    match matches.len() {
+        0 => Err(format!(
+            "no passkey id starts with '{input}' — run `bb passkey list` to see registered passkeys"
+        )),
+        1 => Ok(matches[0].id.clone()),
+        n => Err(format!(
+            "ambiguous id '{input}' matches {n} passkeys — use more characters"
+        )),
+    }
+}
+
+/// Decision for whether `bb passkey remove` may proceed without an
+/// interactive prompt. Mirrors
+/// `commands::sessions::revoke_all_others_may_proceed_without_prompt`
+/// (Codex PR #21 precedent, eng-0481): `--yes` pre-authorizes outright; a
+/// rich/interactive terminal without it falls through to a prompt; a
+/// non-rich context (`--json`/`--quiet`/non-TTY) without it REFUSES rather
+/// than silently proceeding — an output-format flag is not consent for an
+/// irreversible action the caller never typed `--yes` for.
+fn remove_may_proceed_without_prompt(yes: bool, is_rich: bool) -> Result<bool, String> {
+    if yes {
+        return Ok(true);
+    }
+    if !is_rich {
+        return Err(
+            "refusing to remove a passkey without a prompt — pass --yes to run this in \
+             --json/--quiet mode"
+                .to_string(),
+        );
+    }
+    Ok(false)
+}
+
+/// Whether stdin is an actual terminal, not a pipe/redirect. `ui::is_rich()`
+/// alone only reflects the absence of `--json`/`--quiet` — it says nothing
+/// about whether there is a human on the other end of stdin to answer a
+/// prompt. Without this check, a non-interactive invocation like
+/// `echo y | bb passkey remove <id>` (no `--yes`) would reach
+/// `confirm_remove`, consume the piped `y`, and remove the passkey —
+/// silently bypassing the explicit-`--yes` requirement the refuse-path
+/// exists to enforce (Codex review, PR #24). Same `std::io::IsTerminal`
+/// idiom already used for stdout in `commands::sync`/`commands::pull`
+/// (`ui::is_rich() && std::io::stdout().is_terminal()`), applied to stdin
+/// here since stdin is the stream this path actually reads from. Not unit
+/// tested directly — it wraps a real OS terminal check that a test harness
+/// (stdin never a real tty under `cargo test`) can't meaningfully fake
+/// either way; `remove_may_proceed_without_prompt`'s own tests cover the
+/// downstream decision logic given either boolean.
+fn stdin_is_tty() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal()
+}
+
+/// Minimal interactive y/N confirmation, mirroring
+/// `commands::sessions::confirm_revoke_all` (no extra deps; only called on a
+/// rich/interactive terminal with a real tty on stdin).
+fn confirm_remove(name: &str) -> Result<bool, String> {
+    use std::io::Write;
+
+    use colored::Colorize;
+
+    use crate::colors;
+
+    print!(
+        "  {} remove passkey {}? [y/N] ",
+        "?".custom_color(colors::AMBER),
+        name.custom_color(colors::INK)
+    );
+    std::io::stdout().flush().map_err(|e| e.to_string())?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).map_err(|e| e.to_string())?;
+    Ok(matches!(line.trim(), "y" | "Y" | "yes" | "YES"))
+}
+
+/// Classify a `delete_passkey` error string. `"not found"` is the live
+/// handler's exact (lowercased) 404 body — `ApiError::NotFound` renders as
+/// `{"error": "not found"}` (`repos/server/.../error.rs` L533, same mapping
+/// `commands::sessions::classify_revoke_error` relies on) — never
+/// `"Not Found"` or a `"404: ..."`-prefixed string.
+fn classify_remove_error(e: String) -> String {
+    let lower = e.to_lowercase();
+    if lower.contains("unauthorized") || e.contains("401") {
+        "your session has expired — run `bb login` again".to_string()
+    } else if lower.contains("not found") {
+        "passkey not found (already removed, or never existed)".to_string()
+    } else {
+        e
+    }
+}
+
+/// `bb passkey remove <id-or-prefix>` — see the module doc comment above for
+/// the step-up, "last sign-in method", picker, and confirmation
+/// deviations/decisions.
+pub async fn remove(id: String, yes: bool) -> Result<(), String> {
+    use crate::{colors, ui};
+    use colored::Colorize;
+
+    let api = ApiClient::from_config();
+    api.require_auth()?;
+
+    let body = match api.list_passkeys().await {
+        Ok(body) => body,
+        Err(e) => return Err(classify_list_error(e)),
+    };
+    let passkeys = parse_passkeys(&body);
+
+    let full_id = resolve_passkey_id(&passkeys, &id)?;
+    let target = passkeys
+        .iter()
+        .find(|p| p.id == full_id)
+        .expect("resolve_passkey_id only ever returns an id present in `passkeys`");
+    let name = target.name.clone();
+
+    let interactive = ui::is_rich() && stdin_is_tty();
+    if !remove_may_proceed_without_prompt(yes, interactive)? && !confirm_remove(&name)? {
+        if !ui::is_quiet() {
+            println!("  {}", "cancelled".custom_color(colors::INK_DIM));
+        }
+        return Ok(());
+    }
+
+    let resp = api.delete_passkey(&full_id).await.map_err(classify_remove_error)?;
+
+    if ui::is_json() {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&resp).unwrap_or_else(|_| "{}".to_string())
+        );
+    } else if !ui::is_quiet() {
+        println!(
+            "  {} removed passkey {} ({})",
+            "ok".custom_color(colors::GREEN_OK),
+            short_id(&full_id).custom_color(colors::INK),
+            name.custom_color(colors::INK_DIM),
+        );
+    }
     Ok(())
 }
 
@@ -743,5 +943,124 @@ mod tests {
         });
         assert_eq!(body["url"], "https://app.beebeeb.io/settings/passkeys");
         assert!(body.get("token").is_none());
+    }
+
+    // ── task 0484: resolve_passkey_id / remove_may_proceed_without_prompt / classify_remove_error ──
+
+    fn two_row_fixture() -> Vec<PasskeyRow> {
+        vec![
+            PasskeyRow {
+                id: "11111111-1111-1111-1111-111111111111".into(),
+                name: "MacBook Touch ID".into(),
+                created_at: "2026-09-01T09:00:00Z".into(),
+            },
+            PasskeyRow {
+                id: "22222222-2222-2222-2222-222222222222".into(),
+                name: "YubiKey".into(),
+                created_at: "2026-08-15T09:00:00Z".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn resolve_passkey_id_matches_a_full_id_exactly() {
+        let passkeys = two_row_fixture();
+        assert_eq!(
+            resolve_passkey_id(&passkeys, "22222222-2222-2222-2222-222222222222").unwrap(),
+            "22222222-2222-2222-2222-222222222222"
+        );
+    }
+
+    #[test]
+    fn resolve_passkey_id_matches_a_unique_prefix() {
+        let passkeys = two_row_fixture();
+        assert_eq!(
+            resolve_passkey_id(&passkeys, "2222").unwrap(),
+            "22222222-2222-2222-2222-222222222222"
+        );
+    }
+
+    #[test]
+    fn resolve_passkey_id_errors_on_zero_matches() {
+        let passkeys = two_row_fixture();
+        let err = resolve_passkey_id(&passkeys, "deadbeef").unwrap_err();
+        assert!(err.contains("no passkey id starts with 'deadbeef'"), "err was: {err:?}");
+    }
+
+    #[test]
+    fn resolve_passkey_id_errors_on_ambiguous_prefix() {
+        let passkeys = vec![
+            PasskeyRow {
+                id: "aaaa1111-0000-0000-0000-000000000000".into(),
+                name: "p1".into(),
+                created_at: "2026-01-01T00:00:00Z".into(),
+            },
+            PasskeyRow {
+                id: "aaaa2222-0000-0000-0000-000000000000".into(),
+                name: "p2".into(),
+                created_at: "2026-01-01T00:00:00Z".into(),
+            },
+        ];
+        let err = resolve_passkey_id(&passkeys, "aaaa").unwrap_err();
+        assert!(
+            err.contains("ambiguous id 'aaaa' matches 2 passkeys"),
+            "err was: {err:?}"
+        );
+    }
+
+    #[test]
+    fn remove_yes_flag_always_proceeds_without_a_prompt_rich_or_not() {
+        assert_eq!(remove_may_proceed_without_prompt(true, true), Ok(true));
+        assert_eq!(remove_may_proceed_without_prompt(true, false), Ok(true));
+    }
+
+    #[test]
+    fn remove_no_yes_but_rich_terminal_falls_through_to_the_prompt() {
+        assert_eq!(remove_may_proceed_without_prompt(false, true), Ok(false));
+    }
+
+    #[test]
+    fn remove_no_yes_and_not_rich_refuses_instead_of_silently_proceeding() {
+        // The exact bug the Codex PR #21 review caught on the analogous
+        // `sessions revoke-all-others` path (eng-0481): --json/--quiet
+        // (is_rich == false) must NOT silently skip the safety check just
+        // because there's no terminal to prompt on.
+        let err = remove_may_proceed_without_prompt(false, false).unwrap_err();
+        assert!(
+            err.contains("--yes"),
+            "err must tell the caller how to proceed: {err:?}"
+        );
+        assert!(
+            err.contains("refusing"),
+            "must refuse, not silently proceed, when not rich and not --yes: {err:?}"
+        );
+    }
+
+    #[test]
+    fn classify_remove_error_maps_unauthorized_to_a_login_hint() {
+        assert_eq!(
+            classify_remove_error("unauthorized".to_string()),
+            "your session has expired — run `bb login` again"
+        );
+        assert_eq!(
+            classify_remove_error("401 Unauthorized: unauthorized".to_string()),
+            "your session has expired — run `bb login` again"
+        );
+    }
+
+    #[test]
+    fn classify_remove_error_maps_the_live_lowercase_not_found_body() {
+        // The live 404 body is exactly {"error": "not found"} (error.rs
+        // ApiError::NotFound → "not found", L533), never "Not Found" and
+        // never a "404: ..."-prefixed string.
+        assert_eq!(
+            classify_remove_error("not found".to_string()),
+            "passkey not found (already removed, or never existed)"
+        );
+    }
+
+    #[test]
+    fn classify_remove_error_passes_through_unrelated_errors() {
+        assert_eq!(classify_remove_error("network failed".to_string()), "network failed");
     }
 }

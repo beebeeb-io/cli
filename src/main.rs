@@ -587,9 +587,6 @@ enum SessionsCmd {
     },
 }
 
-/// `remove` is plan Task 16 (not this task's scope) — only `List`/`Add` are
-/// wired so `bb passkey remove` doesn't appear in `bb passkey --help` as a
-/// silent stub.
 #[derive(Subcommand)]
 enum PasskeyCmd {
     /// List your registered passkeys
@@ -599,6 +596,14 @@ enum PasskeyCmd {
         /// Print the enrollment URL instead of opening a browser (for SSH / headless use)
         #[arg(long)]
         print_url: bool,
+    },
+    /// Remove a passkey by id (or a unique id prefix from `bb passkey list`)
+    Remove {
+        /// Full passkey id or a unique prefix
+        id: String,
+        /// Skip the confirmation prompt
+        #[arg(short = 'f', long = "yes", visible_alias = "force")]
+        yes: bool,
     },
 }
 
@@ -936,6 +941,7 @@ async fn main() {
         Commands::Passkey(cmd) => match cmd {
             PasskeyCmd::List => commands::passkey::list().await,
             PasskeyCmd::Add { print_url } => commands::passkey::add(print_url).await,
+            PasskeyCmd::Remove { id, yes } => commands::passkey::remove(id, yes).await,
         },
         Commands::Logout => commands::logout::run().await,
         Commands::Completions { shell } => {

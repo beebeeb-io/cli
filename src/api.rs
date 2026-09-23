@@ -924,6 +924,35 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    /// DELETE /api/v1/auth/passkeys/{id} — remove one passkey by id.
+    ///
+    /// **Deviation (eng-0484, task 0484):** the plan's Task 16 pseudocode
+    /// assumed step-up (`X-Confirm-Token`, via `acquire_confirm_token`) and a
+    /// server-side "last sign-in method" refusal. Reading the live handler
+    /// (`repos/server/beebeeb-api/src/routes/passkeys.rs::delete_passkey`,
+    /// ~L388-406) end to end: it takes `AuthUser` + `NotImpersonated` +
+    /// `Path(id)` only — no `ConfirmedAction` extractor — and its body is
+    /// exactly `DELETE FROM passkeys WHERE id = $1 AND user_id = $2`, with no
+    /// count-of-remaining-passkeys check anywhere before it. So (a) no
+    /// `X-Confirm-Token` is sent, same reasoning as `revoke_session` above
+    /// (eng-0481); a token the server never reads is a fabricated password
+    /// prompt, not a safety measure. (b) there is no "last sign-in method"
+    /// 400 to surface — the live server does not defend against a
+    /// passkey-only account deleting its only passkey (a real server-side gap,
+    /// out of scope for this CLI-only task; the CLI still confirms
+    /// client-side before calling this, see `commands::passkey::remove`).
+    pub async fn delete_passkey(&self, id: &str) -> Result<serde_json::Value, String> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .delete(self.url(&format!("/api/v1/auth/passkeys/{id}")))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(resp).await
+    }
+
     /// Step-up re-auth: POST /api/v1/auth/confirm.
     /// Returns the raw confirmation token. Caller is responsible for attaching
     /// it as `X-Confirm-Token` on the protected call within 5 minutes.
@@ -2135,6 +2164,76 @@ mod session_revoke_request_tests {
             headers.get("x-confirm-token").is_none(),
             "must NOT send X-Confirm-Token — the live revoke_all_other_sessions handler takes \
              only AuthUser, no ConfirmedAction extractor (deviation eng-0481): {headers}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod passkey_delete_request_tests {
+    //! task 0484: proves `delete_passkey` hits the exact live route
+    //! (`repos/server/beebeeb-api/src/routes/passkeys.rs::router()`:
+    //! `DELETE /{id}` nested under `/api/v1/auth/passkeys`) and sends NO
+    //! `X-Confirm-Token` header — the live handler takes only `AuthUser` +
+    //! `NotImpersonated`, no `ConfirmedAction` extractor (deviation eng-0484,
+    //! same reasoning as `revoke_session`/eng-0481 above). Same in-process
+    //! axum mock pattern: the mock echoes back what it actually received.
+
+    use axum::extract::{Path as AxumPath, Request as AxumRequest};
+    use axum::routing::delete;
+    use axum::{Json, Router};
+    use serde_json::{Map, Value, json};
+
+    use super::ApiClient;
+
+    fn echo_method_id_and_headers(method: &str, id: &str, req: &AxumRequest) -> Value {
+        let headers: Map<String, Value> = req
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| value.to_str().ok().map(|v| (name.as_str().to_string(), json!(v))))
+            .collect();
+        json!({ "method": method, "id": id, "headers": headers })
+    }
+
+    async fn spawn_delete_passkey_mock() -> String {
+        let app = Router::new().route(
+            "/api/v1/auth/passkeys/:id",
+            delete(|AxumPath(id): AxumPath<String>, req: AxumRequest| async move {
+                Json(echo_method_id_and_headers("DELETE", &id, &req))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn delete_passkey_sends_delete_to_the_id_path_with_bearer_auth_and_no_confirm_token() {
+        let api = ApiClient::new_for_test(spawn_delete_passkey_mock().await);
+        let resp = api
+            .delete_passkey("11111111-1111-1111-1111-111111111111")
+            .await
+            .expect("mock request should succeed");
+
+        assert_eq!(resp["method"], "DELETE", "must be a DELETE, matching the live router");
+        assert_eq!(
+            resp["id"], "11111111-1111-1111-1111-111111111111",
+            "the passkey id must be interpolated into the path, not sent as a body/query param"
+        );
+        let headers = &resp["headers"];
+        assert!(
+            headers["authorization"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("Bearer "),
+            "must send Bearer auth: {headers}"
+        );
+        assert!(
+            headers.get("x-confirm-token").is_none(),
+            "must NOT send X-Confirm-Token — the live delete_passkey handler takes only \
+             AuthUser + NotImpersonated, no ConfirmedAction extractor (deviation eng-0484): {headers}"
         );
     }
 }
