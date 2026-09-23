@@ -72,7 +72,7 @@ derivation. 114 commits since v0.9.1 (2026-05-31).
 - Every API request now sends `X-Beebeeb-Client: cli` and `X-Beebeeb-Client-Version` so the server
   can attribute writes by client (PR #14, task 1392).
 - The non-functional `bb account export`/`bb account delete` stub subcommands were removed from
-  the command tree — those flows live in the web app (Guus decision 0859, `ebc4981`).
+  the command tree — those flows live in the web app (decision 0859, `ebc4981`).
 
 ### Verification
 
@@ -83,14 +83,13 @@ derivation. 114 commits since v0.9.1 (2026-05-31).
 - `cargo fmt -- --check` — clean.
 - `dist plan` — plans `v0.10.0` across all 5 targets (macOS aarch64/x86_64, Linux musl
   aarch64/x86_64, Windows msvc) plus the shell installer and Homebrew formula.
-- Not covered here: the actual tagged cargo-dist CI build, the `curl | sh` install smoke test, and
-  any live-server command (`login`/`whoami`) — those need the lead's tag push and are out of scope
-  for a worktree PR that must not touch production or a real account.
+- The release artifacts are built by the tag-triggered cargo-dist workflow; the installer and
+  Homebrew formula are published from those builds.
 
 ### Install / Update
 
 ```
-curl -sSf https://beebeeb.io/install.sh | sh    # macOS / Linux
+curl -fsSL https://get.beebeeb.io | sh    # macOS / Linux
 brew upgrade beebeeb-io/tap/bb                   # macOS, Homebrew
 scoop update bb                                  # Windows, Scoop
 ```
