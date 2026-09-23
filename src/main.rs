@@ -617,6 +617,12 @@ enum BillingAction {
     },
     /// Storage usage with a per-region breakdown (approximate — top-level files only)
     Usage,
+    /// List VAT-compliant invoices (number, date, amount, status, period)
+    Invoices {
+        /// Download and open one invoice's PDF (full invoice id or a unique prefix)
+        #[arg(long, value_name = "ID")]
+        open: Option<String>,
+    },
     /// Open the billing portal
     Portal,
     /// View or purchase billing add-ons
@@ -915,6 +921,7 @@ async fn main() {
         Commands::Billing { action } => match action {
             BillingAction::Show { json } => commands::billing::show(json).await,
             BillingAction::Usage => commands::billing::usage().await,
+            BillingAction::Invoices { open } => commands::billing::invoices(open).await,
             BillingAction::Portal => commands::billing::portal().await,
             BillingAction::Addons { action } => match action {
                 Some(AddonsAction::Purchase { addon_id }) => commands::billing::purchase_addon(addon_id).await,
