@@ -440,6 +440,10 @@ enum Commands {
     #[command(subcommand)]
     Sessions(SessionsCmd),
 
+    /// Manage passkeys (WebAuthn credentials)
+    #[command(subcommand)]
+    Passkey(PasskeyCmd),
+
     /// Print shell completion script to stdout
     ///
     /// Pipe the output into the correct file for your shell:
@@ -581,6 +585,15 @@ enum SessionsCmd {
         #[arg(short = 'f', long = "yes", visible_alias = "force")]
         yes: bool,
     },
+}
+
+/// `add`/`remove` are plan Tasks 15/16 (eng-0482: not this task's scope) —
+/// only `List` is wired so they don't appear in `bb passkey --help` as
+/// silent stubs.
+#[derive(Subcommand)]
+enum PasskeyCmd {
+    /// List your registered passkeys
+    List,
 }
 
 #[derive(Subcommand)]
@@ -913,6 +926,9 @@ async fn main() {
             SessionsCmd::List => commands::sessions::list().await,
             SessionsCmd::Revoke { id } => commands::sessions::revoke(id).await,
             SessionsCmd::RevokeAllOthers { yes } => commands::sessions::revoke_all_others(yes).await,
+        },
+        Commands::Passkey(cmd) => match cmd {
+            PasskeyCmd::List => commands::passkey::list().await,
         },
         Commands::Logout => commands::logout::run().await,
         Commands::Completions { shell } => {
