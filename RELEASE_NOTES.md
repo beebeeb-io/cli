@@ -95,6 +95,8 @@ brew upgrade beebeeb-io/tap/bb                   # macOS, Homebrew
 scoop update bb                                  # Windows, Scoop
 ```
 
-Existing installs also self-update on next run via the built-in OTA updater.
+macOS and Linux installs (shell installer or Homebrew) also self-update on next run via the
+built-in OTA updater. Windows installs do not self-update yet — run `scoop update bb` to get
+0.10.0.
 
 Full changelog: https://github.com/beebeeb-io/cli/compare/v0.9.1...v0.10.0
