@@ -271,6 +271,23 @@ pub async fn usage() -> Result<(), String> {
     let api = ApiClient::from_config();
     api.require_auth()?;
 
+    // Quiet mode prints only used/quota/percentage. Check it BEFORE fetching
+    // the file listing — the region breakdown is the only thing that needs
+    // it, and `list_files(None)` follows every pagination cursor, so an
+    // account with many root entries would otherwise pay for a full listing
+    // walk (and risk the hard-cap warning) just to throw the result away
+    // (Codex review, cli PR #26).
+    if ui::is_quiet() {
+        let usage = api.get_billing_usage().await?;
+        let used = usage.get("used_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
+        let quota = usage.get("quota_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
+        let pct = if quota > 0 { used as f64 / quota as f64 } else { 0.0 };
+        println!("{}", format_storage_si(used));
+        println!("{}", format_storage_si(quota));
+        println!("{:.2}%", pct * 100.0);
+        return Ok(());
+    }
+
     let (usage_res, files_res) = tokio::join!(api.get_billing_usage(), api.list_files(None));
     let usage = usage_res?;
 
@@ -305,13 +322,6 @@ pub async fn usage() -> Result<(), String> {
             }))
             .unwrap_or_else(|_| "{}".to_string())
         );
-        return Ok(());
-    }
-
-    if ui::is_quiet() {
-        println!("{}", format_storage_si(used));
-        println!("{}", format_storage_si(quota));
-        println!("{:.2}%", pct * 100.0);
         return Ok(());
     }
 
