@@ -66,6 +66,22 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+      # Fail-closed BEFORE anything is built or published (task 1497 follow-up).
+      # This used to run only in `set-release-notes`, which is AFTER `host` has
+      # already created the GitHub Release and uploaded artifacts to it — a
+      # missing/stale RELEASE_NOTES.md still shipped a real release with
+      # cargo-dist's auto-generated changelog body. Running it as the first
+      # step of `plan`, on tag pushes, stops `dist host --steps=create` below
+      # (and every build job downstream) from ever running. No-op on
+      # pull_request runs — PRs never publish, so there is nothing to gate.
+      - name: Validate release notes (fail-closed, before build/publish)
+        if: ${{ !github.event.pull_request }}
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          bash scripts/check-release-notes.sh "${TAG#v}"
       - name: Install dist
         shell: bash
         # W3: replaced curl|sh with `cargo install` from crates.io. The crates.io
@@ -342,24 +358,98 @@ jobs:
           # C3: RELEASE_TAG comes from an env var, not direct expression interpolation
           # shellcheck disable=SC2086
           gh release create "$RELEASE_TAG" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
-      - name: Update Scoop manifest
-        env:
-          RELEASE_TAG: ${{ needs.plan.outputs.tag }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # NOTE: the Scoop-manifest update and the authored-release-notes overwrite
+      # both used to live inline here, at the end of `host`. They were split out
+      # into their own jobs below (task 1497 / incident: v0.10.0's tag run had
+      # this step try to `git push` straight to protected `main` and fail with
+      # GH006, which — because they were the LAST steps of this job — marked the
+      # whole `host` job failed and caused publish-homebrew-formula/announce to
+      # be SKIPPED even though the actual release+artifacts had already
+      # published successfully). Splitting them into their own jobs means a
+      # failure in either can never again take down the real publish: this job
+      # now ends the moment the release + artifacts exist.
+
+  # Rewrites the just-created GitHub Release's body with the authored
+  # RELEASE_NOTES.md (cargo-dist's own body is generated from CHANGELOG.md
+  # section headers, per the workspace CLAUDE.md rule that every release ships
+  # authored notes, not a bare changelog dump — mirrors repos/desktop's
+  # release-notes gate). Deliberately its own job, needed only by nothing
+  # downstream, so a failure here is loud (the job goes red) but can never
+  # skip publish-homebrew-formula or announce, which depend on `host` only.
+  set-release-notes:
+    needs:
+      - plan
+      - host
+    runs-on: "ubuntu-22.04"
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Validate authored release notes
+        # Re-validates the same commit `plan` already gated on before any
+        # build/publish happened (see the early step there). Kept here too so
+        # this job stays self-contained and still fails loudly (belt and
+        # suspenders — cheap to run twice) right before it overwrites the
+        # release body.
+        shell: bash
         run: |
           set -euo pipefail
-          # The windows artifact lives in artifacts/ now (the previous Download
-          # step glob-pulled everything).
-          ART="artifacts/beebeeb-cli-x86_64-pc-windows-msvc.zip"
-          if [[ ! -f "$ART" ]]; then
-            echo "::warning::Windows artifact not produced — skipping Scoop manifest update"
-            exit 0
-          fi
-          SHA="$(shasum -a 256 "$ART" | awk '{print $1}')"
+          bash scripts/check-release-notes.sh "${RELEASE_TAG#v}"
+      - name: Set release body from RELEASE_NOTES.md
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086
+          gh release edit "$RELEASE_TAG" --notes-file RELEASE_NOTES.md
+
+  # Opens a PR against main with scoop/bb.json bumped to the release version +
+  # the released Windows artifact's SHA-256, instead of the old behavior of
+  # pushing the commit straight to `main` (which GH006-refused on a protected
+  # branch — see the note on `host` above). Never blocks publish-homebrew-formula
+  # or announce: it's a separate job that only `plan`/`host` feed into, not one
+  # they depend on.
+  open-scoop-manifest-pr:
+    needs:
+      - plan
+      - host
+    runs-on: "ubuntu-22.04"
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Update scoop/bb.json and open a PR
+        shell: bash
+        run: |
+          set -euo pipefail
           VERSION="${RELEASE_TAG#v}"
 
-          # Use the helper for consistency.
+          mkdir -p artifacts
+          gh release download "$RELEASE_TAG" \
+            --pattern 'beebeeb-cli-x86_64-pc-windows-msvc.zip' \
+            --dir artifacts \
+            --clobber
+
+          ART="artifacts/beebeeb-cli-x86_64-pc-windows-msvc.zip"
+          if [[ ! -f "$ART" ]]; then
+            echo "::warning::Windows artifact not found on release $RELEASE_TAG — skipping Scoop manifest update"
+            exit 0
+          fi
+
+          SHA="$(shasum -a 256 "$ART" | awk '{print $1}')"
           echo "$SHA" > /tmp/win.sha256
+
+          # Use the helper for consistency — same script a human runs locally.
           bash scripts/update-scoop-manifest.sh "$VERSION" /tmp/win.sha256
 
           if git diff --quiet scoop/bb.json; then
@@ -367,21 +457,31 @@ jobs:
             exit 0
           fi
 
+          BASE_BRANCH="main"
+          PR_BRANCH="release/scoop-v${VERSION}"
+
           git config user.name "axo bot"
           git config user.email "admin+bot@axo.dev"
-          git add scoop/bb.json
-          git commit -m "release: update scoop manifest to v$VERSION"
-          # The host job's checkout uses persist-credentials: false (C1 hardening),
-          # so we set the remote URL with a token before pushing back.
-          # Push back to the same branch the tag was cut from. On a tag push,
-          # github.ref_name is the tag, so we resolve the branch via the
-          # commit's parent ref.
-          BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-          if [[ "$BRANCH" == "HEAD" ]]; then
-            BRANCH="main"
-          fi
+          # persist-credentials: false (C1 hardening) means we set the remote
+          # URL with a token before pushing back, same pattern as
+          # publish-homebrew-formula's checkout of the tap repo below.
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git push origin "HEAD:$BRANCH"
+
+          git checkout -B "$PR_BRANCH"
+          git add scoop/bb.json
+          git commit -m "release: update scoop manifest to v${VERSION}"
+          git push --force origin "HEAD:$PR_BRANCH"
+
+          if gh pr view "$PR_BRANCH" >/dev/null 2>&1; then
+            echo "PR for $PR_BRANCH already exists — pushed the update, nothing else to do"
+            exit 0
+          fi
+
+          gh pr create \
+            --base "$BASE_BRANCH" \
+            --head "$PR_BRANCH" \
+            --title "release: update scoop manifest to v${VERSION}" \
+            --body "Automated update of \`scoop/bb.json\` to v${VERSION} (SHA-256 \`${SHA}\`) for the [${RELEASE_TAG} release](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}). Opened by the release workflow, run ${GITHUB_RUN_ID}."
 
   publish-homebrew-formula:
     needs:
