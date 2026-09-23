@@ -72,7 +72,7 @@
       "source_file": "scripts/test-2fa-driver.mjs",
       "source_location": "L1",
       "id": "scripts_test_2fa_driver_mjs",
-      "community": 23,
+      "community": 22,
       "norm_label": "test-2fa-driver.mjs"
     },
     {
@@ -81,7 +81,7 @@
       "source_file": "scripts/prod-bots/wasm-bot.mjs",
       "source_location": "L1",
       "id": "scripts_prod_bots_wasm_bot_mjs",
-      "community": 24,
+      "community": 23,
       "norm_label": "wasm-bot.mjs"
     },
     {
@@ -90,7 +90,7 @@
       "source_file": "scripts/prod-bots/share-recipient-driver.mjs",
       "source_location": "L1",
       "id": "scripts_prod_bots_share_recipient_driver_mjs",
-      "community": 25,
+      "community": 24,
       "norm_label": "share-recipient-driver.mjs"
     },
     {
@@ -99,7 +99,7 @@
       "source_file": "scripts/prod-bots/auth-bot.mjs",
       "source_location": "L1",
       "id": "scripts_prod_bots_auth_bot_mjs",
-      "community": 21,
+      "community": 20,
       "norm_label": "auth-bot.mjs"
     },
     {
@@ -108,7 +108,7 @@
       "source_file": "scripts/prod-bots/auth-bot.mjs",
       "source_location": "L28",
       "id": "prod_bots_auth_bot_authurl",
-      "community": 21,
+      "community": 20,
       "norm_label": "authurl()"
     },
     {
@@ -117,7 +117,7 @@
       "source_file": "scripts/prod-bots/auth-bot.mjs",
       "source_location": "L32",
       "id": "prod_bots_auth_bot_onerun",
-      "community": 21,
+      "community": 20,
       "norm_label": "onerun()"
     },
     {
@@ -126,7 +126,7 @@
       "source_file": "scripts/prod-bots/bb-login-driver.mjs",
       "source_location": "L1",
       "id": "scripts_prod_bots_bb_login_driver_mjs",
-      "community": 26,
+      "community": 25,
       "norm_label": "bb-login-driver.mjs"
     },
     {
@@ -135,7 +135,7 @@
       "source_file": "scripts/prod-bots/shared-state-canary.mjs",
       "source_location": "L1",
       "id": "scripts_prod_bots_shared_state_canary_mjs",
-      "community": 22,
+      "community": 21,
       "norm_label": "shared-state-canary.mjs"
     },
     {
@@ -144,7 +144,7 @@
       "source_file": "scripts/prod-bots/shared-state-canary.mjs",
       "source_location": "L22",
       "id": "prod_bots_shared_state_canary_ratelimitcheck",
-      "community": 22,
+      "community": 21,
       "norm_label": "ratelimitcheck()"
     },
     {
@@ -153,7 +153,7 @@
       "source_file": "scripts/prod-bots/shared-state-canary.mjs",
       "source_location": "L44",
       "id": "prod_bots_shared_state_canary_cliauthcheck",
-      "community": 22,
+      "community": 21,
       "norm_label": "cliauthcheck()"
     },
     {
@@ -288,7 +288,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L1",
       "id": "src_ui_rs",
-      "community": 14,
+      "community": 16,
       "norm_label": "ui.rs"
     },
     {
@@ -297,7 +297,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L15",
       "id": "src_ui_outputmode",
-      "community": 14,
+      "community": 16,
       "norm_label": "outputmode"
     },
     {
@@ -306,7 +306,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L31",
       "id": "src_ui_init",
-      "community": 1,
+      "community": 2,
       "norm_label": "init()"
     },
     {
@@ -324,7 +324,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L53",
       "id": "src_ui_is_json",
-      "community": 1,
+      "community": 2,
       "norm_label": "is_json()"
     },
     {
@@ -333,7 +333,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L58",
       "id": "src_ui_is_quiet",
-      "community": 1,
+      "community": 2,
       "norm_label": "is_quiet()"
     },
     {
@@ -342,7 +342,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L65",
       "id": "src_ui_box_header",
-      "community": 14,
+      "community": 16,
       "norm_label": "box_header()"
     },
     {
@@ -351,7 +351,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L74",
       "id": "src_ui_box_line",
-      "community": 14,
+      "community": 16,
       "norm_label": "box_line()"
     },
     {
@@ -360,7 +360,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L83",
       "id": "src_ui_box_footer",
-      "community": 14,
+      "community": 16,
       "norm_label": "box_footer()"
     },
     {
@@ -369,7 +369,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L94",
       "id": "src_ui_relative_time",
-      "community": 1,
+      "community": 2,
       "norm_label": "relative_time()"
     },
     {
@@ -378,7 +378,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L154",
       "id": "src_ui_file_icon",
-      "community": 1,
+      "community": 2,
       "norm_label": "file_icon()"
     },
     {
@@ -387,7 +387,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L192",
       "id": "src_ui_human_size",
-      "community": 1,
+      "community": 2,
       "norm_label": "human_size()"
     },
     {
@@ -396,7 +396,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L216",
       "id": "src_ui_human_speed",
-      "community": 14,
+      "community": 16,
       "norm_label": "human_speed()"
     },
     {
@@ -405,7 +405,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L236",
       "id": "src_ui_human_speed_network",
-      "community": 14,
+      "community": 16,
       "norm_label": "human_speed_network()"
     },
     {
@@ -414,7 +414,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L258",
       "id": "src_ui_speed_bar",
-      "community": 14,
+      "community": 16,
       "norm_label": "speed_bar()"
     },
     {
@@ -423,7 +423,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L270",
       "id": "src_ui_quota_bar",
-      "community": 14,
+      "community": 16,
       "norm_label": "quota_bar()"
     },
     {
@@ -441,7 +441,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L316",
       "id": "src_ui_table",
-      "community": 14,
+      "community": 16,
       "norm_label": "table()"
     },
     {
@@ -450,7 +450,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L363",
       "id": "src_ui_strip_ansi",
-      "community": 14,
+      "community": 16,
       "norm_label": "strip_ansi()"
     },
     {
@@ -459,7 +459,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L387",
       "id": "src_ui_table_aligns_columns_by_widest_cell",
-      "community": 14,
+      "community": 16,
       "norm_label": "table_aligns_columns_by_widest_cell()"
     },
     {
@@ -468,7 +468,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L403",
       "id": "src_ui_table_empty_headers_returns_empty_string",
-      "community": 14,
+      "community": 16,
       "norm_label": "table_empty_headers_returns_empty_string()"
     },
     {
@@ -477,7 +477,7 @@
       "source_file": "src/ui.rs",
       "source_location": "L408",
       "id": "src_ui_table_width_calculation_ignores_ansi_escapes",
-      "community": 14,
+      "community": 16,
       "norm_label": "table_width_calculation_ignores_ansi_escapes()"
     },
     {
@@ -486,7 +486,7 @@
       "source_file": "src/device.rs",
       "source_location": "L1",
       "id": "src_device_rs",
-      "community": 20,
+      "community": 19,
       "norm_label": "device.rs"
     },
     {
@@ -495,7 +495,7 @@
       "source_file": "src/device.rs",
       "source_location": "L6",
       "id": "src_device_deviceinfo",
-      "community": 20,
+      "community": 19,
       "norm_label": "deviceinfo"
     },
     {
@@ -504,7 +504,7 @@
       "source_file": "src/device.rs",
       "source_location": "L13",
       "id": "src_device_device_path",
-      "community": 20,
+      "community": 19,
       "norm_label": "device_path()"
     },
     {
@@ -513,7 +513,7 @@
       "source_file": "src/device.rs",
       "source_location": "L20",
       "id": "src_device_load_or_create",
-      "community": 20,
+      "community": 19,
       "norm_label": "load_or_create()"
     },
     {
@@ -522,7 +522,7 @@
       "source_file": "src/device.rs",
       "source_location": "L46",
       "id": "src_device_get_device_id",
-      "community": 20,
+      "community": 19,
       "norm_label": "get_device_id()"
     },
     {
@@ -531,7 +531,7 @@
       "source_file": "src/device.rs",
       "source_location": "L50",
       "id": "src_device_current_platform",
-      "community": 20,
+      "community": 19,
       "norm_label": "current_platform()"
     },
     {
@@ -765,7 +765,7 @@
       "source_file": "src/config.rs",
       "source_location": "L1",
       "id": "src_config_rs",
-      "community": 10,
+      "community": 11,
       "norm_label": "config.rs"
     },
     {
@@ -774,7 +774,7 @@
       "source_file": "src/config.rs",
       "source_location": "L9",
       "id": "src_config_config",
-      "community": 10,
+      "community": 11,
       "norm_label": "config"
     },
     {
@@ -783,7 +783,7 @@
       "source_file": "src/config.rs",
       "source_location": "L20",
       "id": "src_config_config_default",
-      "community": 10,
+      "community": 0,
       "norm_label": ".default()"
     },
     {
@@ -792,7 +792,7 @@
       "source_file": "src/config.rs",
       "source_location": "L30",
       "id": "src_config_config_path",
-      "community": 10,
+      "community": 11,
       "norm_label": "config_path()"
     },
     {
@@ -801,7 +801,7 @@
       "source_file": "src/config.rs",
       "source_location": "L35",
       "id": "src_config_load_config",
-      "community": 10,
+      "community": 11,
       "norm_label": "load_config()"
     },
     {
@@ -810,7 +810,7 @@
       "source_file": "src/config.rs",
       "source_location": "L52",
       "id": "src_config_set_api_url_override",
-      "community": 10,
+      "community": 11,
       "norm_label": "set_api_url_override()"
     },
     {
@@ -819,7 +819,7 @@
       "source_file": "src/config.rs",
       "source_location": "L62",
       "id": "src_config_save_config",
-      "community": 10,
+      "community": 11,
       "norm_label": "save_config()"
     },
     {
@@ -828,7 +828,7 @@
       "source_file": "src/config.rs",
       "source_location": "L78",
       "id": "src_config_clear_config",
-      "community": 10,
+      "community": 11,
       "norm_label": "clear_config()"
     },
     {
@@ -1071,7 +1071,7 @@
       "source_file": "src/update.rs",
       "source_location": "L1",
       "id": "src_update_rs",
-      "community": 12,
+      "community": 14,
       "norm_label": "update.rs"
     },
     {
@@ -1080,7 +1080,7 @@
       "source_file": "src/update.rs",
       "source_location": "L30",
       "id": "src_update_check_and_update",
-      "community": 12,
+      "community": 14,
       "norm_label": "check_and_update()"
     },
     {
@@ -1134,7 +1134,7 @@
       "source_file": "src/update.rs",
       "source_location": "L300",
       "id": "src_update_current_target",
-      "community": 12,
+      "community": 14,
       "norm_label": "current_target()"
     },
     {
@@ -1143,7 +1143,7 @@
       "source_file": "src/update.rs",
       "source_location": "L335",
       "id": "src_update_is_dev_build",
-      "community": 12,
+      "community": 14,
       "norm_label": "is_dev_build()"
     },
     {
@@ -1152,7 +1152,7 @@
       "source_file": "src/update.rs",
       "source_location": "L347",
       "id": "src_update_state_file",
-      "community": 12,
+      "community": 14,
       "norm_label": "state_file()"
     },
     {
@@ -1161,7 +1161,7 @@
       "source_file": "src/update.rs",
       "source_location": "L355",
       "id": "src_update_cooldown_elapsed",
-      "community": 12,
+      "community": 14,
       "norm_label": "cooldown_elapsed()"
     },
     {
@@ -1179,7 +1179,7 @@
       "source_file": "src/update.rs",
       "source_location": "L385",
       "id": "src_update_githubrelease",
-      "community": 12,
+      "community": 14,
       "norm_label": "githubrelease"
     },
     {
@@ -1188,7 +1188,7 @@
       "source_file": "src/update.rs",
       "source_location": "L391",
       "id": "src_update_githubasset",
-      "community": 12,
+      "community": 14,
       "norm_label": "githubasset"
     },
     {
@@ -1197,7 +1197,7 @@
       "source_file": "src/update.rs",
       "source_location": "L401",
       "id": "src_update_distmanifest",
-      "community": 12,
+      "community": 14,
       "norm_label": "distmanifest"
     },
     {
@@ -1206,7 +1206,7 @@
       "source_file": "src/update.rs",
       "source_location": "L409",
       "id": "src_update_distartifact",
-      "community": 12,
+      "community": 14,
       "norm_label": "distartifact"
     },
     {
@@ -1215,7 +1215,7 @@
       "source_file": "src/update.rs",
       "source_location": "L415",
       "id": "src_update_distchecksums",
-      "community": 12,
+      "community": 14,
       "norm_label": "distchecksums"
     },
     {
@@ -1233,7 +1233,7 @@
       "source_file": "src/update.rs",
       "source_location": "L442",
       "id": "src_update_ct_eq_ignore_case",
-      "community": 12,
+      "community": 14,
       "norm_label": "ct_eq_ignore_case()"
     },
     {
@@ -1242,7 +1242,7 @@
       "source_file": "src/update.rs",
       "source_location": "L462",
       "id": "src_update_sha256_hex_empty_input_matches_known_value",
-      "community": 12,
+      "community": 14,
       "norm_label": "sha256_hex_empty_input_matches_known_value()"
     },
     {
@@ -1251,7 +1251,7 @@
       "source_file": "src/update.rs",
       "source_location": "L469",
       "id": "src_update_sha256_hex_known_value_for_abc",
-      "community": 12,
+      "community": 14,
       "norm_label": "sha256_hex_known_value_for_abc()"
     },
     {
@@ -1260,7 +1260,7 @@
       "source_file": "src/update.rs",
       "source_location": "L476",
       "id": "src_update_ct_eq_handles_case_insensitivity",
-      "community": 12,
+      "community": 14,
       "norm_label": "ct_eq_handles_case_insensitivity()"
     },
     {
@@ -1269,7 +1269,7 @@
       "source_file": "src/update.rs",
       "source_location": "L482",
       "id": "src_update_ct_eq_detects_mismatch",
-      "community": 12,
+      "community": 14,
       "norm_label": "ct_eq_detects_mismatch()"
     },
     {
@@ -1278,7 +1278,7 @@
       "source_file": "src/update.rs",
       "source_location": "L488",
       "id": "src_update_dist_manifest_parses_real_world_shape",
-      "community": 12,
+      "community": 14,
       "norm_label": "dist_manifest_parses_real_world_shape()"
     },
     {
@@ -1368,7 +1368,7 @@
       "source_file": "src/colors.rs",
       "source_location": "L1",
       "id": "src_colors_rs",
-      "community": 27,
+      "community": 26,
       "norm_label": "colors.rs"
     },
     {
@@ -1710,7 +1710,7 @@
       "source_file": "src/main.rs",
       "source_location": "L631",
       "id": "src_main_print_custom_help",
-      "community": 1,
+      "community": 2,
       "norm_label": "print_custom_help()"
     },
     {
@@ -1719,7 +1719,7 @@
       "source_file": "src/main.rs",
       "source_location": "L718",
       "id": "src_main_main",
-      "community": 1,
+      "community": 2,
       "norm_label": "main()"
     },
     {
@@ -1728,7 +1728,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1",
       "id": "src_api_rs",
-      "community": 2,
+      "community": 1,
       "norm_label": "api.rs"
     },
     {
@@ -1737,7 +1737,7 @@
       "source_file": "src/api.rs",
       "source_location": "L13",
       "id": "src_api_update_rate_state",
-      "community": 2,
+      "community": 1,
       "norm_label": "update_rate_state()"
     },
     {
@@ -1746,7 +1746,7 @@
       "source_file": "src/api.rs",
       "source_location": "L31",
       "id": "src_api_pace_if_needed",
-      "community": 2,
+      "community": 1,
       "norm_label": "pace_if_needed()"
     },
     {
@@ -1755,7 +1755,7 @@
       "source_file": "src/api.rs",
       "source_location": "L54",
       "id": "src_api_format_request_error",
-      "community": 2,
+      "community": 1,
       "norm_label": "format_request_error()"
     },
     {
@@ -1764,7 +1764,7 @@
       "source_file": "src/api.rs",
       "source_location": "L69",
       "id": "src_api_is_transient_transport_error",
-      "community": 2,
+      "community": 1,
       "norm_label": "is_transient_transport_error()"
     },
     {
@@ -1773,7 +1773,7 @@
       "source_file": "src/api.rs",
       "source_location": "L98",
       "id": "src_api_backoff",
-      "community": 2,
+      "community": 1,
       "norm_label": "backoff()"
     },
     {
@@ -1782,7 +1782,7 @@
       "source_file": "src/api.rs",
       "source_location": "L104",
       "id": "src_api_apiclient",
-      "community": 2,
+      "community": 1,
       "norm_label": "apiclient"
     },
     {
@@ -1791,7 +1791,7 @@
       "source_file": "src/api.rs",
       "source_location": "L116",
       "id": "src_api_uploadinit",
-      "community": 2,
+      "community": 1,
       "norm_label": "uploadinit"
     },
     {
@@ -1800,7 +1800,7 @@
       "source_file": "src/api.rs",
       "source_location": "L124",
       "id": "src_api_uploadinit_from_value",
-      "community": 2,
+      "community": 1,
       "norm_label": ".from_value()"
     },
     {
@@ -1809,7 +1809,7 @@
       "source_file": "src/api.rs",
       "source_location": "L161",
       "id": "src_api_build_client",
-      "community": 2,
+      "community": 1,
       "norm_label": "build_client()"
     },
     {
@@ -1818,7 +1818,7 @@
       "source_file": "src/api.rs",
       "source_location": "L177",
       "id": "src_api_apiclient_from_config",
-      "community": 1,
+      "community": 2,
       "norm_label": ".from_config()"
     },
     {
@@ -1827,7 +1827,7 @@
       "source_file": "src/api.rs",
       "source_location": "L196",
       "id": "src_api_apiclient_new_for_test",
-      "community": 2,
+      "community": 1,
       "norm_label": ".new_for_test()"
     },
     {
@@ -1836,7 +1836,7 @@
       "source_file": "src/api.rs",
       "source_location": "L204",
       "id": "src_api_apiclient_require_auth",
-      "community": 2,
+      "community": 1,
       "norm_label": ".require_auth()"
     },
     {
@@ -1845,7 +1845,7 @@
       "source_file": "src/api.rs",
       "source_location": "L210",
       "id": "src_api_apiclient_url",
-      "community": 2,
+      "community": 1,
       "norm_label": ".url()"
     },
     {
@@ -1854,7 +1854,7 @@
       "source_file": "src/api.rs",
       "source_location": "L215",
       "id": "src_api_apiclient_signup",
-      "community": 2,
+      "community": 1,
       "norm_label": ".signup()"
     },
     {
@@ -1863,7 +1863,7 @@
       "source_file": "src/api.rs",
       "source_location": "L228",
       "id": "src_api_apiclient_opaque_login_start",
-      "community": 2,
+      "community": 1,
       "norm_label": ".opaque_login_start()"
     },
     {
@@ -1872,7 +1872,7 @@
       "source_file": "src/api.rs",
       "source_location": "L244",
       "id": "src_api_apiclient_opaque_login_finish",
-      "community": 2,
+      "community": 1,
       "norm_label": ".opaque_login_finish()"
     },
     {
@@ -1881,7 +1881,7 @@
       "source_file": "src/api.rs",
       "source_location": "L265",
       "id": "src_api_apiclient_logout",
-      "community": 2,
+      "community": 1,
       "norm_label": ".logout()"
     },
     {
@@ -1890,7 +1890,7 @@
       "source_file": "src/api.rs",
       "source_location": "L278",
       "id": "src_api_apiclient_get_me",
-      "community": 2,
+      "community": 1,
       "norm_label": ".get_me()"
     },
     {
@@ -1899,7 +1899,7 @@
       "source_file": "src/api.rs",
       "source_location": "L303",
       "id": "src_api_apiclient_totp_setup",
-      "community": 2,
+      "community": 1,
       "norm_label": ".totp_setup()"
     },
     {
@@ -1908,7 +1908,7 @@
       "source_file": "src/api.rs",
       "source_location": "L320",
       "id": "src_api_apiclient_totp_enable",
-      "community": 2,
+      "community": 1,
       "norm_label": ".totp_enable()"
     },
     {
@@ -1917,7 +1917,7 @@
       "source_file": "src/api.rs",
       "source_location": "L340",
       "id": "src_api_apiclient_totp_disable",
-      "community": 2,
+      "community": 1,
       "norm_label": ".totp_disable()"
     },
     {
@@ -1926,7 +1926,7 @@
       "source_file": "src/api.rs",
       "source_location": "L356",
       "id": "src_api_apiclient_get_region",
-      "community": 2,
+      "community": 1,
       "norm_label": ".get_region()"
     },
     {
@@ -1935,7 +1935,7 @@
       "source_file": "src/api.rs",
       "source_location": "L367",
       "id": "src_api_apiclient_get_my_region",
-      "community": 2,
+      "community": 1,
       "norm_label": ".get_my_region()"
     },
     {
@@ -1944,7 +1944,7 @@
       "source_file": "src/api.rs",
       "source_location": "L380",
       "id": "src_api_apiclient_ping_health",
-      "community": 2,
+      "community": 1,
       "norm_label": ".ping_health()"
     },
     {
@@ -1953,7 +1953,7 @@
       "source_file": "src/api.rs",
       "source_location": "L403",
       "id": "src_api_apiclient_list_files_page",
-      "community": 2,
+      "community": 1,
       "norm_label": ".list_files_page()"
     },
     {
@@ -1962,7 +1962,7 @@
       "source_file": "src/api.rs",
       "source_location": "L448",
       "id": "src_api_apiclient_list_all_files",
-      "community": 2,
+      "community": 1,
       "norm_label": ".list_all_files()"
     },
     {
@@ -1971,7 +1971,7 @@
       "source_file": "src/api.rs",
       "source_location": "L475",
       "id": "src_api_apiclient_list_files",
-      "community": 2,
+      "community": 1,
       "norm_label": ".list_files()"
     },
     {
@@ -1980,7 +1980,7 @@
       "source_file": "src/api.rs",
       "source_location": "L483",
       "id": "src_api_apiclient_files_index",
-      "community": 2,
+      "community": 1,
       "norm_label": ".files_index()"
     },
     {
@@ -1989,7 +1989,7 @@
       "source_file": "src/api.rs",
       "source_location": "L497",
       "id": "src_api_apiclient_get_file",
-      "community": 2,
+      "community": 1,
       "norm_label": ".get_file()"
     },
     {
@@ -1998,7 +1998,7 @@
       "source_file": "src/api.rs",
       "source_location": "L531",
       "id": "src_api_apiclient_upload_init",
-      "community": 2,
+      "community": 1,
       "norm_label": ".upload_init()"
     },
     {
@@ -2007,7 +2007,7 @@
       "source_file": "src/api.rs",
       "source_location": "L589",
       "id": "src_api_apiclient_upload_chunk",
-      "community": 2,
+      "community": 1,
       "norm_label": ".upload_chunk()"
     },
     {
@@ -2016,7 +2016,7 @@
       "source_file": "src/api.rs",
       "source_location": "L632",
       "id": "src_api_apiclient_upload_complete",
-      "community": 2,
+      "community": 1,
       "norm_label": ".upload_complete()"
     },
     {
@@ -2025,7 +2025,7 @@
       "source_file": "src/api.rs",
       "source_location": "L656",
       "id": "src_api_apiclient_create_share",
-      "community": 2,
+      "community": 1,
       "norm_label": ".create_share()"
     },
     {
@@ -2034,7 +2034,7 @@
       "source_file": "src/api.rs",
       "source_location": "L691",
       "id": "src_api_apiclient_list_shares",
-      "community": 2,
+      "community": 1,
       "norm_label": ".list_shares()"
     },
     {
@@ -2043,7 +2043,7 @@
       "source_file": "src/api.rs",
       "source_location": "L705",
       "id": "src_api_apiclient_delete_share",
-      "community": 2,
+      "community": 1,
       "norm_label": ".delete_share()"
     },
     {
@@ -2052,7 +2052,7 @@
       "source_file": "src/api.rs",
       "source_location": "L726",
       "id": "src_api_apiclient_create_file_request",
-      "community": 2,
+      "community": 1,
       "norm_label": ".create_file_request()"
     },
     {
@@ -2061,7 +2061,7 @@
       "source_file": "src/api.rs",
       "source_location": "L771",
       "id": "src_api_apiclient_list_file_requests",
-      "community": 2,
+      "community": 1,
       "norm_label": ".list_file_requests()"
     },
     {
@@ -2070,7 +2070,7 @@
       "source_file": "src/api.rs",
       "source_location": "L784",
       "id": "src_api_apiclient_close_file_request",
-      "community": 2,
+      "community": 1,
       "norm_label": ".close_file_request()"
     },
     {
@@ -2079,7 +2079,7 @@
       "source_file": "src/api.rs",
       "source_location": "L799",
       "id": "src_api_apiclient_delete_file_request",
-      "community": 2,
+      "community": 1,
       "norm_label": ".delete_file_request()"
     },
     {
@@ -2088,7 +2088,7 @@
       "source_file": "src/api.rs",
       "source_location": "L816",
       "id": "src_api_apiclient_upload_to_file_request",
-      "community": 2,
+      "community": 1,
       "norm_label": ".upload_to_file_request()"
     },
     {
@@ -2097,7 +2097,7 @@
       "source_file": "src/api.rs",
       "source_location": "L839",
       "id": "src_api_apiclient_get_subscription",
-      "community": 2,
+      "community": 1,
       "norm_label": ".get_subscription()"
     },
     {
@@ -2106,7 +2106,7 @@
       "source_file": "src/api.rs",
       "source_location": "L852",
       "id": "src_api_apiclient_security_score",
-      "community": 2,
+      "community": 1,
       "norm_label": ".security_score()"
     },
     {
@@ -2115,7 +2115,7 @@
       "source_file": "src/api.rs",
       "source_location": "L865",
       "id": "src_api_apiclient_list_sessions_v2",
-      "community": 2,
+      "community": 1,
       "norm_label": ".list_sessions_v2()"
     },
     {
@@ -2124,7 +2124,7 @@
       "source_file": "src/api.rs",
       "source_location": "L884",
       "id": "src_api_apiclient_revoke_session",
-      "community": 2,
+      "community": 1,
       "norm_label": ".revoke_session()"
     },
     {
@@ -2133,7 +2133,7 @@
       "source_file": "src/api.rs",
       "source_location": "L902",
       "id": "src_api_apiclient_revoke_all_other_sessions",
-      "community": 2,
+      "community": 1,
       "norm_label": ".revoke_all_other_sessions()"
     },
     {
@@ -2142,7 +2142,7 @@
       "source_file": "src/api.rs",
       "source_location": "L915",
       "id": "src_api_apiclient_list_passkeys",
-      "community": 2,
+      "community": 1,
       "norm_label": ".list_passkeys()"
     },
     {
@@ -2151,7 +2151,7 @@
       "source_file": "src/api.rs",
       "source_location": "L930",
       "id": "src_api_apiclient_confirm_password",
-      "community": 2,
+      "community": 1,
       "norm_label": ".confirm_password()"
     },
     {
@@ -2160,7 +2160,7 @@
       "source_file": "src/api.rs",
       "source_location": "L950",
       "id": "src_api_apiclient_request_account_export",
-      "community": 2,
+      "community": 1,
       "norm_label": ".request_account_export()"
     },
     {
@@ -2169,7 +2169,7 @@
       "source_file": "src/api.rs",
       "source_location": "L968",
       "id": "src_api_apiclient_account_email_change_legacy",
-      "community": 2,
+      "community": 1,
       "norm_label": ".account_email_change_legacy()"
     },
     {
@@ -2178,7 +2178,7 @@
       "source_file": "src/api.rs",
       "source_location": "L993",
       "id": "src_api_apiclient_account_email_change_start_opaque",
-      "community": 2,
+      "community": 1,
       "norm_label": ".account_email_change_start_opaque()"
     },
     {
@@ -2187,7 +2187,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1018",
       "id": "src_api_apiclient_account_email_change_finish_opaque",
-      "community": 2,
+      "community": 1,
       "norm_label": ".account_email_change_finish_opaque()"
     },
     {
@@ -2196,7 +2196,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1047",
       "id": "src_api_apiclient_get_my_key_material",
-      "community": 2,
+      "community": 1,
       "norm_label": ".get_my_key_material()"
     },
     {
@@ -2205,7 +2205,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1079",
       "id": "src_api_apiclient_get_billing_subscription",
-      "community": 2,
+      "community": 1,
       "norm_label": ".get_billing_subscription()"
     },
     {
@@ -2214,7 +2214,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1085",
       "id": "src_api_apiclient_get_billing_usage",
-      "community": 2,
+      "community": 1,
       "norm_label": ".get_billing_usage()"
     },
     {
@@ -2223,7 +2223,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1093",
       "id": "src_api_apiclient_get_billing_plans",
-      "community": 2,
+      "community": 1,
       "norm_label": ".get_billing_plans()"
     },
     {
@@ -2232,7 +2232,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1103",
       "id": "src_api_apiclient_create_billing_portal_session",
-      "community": 2,
+      "community": 1,
       "norm_label": ".create_billing_portal_session()"
     },
     {
@@ -2241,7 +2241,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1115",
       "id": "src_api_apiclient_get_billing_addons",
-      "community": 2,
+      "community": 1,
       "norm_label": ".get_billing_addons()"
     },
     {
@@ -2250,7 +2250,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1127",
       "id": "src_api_apiclient_update_billing_addons",
-      "community": 2,
+      "community": 1,
       "norm_label": ".update_billing_addons()"
     },
     {
@@ -2259,7 +2259,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1143",
       "id": "src_api_apiclient_check_conflict",
-      "community": 2,
+      "community": 1,
       "norm_label": ".check_conflict()"
     },
     {
@@ -2268,7 +2268,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1156",
       "id": "src_api_apiclient_get_file_count",
-      "community": 2,
+      "community": 1,
       "norm_label": ".get_file_count()"
     },
     {
@@ -2277,7 +2277,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1168",
       "id": "src_api_apiclient_get_usage",
-      "community": 2,
+      "community": 1,
       "norm_label": ".get_usage()"
     },
     {
@@ -2286,7 +2286,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1181",
       "id": "src_api_apiclient_get_sessions",
-      "community": 2,
+      "community": 1,
       "norm_label": ".get_sessions()"
     },
     {
@@ -2295,7 +2295,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1194",
       "id": "src_api_apiclient_create_folder",
-      "community": 2,
+      "community": 1,
       "norm_label": ".create_folder()"
     },
     {
@@ -2304,7 +2304,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1220",
       "id": "src_api_apiclient_move_file",
-      "community": 2,
+      "community": 1,
       "norm_label": ".move_file()"
     },
     {
@@ -2313,7 +2313,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1246",
       "id": "src_api_apiclient_trash_file",
-      "community": 2,
+      "community": 1,
       "norm_label": ".trash_file()"
     },
     {
@@ -2322,7 +2322,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1263",
       "id": "src_api_apiclient_bulk_trash",
-      "community": 2,
+      "community": 1,
       "norm_label": ".bulk_trash()"
     },
     {
@@ -2331,7 +2331,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1281",
       "id": "src_api_apiclient_bulk_permanent_delete",
-      "community": 2,
+      "community": 1,
       "norm_label": ".bulk_permanent_delete()"
     },
     {
@@ -2340,7 +2340,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1302",
       "id": "src_api_apiclient_permanent_delete",
-      "community": 2,
+      "community": 1,
       "norm_label": ".permanent_delete()"
     },
     {
@@ -2349,7 +2349,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1317",
       "id": "src_api_apiclient_restore_file",
-      "community": 2,
+      "community": 1,
       "norm_label": ".restore_file()"
     },
     {
@@ -2358,7 +2358,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1335",
       "id": "src_api_apiclient_list_trashed",
-      "community": 2,
+      "community": 1,
       "norm_label": ".list_trashed()"
     },
     {
@@ -2367,7 +2367,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1350",
       "id": "src_api_apiclient_create_stream_token",
-      "community": 2,
+      "community": 1,
       "norm_label": ".create_stream_token()"
     },
     {
@@ -2376,7 +2376,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1373",
       "id": "src_api_apiclient_stream_url",
-      "community": 2,
+      "community": 1,
       "norm_label": ".stream_url()"
     },
     {
@@ -2385,7 +2385,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1386",
       "id": "src_api_apiclient_list_ops_since",
-      "community": 2,
+      "community": 1,
       "norm_label": ".list_ops_since()"
     },
     {
@@ -2394,7 +2394,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1406",
       "id": "src_api_apiclient_open_sync_stream",
-      "community": 2,
+      "community": 1,
       "norm_label": ".open_sync_stream()"
     },
     {
@@ -2403,7 +2403,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1427",
       "id": "src_api_apiclient_get_json",
-      "community": 2,
+      "community": 1,
       "norm_label": ".get_json()"
     },
     {
@@ -2412,7 +2412,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1440",
       "id": "src_api_apiclient_speedtest_upload",
-      "community": 2,
+      "community": 1,
       "norm_label": ".speedtest_upload()"
     },
     {
@@ -2421,7 +2421,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1459",
       "id": "src_api_apiclient_speedtest_download",
-      "community": 2,
+      "community": 1,
       "norm_label": ".speedtest_download()"
     },
     {
@@ -2439,7 +2439,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1525",
       "id": "src_api_apiclient_upload_thumbnail",
-      "community": 2,
+      "community": 1,
       "norm_label": ".upload_thumbnail()"
     },
     {
@@ -2448,7 +2448,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1548",
       "id": "src_api_apiclient_upload_thumbnail_large",
-      "community": 2,
+      "community": 1,
       "norm_label": ".upload_thumbnail_large()"
     },
     {
@@ -2457,7 +2457,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1576",
       "id": "src_api_apiclient_download_stream",
-      "community": 2,
+      "community": 1,
       "norm_label": ".download_stream()"
     },
     {
@@ -2466,7 +2466,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1595",
       "id": "src_api_apiclient_download_file",
-      "community": 2,
+      "community": 1,
       "norm_label": ".download_file()"
     },
     {
@@ -2475,7 +2475,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1620",
       "id": "src_api_apiclient_register_device",
-      "community": 2,
+      "community": 1,
       "norm_label": ".register_device()"
     },
     {
@@ -2484,7 +2484,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1646",
       "id": "src_api_apiclient_create_client_session",
-      "community": 2,
+      "community": 1,
       "norm_label": ".create_client_session()"
     },
     {
@@ -2493,7 +2493,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1682",
       "id": "src_api_apiclient_send_heartbeat",
-      "community": 2,
+      "community": 1,
       "norm_label": ".send_heartbeat()"
     },
     {
@@ -2502,7 +2502,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1717",
       "id": "src_api_apiclient_list_client_sessions",
-      "community": 2,
+      "community": 1,
       "norm_label": ".list_client_sessions()"
     },
     {
@@ -2511,7 +2511,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1730",
       "id": "src_api_apiclient_stop_client_session",
-      "community": 2,
+      "community": 1,
       "norm_label": ".stop_client_session()"
     },
     {
@@ -2520,7 +2520,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1745",
       "id": "src_api_parse_response",
-      "community": 2,
+      "community": 1,
       "norm_label": "parse_response()"
     },
     {
@@ -2529,7 +2529,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1819",
       "id": "src_api_spawn_mock",
-      "community": 2,
+      "community": 1,
       "norm_label": "spawn_mock()"
     },
     {
@@ -2538,7 +2538,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1852",
       "id": "src_api_ids",
-      "community": 2,
+      "community": 1,
       "norm_label": "ids()"
     },
     {
@@ -2547,7 +2547,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1862",
       "id": "src_api_list_files_walks_every_page_past_the_200_cap",
-      "community": 2,
+      "community": 1,
       "norm_label": "list_files_walks_every_page_past_the_200_cap()"
     },
     {
@@ -2556,7 +2556,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1880",
       "id": "src_api_list_trashed_walks_every_page",
-      "community": 2,
+      "community": 1,
       "norm_label": "list_trashed_walks_every_page()"
     },
     {
@@ -2565,7 +2565,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1897",
       "id": "src_api_last_page_null_cursor_terminates_the_walk",
-      "community": 2,
+      "community": 1,
       "norm_label": "last_page_null_cursor_terminates_the_walk()"
     },
     {
@@ -2574,7 +2574,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1928",
       "id": "src_api_spawn_header_echo_mock",
-      "community": 2,
+      "community": 1,
       "norm_label": "spawn_header_echo_mock()"
     },
     {
@@ -2583,7 +2583,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1949",
       "id": "src_api_every_request_carries_client_and_version_headers",
-      "community": 2,
+      "community": 1,
       "norm_label": "every_request_carries_client_and_version_headers()"
     },
     {
@@ -2592,7 +2592,7 @@
       "source_file": "src/api.rs",
       "source_location": "L1992",
       "id": "src_api_spawn_body_echo_mock",
-      "community": 2,
+      "community": 1,
       "norm_label": "spawn_body_echo_mock()"
     },
     {
@@ -2601,7 +2601,7 @@
       "source_file": "src/api.rs",
       "source_location": "L2003",
       "id": "src_api_totp_enable_sends_code_as_the_sole_json_field",
-      "community": 2,
+      "community": 1,
       "norm_label": "totp_enable_sends_code_as_the_sole_json_field()"
     },
     {
@@ -2610,7 +2610,7 @@
       "source_file": "src/api.rs",
       "source_location": "L2014",
       "id": "src_api_totp_disable_sends_code_as_the_sole_json_field",
-      "community": 2,
+      "community": 1,
       "norm_label": "totp_disable_sends_code_as_the_sole_json_field()"
     },
     {
@@ -2619,7 +2619,7 @@
       "source_file": "src/api.rs",
       "source_location": "L2044",
       "id": "src_api_echo_method_id_and_headers",
-      "community": 2,
+      "community": 1,
       "norm_label": "echo_method_id_and_headers()"
     },
     {
@@ -2628,7 +2628,7 @@
       "source_file": "src/api.rs",
       "source_location": "L2053",
       "id": "src_api_spawn_revoke_mock",
-      "community": 2,
+      "community": 1,
       "norm_label": "spawn_revoke_mock()"
     },
     {
@@ -2637,7 +2637,7 @@
       "source_file": "src/api.rs",
       "source_location": "L2074",
       "id": "src_api_revoke_session_sends_delete_to_the_id_path_with_bearer_auth_and_no_confirm_token",
-      "community": 2,
+      "community": 1,
       "norm_label": "revoke_session_sends_delete_to_the_id_path_with_bearer_auth_and_no_confirm_token()"
     },
     {
@@ -2646,7 +2646,7 @@
       "source_file": "src/api.rs",
       "source_location": "L2102",
       "id": "src_api_revoke_all_other_sessions_sends_post_with_bearer_auth_and_no_confirm_token",
-      "community": 2,
+      "community": 1,
       "norm_label": "revoke_all_other_sessions_sends_post_with_bearer_auth_and_no_confirm_token()"
     },
     {
@@ -2655,7 +2655,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L1",
       "id": "src_env_detect_rs",
-      "community": 10,
+      "community": 15,
       "norm_label": "env_detect.rs"
     },
     {
@@ -2664,7 +2664,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L20",
       "id": "src_env_detect_is_headless",
-      "community": 10,
+      "community": 15,
       "norm_label": "is_headless()"
     },
     {
@@ -2673,7 +2673,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L26",
       "id": "src_env_detect_is_headless_with",
-      "community": 10,
+      "community": 15,
       "norm_label": "is_headless_with()"
     },
     {
@@ -2682,7 +2682,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L54",
       "id": "src_env_detect_envsnapshot",
-      "community": 10,
+      "community": 15,
       "norm_label": "envsnapshot"
     },
     {
@@ -2691,7 +2691,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L63",
       "id": "src_env_detect_envsnapshot_current",
-      "community": 10,
+      "community": 15,
       "norm_label": ".current()"
     },
     {
@@ -2700,7 +2700,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L78",
       "id": "src_env_detect_snap",
-      "community": 10,
+      "community": 15,
       "norm_label": "snap()"
     },
     {
@@ -2709,7 +2709,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L83",
       "id": "src_env_detect_empty_env_is_not_headless_on_macos",
-      "community": 10,
+      "community": 15,
       "norm_label": "empty_env_is_not_headless_on_macos()"
     },
     {
@@ -2718,7 +2718,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L92",
       "id": "src_env_detect_empty_env_is_headless_on_linux",
-      "community": 10,
+      "community": 15,
       "norm_label": "empty_env_is_headless_on_linux()"
     },
     {
@@ -2727,7 +2727,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L100",
       "id": "src_env_detect_empty_env_is_not_headless_on_windows",
-      "community": 10,
+      "community": 15,
       "norm_label": "empty_env_is_not_headless_on_windows()"
     },
     {
@@ -2736,7 +2736,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L107",
       "id": "src_env_detect_explicit_override_always_wins",
-      "community": 10,
+      "community": 15,
       "norm_label": "explicit_override_always_wins()"
     },
     {
@@ -2745,7 +2745,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L115",
       "id": "src_env_detect_explicit_override_zero_is_not_a_yes",
-      "community": 10,
+      "community": 15,
       "norm_label": "explicit_override_zero_is_not_a_yes()"
     },
     {
@@ -2754,7 +2754,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L129",
       "id": "src_env_detect_ssh_without_display_is_headless",
-      "community": 10,
+      "community": 15,
       "norm_label": "ssh_without_display_is_headless()"
     },
     {
@@ -2763,7 +2763,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L139",
       "id": "src_env_detect_ssh_with_x_forwarding_is_not_headless",
-      "community": 10,
+      "community": 15,
       "norm_label": "ssh_with_x_forwarding_is_not_headless()"
     },
     {
@@ -2772,7 +2772,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L148",
       "id": "src_env_detect_ssh_tty_alone_counts_as_ssh",
-      "community": 10,
+      "community": 15,
       "norm_label": "ssh_tty_alone_counts_as_ssh()"
     },
     {
@@ -2781,7 +2781,7 @@
       "source_file": "src/env_detect.rs",
       "source_location": "L157",
       "id": "src_env_detect_wayland_display_counts_as_a_display",
-      "community": 10,
+      "community": 15,
       "norm_label": "wayland_display_counts_as_a_display()"
     },
     {
@@ -2790,7 +2790,7 @@
       "source_file": "src/crypto.rs",
       "source_location": "L1",
       "id": "src_crypto_rs",
-      "community": 13,
+      "community": 12,
       "norm_label": "crypto.rs"
     },
     {
@@ -2799,7 +2799,7 @@
       "source_file": "src/crypto.rs",
       "source_location": "L36",
       "id": "src_crypto_webappblob",
-      "community": 13,
+      "community": 12,
       "norm_label": "webappblob"
     },
     {
@@ -2808,7 +2808,7 @@
       "source_file": "src/crypto.rs",
       "source_location": "L46",
       "id": "src_crypto_decrypt_name",
-      "community": 13,
+      "community": 12,
       "norm_label": "decrypt_name()"
     },
     {
@@ -2817,7 +2817,7 @@
       "source_file": "src/crypto.rs",
       "source_location": "L88",
       "id": "src_crypto_decrypt_names",
-      "community": 13,
+      "community": 12,
       "norm_label": "decrypt_names()"
     },
     {
@@ -2826,7 +2826,7 @@
       "source_file": "src/crypto.rs",
       "source_location": "L103",
       "id": "src_crypto_decrypt_name_with_key",
-      "community": 13,
+      "community": 12,
       "norm_label": "decrypt_name_with_key()"
     },
     {
@@ -2835,7 +2835,7 @@
       "source_file": "src/crypto.rs",
       "source_location": "L138",
       "id": "src_crypto_unwrap_metadata_json",
-      "community": 13,
+      "community": 12,
       "norm_label": "unwrap_metadata_json()"
     },
     {
@@ -2844,7 +2844,7 @@
       "source_file": "src/crypto.rs",
       "source_location": "L162",
       "id": "src_crypto_decrypt_file_chunks",
-      "community": 13,
+      "community": 12,
       "norm_label": "decrypt_file_chunks()"
     },
     {
@@ -2853,7 +2853,7 @@
       "source_file": "src/crypto.rs",
       "source_location": "L189",
       "id": "src_crypto_try_decrypt_all_chunks",
-      "community": 0,
+      "community": 12,
       "norm_label": "try_decrypt_all_chunks()"
     },
     {
@@ -2862,7 +2862,7 @@
       "source_file": "src/crypto.rs",
       "source_location": "L210",
       "id": "src_crypto_decrypt_json_chunks",
-      "community": 0,
+      "community": 12,
       "norm_label": "decrypt_json_chunks()"
     },
     {
@@ -2871,7 +2871,7 @@
       "source_file": "src/crypto.rs",
       "source_location": "L251",
       "id": "src_crypto_decrypt_raw_chunks",
-      "community": 0,
+      "community": 12,
       "norm_label": "decrypt_raw_chunks()"
     },
     {
@@ -2880,7 +2880,7 @@
       "source_file": "src/crypto.rs",
       "source_location": "L329",
       "id": "src_crypto_mk",
-      "community": 13,
+      "community": 12,
       "norm_label": "mk()"
     },
     {
@@ -2889,7 +2889,7 @@
       "source_file": "src/crypto.rs",
       "source_location": "L336",
       "id": "src_crypto_raw_string_uuid_single_chunk_roundtrip",
-      "community": 13,
+      "community": 12,
       "norm_label": "raw_string_uuid_single_chunk_roundtrip()"
     },
     {
@@ -2898,7 +2898,7 @@
       "source_file": "src/crypto.rs",
       "source_location": "L349",
       "id": "src_crypto_raw_binary_uuid_legacy_dual_key_fallback",
-      "community": 13,
+      "community": 12,
       "norm_label": "raw_binary_uuid_legacy_dual_key_fallback()"
     },
     {
@@ -2907,7 +2907,7 @@
       "source_file": "src/crypto.rs",
       "source_location": "L363",
       "id": "src_crypto_json_blob_legacy_format_detected_and_decrypted",
-      "community": 13,
+      "community": 12,
       "norm_label": "json_blob_legacy_format_detected_and_decrypted()"
     },
     {
@@ -2916,7 +2916,7 @@
       "source_file": "src/crypto.rs",
       "source_location": "L377",
       "id": "src_crypto_json_blob_with_binary_uuid_key",
-      "community": 13,
+      "community": 12,
       "norm_label": "json_blob_with_binary_uuid_key()"
     },
     {
@@ -2925,7 +2925,7 @@
       "source_file": "src/crypto.rs",
       "source_location": "L391",
       "id": "src_crypto_raw_multi_chunk_uniform_roundtrip",
-      "community": 13,
+      "community": 12,
       "norm_label": "raw_multi_chunk_uniform_roundtrip()"
     },
     {
@@ -2934,7 +2934,7 @@
       "source_file": "src/crypto.rs",
       "source_location": "L410",
       "id": "src_crypto_wrong_key_fails_cleanly",
-      "community": 13,
+      "community": 12,
       "norm_label": "wrong_key_fails_cleanly()"
     },
     {
@@ -2943,7 +2943,7 @@
       "source_file": "src/crypto.rs",
       "source_location": "L422",
       "id": "src_crypto_streaming_string_key_matches_buffered",
-      "community": 13,
+      "community": 12,
       "norm_label": "streaming_string_key_matches_buffered()"
     },
     {
@@ -2952,7 +2952,7 @@
       "source_file": "src/crypto.rs",
       "source_location": "L436",
       "id": "src_crypto_decrypt_name_plaintext_passthrough",
-      "community": 13,
+      "community": 12,
       "norm_label": "decrypt_name_plaintext_passthrough()"
     },
     {
@@ -2961,7 +2961,7 @@
       "source_file": "src/crypto.rs",
       "source_location": "L444",
       "id": "src_crypto_decrypt_names_batch_matches_single",
-      "community": 13,
+      "community": 12,
       "norm_label": "decrypt_names_batch_matches_single()"
     },
     {
@@ -3033,7 +3033,7 @@
       "source_file": "src/tui/events.rs",
       "source_location": "L1",
       "id": "src_tui_events_rs",
-      "community": 15,
+      "community": 11,
       "norm_label": "events.rs"
     },
     {
@@ -3042,7 +3042,7 @@
       "source_file": "src/tui/events.rs",
       "source_location": "L7",
       "id": "tui_events_tuievent",
-      "community": 15,
+      "community": 11,
       "norm_label": "tuievent"
     },
     {
@@ -3051,7 +3051,7 @@
       "source_file": "src/tui/events.rs",
       "source_location": "L31",
       "id": "tui_events_tuiaction",
-      "community": 15,
+      "community": 11,
       "norm_label": "tuiaction"
     },
     {
@@ -3060,7 +3060,7 @@
       "source_file": "src/tui/events.rs",
       "source_location": "L38",
       "id": "tui_events_poll_key",
-      "community": 15,
+      "community": 11,
       "norm_label": "poll_key()"
     },
     {
@@ -3069,7 +3069,7 @@
       "source_file": "src/tui/events.rs",
       "source_location": "L51",
       "id": "tui_events_is_ctrl_c",
-      "community": 15,
+      "community": 11,
       "norm_label": "is_ctrl_c()"
     },
     {
@@ -3078,7 +3078,7 @@
       "source_file": "src/tui/mod.rs",
       "source_location": "L1",
       "id": "src_tui_mod_rs",
-      "community": 28,
+      "community": 27,
       "norm_label": "mod.rs"
     },
     {
@@ -3168,7 +3168,7 @@
       "source_file": "src/tui/app.rs",
       "source_location": "L1",
       "id": "src_tui_app_rs",
-      "community": 15,
+      "community": 11,
       "norm_label": "app.rs"
     },
     {
@@ -3177,7 +3177,7 @@
       "source_file": "src/tui/app.rs",
       "source_location": "L20",
       "id": "tui_app_run",
-      "community": 15,
+      "community": 11,
       "norm_label": "run()"
     },
     {
@@ -3186,7 +3186,7 @@
       "source_file": "src/tui/app.rs",
       "source_location": "L47",
       "id": "tui_app_event_loop",
-      "community": 15,
+      "community": 11,
       "norm_label": "event_loop()"
     },
     {
@@ -3195,7 +3195,7 @@
       "source_file": "src/tui/dashboard.rs",
       "source_location": "L1",
       "id": "src_tui_dashboard_rs",
-      "community": 15,
+      "community": 0,
       "norm_label": "dashboard.rs"
     },
     {
@@ -3204,7 +3204,7 @@
       "source_file": "src/tui/dashboard.rs",
       "source_location": "L18",
       "id": "tui_dashboard_render",
-      "community": 15,
+      "community": 0,
       "norm_label": "render()"
     },
     {
@@ -3213,7 +3213,7 @@
       "source_file": "src/tui/dashboard.rs",
       "source_location": "L33",
       "id": "tui_dashboard_render_sessions",
-      "community": 15,
+      "community": 0,
       "norm_label": "render_sessions()"
     },
     {
@@ -3222,7 +3222,7 @@
       "source_file": "src/tui/dashboard.rs",
       "source_location": "L138",
       "id": "tui_dashboard_render_hints",
-      "community": 15,
+      "community": 0,
       "norm_label": "render_hints()"
     },
     {
@@ -3231,7 +3231,7 @@
       "source_file": "src/tui/dashboard.rs",
       "source_location": "L154",
       "id": "tui_dashboard_format_size_binary",
-      "community": 15,
+      "community": 0,
       "norm_label": "format_size_binary()"
     },
     {
@@ -3240,7 +3240,7 @@
       "source_file": "src/commands/passkey.rs",
       "source_location": "L1",
       "id": "src_commands_passkey_rs",
-      "community": 6,
+      "community": 5,
       "norm_label": "passkey.rs"
     },
     {
@@ -3249,7 +3249,7 @@
       "source_file": "src/commands/passkey.rs",
       "source_location": "L70",
       "id": "commands_passkey_passkeyrow",
-      "community": 6,
+      "community": 5,
       "norm_label": "passkeyrow"
     },
     {
@@ -3258,7 +3258,7 @@
       "source_file": "src/commands/passkey.rs",
       "source_location": "L84",
       "id": "commands_passkey_passkeyrow_from_json",
-      "community": 6,
+      "community": 5,
       "norm_label": ".from_json()"
     },
     {
@@ -3267,7 +3267,7 @@
       "source_file": "src/commands/passkey.rs",
       "source_location": "L100",
       "id": "commands_passkey_parse_passkeys",
-      "community": 6,
+      "community": 5,
       "norm_label": "parse_passkeys()"
     },
     {
@@ -3276,7 +3276,7 @@
       "source_file": "src/commands/passkey.rs",
       "source_location": "L111",
       "id": "commands_passkey_classify_list_error",
-      "community": 6,
+      "community": 5,
       "norm_label": "classify_list_error()"
     },
     {
@@ -3285,7 +3285,7 @@
       "source_file": "src/commands/passkey.rs",
       "source_location": "L124",
       "id": "commands_passkey_extract_passkeys_json",
-      "community": 6,
+      "community": 5,
       "norm_label": "extract_passkeys_json()"
     },
     {
@@ -3294,7 +3294,7 @@
       "source_file": "src/commands/passkey.rs",
       "source_location": "L132",
       "id": "commands_passkey_short_id",
-      "community": 6,
+      "community": 5,
       "norm_label": "short_id()"
     },
     {
@@ -3303,7 +3303,7 @@
       "source_file": "src/commands/passkey.rs",
       "source_location": "L140",
       "id": "commands_passkey_render_quiet",
-      "community": 6,
+      "community": 5,
       "norm_label": "render_quiet()"
     },
     {
@@ -3312,7 +3312,7 @@
       "source_file": "src/commands/passkey.rs",
       "source_location": "L145",
       "id": "commands_passkey_render_table",
-      "community": 6,
+      "community": 5,
       "norm_label": "render_table()"
     },
     {
@@ -3321,367 +3321,412 @@
       "source_file": "src/commands/passkey.rs",
       "source_location": "L171",
       "id": "commands_passkey_list",
-      "community": 1,
+      "community": 2,
       "norm_label": "list()"
+    },
+    {
+      "label": "host_of()",
+      "file_type": "code",
+      "source_file": "src/commands/passkey.rs",
+      "source_location": "L234",
+      "id": "commands_passkey_host_of",
+      "community": 5,
+      "norm_label": "host_of()"
     },
     {
       "label": "passkey_enrollment_url_from_api()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L246",
+      "source_location": "L264",
       "id": "commands_passkey_passkey_enrollment_url_from_api",
-      "community": 6,
+      "community": 5,
       "norm_label": "passkey_enrollment_url_from_api()"
     },
     {
       "label": "passkey_enrollment_url()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L263",
+      "source_location": "L282",
       "id": "commands_passkey_passkey_enrollment_url",
-      "community": 6,
+      "community": 11,
       "norm_label": "passkey_enrollment_url()"
     },
     {
       "label": "AddAction",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L272",
+      "source_location": "L291",
       "id": "commands_passkey_addaction",
-      "community": 6,
+      "community": 5,
       "norm_label": "addaction"
     },
     {
       "label": "plan_add()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L290",
+      "source_location": "L309",
       "id": "commands_passkey_plan_add",
-      "community": 6,
+      "community": 5,
       "norm_label": "plan_add()"
     },
     {
       "label": "add()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L306",
+      "source_location": "L325",
       "id": "commands_passkey_add",
-      "community": 1,
+      "community": 2,
       "norm_label": "add()"
     },
     {
       "label": "passkeys_fixture()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L368",
+      "source_location": "L387",
       "id": "commands_passkey_passkeys_fixture",
-      "community": 6,
+      "community": 5,
       "norm_label": "passkeys_fixture()"
     },
     {
       "label": "parse_passkeys_reads_every_field_from_the_live_shape()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L388",
+      "source_location": "L407",
       "id": "commands_passkey_parse_passkeys_reads_every_field_from_the_live_shape",
-      "community": 6,
+      "community": 5,
       "norm_label": "parse_passkeys_reads_every_field_from_the_live_shape()"
     },
     {
       "label": "parse_passkeys_defaults_a_missing_name_to_passkey()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L401",
+      "source_location": "L420",
       "id": "commands_passkey_parse_passkeys_defaults_a_missing_name_to_passkey",
-      "community": 6,
+      "community": 5,
       "norm_label": "parse_passkeys_defaults_a_missing_name_to_passkey()"
     },
     {
       "label": "parse_passkeys_defaults_an_empty_name_to_passkey()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L412",
+      "source_location": "L431",
       "id": "commands_passkey_parse_passkeys_defaults_an_empty_name_to_passkey",
-      "community": 6,
+      "community": 5,
       "norm_label": "parse_passkeys_defaults_an_empty_name_to_passkey()"
     },
     {
       "label": "parse_passkeys_skips_a_row_missing_the_required_id()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L423",
+      "source_location": "L442",
       "id": "commands_passkey_parse_passkeys_skips_a_row_missing_the_required_id",
-      "community": 6,
+      "community": 5,
       "norm_label": "parse_passkeys_skips_a_row_missing_the_required_id()"
     },
     {
       "label": "parse_passkeys_skips_a_row_missing_the_required_created_at()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L438",
+      "source_location": "L457",
       "id": "commands_passkey_parse_passkeys_skips_a_row_missing_the_required_created_at",
-      "community": 6,
+      "community": 5,
       "norm_label": "parse_passkeys_skips_a_row_missing_the_required_created_at()"
     },
     {
       "label": "parse_passkeys_on_missing_passkeys_key_returns_empty()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L446",
+      "source_location": "L465",
       "id": "commands_passkey_parse_passkeys_on_missing_passkeys_key_returns_empty",
-      "community": 6,
+      "community": 5,
       "norm_label": "parse_passkeys_on_missing_passkeys_key_returns_empty()"
     },
     {
       "label": "render_table_shows_short_id_name_and_relative_created()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L453",
+      "source_location": "L472",
       "id": "commands_passkey_render_table_shows_short_id_name_and_relative_created",
-      "community": 6,
+      "community": 5,
       "norm_label": "render_table_shows_short_id_name_and_relative_created()"
     },
     {
       "label": "render_table_never_leaks_a_raw_iso_timestamp()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L464",
+      "source_location": "L483",
       "id": "commands_passkey_render_table_never_leaks_a_raw_iso_timestamp",
-      "community": 6,
+      "community": 5,
       "norm_label": "render_table_never_leaks_a_raw_iso_timestamp()"
     },
     {
       "label": "render_table_never_mentions_last_used()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L474",
+      "source_location": "L493",
       "id": "commands_passkey_render_table_never_mentions_last_used",
-      "community": 6,
+      "community": 5,
       "norm_label": "render_table_never_mentions_last_used()"
     },
     {
       "label": "render_quiet_emits_one_bare_id_per_passkey()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L488",
+      "source_location": "L507",
       "id": "commands_passkey_render_quiet_emits_one_bare_id_per_passkey",
-      "community": 6,
+      "community": 5,
       "norm_label": "render_quiet_emits_one_bare_id_per_passkey()"
     },
     {
       "label": "render_quiet_lines_are_single_whitespace_free_tokens()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L497",
+      "source_location": "L516",
       "id": "commands_passkey_render_quiet_lines_are_single_whitespace_free_tokens",
-      "community": 6,
+      "community": 5,
       "norm_label": "render_quiet_lines_are_single_whitespace_free_tokens()"
     },
     {
       "label": "render_quiet_contains_no_ansi_escapes()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L508",
+      "source_location": "L527",
       "id": "commands_passkey_render_quiet_contains_no_ansi_escapes",
-      "community": 6,
+      "community": 5,
       "norm_label": "render_quiet_contains_no_ansi_escapes()"
     },
     {
       "label": "render_quiet_on_empty_passkeys_emits_no_lines()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L518",
+      "source_location": "L537",
       "id": "commands_passkey_render_quiet_on_empty_passkeys_emits_no_lines",
-      "community": 6,
+      "community": 5,
       "norm_label": "render_quiet_on_empty_passkeys_emits_no_lines()"
     },
     {
       "label": "json_mode_extracts_the_raw_passkeys_array_unmodified()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L525",
+      "source_location": "L544",
       "id": "commands_passkey_json_mode_extracts_the_raw_passkeys_array_unmodified",
-      "community": 6,
+      "community": 5,
       "norm_label": "json_mode_extracts_the_raw_passkeys_array_unmodified()"
     },
     {
       "label": "json_mode_on_missing_passkeys_key_falls_back_to_empty_array()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L541",
+      "source_location": "L560",
       "id": "commands_passkey_json_mode_on_missing_passkeys_key_falls_back_to_empty_array",
-      "community": 6,
+      "community": 5,
       "norm_label": "json_mode_on_missing_passkeys_key_falls_back_to_empty_array()"
     },
     {
       "label": "classify_list_error_maps_bare_unauthorized_to_a_login_hint()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L548",
+      "source_location": "L567",
       "id": "commands_passkey_classify_list_error_maps_bare_unauthorized_to_a_login_hint",
-      "community": 6,
+      "community": 5,
       "norm_label": "classify_list_error_maps_bare_unauthorized_to_a_login_hint()"
     },
     {
       "label": "classify_list_error_maps_status_prefixed_unauthorized_too()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L556",
+      "source_location": "L575",
       "id": "commands_passkey_classify_list_error_maps_status_prefixed_unauthorized_too",
-      "community": 6,
+      "community": 5,
       "norm_label": "classify_list_error_maps_status_prefixed_unauthorized_too()"
     },
     {
       "label": "classify_list_error_passes_through_unrelated_errors()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L564",
+      "source_location": "L583",
       "id": "commands_passkey_classify_list_error_passes_through_unrelated_errors",
-      "community": 6,
+      "community": 5,
       "norm_label": "classify_list_error_passes_through_unrelated_errors()"
     },
     {
       "label": "short_id_takes_the_first_eight_characters()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L571",
+      "source_location": "L590",
       "id": "commands_passkey_short_id_takes_the_first_eight_characters",
-      "community": 6,
+      "community": 5,
       "norm_label": "short_id_takes_the_first_eight_characters()"
     },
     {
       "label": "short_id_returns_the_whole_string_when_shorter_than_eight()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L576",
+      "source_location": "L595",
       "id": "commands_passkey_short_id_returns_the_whole_string_when_shorter_than_eight",
-      "community": 6,
+      "community": 5,
       "norm_label": "short_id_returns_the_whole_string_when_shorter_than_eight()"
     },
     {
       "label": "enrollment_url_for_prod_api_points_at_the_prod_web_app()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L583",
+      "source_location": "L602",
       "id": "commands_passkey_enrollment_url_for_prod_api_points_at_the_prod_web_app",
-      "community": 6,
+      "community": 5,
       "norm_label": "enrollment_url_for_prod_api_points_at_the_prod_web_app()"
     },
     {
       "label": "enrollment_url_for_local_api_points_at_the_local_dev_web_app()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L589",
+      "source_location": "L608",
       "id": "commands_passkey_enrollment_url_for_local_api_points_at_the_local_dev_web_app",
-      "community": 6,
+      "community": 5,
       "norm_label": "enrollment_url_for_local_api_points_at_the_local_dev_web_app()"
     },
     {
       "label": "local_api_enrollment_url_is_never_the_prod_host()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L595",
+      "source_location": "L614",
       "id": "commands_passkey_local_api_enrollment_url_is_never_the_prod_host",
-      "community": 6,
+      "community": 5,
       "norm_label": "local_api_enrollment_url_is_never_the_prod_host()"
     },
     {
       "label": "enrollment_url_strips_trailing_slash_before_appending_the_path()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L608",
+      "source_location": "L627",
       "id": "commands_passkey_enrollment_url_strips_trailing_slash_before_appending_the_path",
-      "community": 6,
+      "community": 5,
       "norm_label": "enrollment_url_strips_trailing_slash_before_appending_the_path()"
     },
     {
       "label": "enrollment_url_handles_http_scheme_api_host_too()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L614",
+      "source_location": "L633",
       "id": "commands_passkey_enrollment_url_handles_http_scheme_api_host_too",
-      "community": 6,
+      "community": 5,
       "norm_label": "enrollment_url_handles_http_scheme_api_host_too()"
     },
     {
       "label": "enrollment_url_generalizes_beyond_the_literal_beebeeb_io_host()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L620",
+      "source_location": "L639",
       "id": "commands_passkey_enrollment_url_generalizes_beyond_the_literal_beebeeb_io_host",
-      "community": 6,
+      "community": 5,
       "norm_label": "enrollment_url_generalizes_beyond_the_literal_beebeeb_io_host()"
     },
     {
       "label": "enrollment_url_for_unrecognized_host_stays_on_that_hosts_origin()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L629",
+      "source_location": "L648",
       "id": "commands_passkey_enrollment_url_for_unrecognized_host_stays_on_that_hosts_origin",
-      "community": 6,
+      "community": 5,
       "norm_label": "enrollment_url_for_unrecognized_host_stays_on_that_hosts_origin()"
     },
     {
       "label": "enrollment_url_matches_127_0_0_1_as_local_too()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L640",
+      "source_location": "L659",
       "id": "commands_passkey_enrollment_url_matches_127_0_0_1_as_local_too",
-      "community": 6,
+      "community": 5,
       "norm_label": "enrollment_url_matches_127_0_0_1_as_local_too()"
+    },
+    {
+      "label": "enrollment_url_does_not_treat_a_localhost_labeled_domain_as_local()",
+      "file_type": "code",
+      "source_file": "src/commands/passkey.rs",
+      "source_location": "L665",
+      "id": "commands_passkey_enrollment_url_does_not_treat_a_localhost_labeled_domain_as_local",
+      "community": 5,
+      "norm_label": "enrollment_url_does_not_treat_a_localhost_labeled_domain_as_local()"
+    },
+    {
+      "label": "enrollment_url_does_not_treat_a_127_0_0_1_labeled_domain_as_local()",
+      "file_type": "code",
+      "source_file": "src/commands/passkey.rs",
+      "source_location": "L676",
+      "id": "commands_passkey_enrollment_url_does_not_treat_a_127_0_0_1_labeled_domain_as_local",
+      "community": 5,
+      "norm_label": "enrollment_url_does_not_treat_a_127_0_0_1_labeled_domain_as_local()"
+    },
+    {
+      "label": "enrollment_url_bracketed_ipv6_loopback_is_local_and_port_is_stripped()",
+      "file_type": "code",
+      "source_file": "src/commands/passkey.rs",
+      "source_location": "L683",
+      "id": "commands_passkey_enrollment_url_bracketed_ipv6_loopback_is_local_and_port_is_stripped",
+      "community": 5,
+      "norm_label": "enrollment_url_bracketed_ipv6_loopback_is_local_and_port_is_stripped()"
+    },
+    {
+      "label": "host_of_strips_scheme_port_and_path()",
+      "file_type": "code",
+      "source_file": "src/commands/passkey.rs",
+      "source_location": "L691",
+      "id": "commands_passkey_host_of_strips_scheme_port_and_path",
+      "community": 5,
+      "norm_label": "host_of_strips_scheme_port_and_path()"
     },
     {
       "label": "plan_add_json_wins_over_every_other_flag()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L648",
+      "source_location": "L700",
       "id": "commands_passkey_plan_add_json_wins_over_every_other_flag",
-      "community": 6,
+      "community": 5,
       "norm_label": "plan_add_json_wins_over_every_other_flag()"
     },
     {
       "label": "plan_add_print_url_flag_never_opens_a_browser()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L654",
+      "source_location": "L706",
       "id": "commands_passkey_plan_add_print_url_flag_never_opens_a_browser",
-      "community": 6,
+      "community": 5,
       "norm_label": "plan_add_print_url_flag_never_opens_a_browser()"
     },
     {
       "label": "plan_add_quiet_mode_behaves_like_print_url()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L663",
+      "source_location": "L715",
       "id": "commands_passkey_plan_add_quiet_mode_behaves_like_print_url",
-      "community": 6,
+      "community": 5,
       "norm_label": "plan_add_quiet_mode_behaves_like_print_url()"
     },
     {
       "label": "plan_add_headless_without_print_url_shows_the_url_but_does_not_open()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L671",
+      "source_location": "L723",
       "id": "commands_passkey_plan_add_headless_without_print_url_shows_the_url_but_does_not_open",
-      "community": 6,
+      "community": 5,
       "norm_label": "plan_add_headless_without_print_url_shows_the_url_but_does_not_open()"
     },
     {
       "label": "plan_add_default_interactive_case_opens_the_browser()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L676",
+      "source_location": "L728",
       "id": "commands_passkey_plan_add_default_interactive_case_opens_the_browser",
-      "community": 6,
+      "community": 5,
       "norm_label": "plan_add_default_interactive_case_opens_the_browser()"
     },
     {
       "label": "add_json_body_carries_the_url_and_a_note_never_a_token()",
       "file_type": "code",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L683",
+      "source_location": "L735",
       "id": "commands_passkey_add_json_body_carries_the_url_and_a_note_never_a_token",
-      "community": 6,
+      "community": 5,
       "norm_label": "add_json_body_carries_the_url_and_a_note_never_a_token()"
     },
     {
@@ -3690,7 +3735,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L1",
       "id": "src_commands_request_rs",
-      "community": 11,
+      "community": 10,
       "norm_label": "request.rs"
     },
     {
@@ -3699,7 +3744,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L54",
       "id": "commands_request_app_url",
-      "community": 11,
+      "community": 10,
       "norm_label": "app_url()"
     },
     {
@@ -3708,7 +3753,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L59",
       "id": "commands_request_b64url",
-      "community": 11,
+      "community": 10,
       "norm_label": "b64url()"
     },
     {
@@ -3717,7 +3762,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L65",
       "id": "commands_request_b64std",
-      "community": 11,
+      "community": 10,
       "norm_label": "b64std()"
     },
     {
@@ -3726,7 +3771,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L71",
       "id": "commands_request_generate_request_keypair",
-      "community": 11,
+      "community": 10,
       "norm_label": "generate_request_keypair()"
     },
     {
@@ -3735,7 +3780,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L80",
       "id": "commands_request_build_link",
-      "community": 11,
+      "community": 10,
       "norm_label": "build_link()"
     },
     {
@@ -3744,7 +3789,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L86",
       "id": "commands_request_parse_expiry_secs",
-      "community": 11,
+      "community": 10,
       "norm_label": "parse_expiry_secs()"
     },
     {
@@ -3753,7 +3798,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L116",
       "id": "commands_request_parse_size_bytes",
-      "community": 11,
+      "community": 10,
       "norm_label": "parse_size_bytes()"
     },
     {
@@ -3762,7 +3807,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L149",
       "id": "commands_request_resolve_folder",
-      "community": 11,
+      "community": 10,
       "norm_label": "resolve_folder()"
     },
     {
@@ -3771,7 +3816,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L189",
       "id": "commands_request_create",
-      "community": 11,
+      "community": 10,
       "norm_label": "create()"
     },
     {
@@ -3780,7 +3825,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L335",
       "id": "commands_request_list",
-      "community": 1,
+      "community": 2,
       "norm_label": "list()"
     },
     {
@@ -3789,7 +3834,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L448",
       "id": "commands_request_rebuild_link",
-      "community": 11,
+      "community": 10,
       "norm_label": "rebuild_link()"
     },
     {
@@ -3798,7 +3843,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L460",
       "id": "commands_request_decode_any_b64",
-      "community": 11,
+      "community": 10,
       "norm_label": "decode_any_b64()"
     },
     {
@@ -3807,7 +3852,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L481",
       "id": "commands_request_requestuploadfields",
-      "community": 11,
+      "community": 10,
       "norm_label": "requestuploadfields"
     },
     {
@@ -3816,7 +3861,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L489",
       "id": "commands_request_request_upload_fields",
-      "community": 11,
+      "community": 10,
       "norm_label": "request_upload_fields()"
     },
     {
@@ -3834,7 +3879,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L520",
       "id": "commands_request_requestkeyresolver",
-      "community": 11,
+      "community": 10,
       "norm_label": "requestkeyresolver"
     },
     {
@@ -3843,7 +3888,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L530",
       "id": "commands_request_requestkeyresolver_load",
-      "community": 1,
+      "community": 2,
       "norm_label": ".load()"
     },
     {
@@ -3852,7 +3897,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L553",
       "id": "commands_request_requestkeyresolver_request_priv",
-      "community": 11,
+      "community": 10,
       "norm_label": ".request_priv()"
     },
     {
@@ -3861,7 +3906,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L568",
       "id": "commands_request_requestkeyresolver_content_key",
-      "community": 11,
+      "community": 10,
       "norm_label": ".content_key()"
     },
     {
@@ -3870,7 +3915,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L583",
       "id": "commands_request_rm",
-      "community": 1,
+      "community": 2,
       "norm_label": "rm()"
     },
     {
@@ -3879,7 +3924,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L616",
       "id": "commands_request_parsedlink",
-      "community": 11,
+      "community": 10,
       "norm_label": "parsedlink"
     },
     {
@@ -3888,7 +3933,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L623",
       "id": "commands_request_parse_request_link",
-      "community": 11,
+      "community": 10,
       "norm_label": "parse_request_link()"
     },
     {
@@ -3897,7 +3942,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L661",
       "id": "commands_request_seal_file_for_request",
-      "community": 11,
+      "community": 10,
       "norm_label": "seal_file_for_request()"
     },
     {
@@ -3906,7 +3951,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L711",
       "id": "commands_request_send",
-      "community": 1,
+      "community": 2,
       "norm_label": "send()"
     },
     {
@@ -3915,7 +3960,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L766",
       "id": "commands_request_test_master_key",
-      "community": 11,
+      "community": 10,
       "norm_label": "test_master_key()"
     },
     {
@@ -3924,7 +3969,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L771",
       "id": "commands_request_parse_expiry_units",
-      "community": 11,
+      "community": 10,
       "norm_label": "parse_expiry_units()"
     },
     {
@@ -3933,7 +3978,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L782",
       "id": "commands_request_parse_sizes",
-      "community": 11,
+      "community": 10,
       "norm_label": "parse_sizes()"
     },
     {
@@ -3942,7 +3987,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L792",
       "id": "commands_request_link_assembly_roundtrips_through_parse",
-      "community": 11,
+      "community": 10,
       "norm_label": "link_assembly_roundtrips_through_parse()"
     },
     {
@@ -3951,7 +3996,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L805",
       "id": "commands_request_parse_link_rejects_missing_fragment",
-      "community": 11,
+      "community": 10,
       "norm_label": "parse_link_rejects_missing_fragment()"
     },
     {
@@ -3960,7 +4005,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L811",
       "id": "commands_request_keypair_wrap_unwrap_roundtrip_matches_create_then_list",
-      "community": 11,
+      "community": 10,
       "norm_label": "keypair_wrap_unwrap_roundtrip_matches_create_then_list()"
     },
     {
@@ -3969,7 +4014,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L833",
       "id": "commands_request_send_seal_then_owner_open_recovers_file",
-      "community": 11,
+      "community": 10,
       "norm_label": "send_seal_then_owner_open_recovers_file()"
     },
     {
@@ -3978,7 +4023,7 @@
       "source_file": "src/commands/request.rs",
       "source_location": "L876",
       "id": "commands_request_receive_decrypts_request_uploaded_file_row",
-      "community": 11,
+      "community": 10,
       "norm_label": "receive_decrypts_request_uploaded_file_row()"
     },
     {
@@ -4041,7 +4086,7 @@
       "source_file": "src/commands/ls.rs",
       "source_location": "L1",
       "id": "src_commands_ls_rs",
-      "community": 1,
+      "community": 2,
       "norm_label": "ls.rs"
     },
     {
@@ -4050,7 +4095,7 @@
       "source_file": "src/commands/ls.rs",
       "source_location": "L9",
       "id": "commands_ls_sortfield",
-      "community": 1,
+      "community": 2,
       "norm_label": "sortfield"
     },
     {
@@ -4059,7 +4104,7 @@
       "source_file": "src/commands/ls.rs",
       "source_location": "L18",
       "id": "commands_ls_sortfield_parse",
-      "community": 1,
+      "community": 2,
       "norm_label": ".parse()"
     },
     {
@@ -4068,7 +4113,7 @@
       "source_file": "src/commands/ls.rs",
       "source_location": "L31",
       "id": "commands_ls_lsopts",
-      "community": 1,
+      "community": 2,
       "norm_label": "lsopts"
     },
     {
@@ -4086,7 +4131,7 @@
       "source_file": "src/commands/ls.rs",
       "source_location": "L59",
       "id": "commands_ls_decryptedfile",
-      "community": 1,
+      "community": 2,
       "norm_label": "decryptedfile"
     },
     {
@@ -4095,7 +4140,7 @@
       "source_file": "src/commands/ls.rs",
       "source_location": "L69",
       "id": "commands_ls_run",
-      "community": 1,
+      "community": 2,
       "norm_label": "run()"
     },
     {
@@ -4104,7 +4149,7 @@
       "source_file": "src/commands/ls.rs",
       "source_location": "L151",
       "id": "commands_ls_print_recursive",
-      "community": 1,
+      "community": 2,
       "norm_label": "print_recursive()"
     },
     {
@@ -4113,7 +4158,7 @@
       "source_file": "src/commands/ls.rs",
       "source_location": "L184",
       "id": "commands_ls_decrypt_listing",
-      "community": 1,
+      "community": 2,
       "norm_label": "decrypt_listing()"
     },
     {
@@ -4122,7 +4167,7 @@
       "source_file": "src/commands/ls.rs",
       "source_location": "L271",
       "id": "commands_ls_sort_listing",
-      "community": 1,
+      "community": 2,
       "norm_label": "sort_listing()"
     },
     {
@@ -4131,7 +4176,7 @@
       "source_file": "src/commands/ls.rs",
       "source_location": "L286",
       "id": "commands_ls_print_header",
-      "community": 1,
+      "community": 2,
       "norm_label": "print_header()"
     },
     {
@@ -4140,7 +4185,7 @@
       "source_file": "src/commands/ls.rs",
       "source_location": "L304",
       "id": "commands_ls_print_row",
-      "community": 1,
+      "community": 2,
       "norm_label": "print_row()"
     },
     {
@@ -4149,7 +4194,7 @@
       "source_file": "src/commands/ls.rs",
       "source_location": "L354",
       "id": "commands_ls_print_json",
-      "community": 1,
+      "community": 2,
       "norm_label": "print_json()"
     },
     {
@@ -4158,7 +4203,7 @@
       "source_file": "src/commands/quota.rs",
       "source_location": "L1",
       "id": "src_commands_quota_rs",
-      "community": 1,
+      "community": 2,
       "norm_label": "quota.rs"
     },
     {
@@ -4167,7 +4212,7 @@
       "source_file": "src/commands/quota.rs",
       "source_location": "L7",
       "id": "commands_quota_run",
-      "community": 1,
+      "community": 2,
       "norm_label": "run()"
     },
     {
@@ -4176,7 +4221,7 @@
       "source_file": "src/commands/quota.rs",
       "source_location": "L142",
       "id": "commands_quota_build_plan_label",
-      "community": 1,
+      "community": 2,
       "norm_label": "build_plan_label()"
     },
     {
@@ -4185,7 +4230,7 @@
       "source_file": "src/commands/quota.rs",
       "source_location": "L164",
       "id": "commands_quota_capitalise",
-      "community": 1,
+      "community": 2,
       "norm_label": "capitalise()"
     },
     {
@@ -4194,7 +4239,7 @@
       "source_file": "src/commands/quota.rs",
       "source_location": "L173",
       "id": "commands_quota_format_number",
-      "community": 1,
+      "community": 2,
       "norm_label": "format_number()"
     },
     {
@@ -4203,7 +4248,7 @@
       "source_file": "src/commands/mv.rs",
       "source_location": "L1",
       "id": "src_commands_mv_rs",
-      "community": 1,
+      "community": 2,
       "norm_label": "mv.rs"
     },
     {
@@ -4212,7 +4257,7 @@
       "source_file": "src/commands/mv.rs",
       "source_location": "L22",
       "id": "commands_mv_run",
-      "community": 1,
+      "community": 2,
       "norm_label": "run()"
     },
     {
@@ -4221,7 +4266,7 @@
       "source_file": "src/commands/mv.rs",
       "source_location": "L38",
       "id": "commands_mv_move_bulk",
-      "community": 1,
+      "community": 2,
       "norm_label": "move_bulk()"
     },
     {
@@ -4230,7 +4275,7 @@
       "source_file": "src/commands/mv.rs",
       "source_location": "L110",
       "id": "commands_mv_move_single",
-      "community": 1,
+      "community": 2,
       "norm_label": "move_single()"
     },
     {
@@ -4239,7 +4284,7 @@
       "source_file": "src/commands/mv.rs",
       "source_location": "L210",
       "id": "commands_mv_noop",
-      "community": 1,
+      "community": 2,
       "norm_label": "noop()"
     },
     {
@@ -4248,7 +4293,7 @@
       "source_file": "src/commands/mv.rs",
       "source_location": "L221",
       "id": "commands_mv_split_dst",
-      "community": 1,
+      "community": 2,
       "norm_label": "split_dst()"
     },
     {
@@ -4257,7 +4302,7 @@
       "source_file": "src/commands/billing.rs",
       "source_location": "L1",
       "id": "src_commands_billing_rs",
-      "community": 1,
+      "community": 2,
       "norm_label": "billing.rs"
     },
     {
@@ -4266,7 +4311,7 @@
       "source_file": "src/commands/billing.rs",
       "source_location": "L27",
       "id": "commands_billing_show",
-      "community": 1,
+      "community": 2,
       "norm_label": "show()"
     },
     {
@@ -4275,7 +4320,7 @@
       "source_file": "src/commands/billing.rs",
       "source_location": "L234",
       "id": "commands_billing_portal",
-      "community": 1,
+      "community": 2,
       "norm_label": "portal()"
     },
     {
@@ -4284,7 +4329,7 @@
       "source_file": "src/commands/billing.rs",
       "source_location": "L252",
       "id": "commands_billing_addons",
-      "community": 1,
+      "community": 2,
       "norm_label": "addons()"
     },
     {
@@ -4293,7 +4338,7 @@
       "source_file": "src/commands/billing.rs",
       "source_location": "L261",
       "id": "commands_billing_purchase_addon",
-      "community": 1,
+      "community": 2,
       "norm_label": "purchase_addon()"
     },
     {
@@ -4302,7 +4347,7 @@
       "source_file": "src/commands/billing.rs",
       "source_location": "L295",
       "id": "commands_billing_print_addons",
-      "community": 1,
+      "community": 2,
       "norm_label": "print_addons()"
     },
     {
@@ -4311,7 +4356,7 @@
       "source_file": "src/commands/billing.rs",
       "source_location": "L305",
       "id": "commands_billing_format_json_value",
-      "community": 1,
+      "community": 2,
       "norm_label": "format_json_value()"
     },
     {
@@ -4320,7 +4365,7 @@
       "source_file": "src/commands/billing.rs",
       "source_location": "L320",
       "id": "commands_billing_price_from_subscription",
-      "community": 1,
+      "community": 2,
       "norm_label": "price_from_subscription()"
     },
     {
@@ -4329,7 +4374,7 @@
       "source_file": "src/commands/billing.rs",
       "source_location": "L336",
       "id": "commands_billing_price_from_catalog",
-      "community": 1,
+      "community": 2,
       "norm_label": "price_from_catalog()"
     },
     {
@@ -4338,7 +4383,7 @@
       "source_file": "src/commands/billing.rs",
       "source_location": "L355",
       "id": "commands_billing_format_price",
-      "community": 1,
+      "community": 2,
       "norm_label": "format_price()"
     },
     {
@@ -4347,7 +4392,7 @@
       "source_file": "src/commands/billing.rs",
       "source_location": "L360",
       "id": "commands_billing_region_human",
-      "community": 1,
+      "community": 2,
       "norm_label": "region_human()"
     },
     {
@@ -4356,7 +4401,7 @@
       "source_file": "src/commands/billing.rs",
       "source_location": "L367",
       "id": "commands_billing_capitalise",
-      "community": 1,
+      "community": 2,
       "norm_label": "capitalise()"
     },
     {
@@ -4374,7 +4419,7 @@
       "source_file": "src/commands/billing.rs",
       "source_location": "L387",
       "id": "commands_billing_format_date_human",
-      "community": 1,
+      "community": 2,
       "norm_label": "format_date_human()"
     },
     {
@@ -4383,7 +4428,7 @@
       "source_file": "src/commands/billing.rs",
       "source_location": "L396",
       "id": "commands_billing_colour_pct",
-      "community": 1,
+      "community": 2,
       "norm_label": "colour_pct()"
     },
     {
@@ -4392,7 +4437,7 @@
       "source_file": "src/commands/billing.rs",
       "source_location": "L412",
       "id": "commands_billing_format_price_renders_cents",
-      "community": 1,
+      "community": 2,
       "norm_label": "format_price_renders_cents()"
     },
     {
@@ -4401,7 +4446,7 @@
       "source_file": "src/commands/billing.rs",
       "source_location": "L422",
       "id": "commands_billing_price_from_subscription_prefers_billed_total",
-      "community": 1,
+      "community": 2,
       "norm_label": "price_from_subscription_prefers_billed_total()"
     },
     {
@@ -4410,7 +4455,7 @@
       "source_file": "src/commands/billing.rs",
       "source_location": "L436",
       "id": "commands_billing_price_from_subscription_falls_back_to_base_plus_addon",
-      "community": 1,
+      "community": 2,
       "norm_label": "price_from_subscription_falls_back_to_base_plus_addon()"
     },
     {
@@ -4419,7 +4464,7 @@
       "source_file": "src/commands/billing.rs",
       "source_location": "L449",
       "id": "commands_billing_price_from_subscription_free_is_none",
-      "community": 1,
+      "community": 2,
       "norm_label": "price_from_subscription_free_is_none()"
     },
     {
@@ -4428,7 +4473,7 @@
       "source_file": "src/commands/billing.rs",
       "source_location": "L455",
       "id": "commands_billing_price_from_catalog_matches_slug",
-      "community": 1,
+      "community": 2,
       "norm_label": "price_from_catalog_matches_slug()"
     },
     {
@@ -4437,7 +4482,7 @@
       "source_file": "src/commands/config.rs",
       "source_location": "L1",
       "id": "src_commands_config_rs",
-      "community": 10,
+      "community": 11,
       "norm_label": "config.rs"
     },
     {
@@ -4446,7 +4491,7 @@
       "source_file": "src/commands/config.rs",
       "source_location": "L5",
       "id": "commands_config_run",
-      "community": 10,
+      "community": 11,
       "norm_label": "run()"
     },
     {
@@ -5058,7 +5103,7 @@
       "source_file": "src/commands/repair.rs",
       "source_location": "L1",
       "id": "src_commands_repair_rs",
-      "community": 16,
+      "community": 2,
       "norm_label": "repair.rs"
     },
     {
@@ -5067,7 +5112,7 @@
       "source_file": "src/commands/repair.rs",
       "source_location": "L12",
       "id": "commands_repair_keyderivation",
-      "community": 16,
+      "community": 2,
       "norm_label": "keyderivation"
     },
     {
@@ -5076,7 +5121,7 @@
       "source_file": "src/commands/repair.rs",
       "source_location": "L23",
       "id": "commands_repair_detect_key_derivation",
-      "community": 16,
+      "community": 2,
       "norm_label": "detect_key_derivation()"
     },
     {
@@ -5085,7 +5130,7 @@
       "source_file": "src/commands/repair.rs",
       "source_location": "L78",
       "id": "commands_repair_unwrap_metadata_json",
-      "community": 16,
+      "community": 2,
       "norm_label": "unwrap_metadata_json()"
     },
     {
@@ -5094,7 +5139,7 @@
       "source_file": "src/commands/repair.rs",
       "source_location": "L89",
       "id": "commands_repair_decrypt_chunks_with_binary_key",
-      "community": 16,
+      "community": 2,
       "norm_label": "decrypt_chunks_with_binary_key()"
     },
     {
@@ -5103,7 +5148,7 @@
       "source_file": "src/commands/repair.rs",
       "source_location": "L102",
       "id": "commands_repair_encrypt_chunks_with_string_key",
-      "community": 16,
+      "community": 2,
       "norm_label": "encrypt_chunks_with_string_key()"
     },
     {
@@ -5112,7 +5157,7 @@
       "source_file": "src/commands/repair.rs",
       "source_location": "L130",
       "id": "commands_repair_encrypt_name_with_string_key",
-      "community": 16,
+      "community": 2,
       "norm_label": "encrypt_name_with_string_key()"
     },
     {
@@ -5121,7 +5166,7 @@
       "source_file": "src/commands/repair.rs",
       "source_location": "L141",
       "id": "commands_repair_repairstats",
-      "community": 16,
+      "community": 2,
       "norm_label": "repairstats"
     },
     {
@@ -5130,7 +5175,7 @@
       "source_file": "src/commands/repair.rs",
       "source_location": "L149",
       "id": "commands_repair_run",
-      "community": 16,
+      "community": 2,
       "norm_label": "run()"
     },
     {
@@ -5139,7 +5184,7 @@
       "source_file": "src/commands/repair.rs",
       "source_location": "L344",
       "id": "commands_repair_collect_all_files",
-      "community": 16,
+      "community": 2,
       "norm_label": "collect_all_files()"
     },
     {
@@ -5148,7 +5193,7 @@
       "source_file": "src/commands/repair.rs",
       "source_location": "L382",
       "id": "commands_repair_repair_folder",
-      "community": 16,
+      "community": 2,
       "norm_label": "repair_folder()"
     },
     {
@@ -5157,7 +5202,7 @@
       "source_file": "src/commands/repair.rs",
       "source_location": "L404",
       "id": "commands_repair_repair_file",
-      "community": 16,
+      "community": 2,
       "norm_label": "repair_file()"
     },
     {
@@ -5481,7 +5526,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L1",
       "id": "src_commands_sessions_rs",
-      "community": 7,
+      "community": 6,
       "norm_label": "sessions.rs"
     },
     {
@@ -5490,7 +5535,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L89",
       "id": "commands_sessions_sessionrow",
-      "community": 7,
+      "community": 6,
       "norm_label": "sessionrow"
     },
     {
@@ -5499,7 +5544,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L106",
       "id": "commands_sessions_sessionrow_from_json",
-      "community": 7,
+      "community": 6,
       "norm_label": ".from_json()"
     },
     {
@@ -5508,7 +5553,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L132",
       "id": "commands_sessions_parse_sessions",
-      "community": 7,
+      "community": 6,
       "norm_label": "parse_sessions()"
     },
     {
@@ -5517,7 +5562,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L144",
       "id": "commands_sessions_classify_list_error",
-      "community": 1,
+      "community": 6,
       "norm_label": "classify_list_error()"
     },
     {
@@ -5526,7 +5571,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L157",
       "id": "commands_sessions_extract_sessions_json",
-      "community": 7,
+      "community": 6,
       "norm_label": "extract_sessions_json()"
     },
     {
@@ -5535,7 +5580,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L166",
       "id": "commands_sessions_should_show_empty_state",
-      "community": 7,
+      "community": 6,
       "norm_label": "should_show_empty_state()"
     },
     {
@@ -5544,7 +5589,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L171",
       "id": "commands_sessions_marker_cell",
-      "community": 7,
+      "community": 6,
       "norm_label": "marker_cell()"
     },
     {
@@ -5553,7 +5598,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L192",
       "id": "commands_sessions_render_quiet",
-      "community": 7,
+      "community": 6,
       "norm_label": "render_quiet()"
     },
     {
@@ -5562,7 +5607,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L197",
       "id": "commands_sessions_render_table",
-      "community": 7,
+      "community": 6,
       "norm_label": "render_table()"
     },
     {
@@ -5571,7 +5616,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L230",
       "id": "commands_sessions_list",
-      "community": 1,
+      "community": 6,
       "norm_label": "list()"
     },
     {
@@ -5580,7 +5625,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L294",
       "id": "commands_sessions_resolve_session_id",
-      "community": 7,
+      "community": 6,
       "norm_label": "resolve_session_id()"
     },
     {
@@ -5589,7 +5634,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L314",
       "id": "commands_sessions_guard_not_current",
-      "community": 7,
+      "community": 6,
       "norm_label": "guard_not_current()"
     },
     {
@@ -5598,7 +5643,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L329",
       "id": "commands_sessions_short_id",
-      "community": 7,
+      "community": 6,
       "norm_label": "short_id()"
     },
     {
@@ -5607,7 +5652,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L339",
       "id": "commands_sessions_classify_revoke_error",
-      "community": 7,
+      "community": 6,
       "norm_label": "classify_revoke_error()"
     },
     {
@@ -5616,7 +5661,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L352",
       "id": "commands_sessions_revoke",
-      "community": 1,
+      "community": 6,
       "norm_label": "revoke()"
     },
     {
@@ -5625,7 +5670,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L412",
       "id": "commands_sessions_revoke_all_others_may_proceed_without_prompt",
-      "community": 7,
+      "community": 6,
       "norm_label": "revoke_all_others_may_proceed_without_prompt()"
     },
     {
@@ -5634,7 +5679,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L428",
       "id": "commands_sessions_confirm_revoke_all",
-      "community": 7,
+      "community": 6,
       "norm_label": "confirm_revoke_all()"
     },
     {
@@ -5643,7 +5688,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L449",
       "id": "commands_sessions_revoke_all_others",
-      "community": 1,
+      "community": 2,
       "norm_label": "revoke_all_others()"
     },
     {
@@ -5652,7 +5697,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L489",
       "id": "commands_sessions_sessions_fixture",
-      "community": 7,
+      "community": 6,
       "norm_label": "sessions_fixture()"
     },
     {
@@ -5661,7 +5706,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L517",
       "id": "commands_sessions_parse_sessions_reads_every_field_from_the_live_shape",
-      "community": 7,
+      "community": 6,
       "norm_label": "parse_sessions_reads_every_field_from_the_live_shape()"
     },
     {
@@ -5670,7 +5715,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L536",
       "id": "commands_sessions_parse_sessions_defaults_missing_device_fields_like_the_server_does",
-      "community": 7,
+      "community": 6,
       "norm_label": "parse_sessions_defaults_missing_device_fields_like_the_server_does()"
     },
     {
@@ -5679,7 +5724,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L549",
       "id": "commands_sessions_parse_sessions_skips_a_row_missing_the_required_id",
-      "community": 7,
+      "community": 6,
       "norm_label": "parse_sessions_skips_a_row_missing_the_required_id()"
     },
     {
@@ -5688,7 +5733,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L564",
       "id": "commands_sessions_parse_sessions_on_missing_sessions_key_returns_empty",
-      "community": 7,
+      "community": 6,
       "norm_label": "parse_sessions_on_missing_sessions_key_returns_empty()"
     },
     {
@@ -5697,7 +5742,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L571",
       "id": "commands_sessions_render_table_marks_exactly_the_current_session",
-      "community": 7,
+      "community": 6,
       "norm_label": "render_table_marks_exactly_the_current_session()"
     },
     {
@@ -5706,7 +5751,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L593",
       "id": "commands_sessions_render_table_shows_dashes_for_null_country_and_last_active",
-      "community": 7,
+      "community": 6,
       "norm_label": "render_table_shows_dashes_for_null_country_and_last_active()"
     },
     {
@@ -5715,7 +5760,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L605",
       "id": "commands_sessions_render_table_uses_relative_time_for_a_present_last_active_at",
-      "community": 7,
+      "community": 6,
       "norm_label": "render_table_uses_relative_time_for_a_present_last_active_at()"
     },
     {
@@ -5724,7 +5769,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L620",
       "id": "commands_sessions_render_quiet_emits_one_bare_id_per_session_with_no_current_marker",
-      "community": 7,
+      "community": 6,
       "norm_label": "render_quiet_emits_one_bare_id_per_session_with_no_current_marker()"
     },
     {
@@ -5733,7 +5778,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L635",
       "id": "commands_sessions_render_quiet_lines_are_single_whitespace_free_tokens",
-      "community": 7,
+      "community": 6,
       "norm_label": "render_quiet_lines_are_single_whitespace_free_tokens()"
     },
     {
@@ -5742,7 +5787,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L646",
       "id": "commands_sessions_render_quiet_contains_no_ansi_escapes",
-      "community": 7,
+      "community": 6,
       "norm_label": "render_quiet_contains_no_ansi_escapes()"
     },
     {
@@ -5751,7 +5796,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L656",
       "id": "commands_sessions_render_quiet_on_empty_sessions_emits_no_lines",
-      "community": 7,
+      "community": 6,
       "norm_label": "render_quiet_on_empty_sessions_emits_no_lines()"
     },
     {
@@ -5760,7 +5805,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L663",
       "id": "commands_sessions_json_mode_extracts_the_raw_sessions_array_unmodified",
-      "community": 7,
+      "community": 6,
       "norm_label": "json_mode_extracts_the_raw_sessions_array_unmodified()"
     },
     {
@@ -5769,7 +5814,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L679",
       "id": "commands_sessions_json_mode_on_missing_sessions_key_falls_back_to_empty_array",
-      "community": 7,
+      "community": 6,
       "norm_label": "json_mode_on_missing_sessions_key_falls_back_to_empty_array()"
     },
     {
@@ -5778,7 +5823,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L686",
       "id": "commands_sessions_classify_list_error_maps_bare_unauthorized_to_a_login_hint",
-      "community": 7,
+      "community": 6,
       "norm_label": "classify_list_error_maps_bare_unauthorized_to_a_login_hint()"
     },
     {
@@ -5787,7 +5832,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L694",
       "id": "commands_sessions_classify_list_error_maps_status_prefixed_unauthorized_too",
-      "community": 7,
+      "community": 6,
       "norm_label": "classify_list_error_maps_status_prefixed_unauthorized_too()"
     },
     {
@@ -5796,7 +5841,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L702",
       "id": "commands_sessions_classify_list_error_passes_through_unrelated_errors",
-      "community": 7,
+      "community": 6,
       "norm_label": "classify_list_error_passes_through_unrelated_errors()"
     },
     {
@@ -5805,7 +5850,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L707",
       "id": "commands_sessions_empty_state_line_fires_only_when_the_lone_session_is_the_current_one",
-      "community": 7,
+      "community": 6,
       "norm_label": "empty_state_line_fires_only_when_the_lone_session_is_the_current_one()"
     },
     {
@@ -5814,7 +5859,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L761",
       "id": "commands_sessions_two_row_fixture",
-      "community": 7,
+      "community": 6,
       "norm_label": "two_row_fixture()"
     },
     {
@@ -5823,7 +5868,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L785",
       "id": "commands_sessions_resolve_session_id_matches_a_full_id_exactly",
-      "community": 7,
+      "community": 6,
       "norm_label": "resolve_session_id_matches_a_full_id_exactly()"
     },
     {
@@ -5832,7 +5877,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L794",
       "id": "commands_sessions_resolve_session_id_matches_a_unique_prefix",
-      "community": 7,
+      "community": 6,
       "norm_label": "resolve_session_id_matches_a_unique_prefix()"
     },
     {
@@ -5841,7 +5886,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L803",
       "id": "commands_sessions_resolve_session_id_errors_on_zero_matches",
-      "community": 7,
+      "community": 6,
       "norm_label": "resolve_session_id_errors_on_zero_matches()"
     },
     {
@@ -5850,7 +5895,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L810",
       "id": "commands_sessions_resolve_session_id_errors_on_ambiguous_prefix",
-      "community": 7,
+      "community": 6,
       "norm_label": "resolve_session_id_errors_on_ambiguous_prefix()"
     },
     {
@@ -5859,7 +5904,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L841",
       "id": "commands_sessions_guard_not_current_refuses_the_current_session",
-      "community": 7,
+      "community": 6,
       "norm_label": "guard_not_current_refuses_the_current_session()"
     },
     {
@@ -5868,7 +5913,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L853",
       "id": "commands_sessions_guard_not_current_allows_a_non_current_session",
-      "community": 7,
+      "community": 6,
       "norm_label": "guard_not_current_allows_a_non_current_session()"
     },
     {
@@ -5877,7 +5922,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L860",
       "id": "commands_sessions_short_id_takes_the_first_eight_characters",
-      "community": 7,
+      "community": 6,
       "norm_label": "short_id_takes_the_first_eight_characters()"
     },
     {
@@ -5886,7 +5931,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L865",
       "id": "commands_sessions_short_id_returns_the_whole_string_when_shorter_than_eight",
-      "community": 7,
+      "community": 6,
       "norm_label": "short_id_returns_the_whole_string_when_shorter_than_eight()"
     },
     {
@@ -5895,7 +5940,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L870",
       "id": "commands_sessions_classify_revoke_error_maps_unauthorized_to_a_login_hint",
-      "community": 7,
+      "community": 6,
       "norm_label": "classify_revoke_error_maps_unauthorized_to_a_login_hint()"
     },
     {
@@ -5904,7 +5949,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L882",
       "id": "commands_sessions_classify_revoke_error_maps_the_live_lowercase_not_found_body",
-      "community": 7,
+      "community": 6,
       "norm_label": "classify_revoke_error_maps_the_live_lowercase_not_found_body()"
     },
     {
@@ -5913,7 +5958,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L894",
       "id": "commands_sessions_classify_revoke_error_passes_through_unrelated_errors",
-      "community": 7,
+      "community": 6,
       "norm_label": "classify_revoke_error_passes_through_unrelated_errors()"
     },
     {
@@ -5922,7 +5967,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L901",
       "id": "commands_sessions_yes_flag_always_proceeds_without_a_prompt_rich_or_not",
-      "community": 7,
+      "community": 6,
       "norm_label": "yes_flag_always_proceeds_without_a_prompt_rich_or_not()"
     },
     {
@@ -5931,7 +5976,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L907",
       "id": "commands_sessions_no_yes_but_rich_terminal_falls_through_to_the_prompt",
-      "community": 7,
+      "community": 6,
       "norm_label": "no_yes_but_rich_terminal_falls_through_to_the_prompt()"
     },
     {
@@ -5940,7 +5985,7 @@
       "source_file": "src/commands/sessions.rs",
       "source_location": "L912",
       "id": "commands_sessions_no_yes_and_not_rich_refuses_instead_of_silently_proceeding",
-      "community": 7,
+      "community": 6,
       "norm_label": "no_yes_and_not_rich_refuses_instead_of_silently_proceeding()"
     },
     {
@@ -5949,7 +5994,7 @@
       "source_file": "src/commands/logout.rs",
       "source_location": "L1",
       "id": "src_commands_logout_rs",
-      "community": 10,
+      "community": 11,
       "norm_label": "logout.rs"
     },
     {
@@ -5958,7 +6003,7 @@
       "source_file": "src/commands/logout.rs",
       "source_location": "L6",
       "id": "commands_logout_run",
-      "community": 10,
+      "community": 11,
       "norm_label": "run()"
     },
     {
@@ -5967,7 +6012,7 @@
       "source_file": "src/commands/restore.rs",
       "source_location": "L1",
       "id": "src_commands_restore_rs",
-      "community": 1,
+      "community": 2,
       "norm_label": "restore.rs"
     },
     {
@@ -5976,7 +6021,7 @@
       "source_file": "src/commands/restore.rs",
       "source_location": "L16",
       "id": "commands_restore_run",
-      "community": 1,
+      "community": 2,
       "norm_label": "run()"
     },
     {
@@ -5985,7 +6030,7 @@
       "source_file": "src/commands/mod.rs",
       "source_location": "L1",
       "id": "src_commands_mod_rs",
-      "community": 29,
+      "community": 28,
       "norm_label": "mod.rs"
     },
     {
@@ -6048,7 +6093,7 @@
       "source_file": "src/commands/push.rs",
       "source_location": "L87",
       "id": "commands_push_prompt_conflict",
-      "community": 0,
+      "community": 8,
       "norm_label": "prompt_conflict()"
     },
     {
@@ -6129,7 +6174,7 @@
       "source_file": "src/commands/push.rs",
       "source_location": "L643",
       "id": "commands_push_dir_total_size",
-      "community": 0,
+      "community": 8,
       "norm_label": "dir_total_size()"
     },
     {
@@ -6147,7 +6192,7 @@
       "source_file": "src/commands/account.rs",
       "source_location": "L1",
       "id": "src_commands_account_rs",
-      "community": 1,
+      "community": 13,
       "norm_label": "account.rs"
     },
     {
@@ -6156,7 +6201,7 @@
       "source_file": "src/commands/account.rs",
       "source_location": "L30",
       "id": "commands_account_build_show_payload",
-      "community": 1,
+      "community": 13,
       "norm_label": "build_show_payload()"
     },
     {
@@ -6165,7 +6210,7 @@
       "source_file": "src/commands/account.rs",
       "source_location": "L114",
       "id": "commands_account_show",
-      "community": 1,
+      "community": 13,
       "norm_label": "show()"
     },
     {
@@ -6174,7 +6219,7 @@
       "source_file": "src/commands/account.rs",
       "source_location": "L280",
       "id": "commands_account_render_progress_bar",
-      "community": 1,
+      "community": 13,
       "norm_label": "render_progress_bar()"
     },
     {
@@ -6183,7 +6228,7 @@
       "source_file": "src/commands/account.rs",
       "source_location": "L290",
       "id": "commands_account_update_email",
-      "community": 1,
+      "community": 13,
       "norm_label": "update_email()"
     },
     {
@@ -6192,7 +6237,7 @@
       "source_file": "src/commands/account.rs",
       "source_location": "L309",
       "id": "commands_account_normalize_update_email",
-      "community": 1,
+      "community": 13,
       "norm_label": "normalize_update_email()"
     },
     {
@@ -6201,7 +6246,7 @@
       "source_file": "src/commands/account.rs",
       "source_location": "L317",
       "id": "commands_account_map_email_change_error",
-      "community": 1,
+      "community": 13,
       "norm_label": "map_email_change_error()"
     },
     {
@@ -6210,7 +6255,7 @@
       "source_file": "src/commands/account.rs",
       "source_location": "L325",
       "id": "commands_account_opaque_email_change",
-      "community": 1,
+      "community": 13,
       "norm_label": "opaque_email_change()"
     },
     {
@@ -6219,7 +6264,7 @@
       "source_file": "src/commands/account.rs",
       "source_location": "L337",
       "id": "commands_account_print_email_change_success",
-      "community": 1,
+      "community": 2,
       "norm_label": "print_email_change_success()"
     },
     {
@@ -6228,7 +6273,7 @@
       "source_file": "src/commands/account.rs",
       "source_location": "L368",
       "id": "commands_account_build_show_payload_assembles_all_sections",
-      "community": 1,
+      "community": 13,
       "norm_label": "build_show_payload_assembles_all_sections()"
     },
     {
@@ -6237,7 +6282,7 @@
       "source_file": "src/commands/account.rs",
       "source_location": "L398",
       "id": "commands_account_build_show_payload_degrades_gracefully_per_section",
-      "community": 1,
+      "community": 13,
       "norm_label": "build_show_payload_degrades_gracefully_per_section()"
     },
     {
@@ -6246,7 +6291,7 @@
       "source_file": "src/commands/account.rs",
       "source_location": "L412",
       "id": "commands_account_normalize_update_email_matches_server_contract",
-      "community": 1,
+      "community": 13,
       "norm_label": "normalize_update_email_matches_server_contract()"
     },
     {
@@ -6255,7 +6300,7 @@
       "source_file": "src/commands/account.rs",
       "source_location": "L425",
       "id": "commands_account_map_email_change_error_simplifies_conflict",
-      "community": 1,
+      "community": 13,
       "norm_label": "map_email_change_error_simplifies_conflict()"
     },
     {
@@ -6264,7 +6309,7 @@
       "source_file": "src/commands/confirm.rs",
       "source_location": "L1",
       "id": "src_commands_confirm_rs",
-      "community": 19,
+      "community": 13,
       "norm_label": "confirm.rs"
     },
     {
@@ -6273,7 +6318,7 @@
       "source_file": "src/commands/confirm.rs",
       "source_location": "L21",
       "id": "commands_confirm_confirmedpassword",
-      "community": 19,
+      "community": 13,
       "norm_label": "confirmedpassword"
     },
     {
@@ -6282,7 +6327,7 @@
       "source_file": "src/commands/confirm.rs",
       "source_location": "L29",
       "id": "commands_confirm_acquire_confirm_token",
-      "community": 19,
+      "community": 13,
       "norm_label": "acquire_confirm_token()"
     },
     {
@@ -6291,7 +6336,7 @@
       "source_file": "src/commands/confirm.rs",
       "source_location": "L35",
       "id": "commands_confirm_acquire_confirmed_password",
-      "community": 19,
+      "community": 13,
       "norm_label": "acquire_confirmed_password()"
     },
     {
@@ -6300,7 +6345,7 @@
       "source_file": "src/commands/confirm.rs",
       "source_location": "L43",
       "id": "commands_confirm_map_confirm_error",
-      "community": 19,
+      "community": 13,
       "norm_label": "map_confirm_error()"
     },
     {
@@ -6309,7 +6354,7 @@
       "source_file": "src/commands/confirm.rs",
       "source_location": "L65",
       "id": "commands_confirm_confirm_module_compiles",
-      "community": 19,
+      "community": 13,
       "norm_label": "confirm_module_compiles()"
     },
     {
@@ -6318,7 +6363,7 @@
       "source_file": "src/commands/confirm.rs",
       "source_location": "L71",
       "id": "commands_confirm_confirm_error_mapping_handles_common_auth_failures",
-      "community": 19,
+      "community": 13,
       "norm_label": "confirm_error_mapping_handles_common_auth_failures()"
     },
     {
@@ -6327,7 +6372,7 @@
       "source_file": "src/commands/status.rs",
       "source_location": "L1",
       "id": "src_commands_status_rs",
-      "community": 1,
+      "community": 11,
       "norm_label": "status.rs"
     },
     {
@@ -6336,7 +6381,7 @@
       "source_file": "src/commands/status.rs",
       "source_location": "L1",
       "id": "commands_status_run",
-      "community": 1,
+      "community": 11,
       "norm_label": "run()"
     },
     {
@@ -6345,7 +6390,7 @@
       "source_file": "src/commands/login.rs",
       "source_location": "L1",
       "id": "src_commands_login_rs",
-      "community": 10,
+      "community": 11,
       "norm_label": "login.rs"
     },
     {
@@ -6354,7 +6399,7 @@
       "source_file": "src/commands/login.rs",
       "source_location": "L9",
       "id": "commands_login_browser_login",
-      "community": 10,
+      "community": 11,
       "norm_label": "browser_login()"
     },
     {
@@ -6363,7 +6408,7 @@
       "source_file": "src/commands/login.rs",
       "source_location": "L162",
       "id": "commands_login_print_browser_block",
-      "community": 10,
+      "community": 11,
       "norm_label": "print_browser_block()"
     },
     {
@@ -6372,7 +6417,7 @@
       "source_file": "src/commands/login.rs",
       "source_location": "L191",
       "id": "commands_login_print_headless_block",
-      "community": 10,
+      "community": 11,
       "norm_label": "print_headless_block()"
     },
     {
@@ -6381,7 +6426,7 @@
       "source_file": "src/commands/login.rs",
       "source_location": "L225",
       "id": "commands_login_spawn_countdown",
-      "community": 10,
+      "community": 11,
       "norm_label": "spawn_countdown()"
     },
     {
@@ -6390,7 +6435,7 @@
       "source_file": "src/commands/login.rs",
       "source_location": "L252",
       "id": "commands_login_run",
-      "community": 10,
+      "community": 11,
       "norm_label": "run()"
     },
     {
@@ -6561,7 +6606,7 @@
       "source_file": "src/commands/mount.rs",
       "source_location": "L710",
       "id": "commands_mount_beebeebfs_open",
-      "community": 9,
+      "community": 3,
       "norm_label": ".open()"
     },
     {
@@ -6660,7 +6705,7 @@
       "source_file": "src/commands/share.rs",
       "source_location": "L1",
       "id": "src_commands_share_rs",
-      "community": 1,
+      "community": 2,
       "norm_label": "share.rs"
     },
     {
@@ -6669,7 +6714,7 @@
       "source_file": "src/commands/share.rs",
       "source_location": "L14",
       "id": "commands_share_parse_hours",
-      "community": 1,
+      "community": 2,
       "norm_label": "parse_hours()"
     },
     {
@@ -6678,7 +6723,7 @@
       "source_file": "src/commands/share.rs",
       "source_location": "L28",
       "id": "commands_share_run",
-      "community": 1,
+      "community": 2,
       "norm_label": "run()"
     },
     {
@@ -6687,7 +6732,7 @@
       "source_file": "src/commands/share.rs",
       "source_location": "L319",
       "id": "commands_share_list",
-      "community": 1,
+      "community": 2,
       "norm_label": "list()"
     },
     {
@@ -6696,7 +6741,7 @@
       "source_file": "src/commands/share.rs",
       "source_location": "L431",
       "id": "commands_share_revoke",
-      "community": 1,
+      "community": 2,
       "norm_label": "revoke()"
     },
     {
@@ -6705,7 +6750,7 @@
       "source_file": "src/commands/share.rs",
       "source_location": "L452",
       "id": "commands_share_shareentry",
-      "community": 1,
+      "community": 2,
       "norm_label": "shareentry"
     },
     {
@@ -6714,7 +6759,7 @@
       "source_file": "src/commands/share.rs",
       "source_location": "L463",
       "id": "commands_share_pick_share_interactively",
-      "community": 1,
+      "community": 2,
       "norm_label": "pick_share_interactively()"
     },
     {
@@ -6723,7 +6768,7 @@
       "source_file": "src/commands/share.rs",
       "source_location": "L559",
       "id": "commands_share_run_picker",
-      "community": 1,
+      "community": 2,
       "norm_label": "run_picker()"
     },
     {
@@ -6732,7 +6777,7 @@
       "source_file": "src/commands/share.rs",
       "source_location": "L620",
       "id": "commands_share_draw_picker",
-      "community": 1,
+      "community": 2,
       "norm_label": "draw_picker()"
     },
     {
@@ -6858,7 +6903,7 @@
       "source_file": "src/commands/whoami.rs",
       "source_location": "L1",
       "id": "src_commands_whoami_rs",
-      "community": 1,
+      "community": 2,
       "norm_label": "whoami.rs"
     },
     {
@@ -6867,7 +6912,7 @@
       "source_file": "src/commands/whoami.rs",
       "source_location": "L8",
       "id": "commands_whoami_run",
-      "community": 1,
+      "community": 2,
       "norm_label": "run()"
     },
     {
@@ -6876,7 +6921,7 @@
       "source_file": "src/commands/whoami.rs",
       "source_location": "L200",
       "id": "commands_whoami_build_plan_label",
-      "community": 1,
+      "community": 2,
       "norm_label": "build_plan_label()"
     },
     {
@@ -6885,7 +6930,7 @@
       "source_file": "src/commands/whoami.rs",
       "source_location": "L222",
       "id": "commands_whoami_capitalise",
-      "community": 1,
+      "community": 2,
       "norm_label": "capitalise()"
     },
     {
@@ -6894,7 +6939,7 @@
       "source_file": "src/commands/whoami.rs",
       "source_location": "L239",
       "id": "commands_whoami_upload_limit_for_plan",
-      "community": 1,
+      "community": 2,
       "norm_label": "upload_limit_for_plan()"
     },
     {
@@ -6912,7 +6957,7 @@
       "source_file": "src/commands/whoami.rs",
       "source_location": "L274",
       "id": "commands_whoami_upload_limit_for_plan_covers_every_plan",
-      "community": 1,
+      "community": 2,
       "norm_label": "upload_limit_for_plan_covers_every_plan()"
     },
     {
@@ -6921,7 +6966,7 @@
       "source_file": "src/commands/whoami.rs",
       "source_location": "L288",
       "id": "commands_whoami_upload_limit_for_starter_matches_basic",
-      "community": 1,
+      "community": 2,
       "norm_label": "upload_limit_for_starter_matches_basic()"
     },
     {
@@ -6930,7 +6975,7 @@
       "source_file": "src/commands/trash.rs",
       "source_location": "L1",
       "id": "src_commands_trash_rs",
-      "community": 1,
+      "community": 2,
       "norm_label": "trash.rs"
     },
     {
@@ -6939,7 +6984,7 @@
       "source_file": "src/commands/trash.rs",
       "source_location": "L21",
       "id": "commands_trash_empty",
-      "community": 1,
+      "community": 2,
       "norm_label": "empty()"
     },
     {
@@ -6948,7 +6993,7 @@
       "source_file": "src/commands/trash.rs",
       "source_location": "L89",
       "id": "commands_trash_list",
-      "community": 1,
+      "community": 2,
       "norm_label": "list()"
     },
     {
@@ -7002,7 +7047,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L1",
       "id": "src_commands_twofa_rs",
-      "community": 5,
+      "community": 7,
       "norm_label": "twofa.rs"
     },
     {
@@ -7011,7 +7056,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L62",
       "id": "commands_twofa_twofastatus",
-      "community": 1,
+      "community": 2,
       "norm_label": "twofastatus"
     },
     {
@@ -7020,7 +7065,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L70",
       "id": "commands_twofa_twofasetup",
-      "community": 5,
+      "community": 7,
       "norm_label": "twofasetup"
     },
     {
@@ -7029,7 +7074,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L86",
       "id": "commands_twofa_twofasetup_from_setup_response",
-      "community": 5,
+      "community": 7,
       "norm_label": ".from_setup_response()"
     },
     {
@@ -7038,7 +7083,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L126",
       "id": "commands_twofa_twofasetup_to_json",
-      "community": 5,
+      "community": 7,
       "norm_label": ".to_json()"
     },
     {
@@ -7047,7 +7092,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L139",
       "id": "commands_twofa_twofastatus_from_me_response",
-      "community": 1,
+      "community": 2,
       "norm_label": ".from_me_response()"
     },
     {
@@ -7056,7 +7101,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L145",
       "id": "commands_twofa_twofastatus_to_json",
-      "community": 1,
+      "community": 2,
       "norm_label": ".to_json()"
     },
     {
@@ -7065,7 +7110,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L155",
       "id": "commands_twofa_render_status_quiet",
-      "community": 5,
+      "community": 7,
       "norm_label": "render_status_quiet()"
     },
     {
@@ -7074,7 +7119,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L160",
       "id": "commands_twofa_render_status",
-      "community": 5,
+      "community": 7,
       "norm_label": "render_status()"
     },
     {
@@ -7083,7 +7128,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L174",
       "id": "commands_twofa_status",
-      "community": 1,
+      "community": 2,
       "norm_label": "status()"
     },
     {
@@ -7092,7 +7137,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L206",
       "id": "commands_twofa_render_setup_quiet",
-      "community": 5,
+      "community": 7,
       "norm_label": "render_setup_quiet()"
     },
     {
@@ -7101,7 +7146,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L215",
       "id": "commands_twofa_render_setup",
-      "community": 5,
+      "community": 7,
       "norm_label": "render_setup()"
     },
     {
@@ -7110,7 +7155,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L279",
       "id": "commands_twofa_setup",
-      "community": 1,
+      "community": 2,
       "norm_label": "setup()"
     },
     {
@@ -7119,7 +7164,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L325",
       "id": "commands_twofa_validate_code",
-      "community": 1,
+      "community": 2,
       "norm_label": "validate_code()"
     },
     {
@@ -7128,7 +7173,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L353",
       "id": "commands_twofa_totperroroutcome",
-      "community": 5,
+      "community": 7,
       "norm_label": "totperroroutcome"
     },
     {
@@ -7137,7 +7182,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L371",
       "id": "commands_twofa_classify_enable_error",
-      "community": 5,
+      "community": 7,
       "norm_label": "classify_enable_error()"
     },
     {
@@ -7146,7 +7191,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L386",
       "id": "commands_twofa_classify_disable_error",
-      "community": 5,
+      "community": 7,
       "norm_label": "classify_disable_error()"
     },
     {
@@ -7155,7 +7200,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L402",
       "id": "commands_twofa_diagnose_unauthorized",
-      "community": 5,
+      "community": 1,
       "norm_label": "diagnose_unauthorized()"
     },
     {
@@ -7164,7 +7209,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L411",
       "id": "commands_twofa_resolve_totp_error",
-      "community": 1,
+      "community": 2,
       "norm_label": "resolve_totp_error()"
     },
     {
@@ -7173,7 +7218,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L419",
       "id": "commands_twofa_render_enable_success",
-      "community": 5,
+      "community": 7,
       "norm_label": "render_enable_success()"
     },
     {
@@ -7182,7 +7227,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L429",
       "id": "commands_twofa_render_disable_success",
-      "community": 5,
+      "community": 7,
       "norm_label": "render_disable_success()"
     },
     {
@@ -7191,7 +7236,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L439",
       "id": "commands_twofa_enable",
-      "community": 1,
+      "community": 2,
       "norm_label": "enable()"
     },
     {
@@ -7200,7 +7245,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L474",
       "id": "commands_twofa_disable",
-      "community": 1,
+      "community": 2,
       "norm_label": "disable()"
     },
     {
@@ -7209,7 +7254,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L503",
       "id": "commands_twofa_from_me_response_parses_enabled",
-      "community": 5,
+      "community": 7,
       "norm_label": "from_me_response_parses_enabled()"
     },
     {
@@ -7218,7 +7263,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L509",
       "id": "commands_twofa_from_me_response_parses_disabled",
-      "community": 5,
+      "community": 7,
       "norm_label": "from_me_response_parses_disabled()"
     },
     {
@@ -7227,7 +7272,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L515",
       "id": "commands_twofa_from_me_response_defaults_to_disabled_when_field_missing",
-      "community": 5,
+      "community": 7,
       "norm_label": "from_me_response_defaults_to_disabled_when_field_missing()"
     },
     {
@@ -7236,7 +7281,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L523",
       "id": "commands_twofa_from_me_response_defaults_to_disabled_on_wrong_type",
-      "community": 5,
+      "community": 7,
       "norm_label": "from_me_response_defaults_to_disabled_on_wrong_type()"
     },
     {
@@ -7245,7 +7290,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L529",
       "id": "commands_twofa_to_json_carries_method_only_when_enabled",
-      "community": 5,
+      "community": 7,
       "norm_label": "to_json_carries_method_only_when_enabled()"
     },
     {
@@ -7254,7 +7299,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L541",
       "id": "commands_twofa_render_status_enabled_shows_totp_on_one_line",
-      "community": 5,
+      "community": 7,
       "norm_label": "render_status_enabled_shows_totp_on_one_line()"
     },
     {
@@ -7263,7 +7308,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L548",
       "id": "commands_twofa_render_status_disabled_shows_hint_line",
-      "community": 5,
+      "community": 7,
       "norm_label": "render_status_disabled_shows_hint_line()"
     },
     {
@@ -7272,7 +7317,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L556",
       "id": "commands_twofa_render_status_quiet_is_a_single_bare_word",
-      "community": 5,
+      "community": 7,
       "norm_label": "render_status_quiet_is_a_single_bare_word()"
     },
     {
@@ -7281,7 +7326,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L565",
       "id": "commands_twofa_setup_fixture",
-      "community": 5,
+      "community": 7,
       "norm_label": "setup_fixture()"
     },
     {
@@ -7290,7 +7335,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L574",
       "id": "commands_twofa_from_setup_response_parses_the_live_server_shape",
-      "community": 5,
+      "community": 7,
       "norm_label": "from_setup_response_parses_the_live_server_shape()"
     },
     {
@@ -7299,7 +7344,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L596",
       "id": "commands_twofa_to_json_round_trips_exactly_secret_qr_uri_backup_codes",
-      "community": 5,
+      "community": 7,
       "norm_label": "to_json_round_trips_exactly_secret_qr_uri_backup_codes()"
     },
     {
@@ -7308,7 +7353,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L609",
       "id": "commands_twofa_render_setup_contains_secret_qr_block_all_codes_and_enable_hint",
-      "community": 5,
+      "community": 7,
       "norm_label": "render_setup_contains_secret_qr_block_all_codes_and_enable_hint()"
     },
     {
@@ -7317,7 +7362,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L641",
       "id": "commands_twofa_from_setup_response_rejects_a_missing_secret",
-      "community": 5,
+      "community": 7,
       "norm_label": "from_setup_response_rejects_a_missing_secret()"
     },
     {
@@ -7326,7 +7371,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L652",
       "id": "commands_twofa_from_setup_response_rejects_an_empty_qr_uri",
-      "community": 5,
+      "community": 7,
       "norm_label": "from_setup_response_rejects_an_empty_qr_uri()"
     },
     {
@@ -7335,7 +7380,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L660",
       "id": "commands_twofa_from_setup_response_rejects_missing_backup_codes",
-      "community": 5,
+      "community": 7,
       "norm_label": "from_setup_response_rejects_missing_backup_codes()"
     },
     {
@@ -7344,7 +7389,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L668",
       "id": "commands_twofa_from_setup_response_rejects_an_empty_backup_codes_list",
-      "community": 5,
+      "community": 7,
       "norm_label": "from_setup_response_rejects_an_empty_backup_codes_list()"
     },
     {
@@ -7353,7 +7398,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L676",
       "id": "commands_twofa_from_setup_response_rejects_a_non_string_backup_code",
-      "community": 5,
+      "community": 7,
       "norm_label": "from_setup_response_rejects_a_non_string_backup_code()"
     },
     {
@@ -7362,7 +7407,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L688",
       "id": "commands_twofa_render_setup_quiet_is_bare_secret_and_codes_no_decoration",
-      "community": 5,
+      "community": 7,
       "norm_label": "render_setup_quiet_is_bare_secret_and_codes_no_decoration()"
     },
     {
@@ -7371,7 +7416,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L714",
       "id": "commands_twofa_validate_code_rejects_wrong_length",
-      "community": 5,
+      "community": 7,
       "norm_label": "validate_code_rejects_wrong_length()"
     },
     {
@@ -7380,7 +7425,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L720",
       "id": "commands_twofa_validate_code_rejects_non_digits",
-      "community": 5,
+      "community": 7,
       "norm_label": "validate_code_rejects_non_digits()"
     },
     {
@@ -7389,7 +7434,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L725",
       "id": "commands_twofa_validate_code_accepts_six_digits",
-      "community": 5,
+      "community": 7,
       "norm_label": "validate_code_accepts_six_digits()"
     },
     {
@@ -7398,7 +7443,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L739",
       "id": "commands_twofa_classify_enable_error_reports_setup_required",
-      "community": 5,
+      "community": 7,
       "norm_label": "classify_enable_error_reports_setup_required()"
     },
     {
@@ -7407,7 +7452,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L754",
       "id": "commands_twofa_classify_enable_error_reports_already_enabled",
-      "community": 5,
+      "community": 7,
       "norm_label": "classify_enable_error_reports_already_enabled()"
     },
     {
@@ -7416,7 +7461,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L776",
       "id": "commands_twofa_classify_enable_error_reports_ambiguous_on_bare_unauthorized",
-      "community": 5,
+      "community": 7,
       "norm_label": "classify_enable_error_reports_ambiguous_on_bare_unauthorized()"
     },
     {
@@ -7425,7 +7470,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L786",
       "id": "commands_twofa_classify_enable_error_reports_ambiguous_on_status_prefixed_form",
-      "community": 5,
+      "community": 7,
       "norm_label": "classify_enable_error_reports_ambiguous_on_status_prefixed_form()"
     },
     {
@@ -7434,7 +7479,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L792",
       "id": "commands_twofa_classify_enable_error_passes_through_unrecognized_errors",
-      "community": 5,
+      "community": 7,
       "norm_label": "classify_enable_error_passes_through_unrecognized_errors()"
     },
     {
@@ -7443,7 +7488,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L802",
       "id": "commands_twofa_classify_disable_error_reports_not_enabled_when_never_set_up",
-      "community": 5,
+      "community": 7,
       "norm_label": "classify_disable_error_reports_not_enabled_when_never_set_up()"
     },
     {
@@ -7452,7 +7497,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L817",
       "id": "commands_twofa_classify_disable_error_reports_not_enabled_when_row_disabled",
-      "community": 5,
+      "community": 7,
       "norm_label": "classify_disable_error_reports_not_enabled_when_row_disabled()"
     },
     {
@@ -7461,7 +7506,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L827",
       "id": "commands_twofa_classify_disable_error_reports_ambiguous_on_bare_unauthorized",
-      "community": 5,
+      "community": 7,
       "norm_label": "classify_disable_error_reports_ambiguous_on_bare_unauthorized()"
     },
     {
@@ -7470,7 +7515,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L833",
       "id": "commands_twofa_classify_disable_error_passes_through_unrecognized_errors",
-      "community": 5,
+      "community": 7,
       "norm_label": "classify_disable_error_passes_through_unrecognized_errors()"
     },
     {
@@ -7479,7 +7524,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L839",
       "id": "commands_twofa_render_enable_success_confirms_2fa_is_active",
-      "community": 5,
+      "community": 7,
       "norm_label": "render_enable_success_confirms_2fa_is_active()"
     },
     {
@@ -7488,7 +7533,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L845",
       "id": "commands_twofa_render_disable_success_confirms_2fa_disabled",
-      "community": 5,
+      "community": 7,
       "norm_label": "render_disable_success_confirms_2fa_disabled()"
     },
     {
@@ -7497,7 +7542,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L855",
       "id": "commands_twofa_spawn_me_mock",
-      "community": 5,
+      "community": 1,
       "norm_label": "spawn_me_mock()"
     },
     {
@@ -7506,7 +7551,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L872",
       "id": "commands_twofa_diagnose_unauthorized_blames_the_code_when_the_session_is_alive",
-      "community": 5,
+      "community": 1,
       "norm_label": "diagnose_unauthorized_blames_the_code_when_the_session_is_alive()"
     },
     {
@@ -7515,7 +7560,7 @@
       "source_file": "src/commands/twofa.rs",
       "source_location": "L887",
       "id": "commands_twofa_diagnose_unauthorized_blames_the_session_when_it_is_dead",
-      "community": 5,
+      "community": 1,
       "norm_label": "diagnose_unauthorized_blames_the_session_when_it_is_dead()"
     },
     {
@@ -7524,7 +7569,7 @@
       "source_file": "src/commands/qr.rs",
       "source_location": "L1",
       "id": "src_commands_qr_rs",
-      "community": 5,
+      "community": 7,
       "norm_label": "qr.rs"
     },
     {
@@ -7533,7 +7578,7 @@
       "source_file": "src/commands/qr.rs",
       "source_location": "L18",
       "id": "commands_qr_render_otpauth",
-      "community": 5,
+      "community": 7,
       "norm_label": "render_otpauth()"
     },
     {
@@ -7542,7 +7587,7 @@
       "source_file": "src/commands/qr.rs",
       "source_location": "L34",
       "id": "commands_qr_renders_a_typical_totp_uri",
-      "community": 5,
+      "community": 7,
       "norm_label": "renders_a_typical_totp_uri()"
     },
     {
@@ -7551,7 +7596,7 @@
       "source_file": "src/commands/qr.rs",
       "source_location": "L54",
       "id": "commands_qr_renders_empty_for_garbage_that_cannot_encode",
-      "community": 5,
+      "community": 7,
       "norm_label": "renders_empty_for_garbage_that_cannot_encode()"
     }
   ],
@@ -8523,8 +8568,8 @@
       "source_file": "src/commands/passkey.rs",
       "source_location": "L314",
       "weight": 1.0,
-      "_src": "commands_passkey_add",
-      "_tgt": "src_ui_is_json",
+      "_src": "src_ui_is_json",
+      "_tgt": "commands_passkey_add",
       "source": "src_ui_is_json",
       "target": "commands_passkey_add"
     },
@@ -9075,8 +9120,8 @@
       "source_file": "src/commands/passkey.rs",
       "source_location": "L314",
       "weight": 1.0,
-      "_src": "commands_passkey_add",
-      "_tgt": "src_ui_is_quiet",
+      "_src": "src_ui_is_quiet",
+      "_tgt": "commands_passkey_add",
       "source": "src_ui_is_quiet",
       "target": "commands_passkey_add"
     },
@@ -11055,8 +11100,8 @@
       "source_file": "src/commands/passkey.rs",
       "source_location": "L264",
       "weight": 1.0,
-      "_src": "commands_passkey_passkey_enrollment_url",
-      "_tgt": "src_config_load_config",
+      "_src": "src_config_load_config",
+      "_tgt": "commands_passkey_passkey_enrollment_url",
       "source": "src_config_load_config",
       "target": "commands_passkey_passkey_enrollment_url"
     },
@@ -15483,8 +15528,8 @@
       "source_file": "src/commands/passkey.rs",
       "source_location": "L310",
       "weight": 1.0,
-      "_src": "commands_passkey_add",
-      "_tgt": "src_api_apiclient_from_config",
+      "_src": "src_api_apiclient_from_config",
+      "_tgt": "commands_passkey_add",
       "source": "src_api_apiclient_from_config",
       "target": "commands_passkey_add"
     },
@@ -19095,8 +19140,8 @@
       "source_file": "src/commands/passkey.rs",
       "source_location": "L314",
       "weight": 1.0,
-      "_src": "commands_passkey_add",
-      "_tgt": "src_env_detect_is_headless",
+      "_src": "src_env_detect_is_headless",
+      "_tgt": "commands_passkey_add",
       "source": "src_env_detect_is_headless",
       "target": "commands_passkey_add"
     },
@@ -21672,7 +21717,19 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L246",
+      "source_location": "L234",
+      "weight": 1.0,
+      "_src": "src_commands_passkey_rs",
+      "_tgt": "commands_passkey_host_of",
+      "source": "src_commands_passkey_rs",
+      "target": "commands_passkey_host_of",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src/commands/passkey.rs",
+      "source_location": "L264",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_passkey_enrollment_url_from_api",
@@ -21684,7 +21741,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L263",
+      "source_location": "L282",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_passkey_enrollment_url",
@@ -21696,7 +21753,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L272",
+      "source_location": "L291",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_addaction",
@@ -21708,7 +21765,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L290",
+      "source_location": "L309",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_plan_add",
@@ -21720,7 +21777,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L306",
+      "source_location": "L325",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_add",
@@ -21732,7 +21789,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L368",
+      "source_location": "L387",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_passkeys_fixture",
@@ -21744,7 +21801,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L388",
+      "source_location": "L407",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_parse_passkeys_reads_every_field_from_the_live_shape",
@@ -21756,7 +21813,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L401",
+      "source_location": "L420",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_parse_passkeys_defaults_a_missing_name_to_passkey",
@@ -21768,7 +21825,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L412",
+      "source_location": "L431",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_parse_passkeys_defaults_an_empty_name_to_passkey",
@@ -21780,7 +21837,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L423",
+      "source_location": "L442",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_parse_passkeys_skips_a_row_missing_the_required_id",
@@ -21792,7 +21849,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L438",
+      "source_location": "L457",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_parse_passkeys_skips_a_row_missing_the_required_created_at",
@@ -21804,7 +21861,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L446",
+      "source_location": "L465",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_parse_passkeys_on_missing_passkeys_key_returns_empty",
@@ -21816,7 +21873,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L453",
+      "source_location": "L472",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_render_table_shows_short_id_name_and_relative_created",
@@ -21828,7 +21885,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L464",
+      "source_location": "L483",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_render_table_never_leaks_a_raw_iso_timestamp",
@@ -21840,7 +21897,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L474",
+      "source_location": "L493",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_render_table_never_mentions_last_used",
@@ -21852,7 +21909,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L488",
+      "source_location": "L507",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_render_quiet_emits_one_bare_id_per_passkey",
@@ -21864,7 +21921,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L497",
+      "source_location": "L516",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_render_quiet_lines_are_single_whitespace_free_tokens",
@@ -21876,7 +21933,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L508",
+      "source_location": "L527",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_render_quiet_contains_no_ansi_escapes",
@@ -21888,7 +21945,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L518",
+      "source_location": "L537",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_render_quiet_on_empty_passkeys_emits_no_lines",
@@ -21900,7 +21957,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L525",
+      "source_location": "L544",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_json_mode_extracts_the_raw_passkeys_array_unmodified",
@@ -21912,7 +21969,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L541",
+      "source_location": "L560",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_json_mode_on_missing_passkeys_key_falls_back_to_empty_array",
@@ -21924,7 +21981,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L548",
+      "source_location": "L567",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_classify_list_error_maps_bare_unauthorized_to_a_login_hint",
@@ -21936,7 +21993,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L556",
+      "source_location": "L575",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_classify_list_error_maps_status_prefixed_unauthorized_too",
@@ -21948,7 +22005,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L564",
+      "source_location": "L583",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_classify_list_error_passes_through_unrelated_errors",
@@ -21960,7 +22017,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L571",
+      "source_location": "L590",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_short_id_takes_the_first_eight_characters",
@@ -21972,7 +22029,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L576",
+      "source_location": "L595",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_short_id_returns_the_whole_string_when_shorter_than_eight",
@@ -21984,7 +22041,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L583",
+      "source_location": "L602",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_enrollment_url_for_prod_api_points_at_the_prod_web_app",
@@ -21996,7 +22053,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L589",
+      "source_location": "L608",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_enrollment_url_for_local_api_points_at_the_local_dev_web_app",
@@ -22008,7 +22065,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L595",
+      "source_location": "L614",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_local_api_enrollment_url_is_never_the_prod_host",
@@ -22020,7 +22077,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L608",
+      "source_location": "L627",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_enrollment_url_strips_trailing_slash_before_appending_the_path",
@@ -22032,7 +22089,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L614",
+      "source_location": "L633",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_enrollment_url_handles_http_scheme_api_host_too",
@@ -22044,7 +22101,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L620",
+      "source_location": "L639",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_enrollment_url_generalizes_beyond_the_literal_beebeeb_io_host",
@@ -22056,7 +22113,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L629",
+      "source_location": "L648",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_enrollment_url_for_unrecognized_host_stays_on_that_hosts_origin",
@@ -22068,7 +22125,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L640",
+      "source_location": "L659",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_enrollment_url_matches_127_0_0_1_as_local_too",
@@ -22080,7 +22137,55 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L648",
+      "source_location": "L665",
+      "weight": 1.0,
+      "_src": "src_commands_passkey_rs",
+      "_tgt": "commands_passkey_enrollment_url_does_not_treat_a_localhost_labeled_domain_as_local",
+      "source": "src_commands_passkey_rs",
+      "target": "commands_passkey_enrollment_url_does_not_treat_a_localhost_labeled_domain_as_local",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src/commands/passkey.rs",
+      "source_location": "L676",
+      "weight": 1.0,
+      "_src": "src_commands_passkey_rs",
+      "_tgt": "commands_passkey_enrollment_url_does_not_treat_a_127_0_0_1_labeled_domain_as_local",
+      "source": "src_commands_passkey_rs",
+      "target": "commands_passkey_enrollment_url_does_not_treat_a_127_0_0_1_labeled_domain_as_local",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src/commands/passkey.rs",
+      "source_location": "L683",
+      "weight": 1.0,
+      "_src": "src_commands_passkey_rs",
+      "_tgt": "commands_passkey_enrollment_url_bracketed_ipv6_loopback_is_local_and_port_is_stripped",
+      "source": "src_commands_passkey_rs",
+      "target": "commands_passkey_enrollment_url_bracketed_ipv6_loopback_is_local_and_port_is_stripped",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src/commands/passkey.rs",
+      "source_location": "L691",
+      "weight": 1.0,
+      "_src": "src_commands_passkey_rs",
+      "_tgt": "commands_passkey_host_of_strips_scheme_port_and_path",
+      "source": "src_commands_passkey_rs",
+      "target": "commands_passkey_host_of_strips_scheme_port_and_path",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "src/commands/passkey.rs",
+      "source_location": "L700",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_plan_add_json_wins_over_every_other_flag",
@@ -22092,7 +22197,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L654",
+      "source_location": "L706",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_plan_add_print_url_flag_never_opens_a_browser",
@@ -22104,7 +22209,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L663",
+      "source_location": "L715",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_plan_add_quiet_mode_behaves_like_print_url",
@@ -22116,7 +22221,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L671",
+      "source_location": "L723",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_plan_add_headless_without_print_url_shows_the_url_but_does_not_open",
@@ -22128,7 +22233,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L676",
+      "source_location": "L728",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_plan_add_default_interactive_case_opens_the_browser",
@@ -22140,7 +22245,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L683",
+      "source_location": "L735",
       "weight": 1.0,
       "_src": "src_commands_passkey_rs",
       "_tgt": "commands_passkey_add_json_body_carries_the_url_and_a_note_never_a_token",
@@ -22176,7 +22281,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L389",
+      "source_location": "L408",
       "weight": 1.0,
       "_src": "commands_passkey_parse_passkeys_reads_every_field_from_the_live_shape",
       "_tgt": "commands_passkey_parse_passkeys",
@@ -22188,7 +22293,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L406",
+      "source_location": "L425",
       "weight": 1.0,
       "_src": "commands_passkey_parse_passkeys_defaults_a_missing_name_to_passkey",
       "_tgt": "commands_passkey_parse_passkeys",
@@ -22200,7 +22305,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L418",
+      "source_location": "L437",
       "weight": 1.0,
       "_src": "commands_passkey_parse_passkeys_defaults_an_empty_name_to_passkey",
       "_tgt": "commands_passkey_parse_passkeys",
@@ -22212,7 +22317,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L428",
+      "source_location": "L447",
       "weight": 1.0,
       "_src": "commands_passkey_parse_passkeys_skips_a_row_missing_the_required_id",
       "_tgt": "commands_passkey_parse_passkeys",
@@ -22224,7 +22329,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L454",
+      "source_location": "L473",
       "weight": 1.0,
       "_src": "commands_passkey_render_table_shows_short_id_name_and_relative_created",
       "_tgt": "commands_passkey_parse_passkeys",
@@ -22236,7 +22341,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L465",
+      "source_location": "L484",
       "weight": 1.0,
       "_src": "commands_passkey_render_table_never_leaks_a_raw_iso_timestamp",
       "_tgt": "commands_passkey_parse_passkeys",
@@ -22248,7 +22353,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L477",
+      "source_location": "L496",
       "weight": 1.0,
       "_src": "commands_passkey_render_table_never_mentions_last_used",
       "_tgt": "commands_passkey_parse_passkeys",
@@ -22260,7 +22365,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L489",
+      "source_location": "L508",
       "weight": 1.0,
       "_src": "commands_passkey_render_quiet_emits_one_bare_id_per_passkey",
       "_tgt": "commands_passkey_parse_passkeys",
@@ -22272,7 +22377,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L498",
+      "source_location": "L517",
       "weight": 1.0,
       "_src": "commands_passkey_render_quiet_lines_are_single_whitespace_free_tokens",
       "_tgt": "commands_passkey_parse_passkeys",
@@ -22284,7 +22389,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L509",
+      "source_location": "L528",
       "weight": 1.0,
       "_src": "commands_passkey_render_quiet_contains_no_ansi_escapes",
       "_tgt": "commands_passkey_parse_passkeys",
@@ -22320,7 +22425,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L532",
+      "source_location": "L551",
       "weight": 1.0,
       "_src": "commands_passkey_json_mode_extracts_the_raw_passkeys_array_unmodified",
       "_tgt": "commands_passkey_extract_passkeys_json",
@@ -22356,7 +22461,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L490",
+      "source_location": "L509",
       "weight": 1.0,
       "_src": "commands_passkey_render_quiet_emits_one_bare_id_per_passkey",
       "_tgt": "commands_passkey_render_quiet",
@@ -22368,7 +22473,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L499",
+      "source_location": "L518",
       "weight": 1.0,
       "_src": "commands_passkey_render_quiet_lines_are_single_whitespace_free_tokens",
       "_tgt": "commands_passkey_render_quiet",
@@ -22380,7 +22485,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L510",
+      "source_location": "L529",
       "weight": 1.0,
       "_src": "commands_passkey_render_quiet_contains_no_ansi_escapes",
       "_tgt": "commands_passkey_render_quiet",
@@ -22392,7 +22497,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L455",
+      "source_location": "L474",
       "weight": 1.0,
       "_src": "commands_passkey_render_table_shows_short_id_name_and_relative_created",
       "_tgt": "commands_passkey_render_table",
@@ -22404,7 +22509,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L466",
+      "source_location": "L485",
       "weight": 1.0,
       "_src": "commands_passkey_render_table_never_leaks_a_raw_iso_timestamp",
       "_tgt": "commands_passkey_render_table",
@@ -22416,7 +22521,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L478",
+      "source_location": "L497",
       "weight": 1.0,
       "_src": "commands_passkey_render_table_never_mentions_last_used",
       "_tgt": "commands_passkey_render_table",
@@ -22428,7 +22533,19 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L265",
+      "source_location": "L266",
+      "weight": 1.0,
+      "_src": "commands_passkey_passkey_enrollment_url_from_api",
+      "_tgt": "commands_passkey_host_of",
+      "source": "commands_passkey_host_of",
+      "target": "commands_passkey_passkey_enrollment_url_from_api",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src/commands/passkey.rs",
+      "source_location": "L284",
       "weight": 1.0,
       "_src": "commands_passkey_passkey_enrollment_url",
       "_tgt": "commands_passkey_passkey_enrollment_url_from_api",
@@ -22440,7 +22557,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L584",
+      "source_location": "L603",
       "weight": 1.0,
       "_src": "commands_passkey_enrollment_url_for_prod_api_points_at_the_prod_web_app",
       "_tgt": "commands_passkey_passkey_enrollment_url_from_api",
@@ -22452,7 +22569,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L590",
+      "source_location": "L609",
       "weight": 1.0,
       "_src": "commands_passkey_enrollment_url_for_local_api_points_at_the_local_dev_web_app",
       "_tgt": "commands_passkey_passkey_enrollment_url_from_api",
@@ -22464,7 +22581,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L598",
+      "source_location": "L617",
       "weight": 1.0,
       "_src": "commands_passkey_local_api_enrollment_url_is_never_the_prod_host",
       "_tgt": "commands_passkey_passkey_enrollment_url_from_api",
@@ -22476,7 +22593,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L609",
+      "source_location": "L628",
       "weight": 1.0,
       "_src": "commands_passkey_enrollment_url_strips_trailing_slash_before_appending_the_path",
       "_tgt": "commands_passkey_passkey_enrollment_url_from_api",
@@ -22488,7 +22605,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L615",
+      "source_location": "L634",
       "weight": 1.0,
       "_src": "commands_passkey_enrollment_url_handles_http_scheme_api_host_too",
       "_tgt": "commands_passkey_passkey_enrollment_url_from_api",
@@ -22500,7 +22617,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L624",
+      "source_location": "L643",
       "weight": 1.0,
       "_src": "commands_passkey_enrollment_url_generalizes_beyond_the_literal_beebeeb_io_host",
       "_tgt": "commands_passkey_passkey_enrollment_url_from_api",
@@ -22512,7 +22629,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L634",
+      "source_location": "L653",
       "weight": 1.0,
       "_src": "commands_passkey_enrollment_url_for_unrecognized_host_stays_on_that_hosts_origin",
       "_tgt": "commands_passkey_passkey_enrollment_url_from_api",
@@ -22524,7 +22641,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L641",
+      "source_location": "L660",
       "weight": 1.0,
       "_src": "commands_passkey_enrollment_url_matches_127_0_0_1_as_local_too",
       "_tgt": "commands_passkey_passkey_enrollment_url_from_api",
@@ -22536,7 +22653,43 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L687",
+      "source_location": "L670",
+      "weight": 1.0,
+      "_src": "commands_passkey_enrollment_url_does_not_treat_a_localhost_labeled_domain_as_local",
+      "_tgt": "commands_passkey_passkey_enrollment_url_from_api",
+      "source": "commands_passkey_passkey_enrollment_url_from_api",
+      "target": "commands_passkey_enrollment_url_does_not_treat_a_localhost_labeled_domain_as_local",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src/commands/passkey.rs",
+      "source_location": "L677",
+      "weight": 1.0,
+      "_src": "commands_passkey_enrollment_url_does_not_treat_a_127_0_0_1_labeled_domain_as_local",
+      "_tgt": "commands_passkey_passkey_enrollment_url_from_api",
+      "source": "commands_passkey_passkey_enrollment_url_from_api",
+      "target": "commands_passkey_enrollment_url_does_not_treat_a_127_0_0_1_labeled_domain_as_local",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src/commands/passkey.rs",
+      "source_location": "L684",
+      "weight": 1.0,
+      "_src": "commands_passkey_enrollment_url_bracketed_ipv6_loopback_is_local_and_port_is_stripped",
+      "_tgt": "commands_passkey_passkey_enrollment_url_from_api",
+      "source": "commands_passkey_passkey_enrollment_url_from_api",
+      "target": "commands_passkey_enrollment_url_bracketed_ipv6_loopback_is_local_and_port_is_stripped",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "src/commands/passkey.rs",
+      "source_location": "L739",
       "weight": 1.0,
       "_src": "commands_passkey_add_json_body_carries_the_url_and_a_note_never_a_token",
       "_tgt": "commands_passkey_passkey_enrollment_url_from_api",
@@ -22548,7 +22701,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L313",
+      "source_location": "L332",
       "weight": 1.0,
       "_src": "commands_passkey_add",
       "_tgt": "commands_passkey_passkey_enrollment_url",
@@ -22560,7 +22713,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L314",
+      "source_location": "L333",
       "weight": 1.0,
       "_src": "commands_passkey_add",
       "_tgt": "commands_passkey_plan_add",
@@ -22572,7 +22725,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L389",
+      "source_location": "L408",
       "weight": 1.0,
       "_src": "commands_passkey_parse_passkeys_reads_every_field_from_the_live_shape",
       "_tgt": "commands_passkey_passkeys_fixture",
@@ -22584,7 +22737,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L454",
+      "source_location": "L473",
       "weight": 1.0,
       "_src": "commands_passkey_render_table_shows_short_id_name_and_relative_created",
       "_tgt": "commands_passkey_passkeys_fixture",
@@ -22596,7 +22749,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L465",
+      "source_location": "L484",
       "weight": 1.0,
       "_src": "commands_passkey_render_table_never_leaks_a_raw_iso_timestamp",
       "_tgt": "commands_passkey_passkeys_fixture",
@@ -22608,7 +22761,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L477",
+      "source_location": "L496",
       "weight": 1.0,
       "_src": "commands_passkey_render_table_never_mentions_last_used",
       "_tgt": "commands_passkey_passkeys_fixture",
@@ -22620,7 +22773,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L489",
+      "source_location": "L508",
       "weight": 1.0,
       "_src": "commands_passkey_render_quiet_emits_one_bare_id_per_passkey",
       "_tgt": "commands_passkey_passkeys_fixture",
@@ -22632,7 +22785,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L498",
+      "source_location": "L517",
       "weight": 1.0,
       "_src": "commands_passkey_render_quiet_lines_are_single_whitespace_free_tokens",
       "_tgt": "commands_passkey_passkeys_fixture",
@@ -22644,7 +22797,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "src/commands/passkey.rs",
-      "source_location": "L509",
+      "source_location": "L528",
       "weight": 1.0,
       "_src": "commands_passkey_render_quiet_contains_no_ansi_escapes",
       "_tgt": "commands_passkey_passkeys_fixture",
