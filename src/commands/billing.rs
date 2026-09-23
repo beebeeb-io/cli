@@ -2,6 +2,33 @@
 //!
 //! Spec: docs/superpowers/specs/2026-05-23-cli-launch-readiness-design.md §4
 //! "bb billing show output".
+//!
+//! ## `usage` (task 0486, plan Task 18)
+//!
+//! `GET /api/v1/billing/usage` (`ApiClient::get_billing_usage`, the same
+//! billing-namespaced route `show` reads — task 0485 established this is the
+//! server-authoritative one, NOT `get_usage()` which hits the different
+//! `/api/v1/files/usage` route). Adds a per-region storage breakdown on top of
+//! what `show`/`bb quota` already render.
+//!
+//! **Deviation (eng-0486) — region breakdown is client-side and approximate.**
+//! The plan's open question #4 is still open: no
+//! `GET /api/v1/billing/usage/by-region` route exists on the live server
+//! (confirmed: `grep by.region beebeeb-api/src/routes/billing.rs` — no hit).
+//! So, exactly as the plan's Task 18 describes, this aggregates locally over
+//! `GET /files` with no `parent_id` (`ApiClient::list_files(None)`) — ONE
+//! round-trip, root-level files only, no subfolder recursion — and labels the
+//! breakdown "approximate" in both the rich and JSON output. Each file's
+//! `storage_location.{region,city}` (confirmed present on `GET /files` rows —
+//! `beebeeb-api/src/routes/files.rs`, "Storage location on file responses" in
+//! the server's CLAUDE.md) is the aggregation key.
+//!
+//! **Reuse, not reinvention.** The bar is `ui::quota_bar` (already used by
+//! `bb quota`) rather than a new bespoke progress-bar renderer — the plan's
+//! pseudocode sketches its own `render_progress_bar`, but this repo already
+//! has one with the right green/amber/red thresholds baked in.
+
+use std::collections::BTreeMap;
 
 use beebeeb_types::quota::{Plan, effective_quota, format_storage_si};
 use chrono::DateTime;
@@ -237,6 +264,110 @@ pub async fn show(json: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// `bb billing usage` — storage usage with a per-region breakdown. See the
+/// module doc comment above ("`usage` (task 0486, plan Task 18)") for the
+/// approximate-breakdown deviation.
+pub async fn usage() -> Result<(), String> {
+    let api = ApiClient::from_config();
+    api.require_auth()?;
+
+    // Quiet mode prints only used/quota/percentage. Check it BEFORE fetching
+    // the file listing — the region breakdown is the only thing that needs
+    // it, and `list_files(None)` follows every pagination cursor, so an
+    // account with many root entries would otherwise pay for a full listing
+    // walk (and risk the hard-cap warning) just to throw the result away
+    // (Codex review, cli PR #26).
+    if ui::is_quiet() {
+        let usage = api.get_billing_usage().await?;
+        let used = usage.get("used_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
+        let quota = usage.get("quota_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
+        let pct = if quota > 0 { used as f64 / quota as f64 } else { 0.0 };
+        println!("{}", format_storage_si(used));
+        println!("{}", format_storage_si(quota));
+        println!("{:.2}%", pct * 100.0);
+        return Ok(());
+    }
+
+    let (usage_res, files_res) = tokio::join!(api.get_billing_usage(), api.list_files(None));
+    let usage = usage_res?;
+
+    let used = usage.get("used_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
+    let quota = usage.get("quota_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
+    let pct = if quota > 0 { used as f64 / quota as f64 } else { 0.0 };
+
+    // Local per-region aggregation over root-level files only — see the
+    // module doc comment (eng-0486) for why this is approximate.
+    let region_breakdown_failed = files_res.is_err();
+    let (by_region, file_count) = files_res
+        .ok()
+        .and_then(|body| body.get("files").and_then(|v| v.as_array()).cloned())
+        .map(|files| aggregate_by_region(&files))
+        .unwrap_or_default();
+
+    if ui::is_json() {
+        let regions: Vec<_> = by_region
+            .iter()
+            .map(|((r, c), b)| serde_json::json!({ "region": r, "city": c, "used_bytes": b }))
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "used_bytes": used,
+                "quota_bytes": quota,
+                "percentage": pct,
+                "file_count": file_count,
+                "by_region": regions,
+                "by_region_note": "approximate — top-level files only, no /billing/usage/by-region route yet",
+                "by_region_unavailable": region_breakdown_failed,
+            }))
+            .unwrap_or_else(|_| "{}".to_string())
+        );
+        return Ok(());
+    }
+
+    println!();
+    println!("  {}", "STORAGE".custom_color(crate::colors::AMBER));
+    println!(
+        "  {} / {}  ({:.0}%)",
+        format_storage_si(used).custom_color(crate::colors::INK),
+        format_storage_si(quota).custom_color(crate::colors::INK),
+        pct * 100.0,
+    );
+    println!(
+        "            {}",
+        ui::quota_bar(used.max(0) as u64, quota.max(0) as u64, 40)
+    );
+    println!();
+    println!(
+        "  {} {}",
+        "files  ".custom_color(crate::colors::INK_SAGE),
+        file_count.to_string().custom_color(crate::colors::INK)
+    );
+    if region_breakdown_failed {
+        println!(
+            "  {} {}",
+            "region ".custom_color(crate::colors::INK_SAGE),
+            "unavailable — could not list files for the breakdown".custom_color(crate::colors::RED_ERR)
+        );
+    } else {
+        println!(
+            "  {} {}",
+            "region ".custom_color(crate::colors::INK_SAGE),
+            "approximate — top-level files only".custom_color(crate::colors::INK_DIM)
+        );
+        for ((region, city), bytes) in &by_region {
+            println!(
+                "           {} \u{00b7} {}    {}",
+                region.custom_color(crate::colors::INK_DIM),
+                city.custom_color(crate::colors::INK_DIM),
+                format_storage_si(*bytes).custom_color(crate::colors::INK),
+            );
+        }
+    }
+    println!();
+    Ok(())
+}
+
 pub async fn portal() -> Result<(), String> {
     let api = ApiClient::from_config();
     api.require_auth()?;
@@ -363,6 +494,38 @@ fn format_price(cents: i64, billing_cycle: &str) -> String {
     format!("€{}.{:02} / {}", cents / 100, cents % 100, period)
 }
 
+/// Aggregate a `GET /files` `"files"` array into `(region, city) -> used_bytes`
+/// plus a non-folder file count. Pure function so the region-breakdown logic
+/// (`bb billing usage`, eng-0486) is unit-testable without a mock server.
+/// Folders are skipped (they don't hold their own bytes); a missing/absent
+/// `storage_location` falls back to `("europe", "Falkenstein")` — the live
+/// server's documented default for the region field.
+fn aggregate_by_region(files: &[Value]) -> (BTreeMap<(String, String), i64>, i64) {
+    let mut by_region: BTreeMap<(String, String), i64> = BTreeMap::new();
+    let mut file_count: i64 = 0;
+    for f in files {
+        let is_folder = f.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
+        if is_folder {
+            continue;
+        }
+        file_count += 1;
+        let size = f.get("size_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
+        let loc = f.get("storage_location");
+        let region = loc
+            .and_then(|v| v.get("region"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("europe")
+            .to_string();
+        let city = loc
+            .and_then(|v| v.get("city"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("Falkenstein")
+            .to_string();
+        *by_region.entry((region, city)).or_insert(0) += size;
+    }
+    (by_region, file_count)
+}
+
 fn region_human(slug: &str) -> String {
     match slug {
         // "falkenstein" is the live server's literal fallback value
@@ -418,6 +581,84 @@ fn colour_pct(pct: f64, s: &str) -> colored::ColoredString {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // ── aggregate_by_region (eng-0486) ──────────────────────────────────────
+
+    #[test]
+    fn aggregate_by_region_sums_bytes_per_region_and_skips_folders() {
+        let files = vec![
+            json!({
+                "is_folder": false, "size_bytes": 100,
+                "storage_location": { "region": "europe", "city": "Falkenstein", "provider": "Hetzner" },
+            }),
+            json!({
+                "is_folder": false, "size_bytes": 250,
+                "storage_location": { "region": "europe", "city": "Falkenstein", "provider": "Hetzner" },
+            }),
+            json!({
+                "is_folder": true, "size_bytes": 999_999,
+                "storage_location": { "region": "europe", "city": "Falkenstein", "provider": "Hetzner" },
+            }),
+        ];
+        let (by_region, file_count) = aggregate_by_region(&files);
+        assert_eq!(file_count, 2, "the folder row must not be counted as a file");
+        assert_eq!(
+            by_region.get(&("europe".to_string(), "Falkenstein".to_string())),
+            Some(&350),
+            "folder bytes (999_999) must NOT be summed into the region total: {by_region:?}"
+        );
+        assert_eq!(by_region.len(), 1);
+    }
+
+    #[test]
+    fn aggregate_by_region_splits_multiple_regions() {
+        let files = vec![
+            json!({
+                "is_folder": false, "size_bytes": 10,
+                "storage_location": { "region": "europe", "city": "Falkenstein", "provider": "Hetzner" },
+            }),
+            json!({
+                "is_folder": false, "size_bytes": 20,
+                "storage_location": { "region": "europe", "city": "Helsinki", "provider": "Local" },
+            }),
+        ];
+        let (by_region, file_count) = aggregate_by_region(&files);
+        assert_eq!(file_count, 2);
+        assert_eq!(
+            by_region.len(),
+            2,
+            "two distinct (region, city) pairs must stay separate: {by_region:?}"
+        );
+        assert_eq!(
+            by_region.get(&("europe".to_string(), "Falkenstein".to_string())),
+            Some(&10)
+        );
+        assert_eq!(
+            by_region.get(&("europe".to_string(), "Helsinki".to_string())),
+            Some(&20)
+        );
+    }
+
+    #[test]
+    fn aggregate_by_region_defaults_missing_storage_location_to_europe_falkenstein() {
+        // A file row with no storage_location at all (defensive — every live
+        // row carries one, but the field must never be assumed present).
+        let files = vec![json!({ "is_folder": false, "size_bytes": 5 })];
+        let (by_region, file_count) = aggregate_by_region(&files);
+        assert_eq!(file_count, 1);
+        assert_eq!(
+            by_region.get(&("europe".to_string(), "Falkenstein".to_string())),
+            Some(&5),
+            "missing storage_location must fall back to europe/Falkenstein, not be dropped: {by_region:?}"
+        );
+    }
+
+    #[test]
+    fn aggregate_by_region_empty_input_is_empty_output() {
+        let (by_region, file_count) = aggregate_by_region(&[]);
+        assert_eq!(file_count, 0);
+        assert!(by_region.is_empty());
+    }
 
     #[test]
     fn region_human_maps_the_live_no_subscription_fallback() {

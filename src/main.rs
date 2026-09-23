@@ -615,6 +615,8 @@ enum BillingAction {
         #[arg(long)]
         json: bool,
     },
+    /// Storage usage with a per-region breakdown (approximate — top-level files only)
+    Usage,
     /// Open the billing portal
     Portal,
     /// View or purchase billing add-ons
@@ -912,6 +914,7 @@ async fn main() {
         Commands::Repair { dry_run } => commands::repair::run(dry_run).await,
         Commands::Billing { action } => match action {
             BillingAction::Show { json } => commands::billing::show(json).await,
+            BillingAction::Usage => commands::billing::usage().await,
             BillingAction::Portal => commands::billing::portal().await,
             BillingAction::Addons { action } => match action {
                 Some(AddonsAction::Purchase { addon_id }) => commands::billing::purchase_addon(addon_id).await,
