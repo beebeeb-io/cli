@@ -568,11 +568,19 @@ enum TwofaCmd {
 enum SessionsCmd {
     /// List all active sessions (current one marked with `*`)
     List,
-    // `Revoke` / `RevokeAllOthers` (plan Task 13 — DELETE
-    // /account/sessions/{id} and POST /account/sessions/revoke-all-others)
-    // are NOT wired here (eng-0480, task 12 is list-only). Same reasoning as
-    // the eng-0479 `2fa verify` removal above: no stub variant for a command
-    // this task doesn't implement.
+    /// Revoke one session by id (or a unique id prefix from `bb sessions
+    /// list`). Refuses on the current session — run `bb logout` instead
+    /// (see commands/sessions.rs module doc for why).
+    Revoke {
+        /// Full session id or a unique prefix
+        id: String,
+    },
+    /// Revoke every session except the one you're running this from
+    RevokeAllOthers {
+        /// Skip the confirmation prompt
+        #[arg(short = 'f', long = "yes", visible_alias = "force")]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -903,6 +911,8 @@ async fn main() {
         },
         Commands::Sessions(cmd) => match cmd {
             SessionsCmd::List => commands::sessions::list().await,
+            SessionsCmd::Revoke { id } => commands::sessions::revoke(id).await,
+            SessionsCmd::RevokeAllOthers { yes } => commands::sessions::revoke_all_others(yes).await,
         },
         Commands::Logout => commands::logout::run().await,
         Commands::Completions { shell } => {
