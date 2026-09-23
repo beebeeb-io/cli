@@ -141,6 +141,21 @@ fn marker_cell(is_current: bool) -> String {
     }
 }
 
+/// Render the `--quiet` lines: one bare, uncolored session id per line — no
+/// header, no summary, no per-row decoration of any kind — matching the
+/// established quiet-mode convention elsewhere in this CLI (`ls`'s
+/// `print_row` prints bare `f.decrypted_name`, even dropping its rich-mode
+/// `[trashed]` annotation; `search`'s quiet branch prints bare `m.path`;
+/// `trash list`'s quiet branch prints bare `name`). None of those append a
+/// state suffix to some rows and not others, so this doesn't either — every
+/// line is exactly one whitespace-free token, uniformly script-safe for
+/// `xargs`/`mapfile`, not just `awk '{print $1}'`. `is_current` is rich-mode
+/// state (it drives `marker_cell`'s `"*"` column in `render_table`); quiet
+/// mode's contract is the bare identifying value, nothing else.
+fn render_quiet(sessions: &[SessionRow]) -> Vec<String> {
+    sessions.iter().map(|s| s.id.clone()).collect()
+}
+
 /// Render the full human-mode table for 2+ sessions.
 fn render_table(sessions: &[SessionRow]) -> String {
     use crate::{colors, ui};
@@ -197,6 +212,16 @@ pub async fn list() -> Result<(), String> {
     }
 
     let sessions = parse_sessions(&body);
+
+    if ui::is_quiet() {
+        // No headers, no summary line, no color — matches `bb ls`/`bb
+        // search`'s quiet-mode convention. Runs even for an empty/solo list:
+        // quiet mode never prints the human-only friendly sentences below.
+        for line in render_quiet(&sessions) {
+            println!("{line}");
+        }
+        return Ok(());
+    }
 
     if sessions.is_empty() {
         // Defensive only — a caller always has at least their own active
@@ -358,6 +383,49 @@ mod tests {
             !out.contains("2026-09-23T10:00:00Z"),
             "raw ISO timestamp leaked into the table instead of a relative string:\n{out}"
         );
+    }
+
+    // ── --quiet mode ─────────────────────────────────────────────────────
+
+    #[test]
+    fn render_quiet_emits_one_bare_id_per_session_with_no_current_marker() {
+        let rows = parse_sessions(&sessions_fixture());
+        let lines = render_quiet(&rows);
+        assert_eq!(lines.len(), 2, "one line per session, no header, no summary: {lines:?}");
+        assert_eq!(
+            lines[0], "11111111-1111-1111-1111-111111111111",
+            "current session's id must be bare — no marker, quiet mode strips all decoration"
+        );
+        assert_eq!(
+            lines[1], "22222222-2222-2222-2222-222222222222",
+            "non-current session must be the bare id too"
+        );
+    }
+
+    #[test]
+    fn render_quiet_lines_are_single_whitespace_free_tokens() {
+        let rows = parse_sessions(&sessions_fixture());
+        for line in render_quiet(&rows) {
+            assert!(
+                !line.contains(char::is_whitespace),
+                "quiet line must be one token, safe for xargs/mapfile, not just awk '{{print $1}}': {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_quiet_contains_no_ansi_escapes() {
+        let rows = parse_sessions(&sessions_fixture());
+        let joined = render_quiet(&rows).join("\n");
+        assert!(
+            !joined.contains('\x1b'),
+            "quiet output must never carry color codes, current mode or not: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn render_quiet_on_empty_sessions_emits_no_lines() {
+        assert_eq!(render_quiet(&[]), Vec::<String>::new());
     }
 
     // ── JSON passthrough ─────────────────────────────────────────────────
