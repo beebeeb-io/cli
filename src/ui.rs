@@ -306,6 +306,57 @@ pub fn speed_verdict(mbps: f64) -> (&'static str, colored::CustomColor) {
     }
 }
 
+// ── Tables ───────────────────────────────────────────────────────────────────
+
+/// Render a list of rows as an aligned table. Columns are sized by the
+/// widest cell in each column. Output is plain text — the caller is expected
+/// to colorize headers and individual cells before passing them in.
+/// `headers.len()` must equal `rows[i].len()` for every row (a row with a
+/// mismatched length is padded/truncated defensively rather than panicking).
+pub fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
+    if headers.is_empty() {
+        return String::new();
+    }
+    let ncols = headers.len();
+    let mut widths: Vec<usize> = headers.iter().map(|h| strip_ansi(h).chars().count()).collect();
+    for row in rows {
+        for (i, cell) in row.iter().enumerate() {
+            if i < ncols {
+                let w = strip_ansi(cell).chars().count();
+                if w > widths[i] {
+                    widths[i] = w;
+                }
+            }
+        }
+    }
+
+    let mut out = String::new();
+    // Header
+    for (i, h) in headers.iter().enumerate() {
+        let visible = strip_ansi(h).chars().count();
+        out.push_str(h);
+        if i < ncols - 1 {
+            out.push_str(&" ".repeat(widths[i].saturating_sub(visible) + 2));
+        }
+    }
+    out.push('\n');
+    // Body
+    for row in rows {
+        for (i, cell) in row.iter().enumerate() {
+            if i >= ncols {
+                break;
+            }
+            let visible = strip_ansi(cell).chars().count();
+            out.push_str(cell);
+            if i < ncols - 1 {
+                out.push_str(&" ".repeat(widths[i].saturating_sub(visible) + 2));
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
 // ── Internal helpers ─────────────────────────────────────────────────────────
 
 /// Strip ANSI escape sequences from a string (for width calculations).
@@ -326,4 +377,49 @@ fn strip_ansi(s: &str) -> String {
         result.push(c);
     }
     result
+}
+
+#[cfg(test)]
+mod table_tests {
+    use super::*;
+
+    #[test]
+    fn table_aligns_columns_by_widest_cell() {
+        let headers = ["ID", "NAME"];
+        let rows = vec![
+            vec!["1".to_string(), "short".to_string()],
+            vec!["22".to_string(), "a much longer name".to_string()],
+        ];
+        let out = table(&headers, &rows);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 3, "header + 2 rows: {lines:?}");
+        assert!(lines[0].starts_with("ID  NAME"), "header line was: {:?}", lines[0]);
+        // The second row's ID column ("22") is 2 chars wide, so the first
+        // row's "1" must be padded to the same width before the gutter.
+        assert!(lines[1].starts_with("1   short"), "line was: {:?}", lines[1]);
+    }
+
+    #[test]
+    fn table_empty_headers_returns_empty_string() {
+        assert_eq!(table(&[], &[vec!["x".to_string()]]), "");
+    }
+
+    #[test]
+    fn table_width_calculation_ignores_ansi_escapes() {
+        // A colorized cell's escape codes must not inflate the column width
+        // used for the gutter before the NEXT column (the last column has no
+        // trailing padding, so the color-bearing cell must not be last).
+        let headers = ["A", "B"];
+        let plain_row = vec!["ab".to_string(), "x".to_string()];
+        let colored_row = vec!["\x1b[33mab\x1b[0m".to_string(), "x".to_string()];
+        let plain_out = table(&headers, &[plain_row]);
+        let colored_out = table(&headers, &[colored_row]);
+        // Strip the ANSI codes back out before comparing so the assertion is
+        // about the padding width, not the literal escape bytes.
+        assert_eq!(
+            strip_ansi(&plain_out),
+            strip_ansi(&colored_out),
+            "ANSI-wrapped and plain cells of equal visible width must produce identical padding:\nplain:   {plain_out:?}\ncolored: {colored_out:?}"
+        );
+    }
 }

@@ -436,6 +436,10 @@ enum Commands {
     #[command(name = "2fa", subcommand)]
     Twofa(TwofaCmd),
 
+    /// Manage active sessions across your devices
+    #[command(subcommand)]
+    Sessions(SessionsCmd),
+
     /// Print shell completion script to stdout
     ///
     /// Pipe the output into the correct file for your shell:
@@ -558,6 +562,17 @@ enum TwofaCmd {
     // exchange, but `bb login`'s browser handshake never produces or needs a
     // partial token — see the module doc in `commands/twofa.rs` for the full
     // grep evidence. A visible command with no live semantics is a dead end.
+}
+
+#[derive(Subcommand)]
+enum SessionsCmd {
+    /// List all active sessions (current one marked with `*`)
+    List,
+    // `Revoke` / `RevokeAllOthers` (plan Task 13 — DELETE
+    // /account/sessions/{id} and POST /account/sessions/revoke-all-others)
+    // are NOT wired here (eng-0480, task 12 is list-only). Same reasoning as
+    // the eng-0479 `2fa verify` removal above: no stub variant for a command
+    // this task doesn't implement.
 }
 
 #[derive(Subcommand)]
@@ -885,6 +900,9 @@ async fn main() {
             TwofaCmd::Setup => commands::twofa::setup().await,
             TwofaCmd::Enable { code } => commands::twofa::enable(code).await,
             TwofaCmd::Disable { code } => commands::twofa::disable(code).await,
+        },
+        Commands::Sessions(cmd) => match cmd {
+            SessionsCmd::List => commands::sessions::list().await,
         },
         Commands::Logout => commands::logout::run().await,
         Commands::Completions { shell } => {
