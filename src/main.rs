@@ -641,17 +641,63 @@ enum AddonsAction {
     },
 }
 
-fn print_custom_help() {
-    use crate::{colors, ui};
+/// The curated, hand-grouped rows shown in the `COMMANDS` section. Kept as a
+/// named const (rather than inline in `build_help_text`) so the "everything
+/// else" overflow line below can be computed against it.
+const HELP_MAIN_COMMANDS: &[(&str, &str, &str)] = &[
+    ("ls", "[path]", "list files (decrypts names locally)"),
+    ("mkdir", "<path>", "create a folder · mirrors mkdir -p"),
+    ("mv", "<src> <dst>", "move or rename · mirrors mv"),
+    ("rm", "<path|id>...", "trash files/folders · -r · reversible"),
+    ("restore", "<name|id>", "restore from trash"),
+    ("trash", "list", "browse the trash"),
+    ("search", "<query>", "find files by name · --regex"),
+    ("push", "<path>", "upload · encrypts on the fly"),
+    ("pull", "<id|path>", "download and decrypt"),
+    ("share", "<id>", "create encrypted link (expiry, passphrase)"),
+    ("sync", "<dir> [remote]", "sync + watch · continuous by default"),
+    ("webdav", "", "mount vault in Finder / Explorer"),
+    ("whoami", "", "user · plan · region · quota · session"),
+    ("speedtest", "", "benchmark network + crypto speed"),
+    ("repair", "", "fix cross-client encryption"),
+];
 
-    // Ensure color system is initialised (ui::init hasn't been called yet).
-    ui::init(false, false, false);
+/// The curated `ACCOUNT` section — account-security commands added in 0.10.0
+/// (task 1506: these five were shipped but missing from `--help` entirely).
+const HELP_ACCOUNT_COMMANDS: &[(&str, &str, &str)] = &[
+    ("account", "<action>", "profile, plan & security · show, update"),
+    ("billing", "<action>", "plan, usage, invoices, portal, add-ons"),
+    ("2fa", "<action>", "two-factor auth (TOTP) · setup, enable, disable"),
+    ("sessions", "<action>", "active sessions across devices · list, revoke"),
+    ("passkey", "<action>", "WebAuthn passkeys · list, add, remove"),
+];
+
+/// Every top-level subcommand name the clap tree actually declares
+/// (non-hidden). Used both to render the "+ …" overflow line and, in tests,
+/// to prove the help screen never drops a command silently again.
+fn top_level_command_names() -> Vec<String> {
+    Cli::command()
+        .get_subcommands()
+        .filter(|c| !c.is_hide_set())
+        .map(|c| c.get_name().to_string())
+        .collect()
+}
+
+/// Builds the full `bb --help` screen as a plain `String` — split out from
+/// `print_custom_help` so tests can assert against the text directly instead
+/// of capturing stdout.
+fn build_help_text() -> String {
+    use std::fmt::Write as _;
+
+    use crate::{colors, ui};
 
     let version = env!("CARGO_PKG_VERSION");
     let w = 58;
+    let mut out = String::new();
 
-    println!("{}", ui::box_header("BEEBEEB", w));
-    println!(
+    let _ = writeln!(out, "{}", ui::box_header("BEEBEEB", w));
+    let _ = writeln!(
+        out,
         "{}",
         ui::box_line(
             &format!(
@@ -661,7 +707,8 @@ fn print_custom_help() {
             w,
         )
     );
-    println!(
+    let _ = writeln!(
+        out,
         "{}",
         ui::box_line(
             &format!(
@@ -672,59 +719,82 @@ fn print_custom_help() {
             w,
         )
     );
-    println!("{}", ui::box_footer(w));
-    println!();
+    let _ = writeln!(out, "{}", ui::box_footer(w));
+    let _ = writeln!(out);
 
-    println!("  {}", "COMMANDS".custom_color(colors::AMBER));
-    let cmds: &[(&str, &str, &str)] = &[
-        ("ls", "[path]", "list files (decrypts names locally)"),
-        ("mkdir", "<path>", "create a folder · mirrors mkdir -p"),
-        ("mv", "<src> <dst>", "move or rename · mirrors mv"),
-        ("rm", "<path|id>...", "trash files/folders · -r · reversible"),
-        ("restore", "<name|id>", "restore from trash"),
-        ("trash", "list", "browse the trash"),
-        ("search", "<query>", "find files by name · --regex"),
-        ("push", "<path>", "upload · encrypts on the fly"),
-        ("pull", "<id|path>", "download and decrypt"),
-        ("share", "<id>", "create encrypted link (expiry, passphrase)"),
-        ("sync", "<dir> [remote]", "sync + watch · continuous by default"),
-        ("webdav", "", "mount vault in Finder / Explorer"),
-        ("whoami", "", "user · plan · region · quota · session"),
-        ("speedtest", "", "benchmark network + crypto speed"),
-        ("repair", "", "fix cross-client encryption"),
-    ];
-    for (name, args, desc) in cmds {
-        println!(
+    let _ = writeln!(out, "  {}", "COMMANDS".custom_color(colors::AMBER));
+    for (name, args, desc) in HELP_MAIN_COMMANDS {
+        let _ = writeln!(
+            out,
             "  {:<10}{:<18}{}",
             name.custom_color(colors::GREEN_OK),
             args.custom_color(colors::PATH),
             desc.custom_color(colors::INK_DIM)
         );
     }
-    println!(
-        "  {}",
-        "+ login, logout, mount, shares, unshare, config, quota, status, completions".custom_color(colors::INK_DIM)
-    );
-    println!();
+    let _ = writeln!(out);
 
-    println!("  {}", "FLAGS".custom_color(colors::AMBER));
+    let _ = writeln!(out, "  {}", "ACCOUNT".custom_color(colors::AMBER));
+    for (name, args, desc) in HELP_ACCOUNT_COMMANDS {
+        let _ = writeln!(
+            out,
+            "  {:<10}{:<18}{}",
+            name.custom_color(colors::GREEN_OK),
+            args.custom_color(colors::PATH),
+            desc.custom_color(colors::INK_DIM)
+        );
+    }
+    let _ = writeln!(out);
+
+    // Every remaining top-level subcommand, derived from the clap tree
+    // itself rather than hand-maintained — a new subcommand can never go
+    // missing from --help again (task 1506).
+    let curated: std::collections::HashSet<&str> = HELP_MAIN_COMMANDS
+        .iter()
+        .map(|(name, _, _)| *name)
+        .chain(HELP_ACCOUNT_COMMANDS.iter().map(|(name, _, _)| *name))
+        .collect();
+    let overflow: Vec<String> = top_level_command_names()
+        .into_iter()
+        .filter(|name| !curated.contains(name.as_str()))
+        .collect();
+    if !overflow.is_empty() {
+        let _ = writeln!(
+            out,
+            "  {}",
+            format!("+ {}", overflow.join(", ")).custom_color(colors::INK_DIM)
+        );
+        let _ = writeln!(out);
+    }
+
+    let _ = writeln!(out, "  {}", "FLAGS".custom_color(colors::AMBER));
     let flags: &[(&str, &str)] = &[
         ("--json", "structured JSON output"),
         ("--quiet", "minimal · no progress"),
         ("--api <url>", "override API endpoint"),
     ];
     for (flag, desc) in flags {
-        println!(
+        let _ = writeln!(
+            out,
             "  {:<14}{}",
             flag.custom_color(colors::CYAN),
             desc.custom_color(colors::INK_DIM)
         );
     }
-    println!();
-    println!(
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
         "  {}",
         "# docs · beebeeb.io/cli · fingerprints · beebeeb.io/fingerprints".custom_color(colors::INK_SAGE)
     );
+
+    out
+}
+
+fn print_custom_help() {
+    // Ensure color system is initialised (ui::init hasn't been called yet).
+    ui::init(false, false, false);
+    print!("{}", build_help_text());
 }
 
 #[tokio::main]
@@ -967,5 +1037,54 @@ async fn main() {
             e.custom_color(crate::colors::INK),
         );
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod help_screen_tests {
+    use super::*;
+
+    /// Task 1506: the hand-written `bb --help` screen listed 24 of the 32
+    /// top-level commands and silently dropped `2fa`, `sessions`, `passkey`,
+    /// `billing` and `account` — exactly the headline features of the
+    /// 0.10.0 release. This asserts every non-hidden name in the clap
+    /// command tree shows up SOMEWHERE in the rendered help text (curated
+    /// section or the derived overflow line), so a future subcommand can't
+    /// go missing the same way.
+    #[test]
+    fn help_screen_lists_every_top_level_subcommand() {
+        // Force plain text so ANSI escape codes never hide a name from the
+        // substring/word-boundary check below. Independent of `ui::MODE`
+        // (a once-per-process OnceLock) so this is safe next to other tests.
+        colored::control::set_override(false);
+
+        let help = build_help_text();
+
+        let missing: Vec<String> = top_level_command_names()
+            .into_iter()
+            .filter(|name| {
+                let pattern = format!(r"\b{}\b", regex::escape(name));
+                let re = regex::Regex::new(&pattern).expect("valid word-boundary regex");
+                !re.is_match(&help)
+            })
+            .collect();
+
+        assert!(
+            missing.is_empty(),
+            "bb --help is missing top-level subcommand(s): {missing:?}\n--- rendered help ---\n{help}"
+        );
+    }
+
+    /// Sanity check on the helper itself: it must actually see the full
+    /// clap tree (guards against a future refactor that swaps in a stale or
+    /// partial `Command`).
+    #[test]
+    fn top_level_command_names_is_not_suspiciously_short() {
+        let names = top_level_command_names();
+        assert!(
+            names.len() >= 30,
+            "expected ~32 top-level subcommands, got {}: {names:?}",
+            names.len()
+        );
     }
 }
