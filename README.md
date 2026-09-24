@@ -38,7 +38,7 @@ Downloads the latest release, verifies its SHA-256 checksum, and installs `bb` i
 
 ### Release binary (all platforms)
 
-Grab the archive for your platform from the [latest release](https://github.com/beebeeb-io/cli/releases/latest) and put `bb` (or `bb.exe`) on your `PATH`. Prebuilt targets: macOS (Apple Silicon, Intel), Linux x86_64/aarch64 (musl), and Windows x64. On Windows you can also `scoop install https://raw.githubusercontent.com/beebeeb-io/cli/main/scoop/bb.json`.
+Grab the archive for your platform from the [latest release](https://github.com/beebeeb-io/cli/releases/latest) — or the stable redirect at [beebeeb.io/download/cli](https://beebeeb.io/download/cli), which always points at the current installer — and put `bb` (or `bb.exe`) on your `PATH`. Prebuilt targets: macOS (Apple Silicon, Intel), Linux x86_64/aarch64 (musl), and Windows x64. On Windows you can also `scoop install https://raw.githubusercontent.com/beebeeb-io/cli/main/scoop/bb.json`.
 
 ## Quickstart
 
