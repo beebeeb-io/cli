@@ -71,7 +71,7 @@ bb sync ~/vault /Documents  # Two-way sync, then watch for live changes
 | `bb speedtest` | Benchmark network throughput and crypto speed |
 | `bb completions <shell>` | Print a completion script for bash, zsh, fish, or powershell |
 
-Full reference, including every flag: `bb --help`.
+Command overview: `bb --help`. Every flag of a command: `bb <command> --help` (for example `bb push --help`).
 
 ## Security model
 

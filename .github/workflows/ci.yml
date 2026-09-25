@@ -54,3 +54,8 @@ jobs:
 
       - name: cargo test
         run: cargo test --verbose
+
+      # Every URL printed by `bb --help` must answer HTTP 200 (flow-6 issue 8:
+      # the footer linked two 404 pages). Network test, ignored locally.
+      - name: help link check
+        run: cargo test --bin bb help_links_return_200 -- --ignored --nocapture
