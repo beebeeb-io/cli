@@ -154,6 +154,7 @@ pub async fn show(json: bool) -> Result<(), String> {
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty());
     let region_slug = sub.get("region").and_then(|v| v.as_str()).unwrap_or("europe");
+    let trial_ends_at = sub.get("trial_ends_at").and_then(|v| v.as_str());
 
     // ── Render ───────────────────────────────────────────────────────────────
 
@@ -193,24 +194,32 @@ pub async fn show(json: bool) -> Result<(), String> {
             );
         }
     } else {
-        if let Some(price) = price_label.as_deref() {
+        // Task 1547 finding 1: a trialing subscription (Pattern B — no Mollie
+        // call, no card on file) must never show a price + "Renews:" pair —
+        // that implies an automatic charge that is not coming. See
+        // `plan_line_decision`'s doc comment for the full bug.
+        let decision = plan_line_decision(
+            status,
+            price_label.as_deref(),
+            trial_ends_at,
+            current_period_end,
+            matches!(plan, Plan::Free),
+        );
+        if let Some(price) = decision.price.as_deref() {
             println!(
                 "    {:<35} {}",
                 plan_name.custom_color(crate::colors::INK),
                 price.custom_color(crate::colors::INK)
             );
         } else {
-            // Free plan — no price line.
             println!("    {}", plan_name.custom_color(crate::colors::INK));
         }
-        if let Some(date) = current_period_end {
-            if !matches!(plan, Plan::Free) {
-                println!(
-                    "    {}    {}",
-                    label("Renews:   "),
-                    format_date_human(Some(date)).custom_color(crate::colors::INK_WARM)
-                );
-            }
+        if let Some((label_text, value)) = decision.sub_line {
+            println!(
+                "    {}    {}",
+                label(label_text),
+                value.custom_color(crate::colors::INK_WARM)
+            );
         }
     }
     println!();
@@ -678,11 +687,20 @@ fn write_private_temp_pdf(stem: &str, bytes: &[u8]) -> Result<std::path::PathBuf
     Ok(path)
 }
 
+/// `bb billing portal` — opens the browser to manage the payment method.
+///
+/// **Task 1547 finding 2.** This used to call `create_billing_portal_session()`
+/// → `POST /api/v1/billing/portal-session`, a Stripe-only alias
+/// (`stripe_portal_url()`) that 400s "stripe not configured" on every current
+/// Mollie-era subscription. It now calls `update_payment_method()` →
+/// `POST /api/v1/billing/payment-method/update`, the same provider-agnostic
+/// route the web app's manage-billing button uses (Mollie €0 mandate-capture,
+/// primary; Stripe hosted portal, legacy fallback).
 pub async fn portal() -> Result<(), String> {
     let api = ApiClient::from_config();
     api.require_auth()?;
 
-    let response = api.create_billing_portal_session().await?;
+    let response = api.update_payment_method().await?;
     let url = response
         .get("url")
         .and_then(|v| v.as_str())
@@ -866,6 +884,53 @@ fn format_number(n: i64) -> String {
         out.push(ch);
     }
     out.chars().rev().collect()
+}
+
+/// What to print on the PLAN line's price slot and the line below it, for the
+/// non-pending-downgrade branch of `show()`.
+///
+/// **Task 1547 finding 1.** A trialing subscription (Pattern B: no Mollie
+/// call, no card on file — see `beebeeb-api/src/trial.rs`) used to fall
+/// through to the same `price_from_subscription()` + `current_period_end`
+/// "Renews:" pair as an actively-billed account. Since `mollie_amount_cents`
+/// is null during a trial, `price_from_subscription()` fell back to the
+/// catalog's regular price, and `current_period_end` is set equal to
+/// `trial_ends_at` in the same UPDATE (`trial.rs:249`) — so the output read
+/// as "plan €X.XX / month … Renews: <date>" with no cue that no card is on
+/// file and nothing will actually be charged. This decides a distinct TRIAL
+/// line instead, sourced from the subscription's own `trial_ends_at` field.
+struct PlanLineDecision {
+    /// Price to print on the PLAN line itself. `None` means "no price" (Free,
+    /// or trialing — a trial has no billed amount to show).
+    price: Option<String>,
+    /// Optional `(label, value)` line printed below the PLAN line.
+    sub_line: Option<(&'static str, String)>,
+}
+
+fn plan_line_decision(
+    status: &str,
+    price_label: Option<&str>,
+    trial_ends_at: Option<&str>,
+    current_period_end: Option<&str>,
+    is_free: bool,
+) -> PlanLineDecision {
+    if status == "trialing" {
+        let ends = format_date_human(trial_ends_at);
+        return PlanLineDecision {
+            price: None,
+            sub_line: Some(("Trial:    ", format!("ends {ends} \u{00b7} no card on file"))),
+        };
+    }
+    if is_free {
+        return PlanLineDecision {
+            price: None,
+            sub_line: None,
+        };
+    }
+    PlanLineDecision {
+        price: price_label.map(str::to_string),
+        sub_line: current_period_end.map(|d| ("Renews:   ", format_date_human(Some(d)))),
+    }
 }
 
 fn format_date_human(iso: Option<&str>) -> String {
@@ -1222,6 +1287,70 @@ mod tests {
         assert_eq!(region_human("falkenstein"), "europe (Falkenstein, Germany)");
         assert_eq!(region_human("europe"), "europe (Falkenstein, Germany)");
         assert_eq!(region_human("eu"), "europe (Falkenstein, Germany)");
+    }
+
+    // ── plan_line_decision (task 1547 finding 1) ────────────────────────────
+
+    #[test]
+    fn plan_line_decision_trialing_shows_no_price_and_a_trial_end_date_not_a_renews_line() {
+        let decision = plan_line_decision(
+            "trialing",
+            Some("€10.99 / month"), // must be IGNORED — a trial has no card on file
+            Some("2026-10-09T00:00:00Z"),
+            Some("2026-10-09T00:00:00Z"), // == trial_ends_at per trial.rs:249 — must not print as "Renews"
+            false,
+        );
+        assert_eq!(
+            decision.price, None,
+            "trialing must never show a price — no card is on file and nothing will be charged"
+        );
+        let (label, value) = decision.sub_line.expect("trialing must show a sub-line");
+        assert_eq!(label, "Trial:    ");
+        assert!(
+            value.contains("October 9, 2026") && value.contains("no card on file"),
+            "trial line must name the trial end date and state no card is on file: {value:?}"
+        );
+    }
+
+    #[test]
+    fn plan_line_decision_trialing_with_missing_trial_ends_at_still_says_no_card_on_file() {
+        let decision = plan_line_decision("trialing", Some("€10.99 / month"), None, None, false);
+        assert_eq!(decision.price, None);
+        let (_, value) = decision
+            .sub_line
+            .expect("trialing must show a sub-line even with no trial_ends_at");
+        assert!(value.contains("no card on file"), "value was: {value:?}");
+    }
+
+    #[test]
+    fn plan_line_decision_free_shows_neither_price_nor_sub_line() {
+        let decision = plan_line_decision("active", None, None, Some("2026-10-09T00:00:00Z"), true);
+        assert_eq!(decision.price, None);
+        assert_eq!(decision.sub_line, None, "Free must never show a Renews line either");
+    }
+
+    #[test]
+    fn plan_line_decision_active_paid_shows_price_and_renews_line() {
+        let decision = plan_line_decision(
+            "active",
+            Some("€10.99 / month"),
+            None,
+            Some("2026-10-09T00:00:00Z"),
+            false,
+        );
+        assert_eq!(decision.price.as_deref(), Some("€10.99 / month"));
+        let (label, value) = decision
+            .sub_line
+            .expect("active paid plan with a period end must show Renews");
+        assert_eq!(label, "Renews:   ");
+        assert!(value.contains("October 9, 2026"), "value was: {value:?}");
+    }
+
+    #[test]
+    fn plan_line_decision_active_paid_with_no_period_end_shows_no_sub_line() {
+        let decision = plan_line_decision("active", Some("€10.99 / month"), None, None, false);
+        assert_eq!(decision.price.as_deref(), Some("€10.99 / month"));
+        assert_eq!(decision.sub_line, None);
     }
 
     #[test]

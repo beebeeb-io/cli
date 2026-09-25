@@ -1145,11 +1145,22 @@ impl ApiClient {
         parse_response(resp).await
     }
 
-    pub async fn create_billing_portal_session(&self) -> Result<Value, String> {
+    /// POST /api/v1/billing/payment-method/update — the provider-agnostic
+    /// "manage billing" entry point (`beebeeb-api/src/routes/billing.rs::
+    /// update_payment_method`, server task 0925). Mollie-primary: starts a €0
+    /// card mandate-capture flow (never charges; re-points the user's existing
+    /// active subscription to the new mandate on completion). Falls back to
+    /// the legacy Stripe hosted portal only when Mollie isn't configured. This
+    /// is exactly what the web app's `updatePaymentMethod()` calls for its
+    /// manage-billing button — `bb billing portal` used to call the
+    /// Stripe-only `/billing/portal-session` alias instead (task 1547 finding
+    /// 2), which 400s "stripe not configured" on every current Mollie-era
+    /// account.
+    pub async fn update_payment_method(&self) -> Result<Value, String> {
         let token = self.require_auth()?;
         let resp = self
             .client
-            .post(self.url("/api/v1/billing/portal-session"))
+            .post(self.url("/api/v1/billing/payment-method/update"))
             .bearer_auth(token)
             .send()
             .await
@@ -1868,9 +1879,22 @@ async fn parse_response(resp: reqwest::Response) -> Result<Value, String> {
     let body = resp.text().await.map_err(|e| format!("failed to read response: {e}"))?;
 
     if !status.is_success() {
-        let msg = serde_json::from_str::<Value>(&body)
-            .ok()
-            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
+        // Every typed server error is `{ error: <stable code>, message: <human
+        // text> }` (`beebeeb-api/src/error.rs`'s documented two-field
+        // contract). Prefer the friendly `message` — it's what ~20 typed
+        // errors (billing_no_payment_method, quota_exceeded,
+        // account_suspended, email_unverified, …) author specifically for
+        // display; fall back to the bare `error` code, then to the raw
+        // status+body when neither field is present (task 1547 finding 3).
+        let parsed = serde_json::from_str::<Value>(&body).ok();
+        let msg = parsed
+            .as_ref()
+            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
+            .or_else(|| {
+                parsed
+                    .as_ref()
+                    .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
+            })
             .unwrap_or_else(|| format!("{status}: {body}"));
         return Err(msg);
     }
@@ -2355,6 +2379,68 @@ mod billing_usage_route_tests {
     }
 }
 
+/// Task 1547 finding 2 — `bb billing portal` called the legacy Stripe-only
+/// `/billing/portal-session` alias (`stripe_portal_url()`, which 400s
+/// "stripe not configured" on every current Mollie-era account). The web
+/// app's own manage-billing button calls `updatePaymentMethod()` →
+/// `POST /api/v1/billing/payment-method/update` instead — the
+/// provider-agnostic route (Mollie €0 mandate-capture, primary; Stripe
+/// hosted portal, legacy fallback). `update_payment_method()` must hit that
+/// route, not the Stripe-only one.
+#[cfg(test)]
+mod billing_portal_route_tests {
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use serde_json::json;
+
+    use super::ApiClient;
+
+    async fn spawn_payment_method_update_mock() -> String {
+        let app = Router::new()
+            .route(
+                "/api/v1/billing/payment-method/update",
+                post(|| async { Json(json!({ "url": "https://www.mollie.com/checkout/pm-update/abc123" })) }),
+            )
+            .route(
+                "/api/v1/billing/portal-session",
+                // The legacy Stripe-only route this used to hit — always
+                // errors in a Mollie-era deployment (`state.stripe.is_none()`
+                // per the live handler). If `update_payment_method()` ever
+                // regresses back to calling this alias, the test fails
+                // loudly instead of coincidentally passing.
+                post(|| async {
+                    (
+                        axum::http::StatusCode::BAD_REQUEST,
+                        Json(json!({ "error": "stripe not configured" })),
+                    )
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn update_payment_method_hits_the_provider_agnostic_route_not_the_stripe_only_alias() {
+        let api = ApiClient::new_for_test(spawn_payment_method_update_mock().await);
+        let resp = api
+            .update_payment_method()
+            .await
+            .expect("mock /payment-method/update request should succeed");
+
+        assert_eq!(
+            resp.get("url").and_then(|v| v.as_str()),
+            Some("https://www.mollie.com/checkout/pm-update/abc123"),
+            "update_payment_method() must POST /api/v1/billing/payment-method/update \
+             (the Mollie-primary, provider-agnostic route), not the legacy Stripe-only \
+             /billing/portal-session alias which 400s on every Mollie-era account: {resp:?}"
+        );
+    }
+}
+
 /// Task 0487 — `get_billing_invoices()` / `download_invoice_pdf()` against a
 /// mock of the live server's `/api/v1/billing/invoices[/…/pdf]` routes
 /// (`beebeeb-api/src/routes/billing.rs::invoices` / `invoice_pdf`).
@@ -2462,5 +2548,87 @@ mod billing_invoices_route_tests {
             .await
             .expect_err("a 404 must surface as an Err, not silently return empty bytes");
         assert!(err.contains("404"), "error should mention the status: {err}");
+    }
+}
+
+/// Task 1547 finding 3 — regression coverage for `parse_response` dropping the
+/// server's human-readable `message` field on every typed API error and
+/// showing only the raw machine `error` code. `beebeeb-api/src/error.rs`
+/// documents an explicit two-field contract (`error`: stable code for the
+/// client to match on, `message`: human text for display) for ~20 typed
+/// errors (billing_no_payment_method, quota_exceeded, account_suspended,
+/// email_unverified, …) — the CLI special-cased none of them and never read
+/// `message` at all.
+#[cfg(test)]
+mod error_message_priority_tests {
+    use axum::http::StatusCode;
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use serde_json::json;
+
+    use super::ApiClient;
+
+    async fn spawn_typed_error_mock() -> String {
+        let app = Router::new().route(
+            "/api/v1/billing/addons",
+            post(|| async {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": "billing_no_payment_method",
+                        "message": "No valid payment method on file for this charge. Please add a payment method and try again.",
+                    })),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn typed_api_error_surfaces_the_servers_human_message_not_the_bare_code() {
+        let api = ApiClient::new_for_test(spawn_typed_error_mock().await);
+        let err = api
+            .update_billing_addons(json!({ "extra_storage_tb": 1 }))
+            .await
+            .expect_err("mock returns 400");
+
+        assert_eq!(
+            err, "No valid payment method on file for this charge. Please add a payment method and try again.",
+            "parse_response must prefer the server's `message` field over the bare `error` code \
+             (task 1547 finding 3) — every one of ~20 typed server errors carries a friendly \
+             message the CLI was dropping on the floor: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn error_without_a_message_field_still_falls_back_to_the_bare_code() {
+        // Not every non-2xx body is a typed error with a `message` — e.g. an
+        // upstream 502 or a handler that only ever set `error`. Must not panic
+        // or lose the code entirely.
+        let app = Router::new().route(
+            "/api/v1/billing/addons",
+            post(|| async {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "some_code_with_no_message" })),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let api = ApiClient::new_for_test(format!("http://{addr}"));
+        let err = api
+            .update_billing_addons(json!({ "extra_storage_tb": 1 }))
+            .await
+            .expect_err("mock returns 400");
+        assert_eq!(err, "some_code_with_no_message");
     }
 }
