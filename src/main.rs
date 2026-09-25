@@ -16,6 +16,9 @@ mod ui;
 mod update;
 mod upload;
 
+#[cfg(test)]
+mod readme_flags_tests;
+
 // Peak-heap tracking allocator, active ONLY in test builds (`#[cfg(test)]`), so
 // the shipped `bb` binary keeps the default system allocator. Used by the
 // upload RSS/peak-memory regression test (task 0666) to convert the modeled
