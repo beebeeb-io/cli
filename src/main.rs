@@ -10,6 +10,7 @@ mod env_detect;
 mod loopback;
 mod path;
 mod resume;
+mod signup_email_code;
 mod thumbnail;
 mod tui;
 mod ui;
@@ -111,6 +112,13 @@ enum Commands {
         /// (use this on SSH or boxes without a window server)
         #[arg(long)]
         headless: bool,
+    },
+
+    /// Create a new Beebeeb account (email verification, recovery phrase, password)
+    Signup {
+        /// Email address to sign up with (prompted if omitted)
+        #[arg(long)]
+        email: Option<String>,
     },
 
     /// Show current session, device, region, quota
@@ -831,6 +839,7 @@ async fn main() {
 
     let result = match cli.command {
         Commands::Login { headless } => commands::login::run(headless).await,
+        Commands::Signup { email } => commands::signup::run(email).await,
         Commands::Whoami => commands::whoami::run().await,
         Commands::Status => commands::status::run().await,
         Commands::Quota => commands::quota::run().await,
