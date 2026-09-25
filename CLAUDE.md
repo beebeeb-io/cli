@@ -53,7 +53,7 @@ Account-less links that let **anyone** upload an encrypted file *into* your vaul
 
 - `bb sync <local> [remote]` — bidirectional folder sync (continuous by default; `--once`, `--daemon`, `--stop`, `--dry-run`, `--force`, `--delete`, `--concurrency`, `--rehash`). V2 **streaming** uploads (constant memory). Remote path auto-strips `~/` home prefix. Gracefully handles 409 stuck uploads and corrupt remote files (trashes + re-uploads next run). Shows a scan spinner, then live per-file + overall progress bars (rich TTY only). `--rehash` forces a full re-hash of every file instead of trusting unchanged `(size, mtime)` entries from the last sync.
 - `bb watch <path>` — deprecated alias for `bb sync`.
-- `bb mount <mountpoint>` — FUSE mount. Interactive setup wizard guides through macFUSE/libfuse3 installation. V2 uploads.
+- `bb mount <mountpoint>` — FUSE mount, **source builds with `--features fuse` only**. Release binaries (cargo-dist) ship WITHOUT FUSE and no FUSE asset is published: there `mount`/`unmount` are hidden from `--help` and the stub exits 1 pointing at `bb webdav` (pinned by `tests/mount_availability.rs`). V2 uploads.
 - `bb unmount <mountpoint>` — unmount a previously mounted vault.
 - `bb webdav` — serve the vault as a local WebDAV server (`--port`, `--read-only`, `--cache-ttl`, `--no-cache`, `--verbose`).
 
