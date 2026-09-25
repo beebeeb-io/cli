@@ -34,7 +34,7 @@ Generated from `bb --help`. Source of truth is `src/main.rs` (clap derive).
 
 ### Sharing
 
-- `bb share <file-id>` — create an encrypted share link (`--expires`, `--max-opens`, `--passphrase`, `--double-encrypted`).
+- `bb share <file-id>` — create a double-encrypted share link (`--expires`, `--max-opens`, `--passphrase`). The link key lives only in the URL fragment; `--passphrase` is a server-checked Argon2id gate, not encryption. `--no-double-encrypt` still parses but the server rejects shares without a `wrapped_file_key` (server task 0538), so it only produces an error. README flags are guarded by `src/readme_flags_tests.rs` (`readme_flags_exist`).
 - `bb shares` — list active share links.
 - `bb unshare [share-id]` — revoke a share link (interactive picker without args).
 
@@ -60,6 +60,7 @@ Account-less links that let **anyone** upload an encrypted file *into* your vaul
 ### Billing
 
 - `bb billing show` — read-only plan, storage, and renewal info. `--json` outputs the raw API merge.
+- `bb billing usage` / `bb billing invoices [--open <id>]` / `bb billing portal` / `bb billing addons [purchase <addon_id>]` — per-region usage, invoice list + PDF, billing portal, add-ons.
 
 ### Two-factor authentication
 
