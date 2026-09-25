@@ -366,7 +366,11 @@ enum Commands {
         rehash: bool,
     },
 
-    /// Mount vault as a FUSE filesystem (read-only Day 1; requires macFUSE on macOS)
+    /// Mount vault as a FUSE filesystem (source builds with `--features fuse` only;
+    /// requires macFUSE on macOS / libfuse3 on Linux). Hidden from `--help` in builds
+    /// without FUSE — which includes every release binary — where `bb webdav` is the
+    /// way to open the vault as a drive.
+    #[cfg_attr(not(feature = "fuse"), command(hide = true))]
     Mount {
         /// Directory to mount the vault at (e.g. ~/Beebeeb)
         mountpoint: PathBuf,
@@ -381,6 +385,7 @@ enum Commands {
     },
 
     /// Unmount a previously mounted vault FUSE filesystem
+    #[cfg_attr(not(feature = "fuse"), command(hide = true))]
     Unmount {
         /// Mountpoint to unmount
         mountpoint: PathBuf,
