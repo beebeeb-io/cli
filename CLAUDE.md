@@ -35,7 +35,7 @@ Generated from `bb --help`. Source of truth is `src/main.rs` (clap derive).
 
 ### Sharing
 
-- `bb share <file-id>` — create an encrypted share link (`--expires`, `--max-opens`, `--passphrase`). Always double-encrypted, in the **web wire format** (see "Share wire format" in `src/commands/share.rs`): `wrapped_file_key` = STANDARD base64 of `nonce(12) || AES-256-GCM(raw K_c, FileKey)` — no KDF, no AAD, pinned against the core `share_key_wrap` KAT vector; link = `{APP_URL}/s/<token>#key=<base64url K_c>`. The token is client-minted (`core::share_token`) and sent with `owner_wrapped_key` + `owner_wrapped_token` (both wrapped under the master key) so the owner can rebuild the link. `--no-double-encrypt` is hidden and errors (the server refuses non-E2E shares).
+- `bb share <file-id>` — create an encrypted share link (`--expires`, `--max-opens`, `--passphrase`). Always double-encrypted, in the **web wire format** (see "Share wire format" in `src/commands/share.rs`): `wrapped_file_key` = STANDARD base64 of `nonce(12) || AES-256-GCM(raw K_c, FileKey)` — no KDF, no AAD, pinned against the core `share_key_wrap` KAT vector; link = `{APP_URL}/s/<token>#key=<base64url K_c>`. The token is client-minted (`core::share_token`) and sent with `owner_wrapped_key` + `owner_wrapped_token` (both wrapped under the master key) so the owner can rebuild the link. `--passphrase` is a server-checked Argon2id gate, not encryption. `--no-double-encrypt` is hidden and errors (the server refuses non-E2E shares). README flags are guarded by `src/readme_flags_tests.rs` (`readme_flags_exist`).
 - `bb shares` — list active share links; rebuilds each link from `owner_wrapped_key`/`owner_wrapped_token` (shares made by older clients without those blobs show "link not stored").
 - `bb unshare [share-id]` — revoke a share link (interactive picker without args).
 
@@ -61,6 +61,7 @@ Account-less links that let **anyone** upload an encrypted file *into* your vaul
 ### Billing
 
 - `bb billing show` — read-only plan, storage, and renewal info. `--json` outputs the raw API merge.
+- `bb billing usage` / `bb billing invoices [--open <id>]` / `bb billing portal` / `bb billing addons [purchase <addon_id>]` — per-region usage, invoice list + PDF, billing portal, add-ons.
 
 ### Two-factor authentication
 

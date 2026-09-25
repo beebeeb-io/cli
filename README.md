@@ -61,13 +61,13 @@ bb sync ~/vault /Documents  # Two-way sync, then watch for live changes
 | `bb push <path>` | Encrypt and upload a file or folder (alias `bb upload`) |
 | `bb pull <path-or-id>` | Download and decrypt by vault path or UUID (alias `bb download`) |
 | `bb ls [path]` | List vault contents with locally decrypted names |
-| `bb share <file-id>` | Create an encrypted share link (`--expires`, `--max-opens`, `--passphrase`) |
+| `bb share <file-id>` | Create an end-to-end encrypted share link; the key rides in the URL fragment (`--expires`, `--max-opens`, `--passphrase`) |
 | `bb shares` / `bb unshare` | List or revoke share links |
 | `bb request <create\|list\|send\|rm>` | Account-less links that let anyone upload *into* your vault |
 | `bb sync <local> [remote]` | Bidirectional folder sync; continuous by default (`--once`, `--daemon`, `--delete`) |
 | `bb webdav` | Serve the vault over local WebDAV (Finder, Explorer, rclone, Cyberduck) |
 | `bb mount <point>` | FUSE mount (macFUSE / libfuse3). Source builds with `--features fuse` only; release binaries do not include it, so use `bb webdav` |
-| `bb billing show` | Read-only plan, storage, and renewal info |
+| `bb billing <show\|usage\|invoices\|portal\|addons>` | Plan and renewal info, per-region usage, invoices (`bb billing invoices --open <id>` downloads one as PDF), the billing portal, and add-ons |
 | `bb speedtest` | Benchmark network throughput and crypto speed |
 | `bb completions <shell>` | Print a completion script for bash, zsh, fish, or powershell |
 
@@ -78,10 +78,10 @@ Command overview: `bb --help`. Every flag of a command: `bb <command> --help` (f
 beebeeb is zero-knowledge: the server stores only ciphertext and cannot read your file contents, filenames, or share payloads.
 
 - **Keys.** Your master key is derived at login and stays on your device. Per-file keys are derived from it with HKDF using the file's UUID as context, so every file has a unique key.
-- **Encryption.** File content and filenames are sealed with AES-256-GCM before upload, in independently-nonced 1 MB chunks.
+- **Encryption.** File content and filenames are sealed with AES-256-GCM before upload, in independently-nonced chunks. Chunk size scales with the file, from 4 MiB up to 128 MiB, and shrinks when `bb sync` uploads several files in parallel so memory stays bounded.
 - **Login.** The device-authorization flow uses an ephemeral P-256 ECDH keypair, so the session token and master key are delivered encrypted and never exposed in transit.
 - **Session storage.** After login, the token and master key live in `~/Library/Application Support/beebeeb/config.json` (macOS) or `~/.config/beebeeb/config.json` (Linux). Guard this file like an SSH identity. Sessions expire after 30 days.
-- **Share links.** Every link is end-to-end encrypted: the file key is wrapped (AES-256-GCM) under a random client key `K_c` that travels only in the URL fragment (`#key=…`), which browsers never send to the server. The server stores the opaque wrapped key plus `K_c` and the link token wrapped under your master key, so `bb shares` can show the link again. `--passphrase` adds a server-checked passphrase gate (Argon2id-hashed at rest) on top.
+- **Share links.** Every link `bb share` creates is double-encrypted: `bb` generates a random link key `K_c`, wraps the file key under it (AES-256-GCM), and puts the link key in the URL fragment (`#key=…`), which browsers never send to a server. Beebeeb stores only the wrapped key and cannot open the file. Anyone holding the full link can, so send it the way you would send the file. So that `bb shares` can show the link again, `K_c` and the link token are also stored wrapped under your master key, which never leaves your device. `--passphrase` is an access gate, not extra encryption: the passphrase goes to the server over TLS when the link is created and is stored only as an Argon2id hash, which the server checks before handing out the file.
 
 The crypto itself lives in the shared [`core`](https://github.com/beebeeb-io/core) crate, so the CLI, web, and mobile clients all encrypt the same way and read each other's files.
 
