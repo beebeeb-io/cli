@@ -21,8 +21,9 @@ Generated from `bb --help`. Source of truth is `src/main.rs` (clap derive).
 
 - `bb login` — browser-based device authorisation. The handshake crypto (P-256 ECDH + HKDF-SHA256 + AES-GCM handoff, with raw fallback for v0.4 web apps) lives in `beebeeb_core::cli_auth` (`CliEphemeralKey` / `decrypt_browser_payload`) — `login.rs` no longer hand-rolls it (task 0861). Supports `--headless` for SSH boxes. CLI auth sessions stored in Redis (HA-safe across API servers).
 - `bb logout` — end the current session.
-- `bb whoami` — show email, device, region, quota.
-- `bb status` — connection + session + storage status.
+- `bb whoami` — show email, device, region, quota. Exits 1 (message on stderr, no placeholder plan data) when logged out or when the server rejects the session.
+- `bb status` — connection + session + storage status (same exit behaviour as `whoami`).
+- Any generic 401 surfaces as "Your session expired or was revoked. Run `bb login` to sign in again." (`api::SESSION_EXPIRED_MESSAGE`; the stable `unauthorized` code is kept on `ApiError` for the `classify_*` helpers). A connect failure surfaces as "Can't reach <api_url> — check your connection or --api".
 - `bb config` — print current configuration with secrets masked.
 
 ### Files
