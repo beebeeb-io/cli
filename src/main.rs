@@ -68,6 +68,15 @@ use std::path::PathBuf;
 use clap::{CommandFactory, Parser, Subcommand};
 use colored::Colorize;
 
+/// Footer printed under both help screens (`bb --help` and clap's
+/// `after_help`). Every link here must resolve: `beebeeb.io/cli` and
+/// `beebeeb.io/fingerprints` (the original design copy) were never built and
+/// 404'd. Docs live at beebeeb.io/docs; the per-artifact `.sha256` files and
+/// `sha256.sum` ship with each GitHub release. Guarded by
+/// `help_screen_tests::help_links_resolve` (network, `--ignored`) and
+/// `help_footer_links_are_the_known_set` (offline).
+const HELP_FOOTER: &str = "# docs · beebeeb.io/docs · checksums · github.com/beebeeb-io/cli/releases";
+
 /// bb — Beebeeb CLI · end-to-end encrypted vault from the terminal
 #[derive(Parser)]
 #[command(
@@ -75,12 +84,7 @@ use colored::Colorize;
     version,
     about = "end-to-end encrypted vault, from the terminal",
     long_about = None,
-    after_help = format!(
-        "{}\n{}",
-        "# docs · beebeeb.io/cli · key fingerprints · beebeeb.io/fingerprints"
-            .custom_color(crate::colors::INK_SAGE),
-        ""
-    ),
+    after_help = format!("{}\n", HELP_FOOTER.custom_color(crate::colors::INK_SAGE)),
 )]
 struct Cli {
     /// API base URL to use for this command (login persists it for future commands)
@@ -782,11 +786,7 @@ fn build_help_text() -> String {
         );
     }
     let _ = writeln!(out);
-    let _ = writeln!(
-        out,
-        "  {}",
-        "# docs · beebeeb.io/cli · fingerprints · beebeeb.io/fingerprints".custom_color(colors::INK_SAGE)
-    );
+    let _ = writeln!(out, "  {}", HELP_FOOTER.custom_color(colors::INK_SAGE));
 
     out
 }
@@ -1072,6 +1072,78 @@ mod help_screen_tests {
         assert!(
             missing.is_empty(),
             "bb --help is missing top-level subcommand(s): {missing:?}\n--- rendered help ---\n{help}"
+        );
+    }
+
+    /// Every link printed by `bb --help` (the hand-written screen AND clap's
+    /// own `after_help`, which `bb help <cmd>` renders), normalised to an
+    /// absolute https URL. Plain text: colours forced off first.
+    fn help_links() -> Vec<String> {
+        colored::control::set_override(false);
+        let custom = build_help_text();
+        let clap_help = Cli::command().render_long_help().to_string();
+        let re =
+            regex::Regex::new(r"(?:https?://)?(?:[a-z0-9-]+\.)*(?:beebeeb\.io|github\.com)(?:/[A-Za-z0-9._~/-]*)?")
+                .expect("valid link regex");
+        let mut links: Vec<String> = re
+            .find_iter(&format!("{custom}\n{clap_help}"))
+            .map(|m| {
+                let l = m.as_str().trim_end_matches(['.', '/']);
+                if l.starts_with("http") {
+                    l.to_string()
+                } else {
+                    format!("https://{l}")
+                }
+            })
+            .collect();
+        links.sort();
+        links.dedup();
+        links
+    }
+
+    /// Flow "Download & install", issue 7: the help footer pointed at
+    /// `beebeeb.io/cli` and `beebeeb.io/fingerprints`, both 404. This
+    /// requests every link the help screens print and requires a 2xx.
+    /// Network-bound, so `#[ignore]`d in the default run:
+    /// `cargo test --bin bb help_links_resolve -- --ignored`.
+    #[tokio::test]
+    #[ignore = "network: requests the public URLs printed by bb --help"]
+    async fn help_links_resolve() {
+        let links = help_links();
+        assert!(!links.is_empty(), "extracted zero links from bb --help");
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .expect("http client");
+        let mut dead = Vec::new();
+        for link in &links {
+            match client.get(link).send().await {
+                Ok(r) if r.status().is_success() => eprintln!("ok  {} {link}", r.status()),
+                Ok(r) => dead.push(format!("{} {link}", r.status())),
+                Err(e) => dead.push(format!("ERR {link}: {e}")),
+            }
+        }
+        assert!(
+            dead.is_empty(),
+            "bb --help prints dead link(s): {dead:?} (checked {links:?})"
+        );
+    }
+
+    /// Offline guard (runs in the default `cargo test`): the help screens
+    /// print exactly the links whose liveness `help_links_resolve` checks,
+    /// and never the two that 404'd. A new link added anywhere in the help
+    /// text fails here until it is added to this list (and so to the
+    /// network check).
+    #[test]
+    fn help_footer_links_are_the_known_set() {
+        let links = help_links();
+        assert_eq!(
+            links,
+            vec![
+                "https://beebeeb.io/docs".to_string(),
+                "https://github.com/beebeeb-io/cli/releases".to_string(),
+            ],
+            "bb --help links changed; verify each resolves (cargo test --bin bb help_links_resolve -- --ignored) and update this list"
         );
     }
 
