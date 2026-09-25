@@ -67,6 +67,19 @@ Account-less links that let **anyone** upload an encrypted file *into* your vaul
 - `bb 2fa setup` — begins setup, prints the QR/secret/backup codes (`src/commands/twofa.rs`, task 0478). `bb 2fa enable --code <6 digits>` activates it; `bb 2fa disable --code <6 digits>` turns it off (task 0479) — both POST only the code, no step-up token (the live server routes enforce the code alone, not the plan's assumed `X-Confirm-Token`).
 - `bb 2fa verify` **does not exist** — removed from the clap tree (task 0479). The live `POST /api/v1/auth/2fa/verify` is the login-time `{partial_token, code}` exchange, but `bb login`'s browser handshake never produces a partial token, so there was no CLI caller for it.
 
+### Exit codes and non-interactive runs (`src/exit.rs`)
+
+`0` success · `1` any error · `2` a prompt was needed but stdin is not a terminal · `3` the run finished but left items failed or unresolved. A command sets `2`/`3` by building its error with `exit::with_code(code, msg)`; `main` exits with `exit::code()`.
+
+With stdin not a terminal (cron, CI, a pipe), nothing prompts and nothing silently no-ops:
+
+- `bb push <name>` where the name exists → exit 2, "pass --replace or --keep-both".
+- `bb rm <target>` without `-f` → exit 2, nothing trashed (`--json`/`--quiet` keep skipping the prompt as before).
+- `bb unshare` with no id → exit 2, "pass a share id … `bb shares`" (the picker needs a terminal).
+- `bb sync` one-shot pass (`--once`, `--json`, `--quiet`) with failed uploads or unresolved conflicts → summary says `! incomplete · N failed · M ⚡`, exit 3; `--json` carries `ok` + `failed`. Dry runs and the continuous watch loop don't fail on it.
+
+Covered by `tests/non_interactive.rs` (runs the real binary with `stdin = null` against an in-process mock API, scratch `HOME`, `BB_NO_UPDATE=1`).
+
 ### Utilities
 
 - `bb speedtest` — benchmark network throughput + crypto speed against the API.

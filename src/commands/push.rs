@@ -326,6 +326,17 @@ async fn push_single_file(
                         ConflictResolution::Upload { filename: new_name }
                     }
                     ConflictStrategy::Prompt => {
+                        // No one can answer the prompt: fail loudly instead of
+                        // reading EOF as "skip" and exiting 0 (flow-6).
+                        if !crate::exit::stdin_is_interactive() {
+                            return Err(crate::exit::with_code(
+                                crate::exit::USAGE,
+                                format!(
+                                    "{file_name} already exists \u{2014} pass --replace or --keep-both \
+                                     (stdin is not a terminal, so there is no one to ask)"
+                                ),
+                            ));
+                        }
                         let r = prompt_conflict(&file_name);
                         // If user chose Replace, inject the actual existing_id
                         match r {
