@@ -112,7 +112,7 @@
 
 use serde_json::Value;
 
-use crate::api::ApiClient;
+use crate::api::{ApiClient, ApiError};
 
 /// One parsed element of `GET /api/v1/auth/passkeys`'s `passkeys` array.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,15 +153,20 @@ pub fn parse_passkeys(body: &Value) -> Vec<PasskeyRow> {
         .unwrap_or_default()
 }
 
-/// Classify a raw `GET /api/v1/auth/passkeys` error string. Like
+/// Classify a `GET /api/v1/auth/passkeys` error. Like
 /// `sessions::classify_list_error`, this route has no request body to be
 /// wrong about — only the `AuthUser` extractor can reject it — so a bare
 /// `401`/`"unauthorized"` has exactly one cause.
-fn classify_list_error(e: String) -> String {
-    if e.to_lowercase().contains("unauthorized") || e.contains("401") {
+///
+/// Matches the server's stable `unauthorized` code first (exact —
+/// `ApiClient::list_passkeys` returns `ApiError`, task 1547 finding 1, Codex
+/// review on PR #33); falls back to substring-matching the display message
+/// for local/transport errors that never carry a code.
+fn classify_list_error(e: ApiError) -> String {
+    if e.is_code("unauthorized") || e.message.to_lowercase().contains("unauthorized") || e.message.contains("401") {
         "your session has expired — run `bb login` again".to_string()
     } else {
-        e
+        e.message
     }
 }
 
@@ -512,19 +517,24 @@ fn confirm_remove(name: &str) -> Result<bool, String> {
     Ok(matches!(line.trim(), "y" | "Y" | "yes" | "YES"))
 }
 
-/// Classify a `delete_passkey` error string. `"not found"` is the live
-/// handler's exact (lowercased) 404 body — `ApiError::NotFound` renders as
+/// Classify a `delete_passkey` error. `"not found"` is the live handler's
+/// exact (lowercased) 404 body — `ApiError::NotFound` renders as
 /// `{"error": "not found"}` (`repos/server/.../error.rs` L533, same mapping
 /// `commands::sessions::classify_revoke_error` relies on) — never
 /// `"Not Found"` or a `"404: ..."`-prefixed string.
-fn classify_remove_error(e: String) -> String {
-    let lower = e.to_lowercase();
-    if lower.contains("unauthorized") || e.contains("401") {
+///
+/// Matches the server's stable codes first (exact — `ApiClient::delete_passkey`
+/// returns `ApiError`, task 1547 finding 1, Codex review on PR #33); falls
+/// back to substring-matching the display message for local/transport
+/// errors that never carry a code.
+fn classify_remove_error(e: ApiError) -> String {
+    let lower = e.message.to_lowercase();
+    if e.is_code("unauthorized") || lower.contains("unauthorized") || e.message.contains("401") {
         "your session has expired — run `bb login` again".to_string()
-    } else if lower.contains("not found") {
+    } else if e.is_code("not found") || lower.contains("not found") {
         "passkey not found (already removed, or never existed)".to_string()
     } else {
-        e
+        e.message
     }
 }
 
@@ -764,24 +774,31 @@ mod tests {
     // ── logged-out / 401 mapping ─────────────────────────────────────────
 
     #[test]
-    fn classify_list_error_maps_bare_unauthorized_to_a_login_hint() {
+    fn classify_list_error_maps_the_servers_exact_unauthorized_code_to_a_login_hint() {
+        // The real shape: `list_passkeys` returns `ApiError` with
+        // `code: Some("unauthorized")` (task 1547 finding 1).
         assert_eq!(
-            classify_list_error("unauthorized".to_string()),
+            classify_list_error(ApiError::test_code("unauthorized")),
             "your session has expired — run `bb login` again"
         );
     }
 
     #[test]
     fn classify_list_error_maps_status_prefixed_unauthorized_too() {
+        // Defense in depth: a local/transport error with no code at all
+        // still falls back to matching the message text.
         assert_eq!(
-            classify_list_error("401 Unauthorized: unauthorized".to_string()),
+            classify_list_error(ApiError::test_message("401 Unauthorized: unauthorized")),
             "your session has expired — run `bb login` again"
         );
     }
 
     #[test]
     fn classify_list_error_passes_through_unrelated_errors() {
-        assert_eq!(classify_list_error("network failed".to_string()), "network failed");
+        assert_eq!(
+            classify_list_error(ApiError::test_message("network failed")),
+            "network failed"
+        );
     }
 
     // ── short_id ─────────────────────────────────────────────────────────
@@ -1037,13 +1054,17 @@ mod tests {
     }
 
     #[test]
-    fn classify_remove_error_maps_unauthorized_to_a_login_hint() {
+    fn classify_remove_error_maps_the_servers_exact_unauthorized_code_to_a_login_hint() {
+        // The real shape: `delete_passkey` returns `ApiError` with
+        // `code: Some("unauthorized")` (task 1547 finding 1).
         assert_eq!(
-            classify_remove_error("unauthorized".to_string()),
+            classify_remove_error(ApiError::test_code("unauthorized")),
             "your session has expired — run `bb login` again"
         );
+        // Defense in depth: a local/transport error with no code at all
+        // still falls back to matching the message text.
         assert_eq!(
-            classify_remove_error("401 Unauthorized: unauthorized".to_string()),
+            classify_remove_error(ApiError::test_message("401 Unauthorized: unauthorized")),
             "your session has expired — run `bb login` again"
         );
     }
@@ -1054,13 +1075,16 @@ mod tests {
         // ApiError::NotFound → "not found", L533), never "Not Found" and
         // never a "404: ..."-prefixed string.
         assert_eq!(
-            classify_remove_error("not found".to_string()),
+            classify_remove_error(ApiError::test_code("not found")),
             "passkey not found (already removed, or never existed)"
         );
     }
 
     #[test]
     fn classify_remove_error_passes_through_unrelated_errors() {
-        assert_eq!(classify_remove_error("network failed".to_string()), "network failed");
+        assert_eq!(
+            classify_remove_error(ApiError::test_message("network failed")),
+            "network failed"
+        );
     }
 }

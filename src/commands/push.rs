@@ -663,8 +663,19 @@ async fn check_quota(api: &ApiClient, upload_size: u64) -> Result<(), String> {
     let plan_slug = sub.get("plan").and_then(|v| v.as_str()).unwrap_or("free");
     let plan = Plan::from_slug(plan_slug);
     let extra_tb = sub.get("extra_storage_tb").and_then(|v| v.as_i64()).unwrap_or(0);
-    let bonus_bytes = sub.get("bonus_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
-    let quota = effective_quota(plan, extra_tb, bonus_bytes);
+    // Task 1547 finding 2 (Codex review, PR #33): read the server's own
+    // `quota_bytes` (already folds in extra_storage_tb + any referral bonus
+    // — see `beebeeb-api/src/quota.rs::get_user_quota`) instead of a
+    // `bonus_bytes` key `GET /billing/subscription` never actually returns
+    // (always read back 0) and recomputing via `effective_quota(plan,
+    // extra_tb, bonus_bytes)` client-side — the same bug fixed in
+    // `commands::{quota,whoami}::build_plan_label`, found while sweeping
+    // every `bonus_bytes` call site. Only falls back to the client-side
+    // compute (bonus-blind) if the server ever omits the field.
+    let quota = sub
+        .get("quota_bytes")
+        .and_then(|v| v.as_i64())
+        .unwrap_or_else(|| effective_quota(plan, extra_tb, 0));
 
     if quota > 0 && used_bytes + upload_size as i64 > quota {
         let used_str = format_storage_si(used_bytes);

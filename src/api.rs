@@ -317,7 +317,7 @@ impl ApiClient {
     /// live TOTP code. Body is `{"code": "..."}` (`CodeRequest` in
     /// `repos/server/beebeeb-api/src/routes/totp.rs`). No `X-Confirm-Token`
     /// step-up — the code itself IS the proof of possession the route checks.
-    pub async fn totp_enable(&self, code: &str) -> Result<Value, String> {
+    pub async fn totp_enable(&self, code: &str) -> Result<Value, ApiError> {
         let token = self.require_auth()?;
         let resp = self
             .client
@@ -328,7 +328,7 @@ impl ApiClient {
             .await
             .map_err(format_request_error)?;
 
-        parse_response(resp).await
+        parse_response_typed(resp).await
     }
 
     /// POST /api/v1/auth/2fa/disable — turns TOTP off. Body is
@@ -337,7 +337,7 @@ impl ApiClient {
     /// no `X-Confirm-Token` step-up — so `commands::twofa::disable` sends
     /// nothing beyond the code (eng-0479, deviation from the plan's "DELETE +
     /// step-up confirm" description; see task Notes for the file:line cite).
-    pub async fn totp_disable(&self, code: &str) -> Result<Value, String> {
+    pub async fn totp_disable(&self, code: &str) -> Result<Value, ApiError> {
         let token = self.require_auth()?;
         let resp = self
             .client
@@ -348,7 +348,7 @@ impl ApiClient {
             .await
             .map_err(format_request_error)?;
 
-        parse_response(resp).await
+        parse_response_typed(resp).await
     }
 
     /// Not called by any current command — reserved API surface.
@@ -862,7 +862,7 @@ impl ApiClient {
     }
 
     /// GET /api/v1/account/sessions (newer shape with device_kind, country_code).
-    pub async fn list_sessions_v2(&self) -> Result<serde_json::Value, String> {
+    pub async fn list_sessions_v2(&self) -> Result<serde_json::Value, ApiError> {
         let token = self.require_auth()?;
         let resp = self
             .client
@@ -871,7 +871,7 @@ impl ApiClient {
             .send()
             .await
             .map_err(format_request_error)?;
-        parse_response(resp).await
+        parse_response_typed(resp).await
     }
 
     /// DELETE /api/v1/account/sessions/{id} — revoke one session by id.
@@ -881,7 +881,7 @@ impl ApiClient {
     /// `AuthUser` — no `ConfirmedAction` extractor — so this sends no
     /// `X-Confirm-Token`. The plan pseudocode for this task assumed step-up
     /// was required; it isn't, confirmed by reading the handler signature.
-    pub async fn revoke_session(&self, id: &str) -> Result<serde_json::Value, String> {
+    pub async fn revoke_session(&self, id: &str) -> Result<serde_json::Value, ApiError> {
         let token = self.require_auth()?;
         let resp = self
             .client
@@ -890,7 +890,7 @@ impl ApiClient {
             .send()
             .await
             .map_err(format_request_error)?;
-        parse_response(resp).await
+        parse_response_typed(resp).await
     }
 
     /// POST /api/v1/account/sessions/revoke-all-others — revoke every session
@@ -899,7 +899,7 @@ impl ApiClient {
     /// **Deviation (eng-0481):** same as `revoke_session` above — the live
     /// handler (`account_activity.rs::revoke_all_other_sessions`, ~L351-373)
     /// takes only `AuthUser`, no step-up. No `X-Confirm-Token` is sent.
-    pub async fn revoke_all_other_sessions(&self) -> Result<serde_json::Value, String> {
+    pub async fn revoke_all_other_sessions(&self) -> Result<serde_json::Value, ApiError> {
         let token = self.require_auth()?;
         let resp = self
             .client
@@ -908,11 +908,11 @@ impl ApiClient {
             .send()
             .await
             .map_err(format_request_error)?;
-        parse_response(resp).await
+        parse_response_typed(resp).await
     }
 
     /// GET /api/v1/auth/passkeys
-    pub async fn list_passkeys(&self) -> Result<serde_json::Value, String> {
+    pub async fn list_passkeys(&self) -> Result<serde_json::Value, ApiError> {
         let token = self.require_auth()?;
         let resp = self
             .client
@@ -921,7 +921,7 @@ impl ApiClient {
             .send()
             .await
             .map_err(format_request_error)?;
-        parse_response(resp).await
+        parse_response_typed(resp).await
     }
 
     /// DELETE /api/v1/auth/passkeys/{id} — remove one passkey by id.
@@ -941,7 +941,7 @@ impl ApiClient {
     /// passkey-only account deleting its only passkey (a real server-side gap,
     /// out of scope for this CLI-only task; the CLI still confirms
     /// client-side before calling this, see `commands::passkey::remove`).
-    pub async fn delete_passkey(&self, id: &str) -> Result<serde_json::Value, String> {
+    pub async fn delete_passkey(&self, id: &str) -> Result<serde_json::Value, ApiError> {
         let token = self.require_auth()?;
         let resp = self
             .client
@@ -950,13 +950,13 @@ impl ApiClient {
             .send()
             .await
             .map_err(format_request_error)?;
-        parse_response(resp).await
+        parse_response_typed(resp).await
     }
 
     /// Step-up re-auth: POST /api/v1/auth/confirm.
     /// Returns the raw confirmation token. Caller is responsible for attaching
     /// it as `X-Confirm-Token` on the protected call within 5 minutes.
-    pub async fn confirm_password(&self, password: &str) -> Result<String, String> {
+    pub async fn confirm_password(&self, password: &str) -> Result<String, ApiError> {
         let token = self.require_auth()?;
         let resp = self
             .client
@@ -966,11 +966,11 @@ impl ApiClient {
             .send()
             .await
             .map_err(format_request_error)?;
-        let body = parse_response(resp).await?;
+        let body = parse_response_typed(resp).await?;
         body.get("confirmation_token")
             .and_then(|v| v.as_str())
             .map(String::from)
-            .ok_or_else(|| "server did not return a confirmation_token".to_string())
+            .ok_or_else(|| "server did not return a confirmation_token".to_string().into())
     }
 
     /// POST /api/v1/auth/account/export — queue or resume a GDPR export job.
@@ -1845,7 +1845,119 @@ impl ApiClient {
     }
 }
 
+/// A parsed API error: the server's stable machine `error` code (when
+/// present) alongside the human `message` and HTTP status.
+///
+/// **Codex review on PR #33, task 1547 finding 1:** `parse_response` (below)
+/// intentionally shows ONLY `message` — never the code — because finding 3
+/// on this same task established that contract: the string a user sees must
+/// be the server's clean human sentence, with nothing appended (see
+/// `error_message_priority_tests`, which asserts the display string
+/// byte-for-byte). But several call sites classify failures by the STABLE
+/// CODE, not by the display text — `commands::confirm::map_confirm_error`
+/// (`session_too_old_for_confirmation`), `commands::{passkey,sessions,
+/// twofa}`'s `classify_*` helpers (`unauthorized`). A first attempt at this
+/// fix appended the code to `message` as a `"{message} [{code}]"` suffix so
+/// substring-matching still worked — that broke finding 3's contract for
+/// every typed error whose message doesn't literally contain its code
+/// (which is most of them; e.g. `billing_no_payment_method` → "No valid
+/// payment method on file…" contains no such substring). Two different
+/// contracts (clean display text vs. code-matchable) cannot both live in one
+/// `String`, so the handful of call sites that need to classify by code use
+/// `parse_response_typed` (below) instead and match `ApiError.code`
+/// directly — exact, not substring — while every other call site keeps
+/// using `parse_response` and its unchanged, code-free display string.
+#[derive(Debug, Clone)]
+pub struct ApiError {
+    /// The server's stable `error` field, when the body had one. `None` for
+    /// network failures, a non-JSON body, or a body with neither `error` nor
+    /// `message`. `pub(crate)` (not `pub`) so `commands::*`'s `classify_*`
+    /// helpers can match it directly and their tests can construct fixture
+    /// values — this binary has no external consumers to hide it from.
+    pub(crate) code: Option<String>,
+    /// What to show the user: the server's `message`, else its `error`
+    /// code, else a `"{status}: {body}"` fallback, else (network failures)
+    /// the transport error text. Identical to what `parse_response` returns.
+    pub(crate) message: String,
+    /// HTTP status, or 0 for a failure that never got a response (read
+    /// error, non-JSON body after a 2xx).
+    #[allow(dead_code)]
+    pub(crate) status: u16,
+}
+
+impl ApiError {
+    /// True if the server's stable `error` code equals `code` exactly. The
+    /// primary way callers should classify a failure — exact, not
+    /// substring, so a message that happens to mention another code's text
+    /// can never cause a false match.
+    pub(crate) fn is_code(&self, code: &str) -> bool {
+        self.code.as_deref() == Some(code)
+    }
+
+    /// Build a fixture with only a `message` (no code) — for `classify_*`
+    /// tests exercising the message-substring fallback path, and for the
+    /// handful of local, never-hit-the-wire errors (`require_auth`,
+    /// `format_request_error`) that have no server-issued code either.
+    #[cfg(test)]
+    pub(crate) fn test_message(message: &str) -> Self {
+        Self {
+            code: None,
+            message: message.to_string(),
+            status: 0,
+        }
+    }
+
+    /// Build a fixture with a `code` (and matching `message`, the common
+    /// real-world shape for a code-only error like `unauthorized`) — for
+    /// `classify_*` tests exercising the exact-code path.
+    #[cfg(test)]
+    pub(crate) fn test_code(code: &str) -> Self {
+        Self {
+            code: Some(code.to_string()),
+            message: code.to_string(),
+            status: 0,
+        }
+    }
+}
+
+/// Lets the handful of methods returning `Result<_, ApiError>` keep using
+/// `self.require_auth()?` and `.map_err(format_request_error)?` unchanged —
+/// both already produce a plain `String`, and `?` converts it via this impl.
+impl From<String> for ApiError {
+    fn from(message: String) -> Self {
+        Self {
+            code: None,
+            message,
+            status: 0,
+        }
+    }
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// For call sites that gather an `ApiError` alongside plain-`String`
+/// `ApiClient` results (e.g. `commands::account::show`'s `tokio::join!`) and
+/// need a uniform `Result<_, String>` to hand to shared display code.
+/// Drops the code — same display text `parse_response` would have returned.
+impl From<ApiError> for String {
+    fn from(e: ApiError) -> String {
+        e.message
+    }
+}
+
 async fn parse_response(resp: reqwest::Response) -> Result<Value, String> {
+    parse_response_typed(resp).await.map_err(|e| e.message)
+}
+
+/// Same wire parsing as `parse_response`, but keeps the server's stable
+/// `error` code alongside the display `message` instead of discarding it.
+/// See `ApiError`'s doc comment for why this is a separate function rather
+/// than changing `parse_response` itself.
+async fn parse_response_typed(resp: reqwest::Response) -> Result<Value, ApiError> {
     let status = resp.status();
     update_rate_state(resp.headers());
 
@@ -1873,10 +1985,22 @@ async fn parse_response(resp: reqwest::Response) -> Result<Value, String> {
         }
 
         tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
-        return Err("__rate_limited__".to_string());
+        // `parse_response`'s callers retry-loop on this exact sentinel
+        // string (`e == "__rate_limited__"`) — `.map_err(|e| e.message)`
+        // above preserves it byte-for-byte, so none of those call sites
+        // need to change.
+        return Err(ApiError {
+            code: None,
+            message: "__rate_limited__".to_string(),
+            status: status.as_u16(),
+        });
     }
 
-    let body = resp.text().await.map_err(|e| format!("failed to read response: {e}"))?;
+    let body = resp.text().await.map_err(|e| ApiError {
+        code: None,
+        message: format!("failed to read response: {e}"),
+        status: status.as_u16(),
+    })?;
 
     if !status.is_success() {
         // Every typed server error is `{ error: <stable code>, message: <human
@@ -1887,19 +2011,26 @@ async fn parse_response(resp: reqwest::Response) -> Result<Value, String> {
         // display; fall back to the bare `error` code, then to the raw
         // status+body when neither field is present (task 1547 finding 3).
         let parsed = serde_json::from_str::<Value>(&body).ok();
-        let msg = parsed
+        let code = parsed
+            .as_ref()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from));
+        let message = parsed
             .as_ref()
             .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
-            .or_else(|| {
-                parsed
-                    .as_ref()
-                    .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
-            })
+            .or_else(|| code.clone())
             .unwrap_or_else(|| format!("{status}: {body}"));
-        return Err(msg);
+        return Err(ApiError {
+            code,
+            message,
+            status: status.as_u16(),
+        });
     }
 
-    serde_json::from_str(&body).map_err(|e| format!("invalid JSON: {e}"))
+    serde_json::from_str(&body).map_err(|e| ApiError {
+        code: None,
+        message: format!("invalid JSON: {e}"),
+        status: status.as_u16(),
+    })
 }
 
 #[cfg(test)]

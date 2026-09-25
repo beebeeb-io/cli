@@ -127,6 +127,13 @@ pub async fn show() -> Result<(), String> {
         api.list_sessions_v2(),
         api.list_passkeys(),
     );
+    // `list_sessions_v2`/`list_passkeys` return `Result<_, ApiError>` (task
+    // 1547 finding 1, Codex review on PR #33 — they need the server's
+    // stable code elsewhere; see `commands::sessions`/`commands::passkey`).
+    // This display-only payload wants the same plain string every other arm
+    // here already carries.
+    let sessions = sessions.map_err(String::from);
+    let passkeys = passkeys.map_err(String::from);
 
     let payload = build_show_payload(&me, &sub, &region, &score, &sessions, &passkeys);
 

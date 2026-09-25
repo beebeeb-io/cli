@@ -82,7 +82,7 @@
 
 use serde_json::Value;
 
-use crate::api::ApiClient;
+use crate::api::{ApiClient, ApiError};
 
 /// One parsed row of `GET /api/v1/account/sessions`'s `sessions` array.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,16 +136,21 @@ pub fn parse_sessions(body: &Value) -> Vec<SessionRow> {
         .unwrap_or_default()
 }
 
-/// Classify a raw `GET /api/v1/account/sessions` error string. Unlike
+/// Classify a `GET /api/v1/account/sessions` error. Unlike
 /// `commands::twofa`'s `classify_enable_error`, a bare `401`/`"unauthorized"`
 /// here has exactly one cause — this route has no request body to be wrong
 /// about, only the `AuthUser` extractor can reject it — so no ambiguous case
 /// and no follow-up call is needed.
-fn classify_list_error(e: String) -> String {
-    if e.to_lowercase().contains("unauthorized") || e.contains("401") {
+///
+/// Matches the server's stable `unauthorized` code first (exact —
+/// `ApiClient::list_sessions_v2` returns `ApiError`, task 1547 finding 1,
+/// Codex review on PR #33); falls back to substring-matching the display
+/// message for local/transport errors that never carry a code.
+fn classify_list_error(e: ApiError) -> String {
+    if e.is_code("unauthorized") || e.message.to_lowercase().contains("unauthorized") || e.message.contains("401") {
         "your session has expired — run `bb login` again".to_string()
     } else {
-        e
+        e.message
     }
 }
 
@@ -330,20 +335,25 @@ fn short_id(id: &str) -> &str {
     if id.len() >= 8 { &id[..8] } else { id }
 }
 
-/// Classify a `revoke_session` / `revoke_all_other_sessions` error string.
+/// Classify a `revoke_session` / `revoke_all_other_sessions` error.
 /// `"not found"` is the live handler's exact (lowercased) 404 body —
 /// `ApiError::NotFound` renders as `{"error": "not found"}`
 /// (`repos/server/.../error.rs` L533 + L590) — never `"Not Found"` or a
 /// `"404: ..."`-prefixed string, since `parse_response` extracts just the
 /// `error` field's value with no status-code prefix.
-fn classify_revoke_error(e: String) -> String {
-    let lower = e.to_lowercase();
-    if lower.contains("unauthorized") || e.contains("401") {
+///
+/// Matches the server's stable codes first (exact — `revoke_session`/
+/// `revoke_all_other_sessions` return `ApiError`, task 1547 finding 1, Codex
+/// review on PR #33); falls back to substring-matching the display message
+/// for local/transport errors that never carry a code.
+fn classify_revoke_error(e: ApiError) -> String {
+    let lower = e.message.to_lowercase();
+    if e.is_code("unauthorized") || lower.contains("unauthorized") || e.message.contains("401") {
         "your session has expired — run `bb login` again".to_string()
-    } else if lower.contains("not found") {
+    } else if e.is_code("not found") || lower.contains("not found") {
         "session not found (already revoked, or never existed)".to_string()
     } else {
-        e
+        e.message
     }
 }
 
@@ -683,24 +693,31 @@ mod tests {
     // ── logged-out / 401 mapping ─────────────────────────────────────────
 
     #[test]
-    fn classify_list_error_maps_bare_unauthorized_to_a_login_hint() {
+    fn classify_list_error_maps_the_servers_exact_unauthorized_code_to_a_login_hint() {
+        // The real shape: `ApiError::Unauthorized` off `list_sessions_v2`
+        // carries `code: Some("unauthorized")` (task 1547 finding 1).
         assert_eq!(
-            classify_list_error("unauthorized".to_string()),
+            classify_list_error(ApiError::test_code("unauthorized")),
             "your session has expired — run `bb login` again"
         );
     }
 
     #[test]
     fn classify_list_error_maps_status_prefixed_unauthorized_too() {
+        // Defense in depth: a local/transport error with no code at all
+        // still falls back to matching the message text.
         assert_eq!(
-            classify_list_error("401 Unauthorized: unauthorized".to_string()),
+            classify_list_error(ApiError::test_message("401 Unauthorized: unauthorized")),
             "your session has expired — run `bb login` again"
         );
     }
 
     #[test]
     fn classify_list_error_passes_through_unrelated_errors() {
-        assert_eq!(classify_list_error("network failed".to_string()), "network failed");
+        assert_eq!(
+            classify_list_error(ApiError::test_message("network failed")),
+            "network failed"
+        );
     }
 
     #[test]
@@ -867,13 +884,18 @@ mod tests {
     }
 
     #[test]
-    fn classify_revoke_error_maps_unauthorized_to_a_login_hint() {
+    fn classify_revoke_error_maps_the_servers_exact_unauthorized_code_to_a_login_hint() {
+        // The real shape: `revoke_session`/`revoke_all_other_sessions`
+        // return `ApiError` with `code: Some("unauthorized")` (task 1547
+        // finding 1).
         assert_eq!(
-            classify_revoke_error("unauthorized".to_string()),
+            classify_revoke_error(ApiError::test_code("unauthorized")),
             "your session has expired — run `bb login` again"
         );
+        // Defense in depth: a local/transport error with no code at all
+        // still falls back to matching the message text.
         assert_eq!(
-            classify_revoke_error("401 Unauthorized: unauthorized".to_string()),
+            classify_revoke_error(ApiError::test_message("401 Unauthorized: unauthorized")),
             "your session has expired — run `bb login` again"
         );
     }
@@ -885,14 +907,17 @@ mod tests {
         // "404: ..." (parse_response strips the status prefix whenever the
         // body has an `error` field, which it always does here).
         assert_eq!(
-            classify_revoke_error("not found".to_string()),
+            classify_revoke_error(ApiError::test_code("not found")),
             "session not found (already revoked, or never existed)"
         );
     }
 
     #[test]
     fn classify_revoke_error_passes_through_unrelated_errors() {
-        assert_eq!(classify_revoke_error("network failed".to_string()), "network failed");
+        assert_eq!(
+            classify_revoke_error(ApiError::test_message("network failed")),
+            "network failed"
+        );
     }
 
     // ── PR #21 Codex review fix: revoke_all_others_may_proceed_without_prompt ──
