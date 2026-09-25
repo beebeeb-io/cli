@@ -262,6 +262,132 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    // ─── Task 1552: verify the email with a code BEFORE the account exists ──
+    //
+    // Mirrors web PR #79 (`repos/web/src/lib/api.ts`) and mobile PR #110
+    // (`repos/mobile/src/lib/api.ts`). See `crate::signup_email_code` for the
+    // full server contract and the pure decision helpers that classify the
+    // typed errors these calls can return.
+
+    /// `POST /api/v1/auth/signup/email-start` — ALWAYS resolves with the
+    /// same `202 {"message": ...}` body regardless of whether `email`
+    /// already has an account (server-side anti-enumeration, task 0706b's
+    /// invariant applied a step earlier). New email → an 8-digit code
+    /// email; each call adds a new live code (server task 1525, round 3:
+    /// resend is not a no-op — up to 3 live codes per email, any of them
+    /// verifies). Existing email → a "you already have an account" email
+    /// with a sign-in link — no code, and the caller has no way to tell the
+    /// two cases apart from this response alone.
+    ///
+    /// The route is unconditionally mounted (server task 1525's own
+    /// router.rs comment: the routes are always reachable so clients can
+    /// roll ahead of the `BB_SIGNUP_EMAIL_CODE` flag) — so this call either
+    /// succeeds or throws a `404` `ApiError` on a server that predates task
+    /// 1525. `commands::signup` uses that 404 as the capability signal; see
+    /// `crate::signup_email_code::is_legacy_fallback_error`.
+    pub async fn signup_email_start(&self, email: &str) -> Result<Value, ApiError> {
+        let resp = self
+            .client
+            .post(self.url("/api/v1/auth/signup/email-start"))
+            .json(&serde_json::json!({ "email": email }))
+            .send()
+            .await
+            .map_err(format_request_error)?;
+
+        parse_response_typed(resp).await
+    }
+
+    /// `POST /api/v1/auth/signup/email-verify` — exchanges an 8-digit code
+    /// for a short-lived, single-use `signup_ticket` bound to `email`.
+    /// Wrong / expired / reused / attempt-cap-exhausted code all render as
+    /// the SAME `400` (deliberately undifferentiated — no signal about
+    /// which); the caller should surface `err.message` as-is, it's already
+    /// honest and user-facing.
+    pub async fn signup_email_verify(&self, email: &str, code: &str) -> Result<Value, ApiError> {
+        let resp = self
+            .client
+            .post(self.url("/api/v1/auth/signup/email-verify"))
+            .json(&serde_json::json!({ "email": email, "code": code }))
+            .send()
+            .await
+            .map_err(format_request_error)?;
+
+        parse_response_typed(resp).await
+    }
+
+    /// `POST /api/v1/opaque/register-start` — round 1 of OPAQUE
+    /// registration (proper client-side crypto, unlike the deprecated
+    /// plain-password `signup` above).
+    ///
+    /// `signup_ticket` (task 1552): the `signup_ticket` from a successful
+    /// `signup_email_verify`, sent as a BODY field (not a header — the
+    /// server's `RegisterFinishReq::signup_ticket` doc comment: chosen so
+    /// no CORS `Access-Control-Allow-Headers` change is needed; the CLI has
+    /// no CORS concern either way, but the wire shape must match web/
+    /// mobile). Only enforced server-side when `BB_SIGNUP_EMAIL_CODE=1`;
+    /// harmless to omit or include otherwise. `register-start` validates
+    /// the ticket WITHOUT consuming it (a caller may legitimately retry
+    /// start before finish).
+    pub async fn opaque_register_start(
+        &self,
+        email: &str,
+        client_message_b64: &str,
+        signup_ticket: Option<&str>,
+    ) -> Result<Value, ApiError> {
+        let mut body = serde_json::json!({ "email": email, "client_message": client_message_b64 });
+        if let Some(ticket) = signup_ticket {
+            body["signup_ticket"] = serde_json::json!(ticket);
+        }
+        let resp = self
+            .client
+            .post(self.url("/api/v1/opaque/register-start"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+
+        parse_response_typed(resp).await
+    }
+
+    /// `POST /api/v1/opaque/register-finish` — round 2 of OPAQUE
+    /// registration; the call that actually creates the account.
+    ///
+    /// `signup_ticket` (task 1552): same ticket as `opaque_register_start`,
+    /// sent again here — this is the call that CONSUMES it atomically
+    /// server-side (with the account INSERT, in the same transaction) when
+    /// `BB_SIGNUP_EMAIL_CODE=1`. A missing/wrong-email/expired/consumed
+    /// ticket renders as `403 {"error": "signup_ticket_invalid"}` — see
+    /// `crate::signup_email_code::is_ticket_invalid_error`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn opaque_register_finish(
+        &self,
+        email: &str,
+        client_message_b64: &str,
+        x25519_public_key_b64: Option<&str>,
+        recovery_check_b64: Option<&str>,
+        signup_ticket: Option<&str>,
+    ) -> Result<Value, ApiError> {
+        let mut body = serde_json::json!({ "email": email, "client_message": client_message_b64 });
+        if let Some(k) = x25519_public_key_b64 {
+            body["x25519_public_key"] = serde_json::json!(k);
+        }
+        if let Some(r) = recovery_check_b64 {
+            body["recovery_check"] = serde_json::json!(r);
+        }
+        if let Some(ticket) = signup_ticket {
+            body["signup_ticket"] = serde_json::json!(ticket);
+        }
+        let resp = self
+            .client
+            .post(self.url("/api/v1/opaque/register-finish"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+
+        parse_response_typed(resp).await
+    }
+
     pub async fn logout(&self) -> Result<Value, String> {
         let token = self.require_auth()?;
         let resp = self
@@ -2761,5 +2887,245 @@ mod error_message_priority_tests {
             .await
             .expect_err("mock returns 400");
         assert_eq!(err, "some_code_with_no_message");
+    }
+}
+
+#[cfg(test)]
+mod signup_email_code_api_tests {
+    //! Task 1552 — request-shape + response-classification coverage for the
+    //! signup email-code client methods. No test here can exercise the
+    //! REAL server's atomic ticket-consumption or multi-live-code behavior
+    //! (that's server-side, task 1525's own DB tests cover it) — these mock
+    //! a fixed response shape and assert the CLIENT sends the right body
+    //! and classifies the response correctly. The live-server run (task
+    //! file Notes) is what proves the real round trip end to end.
+
+    use axum::extract::Json as JsonExtract;
+    use axum::http::StatusCode;
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use serde_json::{Value, json};
+
+    use super::ApiClient;
+    use crate::signup_email_code::{is_legacy_fallback_error, is_ticket_invalid_error};
+
+    async fn spawn(app: Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn signup_email_start_sends_email_and_parses_the_202_body() {
+        let app = Router::new().route(
+            "/api/v1/auth/signup/email-start",
+            post(|JsonExtract(body): JsonExtract<Value>| async move {
+                assert_eq!(body["email"], "new@beebeeb.io");
+                assert!(
+                    body.as_object().unwrap().len() == 1,
+                    "email-start body must carry ONLY email, got {body}"
+                );
+                (
+                    StatusCode::ACCEPTED,
+                    Json(json!({ "message": "If that address can sign up, we've sent you a code." })),
+                )
+            }),
+        );
+        let api = ApiClient::new_for_test(spawn(app).await);
+        let resp = api
+            .signup_email_start("new@beebeeb.io")
+            .await
+            .expect("202 must not error");
+        assert_eq!(resp["message"], "If that address can sign up, we've sent you a code.");
+    }
+
+    #[tokio::test]
+    async fn signup_email_start_404_is_detected_as_the_legacy_fallback_signal() {
+        // No route mounted at all — a bare axum 404, exactly what a
+        // pre-task-1525 server returns for this path (the route doesn't
+        // exist there either).
+        let app = Router::new();
+        let api = ApiClient::new_for_test(spawn(app).await);
+        let err = api
+            .signup_email_start("anyone@beebeeb.io")
+            .await
+            .expect_err("404 must error");
+        assert_eq!(err.status, 404);
+        assert!(
+            is_legacy_fallback_error(&err),
+            "a bare 404 on /signup/email-start must read as the legacy-server signal"
+        );
+        assert!(
+            !is_ticket_invalid_error(&err),
+            "a 404 must never also read as a ticket-invalid 403"
+        );
+    }
+
+    #[tokio::test]
+    async fn signup_email_verify_returns_the_signup_ticket_on_200() {
+        let app = Router::new().route(
+            "/api/v1/auth/signup/email-verify",
+            post(|JsonExtract(body): JsonExtract<Value>| async move {
+                assert_eq!(body["email"], "new@beebeeb.io");
+                assert_eq!(body["code"], "12345678");
+                (StatusCode::OK, Json(json!({ "signup_ticket": "tkt_abc123" })))
+            }),
+        );
+        let api = ApiClient::new_for_test(spawn(app).await);
+        let resp = api
+            .signup_email_verify("new@beebeeb.io", "12345678")
+            .await
+            .expect("200 must not error");
+        assert_eq!(resp["signup_ticket"], "tkt_abc123");
+    }
+
+    #[tokio::test]
+    async fn signup_email_verify_400_surfaces_the_undifferentiated_message() {
+        let app = Router::new().route(
+            "/api/v1/auth/signup/email-verify",
+            post(|| async {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "invalid or expired code" })),
+                )
+            }),
+        );
+        let api = ApiClient::new_for_test(spawn(app).await);
+        let err = api
+            .signup_email_verify("new@beebeeb.io", "00000000")
+            .await
+            .expect_err("400 must error");
+        assert_eq!(err.status, 400);
+        assert_eq!(err.message, "invalid or expired code");
+        assert!(!is_legacy_fallback_error(&err));
+        assert!(
+            !is_ticket_invalid_error(&err),
+            "a 400 must never read as the 403 ticket-invalid signal"
+        );
+    }
+
+    #[tokio::test]
+    async fn opaque_register_start_omits_signup_ticket_field_when_none() {
+        let app = Router::new().route(
+            "/api/v1/opaque/register-start",
+            post(|JsonExtract(body): JsonExtract<Value>| async move {
+                assert!(
+                    body.get("signup_ticket").is_none(),
+                    "signup_ticket must be ABSENT (not null) from the body when the caller passed None, got {body}"
+                );
+                assert_eq!(body["email"], "new@beebeeb.io");
+                assert_eq!(body["client_message"], "Y2xpZW50LW1zZw==");
+                (StatusCode::OK, Json(json!({ "server_message": "c2VydmVyLW1zZw==" })))
+            }),
+        );
+        let api = ApiClient::new_for_test(spawn(app).await);
+        let resp = api
+            .opaque_register_start("new@beebeeb.io", "Y2xpZW50LW1zZw==", None)
+            .await
+            .expect("200 must not error");
+        assert_eq!(resp["server_message"], "c2VydmVyLW1zZw==");
+    }
+
+    #[tokio::test]
+    async fn opaque_register_start_includes_signup_ticket_field_when_present() {
+        let app = Router::new().route(
+            "/api/v1/opaque/register-start",
+            post(|JsonExtract(body): JsonExtract<Value>| async move {
+                assert_eq!(body["signup_ticket"], "tkt_abc123");
+                (StatusCode::OK, Json(json!({ "server_message": "c2VydmVyLW1zZw==" })))
+            }),
+        );
+        let api = ApiClient::new_for_test(spawn(app).await);
+        api.opaque_register_start("new@beebeeb.io", "Y2xpZW50LW1zZw==", Some("tkt_abc123"))
+            .await
+            .expect("200 must not error");
+    }
+
+    #[tokio::test]
+    async fn opaque_register_finish_includes_every_optional_field_when_all_present() {
+        let app = Router::new().route(
+            "/api/v1/opaque/register-finish",
+            post(|JsonExtract(body): JsonExtract<Value>| async move {
+                assert_eq!(body["email"], "new@beebeeb.io");
+                assert_eq!(body["client_message"], "cmVnLXVwbG9hZA==");
+                assert_eq!(body["x25519_public_key"], "eDI1NTE5LXB1Yg==");
+                assert_eq!(body["recovery_check"], "cmVjb3ZlcnktY2hlY2s=");
+                assert_eq!(body["signup_ticket"], "tkt_abc123");
+                (
+                    StatusCode::CREATED,
+                    Json(json!({ "session_token": "sess_xyz", "user_id": "11111111-1111-1111-1111-111111111111" })),
+                )
+            }),
+        );
+        let api = ApiClient::new_for_test(spawn(app).await);
+        let resp = api
+            .opaque_register_finish(
+                "new@beebeeb.io",
+                "cmVnLXVwbG9hZA==",
+                Some("eDI1NTE5LXB1Yg=="),
+                Some("cmVjb3ZlcnktY2hlY2s="),
+                Some("tkt_abc123"),
+            )
+            .await
+            .expect("201 must not error");
+        assert_eq!(resp["session_token"], "sess_xyz");
+    }
+
+    #[tokio::test]
+    async fn opaque_register_finish_omits_every_optional_field_when_all_none() {
+        let app = Router::new().route(
+            "/api/v1/opaque/register-finish",
+            post(|JsonExtract(body): JsonExtract<Value>| async move {
+                let obj = body.as_object().unwrap();
+                assert_eq!(
+                    obj.len(),
+                    2,
+                    "must carry ONLY email + client_message when every optional field is None, got {body}"
+                );
+                assert!(obj.contains_key("email"));
+                assert!(obj.contains_key("client_message"));
+                (
+                    StatusCode::CREATED,
+                    Json(json!({ "session_token": "sess_xyz", "user_id": "11111111-1111-1111-1111-111111111111" })),
+                )
+            }),
+        );
+        let api = ApiClient::new_for_test(spawn(app).await);
+        api.opaque_register_finish("new@beebeeb.io", "cmVnLXVwbG9hZA==", None, None, None)
+            .await
+            .expect("201 must not error");
+    }
+
+    #[tokio::test]
+    async fn opaque_register_finish_403_ticket_invalid_matches_the_real_server_shape() {
+        // Exact body shape confirmed against a live server this lane ran
+        // (task file Notes): the 403 carries BOTH a stable `error` code AND
+        // a human `message` — detection must key on the code alone.
+        let app = Router::new().route(
+            "/api/v1/opaque/register-finish",
+            post(|| async {
+                (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({
+                        "error": "signup_ticket_invalid",
+                        "message": "Verify your email again to get a new signup link.",
+                    })),
+                )
+            }),
+        );
+        let api = ApiClient::new_for_test(spawn(app).await);
+        let err = api
+            .opaque_register_finish("new@beebeeb.io", "cmVnLXVwbG9hZA==", None, None, Some("stale_ticket"))
+            .await
+            .expect_err("403 must error");
+        assert_eq!(err.status, 403);
+        assert_eq!(err.message, "Verify your email again to get a new signup link.");
+        assert!(
+            is_ticket_invalid_error(&err),
+            "must classify as ticket-invalid via the code, independent of the message text"
+        );
     }
 }
