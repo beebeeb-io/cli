@@ -34,7 +34,7 @@ Generated from `bb --help`. Source of truth is `src/main.rs` (clap derive).
 
 ### Sharing
 
-- `bb share <file-id>` — create an encrypted share link (`--expires`, `--max-opens`, `--passphrase`, `--double-encrypted`).
+- `bb share <path-or-id>` — create an encrypted share link; accepts a vault path, the short ID `bb ls` prints, or a UUID (same resolver as `bb pull`: `commands::pull::resolve_file_arg`) (`--expires`, `--max-opens`, `--passphrase`, `--double-encrypted`).
 - `bb shares` — list active share links.
 - `bb unshare [share-id]` — revoke a share link (interactive picker without args).
 

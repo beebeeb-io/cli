@@ -24,9 +24,10 @@ fn parse_hours(s: &str) -> Result<u64, String> {
     }
 }
 
-/// `bb share <file_id>` — create a shareable link for a file.
+/// `bb share <file>` — create a shareable link for a file. `file` is a vault
+/// path, a short ID from `bb ls`, or a full UUID (same resolver as `bb pull`).
 pub async fn run(
-    file_id: String,
+    file: String,
     expires: Option<String>,
     max_opens: Option<u32>,
     passphrase: bool,
@@ -34,6 +35,11 @@ pub async fn run(
 ) -> Result<(), String> {
     let api = ApiClient::from_config();
     api.require_auth()?;
+
+    // Resolve a path / short ID / UUID to the full file UUID first: the share
+    // route and the double-encryption key derivation both need the canonical
+    // UUID. Done before the passphrase prompt so a typo fails immediately.
+    let (file_id, _) = crate::commands::pull::resolve_file_arg(&api, &file).await?;
 
     let passphrase_value = if passphrase {
         print!(

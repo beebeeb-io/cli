@@ -266,7 +266,7 @@ enum Commands {
 
     /// Create an encrypted share link
     Share {
-        /// File ID to share
+        /// File path, short ID (e.g. 3e15382b from `bb ls`), or UUID
         file_id: String,
 
         /// Link expiry in hours (e.g. 24) or duration (e.g. "7d")
@@ -654,7 +654,7 @@ const HELP_MAIN_COMMANDS: &[(&str, &str, &str)] = &[
     ("search", "<query>", "find files by name · --regex"),
     ("push", "<path>", "upload · encrypts on the fly"),
     ("pull", "<id|path>", "download and decrypt"),
-    ("share", "<id>", "create encrypted link (expiry, passphrase)"),
+    ("share", "<path|id>", "create encrypted link (expiry, passphrase)"),
     ("sync", "<dir> [remote]", "sync + watch · continuous by default"),
     ("webdav", "", "mount vault in Finder / Explorer"),
     ("whoami", "", "user · plan · region · quota · session"),

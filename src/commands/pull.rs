@@ -16,25 +16,7 @@ pub async fn run(file_id: String, output: Option<PathBuf>, zip: bool) -> Result<
         return run_zip(&api, &file_id, output).await;
     }
 
-    // Detect whether the argument is a UUID, a short ID prefix, or a
-    // plaintext path.
-    let (file_id, resolved_name) = if uuid::Uuid::parse_str(&file_id).is_ok() {
-        // Already a full UUID — use it directly.
-        (file_id, None)
-    } else if looks_like_id_prefix(&file_id) {
-        // Looks like a hex prefix (e.g. "3e15382b" from `bb ls` output).
-        // Try to resolve it to a full UUID.
-        match api.find_file_by_id_prefix(&file_id).await? {
-            Some(full_id) => (full_id, None),
-            None => {
-                // No match by prefix — fall through to path resolution.
-                resolve_as_path(&api, &file_id).await?
-            }
-        }
-    } else {
-        // Treat as a plaintext path and resolve it.
-        resolve_as_path(&api, &file_id).await?
-    };
+    let (file_id, resolved_name) = resolve_file_arg(&api, &file_id).await?;
 
     // If no --output was given and we resolved a path, use the resolved name.
     let output = output.or_else(|| resolved_name.as_deref().map(PathBuf::from));
@@ -211,6 +193,28 @@ pub async fn run(file_id: String, output: Option<PathBuf>, zip: bool) -> Result<
     );
 
     Ok(())
+}
+
+/// Resolve a user-supplied file reference to `(full_uuid, resolved_name)`.
+///
+/// Accepts, in order: a full UUID (used as-is, name `None`), a hex short-ID
+/// prefix such as the 8-char IDs `bb ls` prints (falls through to path
+/// resolution when no file matches), or a plaintext vault path like
+/// `folder1/a.bin`. Folders and the vault root are rejected. Shared by
+/// `bb pull` and `bb share` so both accept exactly the same references.
+pub(crate) async fn resolve_file_arg(api: &ApiClient, arg: &str) -> Result<(String, Option<String>), String> {
+    if uuid::Uuid::parse_str(arg).is_ok() {
+        // Already a full UUID — use it directly.
+        return Ok((arg.to_string(), None));
+    }
+    if looks_like_id_prefix(arg) {
+        // Looks like a hex prefix (e.g. "3e15382b" from `bb ls` output).
+        if let Some(full_id) = api.find_file_by_id_prefix(arg).await? {
+            return Ok((full_id, None));
+        }
+        // No match by prefix — fall through to path resolution.
+    }
+    resolve_as_path(api, arg).await
 }
 
 /// Returns `true` if the string looks like a UUID prefix: 8-36 hex chars
