@@ -66,12 +66,12 @@ bb sync ~/vault /Documents  # Two-way sync, then watch for live changes
 | `bb request <create\|list\|send\|rm>` | Account-less links that let anyone upload *into* your vault |
 | `bb sync <local> [remote]` | Bidirectional folder sync; continuous by default (`--once`, `--daemon`, `--delete`) |
 | `bb webdav` | Serve the vault over local WebDAV (Finder, Explorer, rclone, Cyberduck) |
-| `bb mount <point>` | Mount the vault as a filesystem via FUSE (macFUSE / libfuse3) |
+| `bb mount <point>` | FUSE mount (macFUSE / libfuse3). Source builds with `--features fuse` only; release binaries do not include it, so use `bb webdav` |
 | `bb billing <show\|usage\|invoices\|portal\|addons>` | Plan and renewal info, per-region usage, invoices (`bb billing invoices --open <id>` downloads one as PDF), the billing portal, and add-ons |
 | `bb speedtest` | Benchmark network throughput and crypto speed |
 | `bb completions <shell>` | Print a completion script for bash, zsh, fish, or powershell |
 
-Full reference, including every flag: `bb --help`.
+Command overview: `bb --help`. Every flag of a command: `bb <command> --help` (for example `bb push --help`).
 
 ## Security model
 
@@ -89,7 +89,7 @@ The crypto itself lives in the shared [`core`](https://github.com/beebeeb-io/cor
 
 ```sh
 cargo build --release                  # bb at target/release/bb
-cargo build --release --features fuse  # with FUSE mount support
+cargo build --release --features fuse  # with FUSE mount support (not in release binaries)
 cargo test
 cargo clippy -- -D warnings
 ```

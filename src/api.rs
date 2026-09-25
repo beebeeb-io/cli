@@ -51,7 +51,34 @@ async fn pace_if_needed() {
     }
 }
 
+/// Shown for any 401 the server answers with its generic `unauthorized` body
+/// (no human `message` of its own): the stored session token is expired or was
+/// revoked, and the only fix is signing in again. Replaces the bare
+/// `error: unauthorized` the CLI used to print (flow "CLI end to end", issue 6).
+pub(crate) const SESSION_EXPIRED_MESSAGE: &str =
+    "Your session expired or was revoked. Run `bb login` to sign in again.";
+
+/// The `scheme://host[:port]` a failed request was aimed at — what the user
+/// configured (`api_url` / `--api`), without the route path.
+fn request_origin(error: &reqwest::Error) -> Option<String> {
+    let url = error.url()?;
+    let host = url.host_str()?;
+    Some(match url.port() {
+        Some(port) => format!("{}://{host}:{port}", url.scheme()),
+        None => format!("{}://{host}", url.scheme()),
+    })
+}
+
 fn format_request_error(error: reqwest::Error) -> String {
+    // A connect failure (refused, DNS, unreachable network) has one useful
+    // reading for a user: the server could not be reached. Name the server so
+    // a wrong `--api` / `api_url` is obvious, and skip reqwest's error chain.
+    if error.is_connect() {
+        return match request_origin(&error) {
+            Some(origin) => format!("Can't reach {origin} \u{2014} check your connection or --api"),
+            None => "Can't reach the Beebeeb API \u{2014} check your connection or --api".to_string(),
+        };
+    }
     let mut message = format!("request failed: {error}");
     let mut source = error.source();
     while let Some(err) = source {
@@ -2014,11 +2041,25 @@ async fn parse_response_typed(resp: reqwest::Response) -> Result<Value, ApiError
         let code = parsed
             .as_ref()
             .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from));
-        let message = parsed
+        let server_message = parsed
             .as_ref()
-            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
-            .or_else(|| code.clone())
-            .unwrap_or_else(|| format!("{status}: {body}"));
+            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from));
+        // A 401 without a human `message` is the server's generic
+        // `ApiError::Unauthorized` — the session token was rejected. Say so,
+        // and say how to fix it. The stable `code` is kept untouched, so the
+        // `classify_*` helpers that tell "wrong 2FA code" / "wrong password"
+        // apart from a dead session (they match `is_code("unauthorized")`)
+        // behave exactly as before.
+        let message = if status == reqwest::StatusCode::UNAUTHORIZED
+            && server_message.is_none()
+            && code.as_deref().is_none_or(|c| c == "unauthorized")
+        {
+            SESSION_EXPIRED_MESSAGE.to_string()
+        } else {
+            server_message
+                .or_else(|| code.clone())
+                .unwrap_or_else(|| format!("{status}: {body}"))
+        };
         return Err(ApiError {
             code,
             message,

@@ -22,6 +22,8 @@
 //!
 //! Placeholders: `<a|b|c>` expands to one invocation per alternative, any
 //! other `<x>` becomes a dummy positional value, and `[x]` is dropped.
+//! `<command>` in the subcommand slot (`bb <command> --help`) names no
+//! concrete command, so that span is not an invocation and is skipped.
 
 use clap::CommandFactory;
 use clap::error::ErrorKind;
@@ -78,6 +80,10 @@ fn expand(span: &str) -> (Vec<Vec<String>>, Vec<String>) {
                 continue; // `--flag <value>`: the value placeholder, not a positional
             }
             let inner = &tok[1..tok.len() - 1];
+            if inner == "command" && variants.iter().all(Vec::is_empty) {
+                // `bb <command> …`: generic advice, not a concrete invocation.
+                return (Vec::new(), Vec::new());
+            }
             if inner.contains('|') {
                 let alts: Vec<&str> = inner.split('|').collect();
                 variants = variants
@@ -273,6 +279,19 @@ fn readme_flags_guard_catches_drift() {
         failures[2].contains("README.md:5") && failures[2].contains("--double-encrypted"),
         "{failures:?}"
     );
+}
+
+#[test]
+fn readme_flags_skips_generic_command_placeholder() {
+    // `bb <command> --help` is advice about every command, not one invocation.
+    let (variants, flags) = expand("bb <command> --help");
+    assert!(variants.is_empty() && flags.is_empty(), "{variants:?} {flags:?}");
+    let (checked, failures) = check("Every flag: `bb <command> --help` (for example `bb push --help`).\n");
+    assert!(failures.is_empty(), "{failures:?}");
+    assert_eq!(checked, 2, "the concrete `bb push --help` example is still checked");
+    // A placeholder after a real subcommand is still a positional.
+    let (variants, _) = expand("bb share <command>");
+    assert_eq!(variants, vec![vec!["share".to_string(), "x".to_string()]]);
 }
 
 #[test]
