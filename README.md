@@ -61,7 +61,7 @@ bb sync ~/vault /Documents  # Two-way sync, then watch for live changes
 | `bb push <path>` | Encrypt and upload a file or folder (alias `bb upload`) |
 | `bb pull <path-or-id>` | Download and decrypt by vault path or UUID (alias `bb download`) |
 | `bb ls [path]` | List vault contents with locally decrypted names |
-| `bb share <file-id>` | Create an encrypted share link (`--expires`, `--max-opens`, `--passphrase`, `--double-encrypted`) |
+| `bb share <file-id>` | Create an encrypted share link (`--expires`, `--max-opens`, `--passphrase`) |
 | `bb shares` / `bb unshare` | List or revoke share links |
 | `bb request <create\|list\|send\|rm>` | Account-less links that let anyone upload *into* your vault |
 | `bb sync <local> [remote]` | Bidirectional folder sync; continuous by default (`--once`, `--daemon`, `--delete`) |
@@ -81,7 +81,7 @@ beebeeb is zero-knowledge: the server stores only ciphertext and cannot read you
 - **Encryption.** File content and filenames are sealed with AES-256-GCM before upload, in independently-nonced 1 MB chunks.
 - **Login.** The device-authorization flow uses an ephemeral P-256 ECDH keypair, so the session token and master key are delivered encrypted and never exposed in transit.
 - **Session storage.** After login, the token and master key live in `~/Library/Application Support/beebeeb/config.json` (macOS) or `~/.config/beebeeb/config.json` (Linux). Guard this file like an SSH identity. Sessions expire after 30 days.
-- **Share links.** Standard links carry the file key in the URL. `--double-encrypted` wraps the file key under a client key kept in the URL fragment (never sent to the server); `--passphrase` wraps it with Argon2id key material.
+- **Share links.** Every link is end-to-end encrypted: the file key is wrapped (AES-256-GCM) under a random client key `K_c` that travels only in the URL fragment (`#key=…`), which browsers never send to the server. The server stores the opaque wrapped key plus `K_c` and the link token wrapped under your master key, so `bb shares` can show the link again. `--passphrase` adds a server-checked passphrase gate (Argon2id-hashed at rest) on top.
 
 The crypto itself lives in the shared [`core`](https://github.com/beebeeb-io/core) crate, so the CLI, web, and mobile clients all encrypt the same way and read each other's files.
 

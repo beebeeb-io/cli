@@ -659,10 +659,20 @@ impl ApiClient {
         expires_in_hours: Option<u64>,
         max_opens: Option<u32>,
         passphrase: Option<&str>,
-        wrapped_file_key: Option<String>,
+        share: &crate::commands::share::ShareMaterial,
     ) -> Result<Value, String> {
         let token = self.require_auth()?;
-        let mut body = serde_json::json!({ "file_id": file_id });
+        // Single-file, double-encrypted, owner-recoverable create — the same
+        // body the web share dialog sends (see commands/share.rs "Share wire
+        // format"). The raw share token is client-minted so it can be wrapped
+        // under the master key; the server stores only its hash.
+        let mut body = serde_json::json!({
+            "file_id": file_id,
+            "wrapped_file_key": share.wrapped_file_key,
+            "token": share.token,
+            "owner_wrapped_key": share.owner_wrapped_key,
+            "owner_wrapped_token": share.owner_wrapped_token,
+        });
         if let Some(h) = expires_in_hours {
             body["expires_in_hours"] = serde_json::json!(h);
         }
@@ -671,9 +681,6 @@ impl ApiClient {
         }
         if let Some(p) = passphrase {
             body["passphrase"] = serde_json::json!(p);
-        }
-        if let Some(wfk) = wrapped_file_key {
-            body["wrapped_file_key"] = serde_json::json!(wfk);
         }
         let resp = self
             .client
