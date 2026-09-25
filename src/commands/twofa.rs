@@ -55,7 +55,7 @@
 
 use serde_json::Value;
 
-use crate::api::ApiClient;
+use crate::api::{ApiClient, ApiError};
 
 /// Parsed `bb 2fa status` view of `GET /api/v1/auth/me`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -367,29 +367,45 @@ enum TotpErrorOutcome {
     AmbiguousUnauthorized,
 }
 
-/// Classify a raw `POST /api/v1/auth/2fa/enable` error string.
-fn classify_enable_error(e: String) -> TotpErrorOutcome {
-    if e.contains("has not been set up") {
+/// Classify a `POST /api/v1/auth/2fa/enable` error.
+///
+/// `totp_enable` returns `ApiError` (task 1547 finding 1, Codex review on PR
+/// #33), but `beebeeb-api/src/routes/totp.rs`'s `ApiError::BadRequest(msg)`
+/// (the "has not been set up"/"already enabled" cases) has no distinct
+/// stable code of its own — the wire body is `{"error": <the dynamic
+/// message itself>}`, so `code` and `message` are identical text, not a
+/// short slug. Those two checks stay message-substring matches for exactly
+/// that reason. `Unauthorized` genuinely IS a stable short code
+/// (`{"error": "unauthorized"}`) — matched by `is_code` first, falling back
+/// to the message text for local/transport errors that never carry a code.
+fn classify_enable_error(e: ApiError) -> TotpErrorOutcome {
+    if e.message.contains("has not been set up") {
         TotpErrorOutcome::Message("run `bb 2fa setup` first".to_string())
-    } else if e.contains("already enabled") {
+    } else if e.message.contains("already enabled") {
         TotpErrorOutcome::Message("2FA is already enabled".to_string())
-    } else if e.to_lowercase().contains("unauthorized") || e.contains("401") {
+    } else if e.is_code("unauthorized")
+        || e.message.to_lowercase().contains("unauthorized")
+        || e.message.contains("401")
+    {
         TotpErrorOutcome::AmbiguousUnauthorized
     } else {
-        TotpErrorOutcome::Message(e)
+        TotpErrorOutcome::Message(e.message)
     }
 }
 
-/// Classify a raw `POST /api/v1/auth/2fa/disable` error string. Same
-/// pure/testable shape as `classify_enable_error` — see its doc comment for
-/// the confirmed live wire format and the ambiguous-unauthorized rationale.
-fn classify_disable_error(e: String) -> TotpErrorOutcome {
-    if e.contains("not currently enabled") || e.contains("not set up") {
+/// Classify a `POST /api/v1/auth/2fa/disable` error. Same pure/testable
+/// shape as `classify_enable_error` — see its doc comment for the confirmed
+/// live wire format and the ambiguous-unauthorized rationale.
+fn classify_disable_error(e: ApiError) -> TotpErrorOutcome {
+    if e.message.contains("not currently enabled") || e.message.contains("not set up") {
         TotpErrorOutcome::Message("2FA is not currently enabled".to_string())
-    } else if e.to_lowercase().contains("unauthorized") || e.contains("401") {
+    } else if e.is_code("unauthorized")
+        || e.message.to_lowercase().contains("unauthorized")
+        || e.message.contains("401")
+    {
         TotpErrorOutcome::AmbiguousUnauthorized
     } else {
-        TotpErrorOutcome::Message(e)
+        TotpErrorOutcome::Message(e.message)
     }
 }
 
@@ -737,7 +753,7 @@ mod tests {
     /// exactly `"2FA has not been set up yet"`.
     #[test]
     fn classify_enable_error_reports_setup_required() {
-        let outcome = classify_enable_error("2FA has not been set up yet".to_string());
+        let outcome = classify_enable_error(ApiError::test_message("2FA has not been set up yet"));
         assert_eq!(
             outcome,
             TotpErrorOutcome::Message("run `bb 2fa setup` first".to_string()),
@@ -752,7 +768,7 @@ mod tests {
     /// enabled`, exit 1.
     #[test]
     fn classify_enable_error_reports_already_enabled() {
-        let outcome = classify_enable_error("2FA is already enabled".to_string());
+        let outcome = classify_enable_error(ApiError::test_message("2FA is already enabled"));
         assert_eq!(
             outcome,
             TotpErrorOutcome::Message("2FA is already enabled".to_string()),
@@ -774,23 +790,26 @@ mod tests {
     /// final message; see `diagnose_unauthorized_*` below for that.
     #[test]
     fn classify_enable_error_reports_ambiguous_on_bare_unauthorized() {
-        let outcome = classify_enable_error("unauthorized".to_string());
+        // The real shape: `totp_enable` returns `ApiError` with
+        // `code: Some("unauthorized")` (task 1547 finding 1).
+        let outcome = classify_enable_error(ApiError::test_code("unauthorized"));
         assert_eq!(outcome, TotpErrorOutcome::AmbiguousUnauthorized, "got: {outcome:?}");
     }
 
     /// Defensive belt: a non-JSON-body error (e.g. a proxy 401 in front of a
     /// misconfigured `--api`) falls through `parse_response`'s
     /// `format!("{status}: {body}")` path instead, which DOES carry the
-    /// capitalized/status-coded form — must still classify as ambiguous.
+    /// capitalized/status-coded form, and carries no code at all — must
+    /// still classify as ambiguous via the message-substring fallback.
     #[test]
     fn classify_enable_error_reports_ambiguous_on_status_prefixed_form() {
-        let outcome = classify_enable_error("401 Unauthorized: unauthorized".to_string());
+        let outcome = classify_enable_error(ApiError::test_message("401 Unauthorized: unauthorized"));
         assert_eq!(outcome, TotpErrorOutcome::AmbiguousUnauthorized, "got: {outcome:?}");
     }
 
     #[test]
     fn classify_enable_error_passes_through_unrecognized_errors() {
-        let outcome = classify_enable_error("network failed".to_string());
+        let outcome = classify_enable_error(ApiError::test_message("network failed"));
         assert_eq!(outcome, TotpErrorOutcome::Message("network failed".to_string()));
     }
 
@@ -800,7 +819,7 @@ mod tests {
     /// bare-message wire format.
     #[test]
     fn classify_disable_error_reports_not_enabled_when_never_set_up() {
-        let outcome = classify_disable_error("2FA is not set up".to_string());
+        let outcome = classify_disable_error(ApiError::test_message("2FA is not set up"));
         assert_eq!(
             outcome,
             TotpErrorOutcome::Message("2FA is not currently enabled".to_string()),
@@ -815,7 +834,7 @@ mod tests {
     /// enabled`, exit 1.
     #[test]
     fn classify_disable_error_reports_not_enabled_when_row_disabled() {
-        let outcome = classify_disable_error("2FA is not currently enabled".to_string());
+        let outcome = classify_disable_error(ApiError::test_message("2FA is not currently enabled"));
         assert_eq!(
             outcome,
             TotpErrorOutcome::Message("2FA is not currently enabled".to_string()),
@@ -825,13 +844,13 @@ mod tests {
 
     #[test]
     fn classify_disable_error_reports_ambiguous_on_bare_unauthorized() {
-        let outcome = classify_disable_error("unauthorized".to_string());
+        let outcome = classify_disable_error(ApiError::test_code("unauthorized"));
         assert_eq!(outcome, TotpErrorOutcome::AmbiguousUnauthorized, "got: {outcome:?}");
     }
 
     #[test]
     fn classify_disable_error_passes_through_unrecognized_errors() {
-        let outcome = classify_disable_error("network failed".to_string());
+        let outcome = classify_disable_error(ApiError::test_message("network failed"));
         assert_eq!(outcome, TotpErrorOutcome::Message("network failed".to_string()));
     }
 

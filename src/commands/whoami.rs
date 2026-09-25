@@ -41,9 +41,17 @@ pub async fn run() -> Result<(), String> {
     let plan_slug = sub.get("plan").and_then(|v| v.as_str()).unwrap_or("free");
     let plan = Plan::from_slug(plan_slug);
     let extra_tb = sub.get("extra_storage_tb").and_then(|v| v.as_i64()).unwrap_or(0);
-    let bonus_bytes = sub.get("bonus_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
-    let total_bytes = effective_quota(plan, extra_tb, bonus_bytes);
-    let plan_label = build_plan_label(plan, extra_tb, bonus_bytes);
+    // 1547 finding 4: quota_bytes is the server's authoritative total (folds
+    // in referral bonus_storage_bytes + the DB plan_catalog size) — read it
+    // straight off the subscription response, the same way `bb billing show`
+    // does post-0485, instead of recomputing via effective_quota() with a
+    // `bonus_bytes` field this response never actually carries. Falls back to
+    // a client-side compute only if the server ever omits the field.
+    let total_bytes = sub
+        .get("quota_bytes")
+        .and_then(|v| v.as_i64())
+        .unwrap_or_else(|| effective_quota(plan, extra_tb, 0));
+    let plan_label = build_plan_label(plan, extra_tb, total_bytes);
 
     let region_label = my_region
         .get("preferred_region")
@@ -115,7 +123,6 @@ pub async fn run() -> Result<(), String> {
                 "email": email,
                 "plan": plan.slug(),
                 "extra_storage_tb": extra_tb,
-                "bonus_bytes": bonus_bytes,
                 "storage_used": used_bytes,
                 "storage_total": total_bytes,
                 "files": file_count,
@@ -196,26 +203,52 @@ pub async fn run() -> Result<(), String> {
     Ok(())
 }
 
-/// Build a descriptive plan label like "Pro — 8.0 TB (5.0 TB base + 3.0 TB extra)".
-fn build_plan_label(plan: Plan, extra_tb: i64, bonus_bytes: i64) -> String {
+/// Build a descriptive plan label like "Pro — 8.0 TB (1.0 TB base + 7.0 TB extra)".
+///
+/// `total_bytes` MUST be the server-authoritative quota (`quota_bytes` off
+/// `GET /billing/subscription`) — **task 1547 finding 4.**
+///
+/// **Codex review on PR #33 (task 1547 finding 2):** this used to infer a
+/// third "bonus" component as `total_bytes - base - extra`, on the theory
+/// that any leftover was a referral bonus. That inference is unsound: the
+/// subscription response (`beebeeb-api/src/routes/billing.rs::subscription`)
+/// does not expose a base/bonus split at all — only `quota_bytes` (the
+/// already-folded-in total; see `quota.rs::get_user_quota`, which computes
+/// it server-side as `effective_quota(plan, extra_storage_tb,
+/// bonus_storage_bytes)` and never returns the pieces separately) and
+/// `extra_storage_tb`. `base` here is this CLI's own hardcoded
+/// `Plan::base_storage_bytes()` (a `beebeeb-core` constant) — if it drifts
+/// from whatever the server actually granted (e.g. a stale `CORE_REV` pin
+/// after a pricing constant changes; Pro's base went 5 TB → 1 TB under
+/// pricing-v2), the "leftover" is really just that drift, not a bonus, and
+/// labeling it "bonus" would be a fabricated, wrong claim.
+///
+/// Fix: only show the "(base + extra)" breakdown when it EXACTLY accounts
+/// for the server's `total_bytes` (this CLI's `base` plus the server's own
+/// `extra_storage_tb` sums to exactly what the server granted). Any
+/// unexplained remainder — a real referral bonus, or the two sides
+/// disagreeing on the plan's base — is never split out or labeled; the
+/// total alone is shown, and it is always correct because it comes straight
+/// from the server.
+fn build_plan_label(plan: Plan, extra_tb: i64, total_bytes: i64) -> String {
     let name = capitalise(plan.slug());
-    let total = effective_quota(plan, extra_tb, bonus_bytes);
     let base = plan.base_storage_bytes();
-
-    if extra_tb > 0 || bonus_bytes > 0 {
-        let mut parts = vec![format!("{} base", format_storage_si(base))];
-        if extra_tb > 0 {
-            parts.push(format!(
-                "{} extra",
-                format_storage_si(extra_tb * beebeeb_types::quota::ONE_TB)
-            ));
-        }
-        if bonus_bytes > 0 {
-            parts.push(format!("{} bonus", format_storage_si(bonus_bytes)));
-        }
-        format!("{} \u{2014} {} ({})", name, format_storage_si(total), parts.join(" + "),)
+    let extra_bytes = if extra_tb > 0 {
+        extra_tb * beebeeb_types::quota::ONE_TB
     } else {
-        format!("{} \u{2014} {}", name, format_storage_si(total))
+        0
+    };
+
+    if extra_tb > 0 && base + extra_bytes == total_bytes {
+        format!(
+            "{} \u{2014} {} ({} base + {} extra)",
+            name,
+            format_storage_si(total_bytes),
+            format_storage_si(base),
+            format_storage_si(extra_bytes),
+        )
+    } else {
+        format!("{} \u{2014} {}", name, format_storage_si(total_bytes))
     }
 }
 
@@ -289,5 +322,79 @@ mod tests {
         // Starter (100 GB base, task 1386) shares Basic's throttle tier —
         // same intent as the pre-enum-refactor string match.
         assert_eq!(upload_limit_for_plan(Plan::Starter), upload_limit_for_plan(Plan::Basic));
+    }
+
+    // ── build_plan_label (task 1547 finding 4, Codex review on PR #33) ──────
+    //
+    // `GET /billing/subscription` exposes only `quota_bytes` (the server-
+    // folded total) and `extra_storage_tb` — never a base/bonus split — so a
+    // "bonus" inferred client-side from `total_bytes - base - extra` is
+    // unsound whenever this CLI's own `Plan::base_storage_bytes()` drifts
+    // from what the server actually granted. These tests are RED against
+    // the pre-fix `implied_bonus_bytes` behavior (it fabricated a "bonus"
+    // line here) and GREEN against the fix: no split is ever shown unless
+    // base + extra exactly accounts for the server's total.
+
+    #[test]
+    fn build_plan_label_shows_the_servers_total_bytes_directly_never_double_counted() {
+        // `total_bytes` is the server's authoritative `quota_bytes` off
+        // `GET /billing/subscription` — it ALREADY includes base + extra +
+        // any referral bonus. Passing it straight through must not be added
+        // on top of the plan's base storage again.
+        let total_bytes = 6_000_000_000; // some server-granted total unrelated to Free's 5 GB base
+        let label = build_plan_label(Plan::Free, 0, total_bytes);
+        assert!(
+            label.contains(&format_storage_si(total_bytes)),
+            "label must show the server's total (6.0 GB) directly, not base+total double-counted: {label}"
+        );
+        assert!(
+            !label.contains(&format_storage_si(11_000_000_000)),
+            "must not double-count base + total_bytes: {label}"
+        );
+    }
+
+    #[test]
+    fn build_plan_label_breaks_down_extra_when_it_exactly_accounts_for_the_total() {
+        // extra_storage_tb is a real, server-reported field: when base +
+        // extra reconciles exactly with the server's total, showing the
+        // breakdown is honest.
+        let extra_tb = 2;
+        let total_bytes = Plan::Pro.base_storage_bytes() + extra_tb * beebeeb_types::quota::ONE_TB;
+        let label = build_plan_label(Plan::Pro, extra_tb, total_bytes);
+        assert!(label.contains(&format_storage_si(total_bytes)), "label: {label}");
+        assert!(label.contains("extra"), "label: {label}");
+        assert!(label.contains("base"), "label: {label}");
+    }
+
+    /// RED-first regression (Codex, PR #33, task 1547 finding 2): a server
+    /// total that does NOT reconcile with `base + extra` — e.g. a real
+    /// referral bonus folded server-side, or this CLI's `base` drifting from
+    /// what the server actually granted — must never be presented as a
+    /// "bonus". Before the fix, `implied_bonus_bytes` happily printed
+    /// "… (1.0 TB base + 2.0 TB extra + 500.0 MB bonus)" here. After the
+    /// fix, an unreconciled remainder collapses to plan + total only — no
+    /// fabricated breakdown, no word "bonus" anywhere in this CLI.
+    #[test]
+    fn build_plan_label_never_fabricates_a_bonus_for_an_unreconciled_remainder() {
+        let extra_tb = 2;
+        let unexplained_remainder = 500_000_000i64; // e.g. a referral bonus, or core-version drift
+        let total_bytes =
+            Plan::Pro.base_storage_bytes() + extra_tb * beebeeb_types::quota::ONE_TB + unexplained_remainder;
+        let label = build_plan_label(Plan::Pro, extra_tb, total_bytes);
+        assert!(
+            !label.contains("bonus"),
+            "must never fabricate a bonus label for an unreconciled remainder: {label}"
+        );
+        assert!(
+            label.contains(&format_storage_si(total_bytes)),
+            "the server's total must still be shown: {label}"
+        );
+    }
+
+    #[test]
+    fn build_plan_label_with_no_extra_shows_just_plan_and_total() {
+        let total_bytes = Plan::Basic.base_storage_bytes();
+        let label = build_plan_label(Plan::Basic, 0, total_bytes);
+        assert_eq!(label, format!("Basic \u{2014} {}", format_storage_si(total_bytes)));
     }
 }
