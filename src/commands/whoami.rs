@@ -8,11 +8,9 @@ use crate::ui;
 pub async fn run() -> Result<(), String> {
     let config = load_config();
     if config.session_token.is_none() {
-        println!(
-            "  {}",
-            "Not logged in. Run `bb login` to authenticate.".custom_color(crate::colors::RED_ERR),
-        );
-        return Ok(());
+        // Exit non-zero (main prints this on stderr): scripts use `bb whoami`
+        // as the "am I signed in?" check.
+        return Err("Not logged in. Run `bb login` to sign in.".to_string());
     }
 
     let api = ApiClient::from_config();
@@ -27,11 +25,16 @@ pub async fn run() -> Result<(), String> {
         api.get_file_count(),
     );
 
-    let me = me_res.unwrap_or_default();
-    let sub = sub_res.unwrap_or_default();
+    // Identity, plan and usage are what this command exists to report — if
+    // any of them failed (e.g. a revoked session → 401), fail with that error
+    // instead of printing placeholders ("user unknown, plan Free") that would
+    // tell a paying user they are on Free. Region and the session list stay
+    // best-effort decorations.
+    let me = me_res?;
+    let sub = sub_res?;
+    let usage = usage_res?;
     let my_region = my_region_res.unwrap_or_default();
     let sessions = sessions_res.unwrap_or_default();
-    let usage = usage_res.unwrap_or_default();
     let count = count_res.unwrap_or_default();
 
     // ── Parse fields ─────────────────────────────────────────────────────────
