@@ -164,6 +164,12 @@ enum Commands {
         /// Download an entire folder as a zip archive
         #[arg(long)]
         zip: bool,
+
+        /// Overwrite the output file if it already exists. Without this, an
+        /// existing file is never replaced: bb asks on an interactive terminal
+        /// and refuses (non-zero exit) otherwise — pass -o to save elsewhere
+        #[arg(short = 'f', long)]
+        force: bool,
     },
 
     /// List files (decrypts names locally)
@@ -847,7 +853,8 @@ async fn main() {
             output,
             output_flag,
             zip,
-        } => commands::pull::run(file_id, output.or(output_flag), zip).await,
+            force,
+        } => commands::pull::run(file_id, output.or(output_flag), zip, force).await,
         Commands::Ls {
             path,
             long,
