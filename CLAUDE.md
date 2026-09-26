@@ -29,7 +29,7 @@ Generated from `bb --help`. Source of truth is `src/main.rs` (clap derive).
 ### Files
 
 - `bb push <path>` (alias `bb upload`) — encrypt and upload a file or folder. Uses the **v2 upload-session route** `/api/v1/uploads/*` (`init` → `chunks/{i}` → `complete`), keyed by `upload_session_id`. `bb push --replace` sends the existing file's `file_id` + `base_version_number` so the server versions **by file_id** (snapshots the prior version, bumps `version_number`, UPDATEs in place) — no `name_encrypted` byte-match. A fresh push omits `file_id`.
-- `bb pull <id-or-path>` (alias `bb download`) — **streaming** download + decrypt (constant memory, live progress bar). Preserves legacy decrypt: JSON-blob chunks and pre-`bb repair` binary-UUID files fall back to the buffered path.
+- `bb pull <id-or-path>` (alias `bb download`) — **streaming** download + decrypt (constant memory, live progress bar). Preserves legacy decrypt: JSON-blob chunks and pre-`bb repair` binary-UUID files fall back to the buffered path. **Never silently overwrites** an existing local file (single-file and `--zip` output): `-f/--force` overwrites; otherwise a rich TTY gets a `y/N` prompt and every non-interactive run (`--json`, `--quiet`, piped stdin) refuses with a non-zero exit naming `--force` / `-o <path>`. Checked before any bytes download. Covered by `tests/pull_overwrite.rs` (real `bb` binary vs an in-process mock API). Recursive folder pulls into an existing directory are not guarded yet.
 - `bb ls [path]` — list vault contents.
 - `bb quota` — storage usage with a colour-coded bar.
 

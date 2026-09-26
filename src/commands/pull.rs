@@ -7,13 +7,13 @@ use std::sync::atomic::AtomicBool;
 use crate::api::ApiClient;
 use crate::commands::push::load_master_key;
 
-pub async fn run(file_id: String, output: Option<PathBuf>, zip: bool) -> Result<(), String> {
+pub async fn run(file_id: String, output: Option<PathBuf>, zip: bool, force: bool) -> Result<(), String> {
     let api = ApiClient::from_config();
     api.require_auth()?;
 
     // --zip mode: resolve as folder and download as a zip archive
     if zip {
-        return run_zip(&api, &file_id, output).await;
+        return run_zip(&api, &file_id, output, force).await;
     }
 
     let (file_id, resolved_name) = resolve_file_arg(&api, &file_id).await?;
@@ -68,6 +68,10 @@ pub async fn run(file_id: String, output: Option<PathBuf>, zip: bool) -> Result<
 
     // Output path (needed up front for the streaming write).
     let out_path = output.unwrap_or_else(|| PathBuf::from(decrypted_name.as_deref().unwrap_or(&file_id)));
+
+    // Never clobber a local file silently (flow "CLI end to end", issue 5):
+    // checked before any bytes are downloaded, for both decrypt paths below.
+    guard_existing_output(&out_path, force)?;
 
     // File-request uploads are sealed under a per-file content key C, not the
     // master-derived key the streaming path assumes. Decrypt them via the
@@ -215,6 +219,61 @@ pub(crate) async fn resolve_file_arg(api: &ApiClient, arg: &str) -> Result<(Stri
         // No match by prefix — fall through to path resolution.
     }
     resolve_as_path(api, arg).await
+}
+
+/// Refuse to overwrite an existing local path unless the user said so.
+///
+/// Before this guard `bb pull note.txt` replaced a local `note.txt` with the
+/// remote content — exit 0, no prompt, no backup — so unsaved local edits were
+/// lost. Now:
+/// - nothing at `out_path` → proceed;
+/// - a directory at `out_path` → always an error (a file cannot replace it);
+/// - `--force` → proceed (the atomic `.tmp` + rename replaces the file);
+/// - a rich terminal with a real tty on stdin → `y/N` prompt (default no);
+/// - otherwise (`--json`, `--quiet`, piped/redirected stdin, scripts) → refuse
+///   with a non-zero exit, naming `--force` and `-o <path>`. A piped `y` is not
+///   consent (same rule as `bb passkey remove`, Codex PR #24).
+fn guard_existing_output(out_path: &std::path::Path, force: bool) -> Result<(), String> {
+    let meta = match std::fs::symlink_metadata(out_path) {
+        Ok(m) => m,
+        // Not there (or unreadable metadata): nothing to clobber here; any real
+        // I/O problem surfaces when the file is written.
+        Err(_) => return Ok(()),
+    };
+    let shown = out_path.display();
+    if meta.is_dir() {
+        return Err(format!(
+            "{shown} is a directory — pass -o <path> to choose where to save the file"
+        ));
+    }
+    if force {
+        return Ok(());
+    }
+    if crate::ui::is_rich() && std::io::stdin().is_terminal() {
+        if confirm_overwrite(out_path)? {
+            return Ok(());
+        }
+        return Err(format!("{shown} left unchanged — nothing downloaded"));
+    }
+    Err(format!(
+        "{shown} already exists — use --force to overwrite it, or -o <path> to save elsewhere"
+    ))
+}
+
+/// Minimal interactive y/N confirmation (no extra deps; default no). Only
+/// called on a rich terminal with a real tty on stdin.
+fn confirm_overwrite(out_path: &std::path::Path) -> Result<bool, String> {
+    use std::io::Write;
+
+    print!(
+        "  {} {} already exists. Overwrite? [y/N] ",
+        "?".custom_color(crate::colors::AMBER),
+        out_path.display().to_string().custom_color(crate::colors::INK)
+    );
+    std::io::stdout().flush().map_err(|e| e.to_string())?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).map_err(|e| e.to_string())?;
+    Ok(matches!(line.trim(), "y" | "Y" | "yes" | "YES"))
 }
 
 /// Returns `true` if the string looks like a UUID prefix: 8-36 hex chars
@@ -417,7 +476,7 @@ async fn pull_single_file(
 // ---------------------------------------------------------------------------
 
 /// Resolve the argument as a folder and download all its files into a zip archive.
-async fn run_zip(api: &ApiClient, path_arg: &str, output: Option<PathBuf>) -> Result<(), String> {
+async fn run_zip(api: &ApiClient, path_arg: &str, output: Option<PathBuf>, force: bool) -> Result<(), String> {
     let master_key = load_master_key()?;
 
     // Resolve the path argument to a folder.
@@ -432,6 +491,12 @@ async fn run_zip(api: &ApiClient, path_arg: &str, output: Option<PathBuf>) -> Re
 
     let folder_id = resolved.file_id.ok_or("cannot zip the vault root")?;
     let folder_name = resolved.name;
+
+    // Determine the output path up front so an existing archive is refused
+    // before any blob is fetched.
+    let zip_filename = format!("{}.zip", folder_name);
+    let out_path = output.unwrap_or_else(|| PathBuf::from(&zip_filename));
+    guard_existing_output(&out_path, force)?;
 
     // Recursively collect all files in the folder tree.
     let entries = collect_zip_entries(api, &master_key, &folder_id, &folder_name).await?;
@@ -480,10 +545,6 @@ async fn run_zip(api: &ApiClient, path_arg: &str, output: Option<PathBuf>) -> Re
         // Clear the fetching line
         eprint!("\r{}\r", " ".repeat(80));
     }
-
-    // Determine output path
-    let zip_filename = format!("{}.zip", folder_name);
-    let out_path = output.unwrap_or_else(|| PathBuf::from(&zip_filename));
 
     // Create the output file
     let file = std::fs::File::create(&out_path).map_err(|e| format!("failed to create {}: {e}", out_path.display()))?;
