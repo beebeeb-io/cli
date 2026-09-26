@@ -853,7 +853,17 @@ pub async fn run(
                         concurrency: concurrency as u32,
                         shutdown,
                     };
-                    let outcome = crate::upload::stream_encrypt_upload(api, master_key, spec, progress).await?;
+                    // Name the file in the error: "upload failed: <server
+                    // message>" alone doesn't say which file to look at (flow-6).
+                    let outcome = crate::upload::stream_encrypt_upload(api, master_key, spec, progress)
+                        .await
+                        .map_err(|e| {
+                            if e == crate::upload::INTERRUPTED {
+                                e
+                            } else {
+                                format!("{rel}: {e}")
+                            }
+                        })?;
 
                     let entry = FileEntry {
                         remote_id: outcome.server_id,
