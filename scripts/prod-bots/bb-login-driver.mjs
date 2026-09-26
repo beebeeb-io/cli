@@ -38,9 +38,16 @@ try {
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
 
   // TOTP is optional. Race: TOTP input appears (2FA account) vs recovery
-  // textarea (fresh-browser device-provision) vs straight back to /cli-auth.
+  // phrase inputs (fresh-browser device-provision) vs straight back to
+  // /cli-auth.
   const otpInput = page.locator('input[autocomplete="one-time-code"]');
-  const recovery = page.locator('#recovery-phrase');
+  // Task 1528 (web, deployed 2026-09-25): DeviceProvision replaced the single
+  // #recovery-phrase textarea with 12 individually-labeled word boxes
+  // ("Recovery word 1".."Recovery word 12"). Box 1 accepts a full
+  // space-separated paste and distributes it across all 12
+  // (device-provision.tsx applyWords) — same locator pattern web's own e2e
+  // helpers use (repos/web/e2e/helpers/auth.ts, e2e/prod-smoke/helpers.ts).
+  const recovery = page.getByLabel('Recovery word 1', { exact: true });
   const cliAuthLanded = page.waitForURL(new RegExp(`/cli-auth\\?code=${USER_CODE}`), { timeout: 60000 });
   await Promise.race([
     otpInput.waitFor({ state: 'visible', timeout: 30000 }).catch(() => {}),
