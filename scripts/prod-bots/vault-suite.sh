@@ -136,7 +136,7 @@ if [[ "$SRC_HASH" != "$DST_HASH" ]]; then
 fi
 echo "  round-trip hash MATCH"
 
-# ── 3. SHARE check: push → share(double-enc) → cold-open recipient → hash-match → revoke ──
+# ── 3. SHARE check: push → share(E2E) → cold-open recipient → hash-match → revoke ──
 # The permanent shares-key regression guard (the program's central defect class).
 echo "== vault-suite : share check"
 SHARE_SRC="$WORK/bot-share-$RANDOM.bin"
@@ -148,20 +148,34 @@ SHARE_FILE_ID="$(echo "$SPUSH" | jq -r '.files[0].id')"
 [[ -z "$SHARE_FILE_ID" || "$SHARE_FILE_ID" == "null" ]] && { echo "FAIL: no file id (share push)"; exit 1; }
 cleanup_ids+=("$SHARE_FILE_ID")
 
-# create_share — SWAPPABLE create step (0708 A1 is dual-mode: the legacy
-# server-generated-token flow used here stays valid forever; when rust-server's
-# A1 contract lands, swap ONLY this function for the client-token + two-wrapped-
-# blobs flow. The rest of the share check is create-flow-agnostic.
-create_share() { bb share "$1" --double-encrypted --json; }
+# create_share — SWAPPABLE create step (0708 A1 is dual-mode). The
+# client-token + two-wrapped-blobs flow this note used to describe as future
+# work landed in cli #44 (v0.11.0, 2026-09-26): `bb share` now ALWAYS mints
+# the token client-side and sends owner_wrapped_key/owner_wrapped_token, and
+# --double-encrypted was removed (the server refuses anything else — the
+# hidden --no-double-encrypt errors on purpose). No flag is needed any more;
+# keep this function as the swap point if a future create-flow change needs
+# one. The rest of the share check is create-flow-agnostic.
+create_share() { bb share "$1" --json; }
 
 SHARE_JSON="$(create_share "$SHARE_FILE_ID")"
 SHARE_URL="$(echo "$SHARE_JSON" | jq -r '.url')"
 SHARE_ID="$(echo "$SHARE_JSON" | jq -r '.share_id')"
+DOUBLE_ENCRYPTED="$(echo "$SHARE_JSON" | jq -r '.double_encrypted')"
 [[ -z "$SHARE_URL" || "$SHARE_URL" == "null" ]] && { echo "FAIL: no share url"; exit 1; }
-echo "  share created: ${SHARE_URL%%#*}#key=<redacted> share_id=$SHARE_ID"
+
+# Pin what v0.11.0 actually guarantees (src/commands/share.rs "Share wire
+# format"): every share is end-to-end encrypted and the decryption key
+# travels ONLY in the link's #key= fragment, never to the server. A share
+# link without that fragment, or a create response not marked
+# double_encrypted, would mean the E2E guarantee silently regressed.
+[[ "$DOUBLE_ENCRYPTED" == "true" ]] || { echo "FAIL: share not marked double_encrypted (got: $DOUBLE_ENCRYPTED)"; exit 1; }
+[[ "$SHARE_URL" == *"#key="* ]] || { echo "FAIL: share url has no #key= fragment — key must never reach the server: $SHARE_URL"; exit 1; }
+echo "  share created: ${SHARE_URL%%#*}#key=<redacted> share_id=$SHARE_ID double_encrypted=$DOUBLE_ENCRYPTED"
 
 # cold-open recipient verify in a FRESH unauthenticated browser (the load-bearing
-# assertion — the exact recipient journey): filename decrypts AND bytes hash-match.
+# assertion — the exact recipient journey): filename decrypts AND bytes hash-match,
+# i.e. the recipient can derive the file key from #key= alone and it round-trips.
 if ! SHARE_URL="$SHARE_URL" EXPECTED_NAME="$SHARE_NAME" EXPECTED_SHA256="$SHARE_HASH" \
       EVIDENCE_DIR="$EVIDENCE_DIR" MODE=verify \
       bun run "$HERE/share-recipient-driver.mjs"; then
