@@ -3,7 +3,8 @@
 //!
 //! Resolves each vault path (or raw UUID), refuses a folder unless `-r` is
 //! given, asks for confirmation on an interactive terminal (skipped with
-//! `-f`/`--yes`, `--json`, `--quiet`, or a non-TTY), then trashes everything in
+//! `-f`/`--yes`, `--json` or `--quiet`; with stdin not a terminal and none of
+//! those, it refuses with exit 2 instead of prompting), then trashes everything in
 //! one or more `POST /api/v1/files/trash` batches (max 500 ids each). The
 //! server cascades the trashed flag to folder contents, so trashing a folder
 //! id trashes its whole subtree — no client-side walk. Renders the
@@ -70,8 +71,17 @@ pub async fn run(targets: Vec<String>, recursive: bool, permanent: bool, yes: bo
         return permanent_delete_flow(&api, &resolved).await;
     }
 
-    // Confirm on an interactive terminal unless opted out.
+    // Confirm on an interactive terminal unless opted out. With no terminal to
+    // answer the prompt, refuse loudly (exit 2) rather than reading EOF as
+    // "no" and exiting 0 with nothing trashed (flow-6).
     let folder_count = resolved.iter().filter(|t| t.is_folder).count();
+    if !yes && ui::is_rich() && !crate::exit::stdin_is_interactive() {
+        return Err(crate::exit::with_code(
+            crate::exit::USAGE,
+            "refusing to trash without -f in non-interactive mode (stdin is not a terminal) \u{2014} \
+             re-run with -f to confirm",
+        ));
+    }
     if !yes && ui::is_rich() && !confirm(&resolved, folder_count)? {
         if !ui::is_quiet() {
             println!("  {}", "cancelled".custom_color(colors::INK_DIM));

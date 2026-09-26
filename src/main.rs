@@ -7,6 +7,7 @@ pub mod daemon;
 pub mod device;
 mod download;
 mod env_detect;
+mod exit;
 mod loopback;
 mod path;
 mod resume;
@@ -1064,7 +1065,7 @@ async fn main() {
             "error:".custom_color(crate::colors::RED_ERR),
             e.custom_color(crate::colors::INK),
         );
-        std::process::exit(1);
+        std::process::exit(exit::code());
     }
 }
 
