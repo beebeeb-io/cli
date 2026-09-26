@@ -511,6 +511,8 @@ async fn push_directory(
 
     let total_start = std::time::Instant::now();
     let mut upload_results: Vec<UploadResult> = Vec::new();
+    // (path relative to the pushed folder, error) for every file that failed.
+    let mut failures: Vec<(String, String)> = Vec::new();
 
     for (entry_path, is_dir) in &entries {
         let entry_parent = entry_path.parent().unwrap_or(dir_path);
@@ -533,7 +535,30 @@ async fn push_directory(
 
             folder_map.insert(entry_path.clone(), created_id);
         } else {
-            let ur = push_single_file(api, entry_path, Some(entry_parent_id.to_string()), strategy, true).await?;
+            // One file failing (a server reject, a read error, a network blip)
+            // must not abandon the rest of the folder: record it with its path,
+            // carry on, and fail the command at the end (flow-6: a 0-byte file
+            // used to stop the push, so later siblings were never uploaded).
+            let ur = match push_single_file(api, entry_path, Some(entry_parent_id.to_string()), strategy, true).await {
+                Ok(ur) => ur,
+                Err(e) => {
+                    let rel = entry_path
+                        .strip_prefix(dir_path)
+                        .unwrap_or(entry_path)
+                        .display()
+                        .to_string();
+                    if !ui::is_json() {
+                        eprintln!(
+                            "  {} {}: {}",
+                            "!".custom_color(crate::colors::RED_ERR),
+                            rel.custom_color(crate::colors::INK),
+                            e,
+                        );
+                    }
+                    failures.push((rel, e));
+                    continue;
+                }
+            };
 
             if let Some(ur) = ur {
                 if ui::is_rich() {
@@ -585,6 +610,11 @@ async fn push_directory(
             "total_bytes": total_bytes,
             "avg_speed_bps": avg_speed as u64,
             "total_duration_ms": total_elapsed.as_millis() as u64,
+            "total_failed": failures.len(),
+            "failed": failures
+                .iter()
+                .map(|(path, error)| serde_json::json!({ "path": path, "error": error }))
+                .collect::<Vec<_>>(),
         });
         println!("{}", serde_json::to_string_pretty(&json).unwrap());
     } else if ui::is_rich() {
@@ -593,17 +623,36 @@ async fn push_directory(
         } else {
             0.0
         };
+        let mark = if failures.is_empty() {
+            "\u{2713}".custom_color(crate::colors::GREEN_OK)
+        } else {
+            "!".custom_color(crate::colors::AMBER)
+        };
+        let failed_part = if failures.is_empty() {
+            String::new()
+        } else {
+            format!(" \u{00B7} {} failed", failures.len())
+        };
         println!(
             "  {} {}",
-            "\u{2713}".custom_color(crate::colors::GREEN_OK),
+            mark,
             format!(
-                "{uploaded_count} files uploaded \u{00B7} {} \u{00B7} avg {} \u{00B7} {:.1}s total",
+                "{uploaded_count} files uploaded{failed_part} \u{00B7} {} \u{00B7} avg {} \u{00B7} {:.1}s total",
                 ui::human_size(total_bytes),
                 ui::human_speed(avg_speed),
                 total_elapsed.as_secs_f64(),
             )
             .custom_color(crate::colors::INK_DIM),
         );
+    }
+
+    if !failures.is_empty() {
+        let names: Vec<&str> = failures.iter().map(|(path, _)| path.as_str()).collect();
+        return Err(format!(
+            "{} of {file_count} files failed to upload: {}",
+            failures.len(),
+            names.join(", "),
+        ));
     }
 
     Ok(())
