@@ -65,11 +65,18 @@ try {
   // app.tsx will route to /onboarding/setup-device (device-provision
   // component). We need to restore the vault from the recovery phrase
   // before /cli-auth can complete the ECDH handshake.
-  const recoveryTextarea = page.locator('#recovery-phrase');
+  //
+  // Task 1528 (web, deployed 2026-09-25): DeviceProvision replaced the single
+  // #recovery-phrase textarea with 12 individually-labeled word boxes
+  // ("Recovery word 1".."Recovery word 12"). Box 1 accepts a full
+  // space-separated paste and distributes it across all 12
+  // (device-provision.tsx applyWords) — same locator pattern web's own e2e
+  // helpers use (repos/web/e2e/helpers/auth.ts, e2e/prod-smoke/helpers.ts).
+  const recoveryTextarea = page.getByLabel('Recovery word 1', { exact: true });
   const cliAuthLanded = page.waitForURL(new RegExp(`/cli-auth\\?code=${USER_CODE}`));
 
   // Race: either we go straight back to /cli-auth (existing vault) or the
-  // device-provision page appears with the recovery-phrase textarea.
+  // device-provision page appears with the recovery-phrase word boxes.
   await Promise.race([
     recoveryTextarea.waitFor({ state: 'visible', timeout: 30000 }),
     cliAuthLanded,
@@ -82,6 +89,10 @@ try {
       );
     }
     console.log('  driver: device-provision → entering recovery phrase');
+    // .fill() on box 1 with the full space-separated phrase mirrors a user
+    // pasting all 12 words at once (device-provision.tsx's onChange path
+    // detects whitespace and distributes across all 12 boxes — see
+    // applyWords/distributeWords).
     await recoveryTextarea.fill(TEST_RECOVERY_PHRASE);
     await page.getByRole('button', { name: /restore vault/i }).click();
     // The device-provision flow drops the /cli-auth?code redirect param
