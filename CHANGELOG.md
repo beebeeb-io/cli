@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-26
+
+### Fixed
+- **[P0]** `bb share` could not create any share — now mints shares in the web's end-to-end-encrypted wire format (raw-`K_c`-wrapped file key, client-minted token, owner-recoverable), and `bb shares` rebuilds each link.
+- `bb pull` never silently overwrites an existing local file — `-f`/`--force` overwrites, a rich TTY prompts `y/N`, every non-interactive run refuses with a non-zero exit.
+- `bb share <path-or-id>` accepts vault paths and short IDs (same resolver as `bb pull`), not just full UUIDs.
+- `bb push`/`bb sync` on a folder no longer abort on one failed file (e.g. a zero-byte file) — the rest of the folder still uploads, failures are named, `--json` gains `total_failed`/`failed[]`.
+- Auth/session/connection errors are human-readable ("Your session expired or was revoked. Run `bb login` to sign in again."; "Can't reach `<api>` — check your connection or `--api`"); `bb whoami`/`bb status` exit 1 when logged out instead of printing placeholder plan data.
+- `bb share --passphrase` no longer claims to Argon2id-wrap chunk keys — the passphrase is a server-checked access gate, not encryption.
+- `bb mount` on release binaries (no FUSE feature) explains it can't mount and points at `bb webdav` instead of walking through a macFUSE/libfuse3 install this binary can't use; `mount`/`unmount` hidden from `--help` there.
+- `bb --help` footer links pages that resolve (`github.com/beebeeb-io/cli`, `beebeeb.io/security`) instead of two 404s.
+- `bb --help` lists every top-level command again (`2fa`/`sessions`/`passkey`/`billing`/`account`/`request`/`unmount` had silently dropped out).
+- `bb billing show` shows a distinct trial line instead of implying an upcoming charge; `bb billing portal` uses the Mollie-era payment-method route instead of a Stripe-only alias that 400s; API errors surface the server's human message, not just its code; `bb whoami`/`bb quota`/`bb push` read quota straight from the server instead of a nonexistent `bonus_bytes` field.
+- README links the stable `beebeeb.io/download/cli` redirect.
+
+### Changed
+- **Non-interactive runs (cron, CI, a pipe) fail loudly instead of silently no-oping.** New exit codes: `2` — a prompt was needed but stdin isn't a terminal (`bb push` on an existing name, `bb rm` without `-f`, `bb unshare` with no id); `3` — a one-shot `bb sync --once` finished with failed uploads or unresolved conflicts (summary `! incomplete · N failed · M ⚡`, `--json` carries `ok`/`failed`). `0`/`1` unchanged. Dry runs and the continuous sync watch loop are unaffected.
+
+### Security / Process
+- Release pipeline: the `RELEASE_NOTES.md` gate now runs before any build/publish step, not after; the Scoop manifest bump opens a PR against `main` instead of pushing directly to the protected branch.
+
 ## [0.10.0] - 2026-09-24
 
 ### Added
