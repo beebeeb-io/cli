@@ -21,8 +21,9 @@ Generated from `bb --help`. Source of truth is `src/main.rs` (clap derive).
 
 - `bb login` — browser-based device authorisation. The handshake crypto (P-256 ECDH + HKDF-SHA256 + AES-GCM handoff, with raw fallback for v0.4 web apps) lives in `beebeeb_core::cli_auth` (`CliEphemeralKey` / `decrypt_browser_payload`) — `login.rs` no longer hand-rolls it (task 0861). Supports `--headless` for SSH boxes. CLI auth sessions stored in Redis (HA-safe across API servers).
 - `bb logout` — end the current session.
-- `bb whoami` — show email, device, region, quota.
-- `bb status` — connection + session + storage status.
+- `bb whoami` — show email, device, region, quota. Exits 1 (message on stderr, no placeholder plan data) when logged out or when the server rejects the session.
+- `bb status` — connection + session + storage status (same exit behaviour as `whoami`).
+- Any generic 401 surfaces as "Your session expired or was revoked. Run `bb login` to sign in again." (`api::SESSION_EXPIRED_MESSAGE`; the stable `unauthorized` code is kept on `ApiError` for the `classify_*` helpers). A connect failure surfaces as "Can't reach <api_url> — check your connection or --api".
 - `bb config` — print current configuration with secrets masked.
 
 ### Files
@@ -34,8 +35,8 @@ Generated from `bb --help`. Source of truth is `src/main.rs` (clap derive).
 
 ### Sharing
 
-- `bb share <file-id>` — create an encrypted share link (`--expires`, `--max-opens`, `--passphrase`, `--double-encrypted`).
-- `bb shares` — list active share links.
+- `bb share <file-id>` — create an encrypted share link (`--expires`, `--max-opens`, `--passphrase`). Always double-encrypted, in the **web wire format** (see "Share wire format" in `src/commands/share.rs`): `wrapped_file_key` = STANDARD base64 of `nonce(12) || AES-256-GCM(raw K_c, FileKey)` — no KDF, no AAD, pinned against the core `share_key_wrap` KAT vector; link = `{APP_URL}/s/<token>#key=<base64url K_c>`. The token is client-minted (`core::share_token`) and sent with `owner_wrapped_key` + `owner_wrapped_token` (both wrapped under the master key) so the owner can rebuild the link. `--passphrase` is a server-checked Argon2id gate, not encryption. `--no-double-encrypt` is hidden and errors (the server refuses non-E2E shares). README flags are guarded by `src/readme_flags_tests.rs` (`readme_flags_exist`).
+- `bb shares` — list active share links; rebuilds each link from `owner_wrapped_key`/`owner_wrapped_token` (shares made by older clients without those blobs show "link not stored").
 - `bb unshare [share-id]` — revoke a share link (interactive picker without args).
 
 ### File requests
@@ -53,13 +54,14 @@ Account-less links that let **anyone** upload an encrypted file *into* your vaul
 
 - `bb sync <local> [remote]` — bidirectional folder sync (continuous by default; `--once`, `--daemon`, `--stop`, `--dry-run`, `--force`, `--delete`, `--concurrency`, `--rehash`). V2 **streaming** uploads (constant memory). Remote path auto-strips `~/` home prefix. Gracefully handles 409 stuck uploads and corrupt remote files (trashes + re-uploads next run). Shows a scan spinner, then live per-file + overall progress bars (rich TTY only). `--rehash` forces a full re-hash of every file instead of trusting unchanged `(size, mtime)` entries from the last sync.
 - `bb watch <path>` — deprecated alias for `bb sync`.
-- `bb mount <mountpoint>` — FUSE mount. Interactive setup wizard guides through macFUSE/libfuse3 installation. V2 uploads.
+- `bb mount <mountpoint>` — FUSE mount, **source builds with `--features fuse` only**. Release binaries (cargo-dist) ship WITHOUT FUSE and no FUSE asset is published: there `mount`/`unmount` are hidden from `--help` and the stub exits 1 pointing at `bb webdav` (pinned by `tests/mount_availability.rs`). V2 uploads.
 - `bb unmount <mountpoint>` — unmount a previously mounted vault.
 - `bb webdav` — serve the vault as a local WebDAV server (`--port`, `--read-only`, `--cache-ttl`, `--no-cache`, `--verbose`).
 
 ### Billing
 
 - `bb billing show` — read-only plan, storage, and renewal info. `--json` outputs the raw API merge.
+- `bb billing usage` / `bb billing invoices [--open <id>]` / `bb billing portal` / `bb billing addons [purchase <addon_id>]` — per-region usage, invoice list + PDF, billing portal, add-ons.
 
 ### Two-factor authentication
 
