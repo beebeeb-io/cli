@@ -575,6 +575,9 @@ pub async fn run(
     let mut conflicts = 0u32;
     let mut deletes = 0u32;
     let mut skipped = 0u32;
+    // Uploads that errored (not Ctrl-C). Together with `conflicts` this decides
+    // whether a one-shot pass may report "synced" and exit 0.
+    let mut failed = 0u32;
 
     // ── Phase 1: classify each file into an action ─────────────────────────
     enum SyncAction {
@@ -893,6 +896,7 @@ pub async fn run(
                 }
                 Err(e) => {
                     eprintln!("  {} upload failed: {}", "!".custom_color(crate::colors::RED_ERR), e);
+                    failed += 1;
                 }
             }
         }
@@ -1020,10 +1024,33 @@ pub async fn run(
     let elapsed = sync_start.elapsed();
     let elapsed_secs = elapsed.as_secs_f64();
 
+    // A pass that left uploads failed or conflicts unresolved is not "synced".
+    // A one-shot run (`--once`, json/quiet, …) exits 3 so scripts and cron jobs
+    // notice (flow-6: it used to print "✓ synced" and exit 0). A dry run only
+    // previews, and the watch loop keeps retrying, so neither fails here.
+    let incomplete = failed > 0 || conflicts > 0;
+    let incomplete_err = || {
+        crate::exit::with_code(
+            crate::exit::INCOMPLETE,
+            format!(
+                "sync incomplete: {} \u{2014} fix the cause and re-run{}",
+                incomplete_summary(failed, conflicts),
+                if conflicts > 0 {
+                    " (`--force` overwrites conflicts with the local copy)"
+                } else {
+                    ""
+                }
+            ),
+        )
+    };
+    let fail_one_shot = incomplete && !dry_run && !will_enter_watch;
+
     if ui::is_json() {
         let json_out = serde_json::json!({
+            "ok": !incomplete,
             "uploaded": up_count,
             "downloaded": down_count,
+            "failed": failed,
             "conflicts": conflicts,
             "deleted": deletes,
             "skipped": skipped,
@@ -1031,22 +1058,27 @@ pub async fn run(
             "elapsed_secs": elapsed_secs,
         });
         println!("{}", serde_json::to_string_pretty(&json_out).unwrap_or_default());
-        return Ok(());
+        return if fail_one_shot { Err(incomplete_err()) } else { Ok(()) };
     }
 
     if ui::is_quiet() {
         println!(
-            "{} up {} down {} conflict{}",
+            "{} up {} down {} conflict{}{}",
             up_count,
             down_count,
             conflicts,
+            if failed > 0 {
+                format!(" {failed} failed")
+            } else {
+                String::new()
+            },
             if deletes > 0 {
                 format!(" {deletes} del")
             } else {
                 String::new()
             },
         );
-        return Ok(());
+        return if fail_one_shot { Err(incomplete_err()) } else { Ok(()) };
     }
 
     println!();
@@ -1076,6 +1108,12 @@ pub async fn run(
             format!("{conflicts} \u{26A1}").custom_color(crate::colors::AMBER)
         ));
     }
+    if failed > 0 {
+        parts.push(format!(
+            "{}",
+            format!("{failed} failed").custom_color(crate::colors::RED_ERR)
+        ));
+    }
     if deletes > 0 {
         parts.push(format!(
             "{}",
@@ -1098,15 +1136,30 @@ pub async fn run(
     }
     meta_parts.push(format!("{:.1}s", elapsed_secs));
 
+    let (mark, verdict) = if incomplete {
+        (
+            "!".custom_color(crate::colors::AMBER),
+            "incomplete".custom_color(crate::colors::AMBER),
+        )
+    } else {
+        (
+            "\u{2713}".custom_color(crate::colors::GREEN_OK),
+            "synced".custom_color(crate::colors::GREEN_OK),
+        )
+    };
     println!(
         "  {} {} {} {} {} {}",
-        "\u{2713}".custom_color(crate::colors::GREEN_OK),
-        "synced".custom_color(crate::colors::GREEN_OK),
+        mark,
+        verdict,
         "\u{00b7}".custom_color(crate::colors::INK_DIM),
         counts_str,
         "\u{00b7}".custom_color(crate::colors::INK_DIM),
         meta_parts.join(" \u{00b7} ").custom_color(crate::colors::INK_DIM),
     );
+
+    if fail_one_shot {
+        return Err(incomplete_err());
+    }
 
     // ── Continuous watch mode ───────────────────────────────────────────────
     if will_enter_watch {
@@ -2169,6 +2222,19 @@ fn parent_remote_id(rel: &str, folders: &HashMap<String, Uuid>, root_id: Uuid) -
         Some((parent, _)) => folders.get(parent).copied().or(Some(root_id)),
         None => Some(root_id),
     }
+}
+
+/// "1 failed · 2 conflicts" — the counts a non-clean sync pass reports.
+fn incomplete_summary(failed: u32, conflicts: u32) -> String {
+    let mut parts = Vec::new();
+    if failed > 0 {
+        parts.push(format!("{failed} failed"));
+    }
+    if conflicts > 0 {
+        let s = if conflicts == 1 { "" } else { "s" };
+        parts.push(format!("{conflicts} conflict{s} unresolved"));
+    }
+    parts.join(" \u{00b7} ")
 }
 
 async fn resolve_remote_folder(

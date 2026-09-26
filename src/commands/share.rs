@@ -359,6 +359,14 @@ pub async fn revoke(share_id: Option<String>) -> Result<(), String> {
 
     let resolved_id = match share_id {
         Some(id) => id,
+        // The picker needs a terminal (raw mode); without one it used to die
+        // with "failed to enable raw mode: Device not configured" (flow-6).
+        None if !crate::exit::stdin_is_interactive() || !std::io::IsTerminal::is_terminal(&std::io::stdout()) => {
+            return Err(crate::exit::with_code(
+                crate::exit::USAGE,
+                "pass a share id: bb unshare <share-id> (list them with `bb shares`)",
+            ));
+        }
         None => pick_share_interactively(&api).await?,
     };
 
