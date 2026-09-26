@@ -7,7 +7,6 @@ use crossterm::event::{self, Event, KeyCode};
 use crossterm::terminal;
 
 use crate::api::ApiClient;
-use crate::config::load_config;
 use crate::ui;
 
 /// Parse a human duration like "24h", "7d", "1h" into hours.
@@ -37,15 +36,36 @@ const PASSPHRASE_NOTICE: &[&str] = &[
 ];
 
 /// `bb share <file_id>` — create a shareable link for a file.
+///
+/// Every share is end-to-end encrypted (the server refuses anything else,
+/// task 0538): see "Share wire format" below for exactly what is sent.
 pub async fn run(
     file_id: String,
     expires: Option<String>,
     max_opens: Option<u32>,
     passphrase: bool,
-    double_encrypted: bool,
+    no_double_encrypt: bool,
 ) -> Result<(), String> {
+    if no_double_encrypt {
+        return Err(
+            "--no-double-encrypt is no longer supported: every share is end-to-end encrypted, \
+             and Beebeeb's servers cannot open it"
+                .to_string(),
+        );
+    }
+
     let api = ApiClient::from_config();
     api.require_auth()?;
+
+    // Validate cheap inputs before prompting for anything.
+    let file_uuid: uuid::Uuid = file_id
+        .parse()
+        .map_err(|_| format!("invalid file id (expected UUID): {file_id}"))?;
+    let expires_hours = match &expires {
+        Some(s) => Some(parse_hours(s)?),
+        None => None,
+    };
+    let master_key = crate::commands::push::load_master_key()?;
 
     let passphrase_value = if passphrase {
         print!(
@@ -78,10 +98,14 @@ pub async fn run(
         None
     };
 
-    let expires_hours = match &expires {
-        Some(s) => Some(parse_hours(s)?),
-        None => None,
-    };
+    // K_c: random, never sent to the server — it only travels in #key=.
+    let client_key: Zeroizing<[u8; 32]> = Zeroizing::new(rand::random());
+    let mut material = build_share_material(
+        &master_key,
+        &file_uuid,
+        &client_key,
+        beebeeb_core::share_token::generate_share_token(),
+    )?;
 
     if passphrase_value.is_some() {
         for line in PASSPHRASE_NOTICE {
@@ -89,120 +113,56 @@ pub async fn run(
         }
     }
 
-    // ── Double-encrypted mode ─────────────────────────────────────────────────
-    // Client generates K_c, wraps the per-file AES key under it, sends the
-    // opaque blob to the server. K_c goes in the URL fragment; server stores
-    // only the ciphertext and cannot derive K_c or the file key.
-    //
-    // Wrapping: treat K_c as a MasterKey → derive a wrap FileKey via HKDF →
-    // AES-256-GCM encrypt(wrap_key, file_key.as_bytes()). Stored as a
-    // JSON-serialised EncryptedBlob (same format as file chunks).
-    let (wrapped_file_key, client_key_b64) = if double_encrypted {
-        let config = load_config();
-        let mk_b64 = config.master_key.ok_or("No master key. Run `bb login`.")?;
-        let mk_bytes: Zeroizing<Vec<u8>> = Zeroizing::new(
-            base64::engine::general_purpose::STANDARD
-                .decode(&mk_b64)
-                .map_err(|e| format!("invalid master key: {e}"))?,
-        );
-        if mk_bytes.len() != 32 {
-            return Err(format!("master key must be 32 bytes, got {}", mk_bytes.len()));
-        }
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&mk_bytes);
-        let master_key = beebeeb_core::kdf::MasterKey::from_bytes(arr);
-
-        // Parse file_id as UUID for key derivation
-        let file_uuid: uuid::Uuid = file_id
-            .parse()
-            .map_err(|_| format!("invalid file id (expected UUID): {file_id}"))?;
-
-        // Derive the real per-file encryption key
-        let file_key = beebeeb_core::kdf::derive_file_key(&master_key, file_uuid.to_string().as_bytes());
-
-        // Generate client key K_c (random 32 bytes)
-        let client_key: [u8; 32] = rand::random();
-
-        // Derive a wrap key from K_c: treat it as a MasterKey + HKDF over file_uuid
-        // so the wrap key is file-specific (recipient can only decrypt THIS file).
-        let client_mk = beebeeb_core::kdf::MasterKey::from_bytes(client_key);
-        let wrap_key = beebeeb_core::kdf::derive_file_key(&client_mk, file_uuid.to_string().as_bytes());
-
-        // Encrypt file_key.as_bytes() under wrap_key using AES-256-GCM
-        let blob = beebeeb_core::encrypt::encrypt_chunk(&wrap_key, file_key.as_bytes())
-            .map_err(|e| format!("encrypt file key: {e}"))?;
-        let wfk_json = serde_json::to_string(&blob).map_err(|e| format!("serialize wrapped key: {e}"))?;
-
-        let k_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(client_key);
-        (Some(wfk_json), Some(k_b64))
-    } else {
-        (None, None)
-    };
-
-    let result = api
+    let result = match api
         .create_share(
             &file_id,
             expires_hours,
             max_opens,
             passphrase_value.as_deref(),
-            wrapped_file_key,
+            &material,
         )
-        .await?;
+        .await
+    {
+        // A client-minted token collided with an existing one (≈ never at 160
+        // random bits): the server answers 409 — mint a fresh token once.
+        Err(e) if e.contains("share token already exists") => {
+            material = build_share_material(
+                &master_key,
+                &file_uuid,
+                &client_key,
+                beebeeb_core::share_token::generate_share_token(),
+            )?;
+            api.create_share(
+                &file_id,
+                expires_hours,
+                max_opens,
+                passphrase_value.as_deref(),
+                &material,
+            )
+            .await?
+        }
+        other => other?,
+    };
 
     let share_id = result.get("id").and_then(|v| v.as_str()).unwrap_or("(unknown)");
-    let token = result.get("token").and_then(|v| v.as_str()).unwrap_or("(unknown)");
+    let token = result.get("token").and_then(|v| v.as_str()).unwrap_or(&material.token);
     let expires_at = result.get("expires_at").and_then(|v| v.as_str()).unwrap_or("never");
 
-    // Extract file info from result if available
-    let file_name = result
-        .get("file")
-        .and_then(|f| f.get("name"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let file_size = result
-        .get("file")
-        .and_then(|f| f.get("size_bytes"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-
-    // Build the URL and key parts. In double-encrypted mode the URL fragment
-    // (#key=…) is the decryption material — we print it on its own line so
-    // the user is forced to think about the link and key as two separate
-    // things, sent through different channels.
-    let (bare_url, full_url) = if let Some(ref kc) = client_key_b64 {
-        let app_url = std::env::var("APP_URL").unwrap_or_else(|_| "https://app.beebeeb.io".to_string());
-        let bare = format!("{app_url}/s/{token}");
-        let full = format!("{bare}#key={kc}");
-        (bare, full)
-    } else {
-        let url = result
-            .get("url")
-            .and_then(|v| v.as_str())
-            .unwrap_or("(unknown)")
-            .to_string();
-        // Standard mode: the server URL already contains the key fragment.
-        // bare_url is the same — the key is not separable in this mode.
-        (url.clone(), url)
-    };
+    let bare_url = format!("{}/s/{token}", app_url());
+    let full_url = share_link(&app_url(), token, &material.key_fragment);
 
     // JSON mode: emit machine-readable output
     if ui::is_json() {
-        let mut json_out = serde_json::json!({
+        let json_out = serde_json::json!({
             "share_id": share_id,
             "url": full_url,
+            "share_link": bare_url,
+            "decryption_key": material.key_fragment,
             "expires_at": expires_at,
             "max_opens": max_opens,
-            "double_encrypted": double_encrypted,
+            "double_encrypted": true,
             "passphrase_protected": passphrase_value.is_some(),
         });
-        if double_encrypted {
-            if let Some(obj) = json_out.as_object_mut() {
-                obj.insert("share_link".into(), serde_json::Value::String(bare_url.clone()));
-                if let Some(ref kc) = client_key_b64 {
-                    obj.insert("decryption_key".into(), serde_json::Value::String(kc.clone()));
-                }
-            }
-        }
         println!("{}", serde_json::to_string_pretty(&json_out).unwrap_or_default());
         return Ok(());
     }
@@ -214,53 +174,15 @@ pub async fn run(
 
     // Rich mode
     println!();
-    if double_encrypted {
-        println!(
-            "  {}",
-            "\u{2713} Link created (end-to-end encrypted)".custom_color(crate::colors::GREEN_OK)
-        );
-    } else {
-        println!("  {}", "\u{2713} Link created".custom_color(crate::colors::GREEN_OK));
-    }
-
-    if double_encrypted {
-        // Print the URL and the decryption key on separate lines so the user
-        // is reminded to send them through different channels.
-        println!(
-            "  {} {}",
-            "share link    ".custom_color(crate::colors::INK_DIM),
-            bare_url.custom_color(crate::colors::AMBER),
-        );
-        if let Some(ref kc) = client_key_b64 {
-            println!(
-                "  {} {}",
-                "decryption key".custom_color(crate::colors::INK_DIM),
-                kc.custom_color(crate::colors::AMBER),
-            );
-            println!(
-                "  {}",
-                "               (send this through a SEPARATE channel)".custom_color(crate::colors::INK_SAGE),
-            );
-        }
-    } else {
-        println!(
-            "  {} {}",
-            "url       ".custom_color(crate::colors::INK_DIM),
-            full_url.custom_color(crate::colors::AMBER),
-        );
-    }
-    if !file_name.is_empty() {
-        let size_str = if file_size > 0 {
-            format!(" \u{00b7} {}", ui::human_size(file_size))
-        } else {
-            String::new()
-        };
-        println!(
-            "  {} {}",
-            "file      ".custom_color(crate::colors::INK_DIM),
-            format!("{file_name}{size_str}").custom_color(crate::colors::INK),
-        );
-    }
+    println!(
+        "  {}",
+        "\u{2713} Link created (end-to-end encrypted)".custom_color(crate::colors::GREEN_OK)
+    );
+    println!(
+        "  {} {}",
+        "url       ".custom_color(crate::colors::INK_DIM),
+        full_url.custom_color(crate::colors::AMBER),
+    );
     let expires_display = if expires_at == "never" {
         "never".to_string()
     } else {
@@ -278,40 +200,25 @@ pub async fn run(
             max.to_string().custom_color(crate::colors::INK),
         );
     }
-    if double_encrypted {
-        println!(
-            "  {} {}",
-            "encryption".custom_color(crate::colors::INK_DIM),
-            "end-to-end \u{00b7} server blind".custom_color(crate::colors::GREEN_OK),
-        );
-    } else {
-        println!(
-            "  {} {}",
-            "encryption".custom_color(crate::colors::INK_DIM),
-            "server-assisted recovery \u{00b7} less secure".custom_color(crate::colors::AMBER),
-        );
-    }
+    println!(
+        "  {} {}",
+        "encryption".custom_color(crate::colors::INK_DIM),
+        "end-to-end \u{00b7} server blind".custom_color(crate::colors::GREEN_OK),
+    );
     println!(
         "  {} {}",
         "share-id  ".custom_color(crate::colors::INK_DIM),
         share_id.custom_color(crate::colors::INK_WARM),
     );
     println!();
-    if double_encrypted {
-        println!(
-            "  {}",
-            "Beebeeb cannot decrypt this share. If the recipient loses the key,".custom_color(crate::colors::AMBER),
-        );
-        println!(
-            "  {}",
-            "the share is permanently inaccessible.".custom_color(crate::colors::AMBER),
-        );
-    } else {
-        println!(
-            "  {}",
-            "Heads up: Beebeeb's servers can technically decrypt this share.".custom_color(crate::colors::AMBER),
-        );
-    }
+    println!(
+        "  {}",
+        "The part after #key= is the decryption key. It never reaches Beebeeb:".custom_color(crate::colors::INK_SAGE),
+    );
+    println!(
+        "  {}",
+        "we cannot open this share, and cannot recover it if the key is lost.".custom_color(crate::colors::INK_SAGE),
+    );
     if passphrase_value.is_some() {
         println!(
             "  {}",
@@ -381,7 +288,14 @@ pub async fn list() -> Result<(), String> {
                 "(unknown)".to_string()
             }
         };
-        let url = share.get("url").and_then(|v| v.as_str()).unwrap_or("-");
+        let url = match (
+            share.get("owner_wrapped_key").and_then(|v| v.as_str()),
+            share.get("owner_wrapped_token").and_then(|v| v.as_str()),
+        ) {
+            (Some(owk), Some(owt)) => recover_share_link(&master_key, owk, owt, &app_url())
+                .unwrap_or_else(|| "(link not recoverable)".to_string()),
+            _ => "(link not stored \u{00b7} created by an older client)".to_string(),
+        };
         let expires_raw = share.get("expires_at").and_then(|v| v.as_str()).unwrap_or("never");
         let is_revoked = share.get("revoked").and_then(|v| v.as_bool()).unwrap_or(false);
         let opens = share
@@ -426,7 +340,7 @@ pub async fn list() -> Result<(), String> {
             "  {} {:<36}  {:<40}  {:<20}  {}",
             status_icon,
             file_name.custom_color(name_color),
-            url.custom_color(crate::colors::AMBER),
+            url.as_str().custom_color(crate::colors::AMBER),
             expires_display.custom_color(crate::colors::INK_DIM),
             opens_display.custom_color(crate::colors::INK),
         );
@@ -680,6 +594,230 @@ fn draw_picker(stdout: &mut io::Stdout, entries: &[ShareEntry], selected: usize)
 
     stdout.flush().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+// ── Share wire format ───────────────────────────────────────────────────────
+//
+// Every client mints the SAME single-file share (web `share-dialog.tsx`, the
+// server's `POST /api/v1/shares` validator, and the core `share_key_wrap` KAT
+// vector, core a04dce5):
+//
+//   K_c                 = 32 random bytes; lives only in the URL fragment
+//   wrapped_file_key    = base64(STANDARD, nonce(12) || AES-256-GCM(K_c, FileKey))
+//   owner_wrapped_key   = base64(STANDARD, nonce(12) || AES-256-GCM(MasterKey, K_c))
+//   owner_wrapped_token = base64(STANDARD, nonce(12) || AES-256-GCM(MasterKey, utf8(token)))
+//   token               = beebeeb_core::share_token::generate_share_token()
+//   link                = {APP_URL}/s/{token}#key={base64url-no-pad(K_c)}
+//
+// The AES-GCM is the raw key with no KDF and no AAD — exactly web's
+// wrapKeyForShare/unwrapKeyFromShare — via core's encrypt_chunk_raw /
+// decrypt_chunk_raw. The owner blobs let `bb shares` (and the web) rebuild a
+// working link later; the server only ever stores opaque ciphertext and a
+// hash of the token.
+
+/// Wrap `plaintext` under a raw 32-byte key: nonce(12) || ciphertext+tag.
+fn wrap_raw(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, String> {
+    beebeeb_core::encrypt::encrypt_chunk_raw(&beebeeb_core::kdf::FileKey::from_bytes(*key), plaintext)
+        .map_err(|e| format!("wrap share key: {e}"))
+}
+
+/// Open a nonce(12) || ciphertext+tag blob under a raw 32-byte key.
+pub(crate) fn unwrap_share_blob(key: &[u8; 32], blob: &[u8]) -> Result<Vec<u8>, String> {
+    beebeeb_core::encrypt::decrypt_chunk_raw(&beebeeb_core::kdf::FileKey::from_bytes(*key), blob)
+        .map_err(|_| "share key blob does not decrypt".to_string())
+}
+
+/// `wrapped_file_key` as the server and the web viewer expect it.
+pub(crate) fn wrap_file_key_for_share(client_key: &[u8; 32], file_key: &[u8; 32]) -> Result<String, String> {
+    Ok(base64::engine::general_purpose::STANDARD.encode(wrap_raw(client_key, file_key)?))
+}
+
+/// Everything a single-file share create needs, plus the link to print.
+pub(crate) struct ShareMaterial {
+    pub token: String,
+    pub wrapped_file_key: String,
+    pub owner_wrapped_key: String,
+    pub owner_wrapped_token: String,
+    /// base64url-no-pad K_c — the `#key=` fragment.
+    pub key_fragment: String,
+}
+
+pub(crate) fn build_share_material(
+    master_key: &beebeeb_core::kdf::MasterKey,
+    file_uuid: &uuid::Uuid,
+    client_key: &[u8; 32],
+    token: String,
+) -> Result<ShareMaterial, String> {
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let mk: Zeroizing<[u8; 32]> = Zeroizing::new(master_key.to_bytes());
+    // Same per-file key the web derives in getFileKey(fileId) and the CLI
+    // uses for upload: HKDF(master, file-uuid string).
+    let file_key = beebeeb_core::kdf::derive_file_key(master_key, file_uuid.to_string().as_bytes());
+    Ok(ShareMaterial {
+        wrapped_file_key: wrap_file_key_for_share(client_key, file_key.as_bytes())?,
+        owner_wrapped_key: b64.encode(wrap_raw(&mk, client_key)?),
+        owner_wrapped_token: b64.encode(wrap_raw(&mk, token.as_bytes())?),
+        key_fragment: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(client_key),
+        token,
+    })
+}
+
+fn app_url() -> String {
+    std::env::var("APP_URL")
+        .unwrap_or_else(|_| "https://app.beebeeb.io".to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+pub(crate) fn share_link(app_url: &str, token: &str, key_fragment: &str) -> String {
+    format!("{app_url}/s/{token}#key={key_fragment}")
+}
+
+/// Rebuild a share's working link from the owner-wrapped blobs returned by
+/// `GET /api/v1/shares/mine`. `None` for shares created without them (older
+/// clients) or if the blobs do not open under this master key.
+pub(crate) fn recover_share_link(
+    master_key: &beebeeb_core::kdf::MasterKey,
+    owner_wrapped_key: &str,
+    owner_wrapped_token: &str,
+    app_url: &str,
+) -> Option<String> {
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let mk: Zeroizing<[u8; 32]> = Zeroizing::new(master_key.to_bytes());
+    let kc = Zeroizing::new(unwrap_share_blob(&mk, &b64.decode(owner_wrapped_key).ok()?).ok()?);
+    if kc.len() != 32 {
+        return None;
+    }
+    let token = String::from_utf8(unwrap_share_blob(&mk, &b64.decode(owner_wrapped_token).ok()?).ok()?).ok()?;
+    let frag = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&kc[..]);
+    Some(share_link(app_url, &token, &frag))
+}
+
+#[cfg(test)]
+mod share_wire_tests {
+    use super::*;
+
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    // core test-vectors/vectors.json @ 3ee6b90, vector "share_key_wrap" (K3,
+    // core a04dce5): pins web's wrapKeyForShare/unwrapKeyFromShare format.
+    const KAT_WRAP_KEY: &str = "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5";
+    const KAT_KEY_TO_WRAP: &str = "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a";
+    const KAT_NONCE: &str = "174e5553a15305c56b28ae60";
+    const KAT_CT: &str =
+        "296c608d2b6150057284434cacb9ac684db811891e0e5b4cdb39cdec3ce53f99f1b5611f75edd9b75c2614e32bb5c596";
+
+    fn arr32(v: &[u8]) -> [u8; 32] {
+        let mut a = [0u8; 32];
+        a.copy_from_slice(v);
+        a
+    }
+
+    /// The server (routes/shares.rs) requires STANDARD base64 of a raw AEAD
+    /// blob; the web viewer (unwrapKeyFromShare) splits nonce(12)||ct under the
+    /// RAW K_c with no KDF. The CLI's wrapped_file_key must satisfy both.
+    #[test]
+    fn wrapped_file_key_is_web_wire_format_and_opens_with_raw_client_key() {
+        let k_c = arr32(&hex(KAT_WRAP_KEY));
+        let fk = arr32(&hex(KAT_KEY_TO_WRAP));
+        let wire = wrap_file_key_for_share(&k_c, &fk).expect("wrap");
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(&wire)
+            .expect("wrapped_file_key must be STANDARD base64 (server check)");
+        assert_eq!(raw.len(), 60, "nonce(12) || ct(32+16) = 60 bytes (K3 wire format)");
+        let opened = beebeeb_core::encrypt::decrypt_chunk_raw(&beebeeb_core::kdf::FileKey::from_bytes(k_c), &raw)
+            .expect("must open under the raw K_c exactly as web unwrapKeyFromShare does");
+        assert_eq!(opened, fk.to_vec());
+    }
+
+    /// The full create body: file key is the upload key HKDF(master, uuid),
+    /// token is the canonical 27-char format, and the owner blobs rebuild the
+    /// exact link the create printed (what `bb shares` shows).
+    #[test]
+    fn share_material_roundtrips_to_the_printed_link() {
+        let mk = beebeeb_core::kdf::MasterKey::from_bytes([7u8; 32]);
+        let file_uuid = uuid::Uuid::parse_str("4c53f27f-c64f-4d65-8872-ea36011ef316").unwrap();
+        let k_c = [9u8; 32];
+        let token = beebeeb_core::share_token::generate_share_token();
+        let m = build_share_material(&mk, &file_uuid, &k_c, token.clone()).unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD;
+
+        assert_eq!(m.token.len(), 27);
+        let fk = beebeeb_core::kdf::derive_file_key(&mk, file_uuid.to_string().as_bytes());
+        let opened = unwrap_share_blob(&k_c, &b64.decode(&m.wrapped_file_key).unwrap()).unwrap();
+        assert_eq!(
+            opened,
+            fk.as_bytes().to_vec(),
+            "recipient with #key= must get the upload file key"
+        );
+        assert_eq!(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(&m.key_fragment)
+                .unwrap(),
+            k_c.to_vec()
+        );
+
+        let printed = share_link("http://localhost:5360", &m.token, &m.key_fragment);
+        assert!(printed.starts_with(&format!("http://localhost:5360/s/{token}#key=")));
+        let rebuilt = recover_share_link(
+            &mk,
+            &m.owner_wrapped_key,
+            &m.owner_wrapped_token,
+            "http://localhost:5360",
+        )
+        .unwrap();
+        assert_eq!(rebuilt, printed);
+
+        let other = beebeeb_core::kdf::MasterKey::from_bytes([8u8; 32]);
+        assert!(recover_share_link(&other, &m.owner_wrapped_key, &m.owner_wrapped_token, "x").is_none());
+    }
+
+    /// Independent AES-256-GCM reference (test-only dep), no AAD.
+    fn reference_wrap(k_c: &[u8; 32], plaintext: &[u8], nonce: &[u8]) -> Vec<u8> {
+        use aes_gcm::aead::Aead;
+        use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+        let c = Aes256Gcm::new_from_slice(k_c).unwrap();
+        let mut out = nonce.to_vec();
+        out.extend(c.encrypt(Nonce::from_slice(nonce), plaintext).unwrap());
+        out
+    }
+
+    /// Byte-for-byte KAT. (1) The reference reproduces the core vector bytes
+    /// exactly (pins the reference). (2) The CLI's wrapped_file_key, under the
+    /// KAT K_c and KAT file key, equals reference(K_c, key, its own nonce) —
+    /// i.e. exactly the vector's construction; with the KAT nonce that is the
+    /// vector's bytes. (3) The CLI's unwrap opens the vector blob.
+    #[test]
+    fn share_wrap_matches_core_kat_vector() {
+        let k_c = arr32(&hex(KAT_WRAP_KEY));
+        let key = hex(KAT_KEY_TO_WRAP);
+        let mut vector_blob = hex(KAT_NONCE);
+        vector_blob.extend_from_slice(&hex(KAT_CT));
+        let b64 = base64::engine::general_purpose::STANDARD;
+
+        assert_eq!(
+            b64.encode(reference_wrap(&k_c, &key, &hex(KAT_NONCE))),
+            b64.encode(&vector_blob),
+            "reference must reproduce the core share_key_wrap vector"
+        );
+
+        let wire = wrap_file_key_for_share(&k_c, &arr32(&key)).expect("wrap");
+        let raw = b64.decode(&wire).expect("wrapped_file_key must be STANDARD base64");
+        assert!(raw.len() >= 12, "blob too short");
+        assert_eq!(
+            b64.encode(&raw),
+            b64.encode(reference_wrap(&k_c, &key, &raw[..12])),
+            "CLI wrapped_file_key must be nonce || AES-256-GCM(raw K_c, file_key) — the core K3 vector construction"
+        );
+
+        let opened = unwrap_share_blob(&k_c, &vector_blob).expect("KAT blob must open");
+        assert_eq!(opened, key);
+    }
 }
 
 #[cfg(test)]

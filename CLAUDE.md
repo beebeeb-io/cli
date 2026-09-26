@@ -35,8 +35,8 @@ Generated from `bb --help`. Source of truth is `src/main.rs` (clap derive).
 
 ### Sharing
 
-- `bb share <file-id>` — create a double-encrypted share link (`--expires`, `--max-opens`, `--passphrase`). The link key lives only in the URL fragment; `--passphrase` is a server-checked Argon2id gate, not encryption. `--no-double-encrypt` still parses but the server rejects shares without a `wrapped_file_key` (server task 0538), so it only produces an error. README flags are guarded by `src/readme_flags_tests.rs` (`readme_flags_exist`).
-- `bb shares` — list active share links.
+- `bb share <file-id>` — create an encrypted share link (`--expires`, `--max-opens`, `--passphrase`). Always double-encrypted, in the **web wire format** (see "Share wire format" in `src/commands/share.rs`): `wrapped_file_key` = STANDARD base64 of `nonce(12) || AES-256-GCM(raw K_c, FileKey)` — no KDF, no AAD, pinned against the core `share_key_wrap` KAT vector; link = `{APP_URL}/s/<token>#key=<base64url K_c>`. The token is client-minted (`core::share_token`) and sent with `owner_wrapped_key` + `owner_wrapped_token` (both wrapped under the master key) so the owner can rebuild the link. `--passphrase` is a server-checked Argon2id gate, not encryption. `--no-double-encrypt` is hidden and errors (the server refuses non-E2E shares). README flags are guarded by `src/readme_flags_tests.rs` (`readme_flags_exist`).
+- `bb shares` — list active share links; rebuilds each link from `owner_wrapped_key`/`owner_wrapped_token` (shares made by older clients without those blobs show "link not stored").
 - `bb unshare [share-id]` — revoke a share link (interactive picker without args).
 
 ### File requests

@@ -15,8 +15,8 @@ name = "bb"
 path = "src/main.rs"
 
 [dependencies]
-beebeeb-core = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-core", rev = "6fcda3b1a41c456a27cfb06285e77b77214422e5" }
-beebeeb-types = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-types", rev = "6fcda3b1a41c456a27cfb06285e77b77214422e5" }
+beebeeb-core = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-core", rev = "3ee6b90f6fb7af4decef602a395016ac445c5cf7" }
+beebeeb-types = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-types", rev = "3ee6b90f6fb7af4decef602a395016ac445c5cf7" }
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 tokio = { version = "1", features = ["full"] }
@@ -58,6 +58,13 @@ qrcode = { version = "0.14", default-features = false }
 percent-encoding = "2"
 zeroize = "1"
 ratatui = { version = "0.29", features = ["crossterm"] }
+
+[dev-dependencies]
+# Test-only: an independent AES-256-GCM reference so the share-wrap tests can
+# assert the CLI's wrapped_file_key byte-for-byte against the core
+# `share_key_wrap` KAT vector (core's public API has no fixed-nonce encrypt).
+# Production crypto stays in beebeeb-core.
+aes-gcm = "0.10"
 
 [features]
 # Enable the FUSE filesystem mount command.
