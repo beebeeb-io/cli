@@ -23,6 +23,18 @@ fn parse_hours(s: &str) -> Result<u64, String> {
     }
 }
 
+/// What `bb share --passphrase` tells the user about the passphrase.
+///
+/// This must describe what the code actually does: `ApiClient::create_share`
+/// sends the passphrase in the `POST /api/v1/shares` body, and the server
+/// stores an Argon2id hash of it and checks it before serving the share. The
+/// passphrase does not wrap or encrypt any key — the link's secrecy comes
+/// from the `#key=` fragment alone. Pinned by the tests at the bottom.
+const PASSPHRASE_NOTICE: &[&str] = &[
+    "the passphrase is sent to Beebeeb and checked by the server before it serves the link",
+    "it gates access; it does not encrypt the file (the #key in the link does that)",
+];
+
 /// `bb share <file_id>` — create a shareable link for a file.
 ///
 /// Every share is end-to-end encrypted (the server refuses anything else,
@@ -94,6 +106,12 @@ pub async fn run(
         &client_key,
         beebeeb_core::share_token::generate_share_token(),
     )?;
+
+    if passphrase_value.is_some() {
+        for line in PASSPHRASE_NOTICE {
+            println!("  {}", line.custom_color(crate::colors::INK_DIM));
+        }
+    }
 
     let result = match api
         .create_share(
@@ -799,5 +817,56 @@ mod share_wire_tests {
 
         let opened = unwrap_share_blob(&k_c, &vector_blob).expect("KAT blob must open");
         assert_eq!(opened, key);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Built at runtime so this test module does not itself contain the phrase
+    /// it scans the source file for.
+    fn false_wrap_claim() -> String {
+        format!("Argon2id({})", "passphrase")
+    }
+
+    /// The passphrase is sent to the server (api.rs `create_share` puts it in
+    /// the request body) and only checked there. Output that claims it wraps
+    /// key material client-side is false. If a real client-side wrap ever
+    /// lands, replace this with a test that the request body has no
+    /// `passphrase` field.
+    #[test]
+    fn passphrase_notice_does_not_claim_a_client_side_key_wrap() {
+        let notice = PASSPHRASE_NOTICE.join(" ");
+        assert!(
+            !notice.contains(&false_wrap_claim()),
+            "share output claims a client-side Argon2id wrap: {notice:?}"
+        );
+        assert!(
+            !notice.to_lowercase().contains("wrapping"),
+            "share output claims the passphrase wraps keys: {notice:?}"
+        );
+    }
+
+    #[test]
+    fn passphrase_notice_says_the_server_receives_and_checks_it() {
+        let notice = PASSPHRASE_NOTICE.join(" ").to_lowercase();
+        assert!(notice.contains("server"), "notice must name the server: {notice:?}");
+        assert!(
+            notice.contains("not encrypt"),
+            "notice must say the passphrase does not encrypt the file: {notice:?}"
+        );
+    }
+
+    /// Guard against the claim coming back anywhere else in this file (a
+    /// second println!, a comment copied into output later).
+    #[test]
+    fn share_source_has_no_client_side_wrap_claim() {
+        let src = include_str!("share.rs");
+        let body = src.split("#[cfg(test)]").next().unwrap_or(src);
+        assert!(
+            !body.contains(&false_wrap_claim()),
+            "src/commands/share.rs still claims Argon2id(passphrase) key wrapping"
+        );
     }
 }

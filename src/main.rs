@@ -275,7 +275,9 @@ enum Commands {
         #[arg(long)]
         max_opens: Option<u32>,
 
-        /// Prompt for a passphrase to protect the link
+        /// Require a passphrase to open the link. The server receives it and
+        /// checks it (stored as an Argon2id hash); it is an access gate, not
+        /// extra encryption.
         #[arg(long)]
         passphrase: bool,
 
