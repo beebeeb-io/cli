@@ -270,6 +270,7 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 name = "beebeeb-cli"
 version = "0.10.0"
 dependencies = [
+ "aes-gcm",
  "axum",
  "base64",
  "beebeeb-core",
@@ -315,7 +316,7 @@ dependencies = [
 [[package]]
 name = "beebeeb-core"
 version = "0.1.0"
-source = "git+https://github.com/beebeeb-io/core?rev=6fcda3b1a41c456a27cfb06285e77b77214422e5#6fcda3b1a41c456a27cfb06285e77b77214422e5"
+source = "git+https://github.com/beebeeb-io/core?rev=3ee6b90f6fb7af4decef602a395016ac445c5cf7#3ee6b90f6fb7af4decef602a395016ac445c5cf7"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -348,7 +349,7 @@ dependencies = [
 [[package]]
 name = "beebeeb-types"
 version = "0.1.0"
-source = "git+https://github.com/beebeeb-io/core?rev=6fcda3b1a41c456a27cfb06285e77b77214422e5#6fcda3b1a41c456a27cfb06285e77b77214422e5"
+source = "git+https://github.com/beebeeb-io/core?rev=3ee6b90f6fb7af4decef602a395016ac445c5cf7#3ee6b90f6fb7af4decef602a395016ac445c5cf7"
 dependencies = [
  "serde",
 ]

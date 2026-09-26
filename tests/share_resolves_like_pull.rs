@@ -148,7 +148,6 @@ async fn share_accepts_path_and_short_id_and_resolves_like_pull() {
     let cases: &[(&[&str], &str)] = &[
         (&["share", "note.txt"], NOTE_ID),
         (&["share", "4c53f27f"], NOTE_ID),
-        (&["share", "4c53f27f", "--no-double-encrypt"], NOTE_ID),
         (&["share", "folder1/a.bin"], CHILD_ID),
         (&["share", NOTE_ID], NOTE_ID),
     ];

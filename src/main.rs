@@ -16,6 +16,9 @@ mod ui;
 mod update;
 mod upload;
 
+#[cfg(test)]
+mod readme_flags_tests;
+
 // Peak-heap tracking allocator, active ONLY in test builds (`#[cfg(test)]`), so
 // the shipped `bb` binary keeps the default system allocator. Used by the
 // upload RSS/peak-memory regression test (task 0666) to convert the modeled
@@ -75,12 +78,7 @@ use colored::Colorize;
     version,
     about = "end-to-end encrypted vault, from the terminal",
     long_about = None,
-    after_help = format!(
-        "{}\n{}",
-        "# docs · beebeeb.io/cli · key fingerprints · beebeeb.io/fingerprints"
-            .custom_color(crate::colors::INK_SAGE),
-        ""
-    ),
+    after_help = format!("{}\n", help_footer_text().custom_color(crate::colors::INK_SAGE)),
 )]
 struct Cli {
     /// API base URL to use for this command (login persists it for future commands)
@@ -277,15 +275,15 @@ enum Commands {
         #[arg(long)]
         max_opens: Option<u32>,
 
-        /// Prompt for a passphrase to protect the link
+        /// Require a passphrase to open the link. The server receives it and
+        /// checks it (stored as an Argon2id hash); it is an access gate, not
+        /// extra encryption.
         #[arg(long)]
         passphrase: bool,
 
-        /// Opt out of double encryption. Default is end-to-end encrypted —
-        /// the server stores an opaque blob and cannot decrypt the share.
-        /// Passing this flag lets Beebeeb hold a server-wrapped copy of the
-        /// key (less secure, allows server-assisted recovery).
-        #[arg(long = "no-double-encrypt")]
+        /// Removed: every share is end-to-end encrypted and the server refuses
+        /// anything else. Kept hidden only so old scripts get a clear error.
+        #[arg(long = "no-double-encrypt", hide = true)]
         no_double_encrypt: bool,
     },
 
@@ -366,7 +364,11 @@ enum Commands {
         rehash: bool,
     },
 
-    /// Mount vault as a FUSE filesystem (read-only Day 1; requires macFUSE on macOS)
+    /// Mount vault as a FUSE filesystem (source builds with `--features fuse` only;
+    /// requires macFUSE on macOS / libfuse3 on Linux). Hidden from `--help` in builds
+    /// without FUSE — which includes every release binary — where `bb webdav` is the
+    /// way to open the vault as a drive.
+    #[cfg_attr(not(feature = "fuse"), command(hide = true))]
     Mount {
         /// Directory to mount the vault at (e.g. ~/Beebeeb)
         mountpoint: PathBuf,
@@ -381,6 +383,7 @@ enum Commands {
     },
 
     /// Unmount a previously mounted vault FUSE filesystem
+    #[cfg_attr(not(feature = "fuse"), command(hide = true))]
     Unmount {
         /// Mountpoint to unmount
         mountpoint: PathBuf,
@@ -672,6 +675,26 @@ const HELP_ACCOUNT_COMMANDS: &[(&str, &str, &str)] = &[
     ("passkey", "<action>", "WebAuthn passkeys · list, add, remove"),
 ];
 
+/// Links printed at the foot of every help surface (the custom `bb --help`
+/// screen and clap's own rendering). Full https URLs to pages that exist —
+/// the previous footer pointed at `beebeeb.io/cli` and
+/// `beebeeb.io/fingerprints`, both 404. `help_links_return_200` (run in CI)
+/// checks every URL here answers 200.
+const HELP_FOOTER_LINKS: &[(&str, &str)] = &[
+    ("docs", "https://github.com/beebeeb-io/cli"),
+    ("security", "https://beebeeb.io/security"),
+];
+
+/// The footer block, one `# label  url` line per link, plus a pointer to
+/// per-command help (the top-level screen lists no per-command flags).
+fn help_footer_text() -> String {
+    let mut out = String::from("# flags    bb <command> --help");
+    for (label, url) in HELP_FOOTER_LINKS {
+        out.push_str(&format!("\n# {label:<8} {url}"));
+    }
+    out
+}
+
 /// Every top-level subcommand name the clap tree actually declares
 /// (non-hidden). Used both to render the "+ …" overflow line and, in tests,
 /// to prove the help screen never drops a command silently again.
@@ -782,11 +805,9 @@ fn build_help_text() -> String {
         );
     }
     let _ = writeln!(out);
-    let _ = writeln!(
-        out,
-        "  {}",
-        "# docs · beebeeb.io/cli · fingerprints · beebeeb.io/fingerprints".custom_color(colors::INK_SAGE)
-    );
+    for line in help_footer_text().lines() {
+        let _ = writeln!(out, "  {}", line.custom_color(colors::INK_SAGE));
+    }
 
     out
 }
@@ -899,7 +920,7 @@ async fn main() {
             max_opens,
             passphrase,
             no_double_encrypt,
-        } => commands::share::run(file_id, expires, max_opens, passphrase, !no_double_encrypt).await,
+        } => commands::share::run(file_id, expires, max_opens, passphrase, no_double_encrypt).await,
         Commands::Request(cmd) => match cmd {
             RequestCmd::Create {
                 folder,
@@ -1072,6 +1093,89 @@ mod help_screen_tests {
         assert!(
             missing.is_empty(),
             "bb --help is missing top-level subcommand(s): {missing:?}\n--- rendered help ---\n{help}"
+        );
+    }
+
+    /// Every link-shaped token (`host.tld/path`, with or without a scheme)
+    /// in a rendered help screen. Deliberately matches BARE domains too, so a
+    /// footer written as `beebeeb.io/cli` is caught, not just full URLs.
+    fn help_urls(text: &str) -> Vec<String> {
+        let re = regex::Regex::new(r"(?:https?://)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/[A-Za-z0-9._~/#-]*)?")
+            .expect("valid url regex");
+        re.find_iter(text).map(|m| m.as_str().to_string()).collect()
+    }
+
+    /// Both help surfaces: the custom top-level screen (`bb`, `bb --help`)
+    /// and clap's own rendering (reached via e.g. `bb --json --help`), which
+    /// carries the `after_help` footer.
+    fn all_help_text() -> String {
+        colored::control::set_override(false);
+        format!("{}\n{}", build_help_text(), Cli::command().render_long_help())
+    }
+
+    /// Pages checked to answer HTTP 200 on 2026-09-25 (flow-6 issue 8:
+    /// `beebeeb.io/cli` and `beebeeb.io/fingerprints` were 404). The ignored
+    /// network test `help_links_return_200` re-checks them live in CI.
+    const CHECKED_LIVE_URLS: &[&str] = &["https://github.com/beebeeb-io/cli", "https://beebeeb.io/security"];
+
+    #[test]
+    fn help_links_are_full_urls_to_checked_live_pages() {
+        let help = all_help_text();
+        let urls = help_urls(&help);
+        assert!(
+            !urls.is_empty(),
+            "help footer must link somewhere; found no URLs in:\n{help}"
+        );
+        let bad: Vec<&String> = urls
+            .iter()
+            .filter(|u| !CHECKED_LIVE_URLS.contains(&u.as_str()))
+            .collect();
+        assert!(bad.is_empty(), "help links not in the checked-live list: {bad:?}");
+    }
+
+    /// Network check: every link printed by any help surface answers 200.
+    /// Ignored by default (needs the internet); CI runs it with `--ignored`.
+    #[tokio::test]
+    #[ignore = "network: run with cargo test help_links_return_200 -- --ignored"]
+    async fn help_links_return_200() {
+        let help = all_help_text();
+        let urls = help_urls(&help);
+        assert!(!urls.is_empty(), "no URLs extracted from help");
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .user_agent("beebeeb-cli-help-link-check")
+            .build()
+            .expect("http client");
+        let mut failures = Vec::new();
+        let mut checked = 0usize;
+        for u in &urls {
+            let full = if u.starts_with("http") {
+                u.clone()
+            } else {
+                format!("https://{u}")
+            };
+            match client.get(&full).send().await {
+                Ok(r) if r.status().as_u16() == 200 => checked += 1,
+                Ok(r) => failures.push(format!("{full} -> {}", r.status())),
+                Err(e) => failures.push(format!("{full} -> {e}")),
+            }
+        }
+        println!("help link check: {checked} of {} URLs answered 200", urls.len());
+        assert!(failures.is_empty(), "dead help links: {failures:?}");
+    }
+
+    /// The custom top-level screen lists no per-command flags; the README
+    /// must not promise that it does.
+    #[test]
+    fn readme_points_flag_reference_at_subcommand_help() {
+        let readme = include_str!("../README.md");
+        assert!(
+            !readme.contains("including every flag: `bb --help`"),
+            "README still claims `bb --help` shows every flag"
+        );
+        assert!(
+            readme.contains("`bb <command> --help`"),
+            "README must point the flag reference at `bb <command> --help`"
         );
     }
 
