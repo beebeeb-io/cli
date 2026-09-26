@@ -163,6 +163,12 @@ enum Commands {
         /// Download an entire folder as a zip archive
         #[arg(long)]
         zip: bool,
+
+        /// Overwrite the output file if it already exists. Without this, an
+        /// existing file is never replaced: bb asks on an interactive terminal
+        /// and refuses (non-zero exit) otherwise — pass -o to save elsewhere
+        #[arg(short = 'f', long)]
+        force: bool,
     },
 
     /// List files (decrypts names locally)
@@ -282,11 +288,9 @@ enum Commands {
         #[arg(long)]
         passphrase: bool,
 
-        /// Opt out of double encryption. Default is end-to-end encrypted —
-        /// the server stores an opaque blob and cannot decrypt the share.
-        /// Passing this flag lets Beebeeb hold a server-wrapped copy of the
-        /// key (less secure, allows server-assisted recovery).
-        #[arg(long = "no-double-encrypt")]
+        /// Removed: every share is end-to-end encrypted and the server refuses
+        /// anything else. Kept hidden only so old scripts get a clear error.
+        #[arg(long = "no-double-encrypt", hide = true)]
         no_double_encrypt: bool,
     },
 
@@ -871,7 +875,8 @@ async fn main() {
             output,
             output_flag,
             zip,
-        } => commands::pull::run(file_id, output.or(output_flag), zip).await,
+            force,
+        } => commands::pull::run(file_id, output.or(output_flag), zip, force).await,
         Commands::Ls {
             path,
             long,
@@ -923,7 +928,7 @@ async fn main() {
             max_opens,
             passphrase,
             no_double_encrypt,
-        } => commands::share::run(file_id, expires, max_opens, passphrase, !no_double_encrypt).await,
+        } => commands::share::run(file_id, expires, max_opens, passphrase, no_double_encrypt).await,
         Commands::Request(cmd) => match cmd {
             RequestCmd::Create {
                 folder,
