@@ -61,7 +61,7 @@ bb sync ~/vault /Documents  # Two-way sync, then watch for live changes
 | `bb push <path>` | Encrypt and upload a file or folder (alias `bb upload`) |
 | `bb pull <path-or-id>` | Download and decrypt by vault path or UUID (alias `bb download`) |
 | `bb ls [path]` | List vault contents with locally decrypted names |
-| `bb share <file-id>` | Create an end-to-end encrypted share link; the key rides in the URL fragment (`--expires`, `--max-opens`, `--passphrase`) |
+| `bb share <path-or-id>` | Create an end-to-end encrypted share link by vault path, the short ID from the listing, or UUID; the key rides in the URL fragment (`--expires`, `--max-opens`, `--passphrase`) |
 | `bb shares` / `bb unshare` | List or revoke share links |
 | `bb request <create\|list\|send\|rm>` | Account-less links that let anyone upload *into* your vault |
 | `bb sync <local> [remote]` | Bidirectional folder sync; continuous by default (`--once`, `--daemon`, `--delete`) |

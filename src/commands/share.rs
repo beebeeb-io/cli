@@ -35,12 +35,13 @@ const PASSPHRASE_NOTICE: &[&str] = &[
     "it gates access; it does not encrypt the file (the #key in the link does that)",
 ];
 
-/// `bb share <file_id>` — create a shareable link for a file.
+/// `bb share <file>` — create a shareable link for a file. `file` is a vault
+/// path, a short ID from `bb ls`, or a full UUID (same resolver as `bb pull`).
 ///
 /// Every share is end-to-end encrypted (the server refuses anything else,
 /// task 0538): see "Share wire format" below for exactly what is sent.
 pub async fn run(
-    file_id: String,
+    file: String,
     expires: Option<String>,
     max_opens: Option<u32>,
     passphrase: bool,
@@ -58,14 +59,19 @@ pub async fn run(
     api.require_auth()?;
 
     // Validate cheap inputs before prompting for anything.
-    let file_uuid: uuid::Uuid = file_id
-        .parse()
-        .map_err(|_| format!("invalid file id (expected UUID): {file_id}"))?;
     let expires_hours = match &expires {
         Some(s) => Some(parse_hours(s)?),
         None => None,
     };
     let master_key = crate::commands::push::load_master_key()?;
+
+    // Resolve a path / short ID / UUID to the full file UUID: the share route
+    // and the key wrap (`build_share_material`) both need the canonical UUID.
+    // Done before the passphrase prompt so a typo fails immediately.
+    let (file_id, _) = crate::commands::pull::resolve_file_arg(&api, &file).await?;
+    let file_uuid: uuid::Uuid = file_id
+        .parse()
+        .map_err(|_| format!("invalid file id (expected UUID): {file_id}"))?;
 
     let passphrase_value = if passphrase {
         print!(
