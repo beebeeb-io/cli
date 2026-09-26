@@ -1,88 +1,114 @@
-# Beebeeb CLI 0.10.0 — account security, billing, and vault organization land in the CLI
+# Beebeeb CLI 0.11.0 — `bb share` works again, and scripts stop getting lied to
 
-This release brings the CLI to parity with the web app for day-to-day account management —
-two-factor authentication, session and passkey management, and billing all now work from the
-terminal — and adds vault organization commands (`mkdir`, `mv`, `rm`/`restore`/`trash`, `search`)
-that were previously web-only. It also closes out the migration of every upload path to the v2
-chunked session route and removes a login-time fallback that could silently degrade a failed key
-derivation. 114 commits since v0.9.1 (2026-05-31).
+The headline fix in this release is `bb share`: it could not create a single share on v0.10.0
+because it sent the wrapped file key in a format the server no longer accepted. It now mints
+shares in the same end-to-end-encrypted wire format the web app uses, so a link made by `bb`
+opens correctly in the web viewer. Alongside that P0, every command that used to read EOF from a
+non-interactive stdin and quietly do nothing (or silently overwrite a file) now fails loudly with
+a distinct, documented exit code — and a sweep of billing, auth-error, help-text, README, and
+FUSE-mount correctness issues found along the way is included. 48 commits since v0.10.0
+(2026-09-24).
 
 ### What's New
 
-**Vault organization**
-- `bb mkdir <path>` (with `-p` for recursive) creates folders (`fc2fc7f`).
-- `bb mv <src> <dst>` renames or moves a file/folder; a bulk form moves several sources into one
-  destination folder (`b2e7fdf`, `60604ad`).
-- `bb rm`, `bb restore`, and `bb trash list`/`bb trash empty` bring the trash lifecycle to the
-  CLI, including multi-target and recursive `rm` (task 0502/0503, `56bb6a6`) and a `--permanent`
-  irreversible delete gated behind a mandatory step-up token, restricted to a single target at a
-  time since the token is single-use, with an explicit "we cannot recover them" warning (task
-  0504/0507, `4af6e0a`, `64f1afe`, `dd99e31`, `63b0696`).
-- `bb search <query>` finds files/folders by name, decrypted locally; it now fetches the file
-  index once and decrypts in parallel instead of walking every folder (task 0810, `81d3f16`,
-  `9e78530`).
-- `bb ls` gained `-l`/`-a`/`-R`/`--depth`/`--sort`/`-r` and batches name decryption in parallel
-  (task 0810, `b710427`, `ae3706d`).
-- `bb ls`, `bb search`, and `bb trash list` no longer silently truncate at 200 entries — listing
-  now walks the full server-side cursor (task 0755, `70b3612`).
-
-**Two-factor authentication**
-- `bb 2fa status`, `setup`, `enable`, and `disable` manage TOTP from the CLI: `setup` renders the
-  otpauth URI as an ASCII QR and prints backup codes with a loss warning; `status` reads the
-  account's TOTP flag directly, since no separate status route exists server-side (PR #17/#18/#19,
-  tasks 0477/0478/0479).
-
-**Sessions and passkeys**
-- `bb sessions list` shows device, kind, country, and last-seen, with the current session marked
-  (PR #20, task 0480).
-- `bb sessions revoke <id>` and `bb sessions revoke-all-others` end sessions; revoking the current
-  session is refused with a pointer to `bb logout` (PR #21, task 0481).
-- `bb passkey list`, `bb passkey add` (opens the right web passkey page for whichever environment
-  `bb` is configured against — prod vs. local — since adding a passkey is a browser-only WebAuthn
-  ceremony), and `bb passkey remove` (PR #22/#23/#24, tasks 0482/0483/0484).
-
-**Billing**
-- `bb billing show`, `bb billing usage`, and `bb billing invoices` read live billing data — plan,
-  server-computed quota including referral bonus, an explicitly approximate per-region usage
-  breakdown, and invoice PDFs downloaded to a private, collision-safe temp file (PR #25/#26/#27,
-  tasks 0485/0486/0487).
-- `bb account billing` opens the billing portal; `bb account addons` views and purchases storage
-  add-ons (task 0489, `bf80927`).
-- `bb account update --email <new>` changes the account email, with verification sent to the new
-  inbox (`6af780e`).
+- **[P0] `bb share` works again — every share is end-to-end encrypted, in the web's wire
+  format.** It previously sent `wrapped_file_key` as a JSON blob under an HKDF-derived key; the
+  server (since a prior change) requires standard base64 of a raw AEAD blob, and the web viewer
+  unwraps `nonce(12) || ciphertext` under the raw client key `K_c` — so every `bb share` call
+  failed outright, and `--no-double-encrypt` was rejected by the server. `bb share` now wraps the
+  file key exactly like the web app (`encrypt_chunk_raw` under raw `K_c`), mints the share token
+  client-side, and sends `owner_wrapped_key`/`owner_wrapped_token` so `bb shares` can rebuild the
+  link later; `--no-double-encrypt` is hidden and returns a clear error instead of a server
+  rejection. Pinned by a known-answer test against an independent AES-GCM reference. (`75918a1`)
+- **Non-interactive runs fail loudly with dedicated exit codes, instead of silently doing
+  nothing.** With stdin not a terminal (cron, CI, a pipe), several commands used to read EOF from
+  a confirmation prompt, print a success-looking line, and exit `0` having done nothing. Exit
+  codes are now `0` success · `1` any other error (unchanged) · `2` a prompt was needed but stdin
+  isn't a terminal · `3` a one-shot run finished with failed or unresolved items:
+  - `bb push <name>` on an existing name: exit 2, "already exists — pass --replace or
+    --keep-both" (previously printed "skip" and exited 0).
+  - `bb rm <target>` without `-f`: exit 2, "refusing to trash without -f in non-interactive
+    mode", nothing trashed (previously printed "cancelled" and exited 0). `-f`/`--json`/`--quiet`
+    are unchanged.
+  - `bb unshare` with no id: exit 2, pointed at `bb shares` (previously crashed with a raw
+    "failed to enable raw mode" terminal error).
+  - `bb sync --once` with a failed upload or an unresolved conflict: summary reads
+    `! incomplete · N failed · M ⚡` and exits 3 with the counts (`--json` carries `ok`/`failed`);
+    previously printed `✓ synced` and exited 0. Dry runs and the continuous watch loop are
+    unaffected. (`aec35c7`)
+- **`bb pull` never silently overwrites a local file again.** `bb pull note.txt` over a local
+  `note.txt` used to print `✓ note.txt`, exit 0, and replace the file's content with no prompt, no
+  flag, and no backup. The output path is now checked before any bytes download, for both
+  single-file and `--zip` output: `-f`/`--force` overwrites (unchanged atomic
+  `.tmp` + rename); a rich terminal with a real tty on stdin gets a `y/N` prompt (default no); every
+  non-interactive run (`--json`, `--quiet`, piped stdin) refuses with a non-zero exit naming
+  `--force` and `-o <path>`; a directory at the output path is always an error. Recursive folder
+  pulls into an existing directory are not guarded yet. (`de3c8c4`)
+- **`bb share` accepts vault paths and short IDs**, not just full UUIDs — the same resolver
+  `bb pull` uses. Previously `bb share note.txt` or `bb share 4c53f27f` failed with "invalid file
+  id (expected UUID)", even though `bb ls` only ever prints the 8-character short ID. (`024dc3d`)
 
 ### Bug Fixes / Hardening
 
-- The upload driver (`bb push`, `bb sync`, `bb mount`, `bb webdav`) is fully migrated to the v2
-  `/api/v1/uploads/*` session route (task 0689, `b763a24`); `bb repair` — the last caller of the
-  deprecated V1 multipart path — was migrated too (`c9d6145`).
-- `bb sync` reconciles remote deletions instead of resurrecting them (task 0806, `0332a49`), and
-  stops its session cleanly on exit so a closed sync no longer zombies or spams the server
-  (`2292d74`).
-- `bb login`'s browser handshake now uses `beebeeb_core::cli_auth` instead of a hand-rolled
-  P-256/AES-GCM/HKDF implementation, wire-pinned against a shared ECDH compatibility vector (task
-  0861, `5e309f6`); decrypted login credentials are wrapped in `Zeroizing` and wiped from memory
-  on drop (task 0862, `7ed6caf`).
-- The OPAQUE zero-key fallback was removed from login — a failed key derivation now fails loudly
-  instead of silently degrading (task 0473, `43dd6a4`).
-- `bb whoami` handles the `Plan::Starter` variant instead of failing to build against newer core
-  plan types (PR #12, task 1386).
-- Billing prices are now read from the server; the stale local price table was dropped (task 1040,
-  `6085c6a`).
-- Every API request now sends `X-Beebeeb-Client: cli` and `X-Beebeeb-Client-Version` so the server
-  can attribute writes by client (PR #14, task 1392).
-- The non-functional `bb account export`/`bb account delete` stub subcommands were removed from
-  the command tree — those flows live in the web app (decision 0859, `ebc4981`).
+- `bb push`/`bb sync` on a folder no longer abort the whole folder when one file fails (e.g. a
+  zero-byte file the server used to reject): the rest of the folder still uploads, each failure is
+  printed with its relative path, the summary shows `N failed`, `--json` gains
+  `total_failed`/`failed[{path,error}]`, and the command exits 1 naming which files failed.
+  Sub-folder-creation errors still abort, since children would otherwise land in the wrong folder.
+  (`65372dc`)
+- Auth, session, and connection errors read like English instead of raw codes or reqwest's error
+  chain: a generic 401 now says "Your session expired or was revoked. Run `bb login` to sign in
+  again."; a connect failure says "Can't reach `<api origin>` — check your connection or `--api`".
+  `bb whoami`/`bb status` exit 1 when logged out or when the server rejects the session, instead of
+  printing placeholder plan data ("user unknown, plan Free — 5 GB") for a session that no longer
+  works. (`e4ba5de`)
+- `bb share --passphrase` no longer claims to wrap chunk keys with Argon2id — it doesn't; the
+  passphrase is sent to the server as a checked gate on access, and the file's encryption never
+  depends on it. Output and `--help` text corrected. (`8d7852d`, `36a36f1`)
+- `bb mount` on release binaries (which ship without the `fuse` feature — no FUSE asset has ever
+  been published) now says plainly that this build can't mount, points at `bb webdav` (ships in
+  every release) and the source-build route, and exits 1 — instead of walking users through
+  installing macFUSE/libfuse3 for a feature this binary can never use. `mount`/`unmount` are
+  hidden from `--help` on these builds; source builds with `--features fuse` are unchanged.
+  (`f884b4b`)
+- `bb --help`'s footer now links pages that actually resolve (`github.com/beebeeb-io/cli`,
+  `beebeeb.io/security`) instead of two 404s (`beebeeb.io/cli`, `beebeeb.io/fingerprints` — the
+  CLI has no fingerprint feature); the README no longer claims `bb --help` shows every flag and
+  points at `bb <command> --help` instead. (`d965504`)
+- `bb --help` lists every top-level command again — `2fa`, `sessions`, `passkey`, `billing`,
+  `account`, `request`, and `unmount` had silently dropped out of the hand-written help screen; the
+  "+ ..." overflow line is now computed from the actual clap command tree so this can't recur
+  silently. (`aa62be4`)
+- Billing sweep (task 1547, four confirmed findings): `bb billing show` shows a distinct
+  `Trial: ends <date> · no card on file` line instead of the same price/renewal pair as an
+  actively-billed account; `bb billing portal` uses the Mollie-era payment-method-update route
+  instead of a Stripe-only alias that 400s "stripe not configured" on every current account; API
+  error responses now surface the server's human `message` field instead of only the bare error
+  code (~20 error types were previously invisible to CLI users); `bb whoami`/`bb quota`/`bb push`
+  read quota straight from the server's `quota_bytes` instead of reconstructing a "bonus" from a
+  `bonus_bytes` field the API never actually returns. (`31bb2dc`, `07a5b5b`)
+- README links the stable `beebeeb.io/download/cli` redirect alongside the GitHub releases page.
+  (`22aac96`)
+- Release pipeline hardening: the `RELEASE_NOTES.md` gate now runs as the first step of the tag
+  workflow, before anything is built or the GitHub Release is created — a missing or stale file
+  can no longer ship a release with cargo-dist's auto-generated changelog body. The Scoop manifest
+  bump now opens a PR against `main` instead of pushing directly to it, which used to fail closed
+  on the protected branch and could take the whole publish job down with it. (`91619cf`,
+  `23f32ab`)
 
 ### Verification
 
-- `cargo build --release` — succeeds; `./target/release/bb --version` prints `bb 0.10.0`.
-- `cargo test` — two binaries: `test result: ok. 219 passed; 0 failed; 1 ignored` (main suite),
-  `test result: ok. 4 passed; 0 failed` (login ECDH handshake suite) — 223 passed, 0 failed total.
+- `cargo build --release` — succeeds; `./target/release/bb --version` prints `bb 0.11.0`.
+- `cargo test --all-targets` — 8 binaries, all green: `test result: ok. 250 passed; 0 failed;
+  2 ignored` (main lib+bin suite) plus `6 passed` (`auth_errors`), `4 passed` (`ecdh_compat`),
+  `3 passed` (`mount_availability`), `6 passed` (`non_interactive`), `5 passed`
+  (`pull_overwrite`), `1 passed` (`share_resolves_like_pull`), `4 passed` (`zero_byte_files`) —
+  279 passed, 0 failed total.
 - `cargo clippy --all-targets -- -D warnings` — clean.
 - `cargo fmt -- --check` — clean.
-- `dist plan` — plans `v0.10.0` across all 5 targets (macOS aarch64/x86_64, Linux musl
-  aarch64/x86_64, Windows msvc) plus the shell installer and Homebrew formula.
+- `dist plan` (cargo-dist 0.31.0, matching the pinned CI version) — plans `v0.11.0` across all 5
+  targets (macOS aarch64/x86_64, Linux musl aarch64/x86_64, Windows msvc) plus the shell
+  installer and Homebrew formula.
 - The release artifacts are built by the tag-triggered cargo-dist workflow; the installer and
   Homebrew formula are published from those builds.
 
@@ -96,6 +122,10 @@ scoop update bb                                  # Windows, Scoop
 
 macOS and Linux installs (shell installer or Homebrew) also self-update on next run via the
 built-in OTA updater. Windows installs do not self-update yet — run `scoop update bb` to get
-0.10.0.
+0.11.0.
 
-Full changelog: https://github.com/beebeeb-io/cli/compare/v0.9.1...v0.10.0
+**Scripts and CI pipelines that call `bb` non-interactively should check the new exit codes** (`2`
+for "needed a prompt", `3` for "finished incomplete") if they only handled `0`/`1` before —
+see "What's New" above.
+
+Full changelog: https://github.com/beebeeb-io/cli/compare/v0.10.0...v0.11.0
