@@ -259,12 +259,91 @@ fn display_name(name: &str) -> String {
 
 // ── The streaming upload driver ───────────────────────────────────────────────
 
+/// How one upload attempt obtains its v2 session.
+#[derive(Clone, Copy, Debug)]
+enum SessionPlan {
+    /// Reuse a session recorded by an interrupted earlier run (skip init).
+    Resume { file_id: Uuid, session_id: Uuid },
+    /// Open a new session for `file_id`. `fallback_file_id` is set only on the
+    /// re-init after a swept session (task 1589): if the server refuses the
+    /// stored id, the driver may try once more with this fresh id.
+    Init {
+        file_id: Uuid,
+        fallback_file_id: Option<Uuid>,
+    },
+}
+
+/// Why one attempt failed, kept typed so the driver can react to exactly the
+/// two recoverable cases and nothing else.
+enum AttemptErr {
+    /// The server no longer has the upload session (task 1589: its lease
+    /// expired and the sweeper removed it). Recoverable once per file per run by
+    /// a re-init.
+    SessionGone(String),
+    /// The init for the stored `file_id` was refused in a way a fresh id can
+    /// fix. Carries the fresh id to try (at most once).
+    InitRefused { message: String, fresh_file_id: Uuid },
+    /// Anything else — surfaced to the caller unchanged.
+    Other(String),
+}
+
+impl AttemptErr {
+    fn into_message(self) -> String {
+        match self {
+            AttemptErr::SessionGone(m) | AttemptErr::InitRefused { message: m, .. } | AttemptErr::Other(m) => m,
+        }
+    }
+}
+
+impl From<String> for AttemptErr {
+    fn from(m: String) -> Self {
+        AttemptErr::Other(m)
+    }
+}
+
+/// Map a chunk-PUT / complete failure: a swept session becomes
+/// [`AttemptErr::SessionGone`], everything else [`AttemptErr::Other`] with the
+/// same text the caller always saw.
+fn session_err(prefix: Option<String>, e: crate::api::ApiError) -> AttemptErr {
+    let gone = crate::api::is_upload_session_gone(&e);
+    let text = match prefix {
+        Some(p) => format!("{p}: {e}"),
+        None => e.message,
+    };
+    if gone {
+        AttemptErr::SessionGone(text)
+    } else {
+        AttemptErr::Other(text)
+    }
+}
+
+/// Whether an init refused for a stored `file_id` may be retried with a fresh
+/// id. Only statuses a different id can plausibly fix: 400 (the stored id is
+/// unusable), 404, and a 5xx (e.g. the id collides with a trashed row). Never
+/// for 401/403 (auth), 409 (a live upload or a stale base version — a fresh id
+/// would create a duplicate), 402/413 (quota) or 429 (handled in `api`).
+fn fresh_id_can_fix(status: u16) -> bool {
+    matches!(status, 400 | 404) || (500..=599).contains(&status)
+}
+
 /// Encrypt and upload one file with constant memory and honest progress.
 ///
 /// Shared by `bb sync` (called inside the `buffer_unordered` closure, so files
 /// run in parallel) and `bb push` (called sequentially). The master key is held
 /// behind an `Arc` and used only synchronously here; only the `FileKey`-owning
 /// encryptor crosses into the blocking thread.
+///
+/// ## Swept sessions (task 1589)
+///
+/// A resumed session (from `pending-uploads.json`) may no longer exist: the
+/// server gives every upload session an expiring lease and sweeps it once the
+/// lease runs out. Its chunk PUT / complete then answer 404 (or 400 "not
+/// writable: expired" on older servers). The driver then drops the stale
+/// record, re-inits with the stored `file_id` (the server re-creates a swept
+/// new file under the same id, or versions the existing one), and uploads from
+/// chunk 0. If the server refuses the stored id, it tries once with the
+/// caller's fresh id. At most ONE re-init per file per run — a second swept
+/// session in the same run is returned as an error, never looped on.
 pub async fn stream_encrypt_upload(
     api: &ApiClient,
     master_key: Arc<MasterKey>,
@@ -290,14 +369,70 @@ pub async fn stream_encrypt_upload(
     //     entry (file_id + v2 upload_session_id) for this path; reuse it — and
     //     let the server short-circuit chunks it already has — only if the file
     //     is unchanged. Otherwise mint a fresh upload (`spec.file_id` + a new
-    //     init session). The v2 init rejects re-init of an in-progress file
-    //     (409), so a resumed upload must SKIP `upload_init` and re-PUT every
-    //     chunk to the stored session; the v2 chunk route is idempotent
-    //     (already-stored → `{skipped:true}`), so re-PUTs are cheap.
-    let resume_candidate = crate::resume::resumable_upload(&spec.path, size, mtime_ns);
-    let (file_id, resumed_session) = match resume_candidate {
-        Some((fid, sid)) => (fid, Some(sid)),
-        None => (spec.file_id, None),
+    //     init session). The v2 init rejects re-init of a file whose upload
+    //     still holds a live lease (409), so a resumed upload must SKIP
+    //     `upload_init` and re-PUT every chunk to the stored session; the v2
+    //     chunk route is idempotent (already-stored → `{skipped:true}`), so
+    //     re-PUTs are cheap.
+    let mut plan = match crate::resume::resumable_upload(&spec.path, size, mtime_ns) {
+        Some((file_id, session_id)) => SessionPlan::Resume { file_id, session_id },
+        None => SessionPlan::Init {
+            file_id: spec.file_id,
+            fallback_file_id: None,
+        },
+    };
+    loop {
+        match upload_attempt(api, &master_key, &spec, size, mtime_ns, plan, progress).await {
+            Ok(outcome) => return Ok(outcome),
+            Err(AttemptErr::SessionGone(msg)) => {
+                // Only a RESUMED session is re-inited, and a re-init always
+                // yields an `Init` plan — so this arm runs at most once per
+                // file per run (the loop bound). A session this run opened
+                // itself vanishing is not the case this recovery is for.
+                let SessionPlan::Resume { file_id, .. } = plan else {
+                    return Err(msg);
+                };
+                // The recorded session is dead: drop it so neither this run nor
+                // a later one ever PUTs to it again.
+                crate::resume::clear(&spec.path);
+                if !crate::ui::is_quiet() {
+                    eprintln!(
+                        "  {}: the interrupted upload expired on the server; starting it again",
+                        display_name(&spec.file_name)
+                    );
+                }
+                plan = SessionPlan::Init {
+                    file_id,
+                    fallback_file_id: (file_id != spec.file_id).then_some(spec.file_id),
+                };
+            }
+            Err(AttemptErr::InitRefused { fresh_file_id, .. }) => {
+                plan = SessionPlan::Init {
+                    file_id: fresh_file_id,
+                    fallback_file_id: None,
+                };
+            }
+            Err(e) => return Err(e.into_message()),
+        }
+    }
+}
+
+/// One attempt: build the encryptor for `plan`'s file id, open (or reuse) the
+/// session, stream every chunk, complete. Consumes nothing the retry needs —
+/// the encryptor is rebuilt per attempt because the file key derives from the
+/// file id.
+async fn upload_attempt(
+    api: &ApiClient,
+    master_key: &Arc<MasterKey>,
+    spec: &UploadSpec,
+    size: u64,
+    mtime_ns: u128,
+    plan: SessionPlan,
+    progress: &dyn ChunkProgress,
+) -> Result<UploadOutcome, AttemptErr> {
+    let (file_id, resumed_session) = match plan {
+        SessionPlan::Resume { file_id, session_id } => (file_id, Some(session_id)),
+        SessionPlan::Init { file_id, .. } => (file_id, None),
     };
     let file_id_str = file_id.to_string();
 
@@ -305,7 +440,7 @@ pub async fn stream_encrypt_upload(
     //    name key derives from the DURABLE file_id, so a replace re-encrypts the
     //    name under the same id the server already stores.
     let mime = beebeeb_core::media::guess_mime_type(&spec.file_name);
-    let name_encrypted = beebeeb_core::encrypt::encrypt_name(&master_key, &file_id_str, &spec.file_name, mime)
+    let name_encrypted = beebeeb_core::encrypt::encrypt_name(master_key, &file_id_str, &spec.file_name, mime)
         .map_err(|e| format!("encrypt name: {e}"))?;
     let is_media = beebeeb_core::media::is_media(mime);
 
@@ -318,7 +453,7 @@ pub async fn stream_encrypt_upload(
     let chunk_size =
         beebeeb_types::plan_chunks_concurrent(size, ChunkProfile::Cli, spec.concurrency.max(1)).chunk_size_bytes;
     let file = std::fs::File::open(&spec.path).map_err(|e| format!("open {}: {e}", spec.path.display()))?;
-    let encryptor = ChunkEncryptor::from_reader_with_chunk_size(&master_key, &file_id_str, size, chunk_size, file)
+    let encryptor = ChunkEncryptor::from_reader_with_chunk_size(master_key, &file_id_str, size, chunk_size, file)
         .map_err(|e| format!("init encryptor for {}: {e}", spec.file_name))?;
     let chunk_count = encryptor.chunk_plan().chunk_count as u32;
     let expected_total = encryptor.expected_total_ciphertext();
@@ -330,11 +465,11 @@ pub async fn stream_encrypt_upload(
     //    stale, so bail and let the next run pick it up.
     if let Ok(m2) = std::fs::metadata(&spec.path) {
         if m2.len() != size {
-            return Err(format!(
+            return Err(AttemptErr::Other(format!(
                 "{} changed size during scan ({size} → {}); will retry next run",
                 spec.file_name,
                 m2.len()
-            ));
+            )));
         }
     }
 
@@ -343,16 +478,16 @@ pub async fn stream_encrypt_upload(
     //    from the summed chunks at complete) plus the exact chunk plan the
     //    encryptor uses. On a replace (`spec.base_version_number` is `Some`) the
     //    server versions by `file_id` and enforces the stale-version 409. On
-    //    resume the session already exists (re-init would 409), so reuse the
-    //    stored session id and skip straight to the pipeline.
+    //    resume the session already exists, so reuse the stored session id and
+    //    skip straight to the pipeline.
     //
     //    `upload_session_id` keys the chunk PUTs + complete; `server_id` is the
     //    durable file id returned by init (equals `file_id` on replace).
     let (upload_session_id, server_id) = if let Some(sid) = resumed_session {
         (sid.to_string(), file_id_str.clone())
     } else {
-        let init = api
-            .upload_init(
+        let init = match api
+            .upload_init_typed(
                 Some(file_id),
                 &name_encrypted,
                 spec.parent_id,
@@ -362,7 +497,22 @@ pub async fn stream_encrypt_upload(
                 is_media,
                 spec.base_version_number,
             )
-            .await?;
+            .await
+        {
+            Ok(init) => init,
+            Err(e) => {
+                return Err(match plan {
+                    SessionPlan::Init {
+                        fallback_file_id: Some(fresh_file_id),
+                        ..
+                    } if fresh_id_can_fix(e.status) => AttemptErr::InitRefused {
+                        message: e.message,
+                        fresh_file_id,
+                    },
+                    _ => AttemptErr::Other(e.message),
+                });
+            }
+        };
         // The server's plan is authoritative — frame the upload against it, not
         // a hardcoded local guess. We sent our `ChunkEncryptor` plan; the v2
         // server uses client `chunk_size_bytes`/`chunk_count` verbatim, so the
@@ -370,11 +520,11 @@ pub async fn stream_encrypt_upload(
         // ceiling), which would desync the chunk PUTs from the encryptor — bail
         // loudly rather than upload a corrupt frame layout.
         if init.chunk_count != chunk_count as u64 || init.chunk_size_bytes != chunk_size {
-            return Err(format!(
+            return Err(AttemptErr::Other(format!(
                 "server reframed the upload plan (sent {chunk_count}×{chunk_size}B, \
                  got {}×{}B) — refusing to upload a mismatched layout",
                 init.chunk_count, init.chunk_size_bytes
-            ));
+            )));
         }
         // Record this upload as resumable now that the session exists, BEFORE
         // any chunk goes out, so an interrupt mid-stream leaves a record the
@@ -407,14 +557,16 @@ pub async fn stream_encrypt_upload(
     result?;
 
     // 7. Finalise the version.
-    api.upload_complete(&upload_session_id).await?;
+    api.upload_complete_typed(&upload_session_id)
+        .await
+        .map_err(|e| session_err(None, e))?;
 
     // 7b. Upload done — drop the resume record so a future upload of this path
     //     (e.g. a changed version) starts fresh rather than resuming this id.
     crate::resume::clear(&spec.path);
 
     // 8. Thumbnails: image/* only, one bounded extra read, best-effort.
-    maybe_upload_thumbnail(api, &master_key, &file_id_str, &server_id, &spec.path, mime, size).await;
+    maybe_upload_thumbnail(api, master_key, &file_id_str, &server_id, &spec.path, mime, size).await;
 
     let parsed: Uuid = server_id.parse().map_err(|e| format!("invalid server file id: {e}"))?;
     Ok(UploadOutcome {
@@ -447,7 +599,7 @@ async fn run_pipeline(
     expected_total: u64,
     shutdown: &Arc<AtomicBool>,
     file_prog: &dyn FileProgress,
-) -> Result<(), String> {
+) -> Result<(), AttemptErr> {
     use tokio::sync::mpsc;
 
     let (tx, mut rx) = mpsc::channel::<EncryptedChunk>(CHANNEL_CAP);
@@ -488,10 +640,10 @@ async fn run_pipeline(
     // for the same reason.
     let mut confirmed_bytes: u64 = 0;
     let mut confirmed_chunks: u32 = 0;
-    let mut consumer_err: Option<String> = None;
+    let mut consumer_err: Option<AttemptErr> = None;
     while let Some(chunk) = rx.recv().await {
         if shutdown.load(Ordering::Relaxed) {
-            consumer_err = Some(INTERRUPTED.to_string());
+            consumer_err = Some(AttemptErr::Other(INTERRUPTED.to_string()));
             break;
         }
         let len = chunk.data.len() as u64;
@@ -501,7 +653,7 @@ async fn run_pipeline(
         // re-written). So we always PUT and count the 200 either way — no
         // client-side "present" set needed.
         match api
-            .upload_chunk(upload_session_id, index, Bytes::from(chunk.data))
+            .upload_chunk_typed(upload_session_id, index, Bytes::from(chunk.data))
             .await
         {
             Ok(_) => {
@@ -510,7 +662,7 @@ async fn run_pipeline(
                 file_prog.chunk_confirmed(len);
             }
             Err(e) => {
-                consumer_err = Some(format!("chunk {index} upload: {e}"));
+                consumer_err = Some(session_err(Some(format!("chunk {index} upload")), e));
                 break;
             }
         }
@@ -525,27 +677,28 @@ async fn run_pipeline(
     if let Some(e) = consumer_err {
         return Err(e);
     }
-    match producer_join {
-        Ok(Ok(())) => {}
-        Ok(Err(ProducerErr::Cancelled)) => return Err(INTERRUPTED.to_string()),
-        Ok(Err(ProducerErr::ChannelClosed)) => {
-            return Err("internal: chunk channel closed before completion".to_string());
-        }
-        Ok(Err(ProducerErr::Core(e))) => return Err(e),
-        Ok(Err(ProducerErr::Finish(e))) => return Err(format!("integrity check failed: {e}")),
-        Err(join_err) => return Err(format!("encrypt task failed: {join_err}")),
+    let producer_err = match producer_join {
+        Ok(Ok(())) => None,
+        Ok(Err(ProducerErr::Cancelled)) => Some(INTERRUPTED.to_string()),
+        Ok(Err(ProducerErr::ChannelClosed)) => Some("internal: chunk channel closed before completion".to_string()),
+        Ok(Err(ProducerErr::Core(e))) => Some(e),
+        Ok(Err(ProducerErr::Finish(e))) => Some(format!("integrity check failed: {e}")),
+        Err(join_err) => Some(format!("encrypt task failed: {join_err}")),
+    };
+    if let Some(e) = producer_err {
+        return Err(AttemptErr::Other(e));
     }
 
     // Final client-side guards (hygiene; the server recomputes the total).
     if confirmed_chunks != chunk_count {
-        return Err(format!(
+        return Err(AttemptErr::Other(format!(
             "incomplete upload: {confirmed_chunks}/{chunk_count} chunks confirmed"
-        ));
+        )));
     }
     if confirmed_bytes != expected_total {
-        return Err(format!(
+        return Err(AttemptErr::Other(format!(
             "ciphertext total mismatch: confirmed {confirmed_bytes}, expected {expected_total}"
-        ));
+        )));
     }
     Ok(())
 }
@@ -752,5 +905,394 @@ mod rss_regression {
             "peak heap increase {mib:.1} MiB exceeded {} MiB — upload is not constant-memory",
             BOUND / (1024 * 1024)
         );
+    }
+}
+
+/// Task 1589: a resumed upload whose server session was swept (lease expired)
+/// must drop its `pending-uploads.json` record, re-init ONCE (stored
+/// `file_id` first, a fresh one only if the server refuses it), and upload from
+/// chunk 0 — never PUT to the dead session forever, never loop.
+#[cfg(test)]
+mod swept_session_reinit {
+    use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex};
+
+    use axum::body::Body;
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use axum::response::{IntoResponse, Response};
+    use axum::routing::{post, put};
+    use axum::{Json, Router};
+    use beebeeb_core::kdf::MasterKey;
+    use futures_util::StreamExt;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use super::{NoopProgress, UploadSpec, stream_encrypt_upload};
+    use crate::api::ApiClient;
+
+    /// What the mock answers for a session it no longer has.
+    #[derive(Clone, Copy)]
+    enum Gone {
+        /// Current servers (PR #120): 404.
+        NotFound,
+        /// Older servers for a kept `status='expired'` row.
+        BadRequestExpired,
+    }
+
+    #[derive(Default)]
+    struct Mock {
+        /// Sessions the server holds. Anything else is "swept".
+        live: HashSet<String>,
+        /// Sessions whose complete answers "gone" although chunks were taken.
+        complete_gone: HashSet<String>,
+        /// When set, sessions opened by init are dead immediately (to prove the
+        /// driver re-inits at most once).
+        kill_new_sessions: bool,
+        /// Init answers this status for the given file_id.
+        init_refuse: HashMap<String, u16>,
+        gone: Option<Gone>,
+        /// file_id sent on every init, in order.
+        inits: Vec<String>,
+        /// (session, index) of every chunk PUT, in order.
+        chunk_puts: Vec<(String, u32)>,
+        /// session of every successful complete.
+        completed: Vec<String>,
+        /// session -> file_id, for complete's response.
+        session_file: HashMap<String, String>,
+    }
+
+    type Shared = Arc<Mutex<Mock>>;
+
+    fn gone_response(g: Option<Gone>) -> Response {
+        match g.unwrap_or(Gone::NotFound) {
+            Gone::NotFound => (StatusCode::NOT_FOUND, Json(json!({ "error": "not found" }))).into_response(),
+            Gone::BadRequestExpired => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "upload session is not writable: expired" })),
+            )
+                .into_response(),
+        }
+    }
+
+    async fn spawn(state: Shared) -> String {
+        let app = Router::new()
+            .route(
+                "/api/v1/uploads/init",
+                post(
+                    |State(st): State<Shared>, Json(body): Json<serde_json::Value>| async move {
+                        let file_id = body
+                            .get("file_id")
+                            .and_then(|v| v.as_str())
+                            .map(String::from)
+                            .unwrap_or_else(|| Uuid::new_v4().to_string());
+                        let mut m = st.lock().unwrap();
+                        m.inits.push(file_id.clone());
+                        if let Some(code) = m.init_refuse.get(&file_id).copied() {
+                            let status = StatusCode::from_u16(code).unwrap();
+                            return (status, Json(json!({ "error": "refused by mock" }))).into_response();
+                        }
+                        let sid = Uuid::new_v4().to_string();
+                        if !m.kill_new_sessions {
+                            m.live.insert(sid.clone());
+                        }
+                        m.session_file.insert(sid.clone(), file_id.clone());
+                        Json(json!({
+                            "upload_session_id": sid,
+                            "file_id": file_id,
+                            "chunk_size_bytes": body.get("chunk_size_bytes").and_then(|v| v.as_u64()).unwrap_or(0),
+                            "chunk_count": body.get("chunk_count").and_then(|v| v.as_u64()).unwrap_or(0),
+                        }))
+                        .into_response()
+                    },
+                ),
+            )
+            .route(
+                "/api/v1/uploads/:session/chunks/:idx",
+                put(
+                    |State(st): State<Shared>, Path((sid, idx)): Path<(String, u32)>, body: Body| async move {
+                        let mut stream = body.into_data_stream();
+                        let mut n = 0usize;
+                        while let Some(frame) = stream.next().await {
+                            n += frame.map(|b| b.len()).unwrap_or(0);
+                        }
+                        let mut m = st.lock().unwrap();
+                        m.chunk_puts.push((sid.clone(), idx));
+                        if !m.live.contains(&sid) {
+                            return gone_response(m.gone);
+                        }
+                        Json(json!({ "index": idx, "size": n, "skipped": false })).into_response()
+                    },
+                ),
+            )
+            .route(
+                "/api/v1/uploads/:session/complete",
+                post(|State(st): State<Shared>, Path(sid): Path<String>| async move {
+                    let mut m = st.lock().unwrap();
+                    if !m.live.contains(&sid) || m.complete_gone.contains(&sid) {
+                        return gone_response(m.gone);
+                    }
+                    m.completed.push(sid.clone());
+                    let fid = m.session_file.get(&sid).cloned().unwrap_or_default();
+                    Json(json!({ "id": fid, "size_bytes": 0, "chunk_count": 0 })).into_response()
+                }),
+            )
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    /// A scratch dir with the sidecar redirected into it. Holding the guard
+    /// serialises every test that touches the process-global env var.
+    struct Scratch {
+        dir: std::path::PathBuf,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let guard = crate::resume::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let dir = std::env::temp_dir().join(format!("bb-1589-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            // SAFETY: serialised by TEST_ENV_LOCK; no other thread reads it
+            // concurrently outside that lock.
+            unsafe {
+                std::env::set_var("BB_PENDING_UPLOADS_PATH", dir.join("pending.json"));
+            }
+            Self { dir, _guard: guard }
+        }
+
+        fn file(&self, size: usize) -> (std::path::PathBuf, u64, u128) {
+            let p = self.dir.join("payload.bin");
+            std::fs::write(&p, vec![0x5Au8; size]).unwrap();
+            let meta = std::fs::metadata(&p).unwrap();
+            let mtime = meta
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            (p, meta.len(), mtime)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            unsafe {
+                std::env::remove_var("BB_PENDING_UPLOADS_PATH");
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn spec(path: &std::path::Path, file_id: Uuid) -> UploadSpec {
+        UploadSpec {
+            path: path.to_path_buf(),
+            file_name: "payload.bin".to_string(),
+            file_id,
+            base_version_number: None,
+            parent_id: None,
+            concurrency: 1,
+            shutdown: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    async fn run(state: &Shared, spec: UploadSpec) -> Result<super::UploadOutcome, String> {
+        let base = spawn(state.clone()).await;
+        let api = ApiClient::new_for_test(base);
+        let mk = Arc::new(MasterKey::from_bytes([9u8; 32]));
+        stream_encrypt_upload(&api, mk, spec, &NoopProgress).await
+    }
+
+    /// Shared body of the two "swept on the first chunk PUT" cases.
+    async fn swept_on_chunk_recovers(gone: Gone, tag: &str) {
+        let s = Scratch::new(tag);
+        let (path, size, mtime) = s.file(300 * 1024);
+        let stored_fid = Uuid::new_v4();
+        let dead_sid = Uuid::new_v4();
+        crate::resume::record(&path, stored_fid, dead_sid, size, mtime);
+
+        let state: Shared = Arc::new(Mutex::new(Mock {
+            gone: Some(gone),
+            ..Default::default()
+        }));
+        let fresh_fid = Uuid::new_v4();
+        let out = run(&state, spec(&path, fresh_fid)).await.expect("upload must recover");
+
+        let m = state.lock().unwrap();
+        // The dead session was tried first (the resume), exactly once.
+        assert_eq!(m.chunk_puts.first().map(|c| c.0.clone()), Some(dead_sid.to_string()));
+        assert_eq!(m.chunk_puts.iter().filter(|c| c.0 == dead_sid.to_string()).count(), 1);
+        // Exactly one re-init, with the STORED file_id.
+        assert_eq!(m.inits, vec![stored_fid.to_string()]);
+        // The new session got every chunk from 0 and was completed.
+        let new_sid = m.completed.first().cloned().expect("new session completed");
+        let idx: Vec<u32> = m.chunk_puts.iter().filter(|c| c.0 == new_sid).map(|c| c.1).collect();
+        assert_eq!(idx.first(), Some(&0), "re-upload starts at chunk 0");
+        assert!(idx.windows(2).all(|w| w[1] == w[0] + 1));
+        assert_eq!(out.server_id, stored_fid);
+        // The stale record is gone (and the success cleared the new one).
+        assert_eq!(crate::resume::resumable_upload(&path, size, mtime), None);
+    }
+
+    #[tokio::test]
+    async fn resumed_session_404_on_chunk_reinits_with_stored_id() {
+        swept_on_chunk_recovers(Gone::NotFound, "chunk404").await;
+    }
+
+    #[tokio::test]
+    async fn resumed_session_400_expired_on_chunk_reinits_with_stored_id() {
+        swept_on_chunk_recovers(Gone::BadRequestExpired, "chunk400").await;
+    }
+
+    #[tokio::test]
+    async fn resumed_session_404_on_complete_reinits() {
+        let s = Scratch::new("complete404");
+        let (path, size, mtime) = s.file(64 * 1024);
+        let stored_fid = Uuid::new_v4();
+        let sid = Uuid::new_v4();
+        crate::resume::record(&path, stored_fid, sid, size, mtime);
+        let mut mock = Mock::default();
+        mock.live.insert(sid.to_string());
+        mock.complete_gone.insert(sid.to_string());
+        let state: Shared = Arc::new(Mutex::new(mock));
+
+        let out = run(&state, spec(&path, Uuid::new_v4()))
+            .await
+            .expect("upload must recover");
+        let m = state.lock().unwrap();
+        assert_eq!(m.inits, vec![stored_fid.to_string()]);
+        assert_eq!(m.completed.len(), 1);
+        assert_ne!(m.completed[0], sid.to_string());
+        assert_eq!(out.server_id, stored_fid);
+        assert_eq!(crate::resume::resumable_upload(&path, size, mtime), None);
+    }
+
+    #[tokio::test]
+    async fn reinit_happens_at_most_once_per_file_per_run() {
+        let s = Scratch::new("once");
+        let (path, size, mtime) = s.file(64 * 1024);
+        let stored_fid = Uuid::new_v4();
+        let dead_sid = Uuid::new_v4();
+        crate::resume::record(&path, stored_fid, dead_sid, size, mtime);
+        // Every session, including the re-inited one, is swept at once.
+        let state: Shared = Arc::new(Mutex::new(Mock {
+            kill_new_sessions: true,
+            ..Default::default()
+        }));
+
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            run(&state, spec(&path, Uuid::new_v4())),
+        )
+        .await
+        .expect("must not loop");
+        assert!(res.is_err(), "a second swept session is an error, not a retry");
+        let m = state.lock().unwrap();
+        assert_eq!(m.inits.len(), 1, "exactly one re-init: {:?}", m.inits);
+        assert!(m.completed.is_empty());
+        // The dead original record was cleared; the one left is the new
+        // session's, so the next run gets its own single re-init.
+        let left = crate::resume::resumable_upload(&path, size, mtime);
+        assert!(left.is_some_and(|(_, sid)| sid != dead_sid), "left: {left:?}");
+    }
+
+    #[tokio::test]
+    async fn refused_stored_id_falls_back_to_one_fresh_id() {
+        let s = Scratch::new("fallback");
+        let (path, size, mtime) = s.file(64 * 1024);
+        let stored_fid = Uuid::new_v4();
+        crate::resume::record(&path, stored_fid, Uuid::new_v4(), size, mtime);
+        let mut mock = Mock::default();
+        mock.init_refuse.insert(stored_fid.to_string(), 400);
+        let state: Shared = Arc::new(Mutex::new(mock));
+        let fresh_fid = Uuid::new_v4();
+
+        let out = run(&state, spec(&path, fresh_fid))
+            .await
+            .expect("fresh id must succeed");
+        let m = state.lock().unwrap();
+        assert_eq!(m.inits, vec![stored_fid.to_string(), fresh_fid.to_string()]);
+        assert_eq!(out.server_id, fresh_fid);
+        assert_eq!(m.completed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn conflict_on_reinit_is_not_papered_over_with_a_fresh_id() {
+        let s = Scratch::new("conflict");
+        let (path, size, mtime) = s.file(64 * 1024);
+        let stored_fid = Uuid::new_v4();
+        crate::resume::record(&path, stored_fid, Uuid::new_v4(), size, mtime);
+        let mut mock = Mock::default();
+        mock.init_refuse.insert(stored_fid.to_string(), 409);
+        let state: Shared = Arc::new(Mutex::new(mock));
+
+        let res = run(&state, spec(&path, Uuid::new_v4())).await;
+        assert!(res.is_err());
+        let m = state.lock().unwrap();
+        assert_eq!(
+            m.inits,
+            vec![stored_fid.to_string()],
+            "no duplicate file under a fresh id"
+        );
+        // The dead record is gone either way.
+        assert_eq!(crate::resume::resumable_upload(&path, size, mtime), None);
+    }
+
+    #[tokio::test]
+    async fn a_session_this_run_opened_is_not_reinited() {
+        let s = Scratch::new("fresh");
+        let (path, _size, _mtime) = s.file(64 * 1024);
+        let state: Shared = Arc::new(Mutex::new(Mock {
+            kill_new_sessions: true,
+            ..Default::default()
+        }));
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            run(&state, spec(&path, Uuid::new_v4())),
+        )
+        .await
+        .expect("must not loop");
+        assert!(res.is_err());
+        assert_eq!(
+            state.lock().unwrap().inits.len(),
+            1,
+            "no re-init for a session this run opened"
+        );
+    }
+
+    #[test]
+    fn session_gone_classifier() {
+        use crate::api::{ApiError, is_upload_session_gone};
+        let e = |status: u16, msg: &str| ApiError {
+            code: Some(msg.to_string()),
+            message: msg.to_string(),
+            status,
+        };
+        assert!(is_upload_session_gone(&e(404, "not found")));
+        assert!(is_upload_session_gone(&e(
+            400,
+            "upload session is not writable: expired"
+        )));
+        assert!(!is_upload_session_gone(&e(
+            400,
+            "upload session is not writable: completed"
+        )));
+        assert!(!is_upload_session_gone(&e(
+            400,
+            "chunk index 9 out of range (expected 0..3)"
+        )));
+        assert!(!is_upload_session_gone(&e(
+            409,
+            "upload is already in progress for this file"
+        )));
+        assert!(!is_upload_session_gone(&e(500, "internal")));
+        assert!(!is_upload_session_gone(&e(0, "Can't reach the Beebeeb API")));
     }
 }

@@ -566,6 +566,35 @@ impl ApiClient {
         is_media: bool,
         base_version_number: Option<i32>,
     ) -> Result<UploadInit, String> {
+        self.upload_init_typed(
+            file_id,
+            name_encrypted,
+            parent_id,
+            size_bytes,
+            chunk_size_bytes,
+            chunk_count,
+            is_media,
+            base_version_number,
+        )
+        .await
+        .map_err(|e| e.message)
+    }
+
+    /// [`upload_init`](Self::upload_init), keeping the HTTP status + server
+    /// code so the upload driver can decide whether a re-init after a swept
+    /// session may fall back to a fresh `file_id` (task 1589).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upload_init_typed(
+        &self,
+        file_id: Option<uuid::Uuid>,
+        name_encrypted: &str,
+        parent_id: Option<uuid::Uuid>,
+        size_bytes: i64,
+        chunk_size_bytes: i64,
+        chunk_count: i32,
+        is_media: bool,
+        base_version_number: Option<i32>,
+    ) -> Result<UploadInit, ApiError> {
         let token = self.require_auth()?;
         // The v2 server (`routes/uploads.rs::parse_profile`) accepts only
         // web/mobile/desktop/backup_agent — there is no "cli" wire profile. The
@@ -595,13 +624,13 @@ impl ApiClient {
                 .send()
                 .await
                 .map_err(format_request_error)?;
-            match parse_response(resp).await {
-                Err(e) if e == "__rate_limited__" => continue,
+            match parse_response_typed(resp).await {
+                Err(e) if e.message == "__rate_limited__" => continue,
                 Err(e) => return Err(e),
-                Ok(v) => return UploadInit::from_value(&v),
+                Ok(v) => return UploadInit::from_value(&v).map_err(ApiError::from),
             }
         }
-        Err("rate limited after 3 retries".to_string())
+        Err("rate limited after 3 retries".to_string().into())
     }
 
     /// Upload one chunk to a v2 session: `PUT /api/v1/uploads/{session}/chunks/{index}`.
@@ -614,6 +643,21 @@ impl ApiClient {
     /// it already has. `data` is `Bytes` so each retry reuses the same allocation
     /// (a clone is just an `Arc` refcount bump).
     pub async fn upload_chunk(&self, upload_session_id: &str, index: u32, data: Bytes) -> Result<Value, String> {
+        self.upload_chunk_typed(upload_session_id, index, data)
+            .await
+            .map_err(|e| e.message)
+    }
+
+    /// [`upload_chunk`](Self::upload_chunk), keeping the HTTP status + server
+    /// code so the upload driver can tell a swept session (404, or 400
+    /// "not writable: expired" from an older server) apart from any other
+    /// failure (task 1589). See [`is_upload_session_gone`].
+    pub async fn upload_chunk_typed(
+        &self,
+        upload_session_id: &str,
+        index: u32,
+        data: Bytes,
+    ) -> Result<Value, ApiError> {
         let token = self.require_auth()?;
         let url = self.url(&format!("/api/v1/uploads/{upload_session_id}/chunks/{index}"));
         const MAX_ATTEMPTS: u32 = 5;
@@ -629,9 +673,9 @@ impl ApiClient {
                 .send()
                 .await;
             match send {
-                Ok(resp) => match parse_response(resp).await {
+                Ok(resp) => match parse_response_typed(resp).await {
                     // parse_response already slept for Retry-After; just re-try.
-                    Err(e) if e == "__rate_limited__" => {
+                    Err(e) if e.message == "__rate_limited__" => {
                         last_err = "rate limited".to_string();
                         continue;
                     }
@@ -644,12 +688,10 @@ impl ApiClient {
                     continue;
                 }
                 // Permanent transport error (TLS/builder/etc.) — fail fast.
-                Err(err) => return Err(format_request_error(err)),
+                Err(err) => return Err(format_request_error(err).into()),
             }
         }
-        Err(format!(
-            "chunk {index} failed after {MAX_ATTEMPTS} attempts: {last_err}"
-        ))
+        Err(format!("chunk {index} failed after {MAX_ATTEMPTS} attempts: {last_err}").into())
     }
 
     /// Finalise a v2 upload session: `POST /api/v1/uploads/{session}/complete`.
@@ -657,6 +699,14 @@ impl ApiClient {
     /// the full file metadata. Idempotent (a second call on a completed session
     /// returns `{already_completed: true}`).
     pub async fn upload_complete(&self, upload_session_id: &str) -> Result<Value, String> {
+        self.upload_complete_typed(upload_session_id)
+            .await
+            .map_err(|e| e.message)
+    }
+
+    /// [`upload_complete`](Self::upload_complete), keeping the HTTP status +
+    /// server code (task 1589; see [`upload_chunk_typed`](Self::upload_chunk_typed)).
+    pub async fn upload_complete_typed(&self, upload_session_id: &str) -> Result<Value, ApiError> {
         let token = self.require_auth()?;
         for _ in 0..3 {
             pace_if_needed().await;
@@ -667,12 +717,12 @@ impl ApiClient {
                 .send()
                 .await
                 .map_err(format_request_error)?;
-            match parse_response(resp).await {
-                Err(e) if e == "__rate_limited__" => continue,
+            match parse_response_typed(resp).await {
+                Err(e) if e.message == "__rate_limited__" => continue,
                 other => return other,
             }
         }
-        Err("rate limited after 3 retries".to_string())
+        Err("rate limited after 3 retries".to_string().into())
     }
 
     /// Create a share link for a file.
@@ -1915,7 +1965,6 @@ pub struct ApiError {
     pub(crate) message: String,
     /// HTTP status, or 0 for a failure that never got a response (read
     /// error, non-JSON body after a 2xx).
-    #[allow(dead_code)]
     pub(crate) status: u16,
 }
 
@@ -1964,6 +2013,24 @@ impl From<String> for ApiError {
             message,
             status: 0,
         }
+    }
+}
+
+/// True when a v2 upload-session request failed because the server no longer
+/// has that session (task 1589). Server PR #120 sweeps a session whose lease
+/// expired: its chunk PUT / complete then answer **404** (the row is gone, or
+/// kept as `status = 'expired'` on servers that map that to 404 too). Servers
+/// from before that mapping answer **400** `upload session is not writable:
+/// expired` for a kept-but-expired row — the same meaning, so it is matched
+/// here too. Nothing else counts: a 409, a quota error or a 5xx is a real
+/// failure the caller must surface, never a reason to re-init.
+pub(crate) fn is_upload_session_gone(e: &ApiError) -> bool {
+    match e.status {
+        404 => true,
+        // The server sends `{ error: <text> }` for this 400; `message` carries
+        // it (it falls back to `error` when the body has no `message`).
+        400 => e.message.contains("upload session is not writable: expired"),
+        _ => false,
     }
 }
 
