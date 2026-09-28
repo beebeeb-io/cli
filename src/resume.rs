@@ -27,6 +27,11 @@ use uuid::Uuid;
 
 static LOCK: Mutex<()> = Mutex::new(());
 
+/// Test-only: serialises every test that points `BB_PENDING_UPLOADS_PATH` at a
+/// scratch file (a process-global env var), across modules.
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
 #[derive(Serialize, Deserialize, Default)]
 struct PendingDb {
     #[serde(default)]
@@ -132,6 +137,7 @@ mod tests {
     // process-global env var, so splitting across parallel tests would race.
     #[test]
     fn record_lookup_clear_with_signature_guard() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("bb-resume-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let db = dir.join("pending.json");
