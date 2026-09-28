@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `bb whoami`/`bb status`, `bb quota` and `bb billing show` show the account state from the server (`account_state`): an account with no plan yet, or whose trial ended unpaid (read-only, with the date the vault will be deleted). `--json` on `whoami`/`quota` gains `account_state` and `data_deletion_at`.
 
 ### Changed
-- An upload refused because the account has no plan yet says so and links the plan chooser (`/choose-plan`); one refused because the trial ended says the vault is read-only, when it will be deleted, and links `/billing` — instead of a bare `quota_exceeded`. `bb push` explains this from the subscription it already fetches before uploading; other upload paths (`bb sync`, `bb webdav`, `bb mount`, `bb repair`) look the state up only after the server refuses an upload, at most once per run.
+- An upload or share refused because the account has no plan yet (`409 plan_required`) says so and links the plan chooser (`/choose-plan`); one refused because the trial ended (`409 account_lapsed`) says the vault is read-only, when it will be deleted, and links `/billing?view=change` — instead of the server's generic text. The older `413 quota_exceeded` refusal is explained the same way when the account state calls for it. `bb push` also checks this before uploading, from the subscription it already fetches. Other paths look the account state up only after a refusal, at most once per run.
 
 ## [0.11.1] - 2026-09-28
 

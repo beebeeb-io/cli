@@ -13,8 +13,9 @@
 //! A server that predates 1037 sends neither field; that (and any value this
 //! CLI doesn't know yet) reads as [`AccountState::Ok`], so an old server or a
 //! future state never blocks a command here — the server stays the enforcer
-//! (it refuses the upload init with `quota_exceeded`), this module only
-//! explains *why* to the user.
+//! (it refuses upload init / share create with `409 plan_required` /
+//! `account_lapsed`, older servers with `413 quota_exceeded`; see
+//! [`Refusal`]), this module only explains *why* to the user.
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -90,9 +91,58 @@ impl AccountState {
                 };
                 Some(format!(
                     "Your trial has ended; your vault is read-only and will be deleted {when}. \
-                     Subscribe at {base}/billing"
+                     Subscribe at {base}/billing?view=change"
                 ))
             }
+        }
+    }
+}
+
+/// Why the server refused an upload init / share create, as far as account
+/// state is concerned. Task 1037 server contract: an account without a plan
+/// gets `409 { error: "plan_required" | "account_lapsed" }`; the older
+/// `413 quota_exceeded` (quota 0) path is still recognised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    /// `plan_required` — the account never started a trial or plan.
+    PlanRequired,
+    /// `account_lapsed` — read-only; the deletion date lives on the
+    /// subscription, not on the error body.
+    AccountLapsed,
+    /// `quota_exceeded` / 413 — only an account-state problem if the
+    /// subscription says so.
+    Quota,
+}
+
+impl Refusal {
+    /// Classify a refusal by its stable `error` code and HTTP status.
+    pub(crate) fn classify(code: Option<&str>, status: u16) -> Option<Self> {
+        match code {
+            Some("plan_required") => Some(Refusal::PlanRequired),
+            Some("account_lapsed") => Some(Refusal::AccountLapsed),
+            Some("quota_exceeded") => Some(Refusal::Quota),
+            _ if status == 413 => Some(Refusal::Quota),
+            _ => None,
+        }
+    }
+
+    /// Whether resolving this refusal needs `GET /billing/subscription`.
+    pub(crate) fn needs_subscription(self) -> bool {
+        !matches!(self, Refusal::PlanRequired)
+    }
+
+    /// The account state that explains the refusal, given the subscription's
+    /// state if it was fetched (`None`: not fetched, or the fetch failed).
+    /// `None` result: nothing to explain — keep the server's error.
+    pub(crate) fn resolve(self, fetched: Option<&AccountState>) -> Option<AccountState> {
+        match self {
+            Refusal::PlanRequired => Some(AccountState::NeedsPlan),
+            // The server's code wins; the subscription only adds the date.
+            Refusal::AccountLapsed => Some(match fetched {
+                Some(lapsed @ AccountState::Lapsed { .. }) => lapsed.clone(),
+                _ => AccountState::Lapsed { data_deletion_at: None },
+            }),
+            Refusal::Quota => fetched.filter(|s| **s != AccountState::Ok).cloned(),
         }
     }
 }
@@ -248,7 +298,7 @@ mod tests {
             lapsed.notice("https://app.beebeeb.io").as_deref(),
             Some(
                 "Your trial has ended; your vault is read-only and will be deleted on November 27, 2026. \
-                 Subscribe at https://app.beebeeb.io/billing"
+                 Subscribe at https://app.beebeeb.io/billing?view=change"
             )
         );
     }
@@ -260,7 +310,7 @@ mod tests {
             lapsed.notice("https://app.beebeeb.io").as_deref(),
             Some(
                 "Your trial has ended; your vault is read-only and will be deleted 60 days after it lapsed. \
-                 Subscribe at https://app.beebeeb.io/billing"
+                 Subscribe at https://app.beebeeb.io/billing?view=change"
             )
         );
     }
@@ -271,6 +321,71 @@ mod tests {
         let n = AccountState::NeedsPlan.notice("http://localhost:5173").unwrap();
         assert!(n.ends_with("http://localhost:5173/choose-plan"), "{n}");
         assert!(!n.contains("beebeeb.io"), "{n}");
+    }
+
+    // ── refusal classification (409 plan_required / account_lapsed) ──────
+
+    #[test]
+    fn classify_maps_the_typed_409_codes() {
+        assert_eq!(
+            Refusal::classify(Some("plan_required"), 409),
+            Some(Refusal::PlanRequired)
+        );
+        assert_eq!(
+            Refusal::classify(Some("account_lapsed"), 409),
+            Some(Refusal::AccountLapsed)
+        );
+    }
+
+    #[test]
+    fn classify_keeps_the_quota_path() {
+        assert_eq!(Refusal::classify(Some("quota_exceeded"), 413), Some(Refusal::Quota));
+        assert_eq!(Refusal::classify(None, 413), Some(Refusal::Quota));
+    }
+
+    #[test]
+    fn classify_ignores_other_conflicts_and_errors() {
+        // A 409 "upload already in progress" / stale base version is NOT an
+        // account-state refusal — it must reach the caller untouched.
+        assert_eq!(Refusal::classify(None, 409), None);
+        assert_eq!(Refusal::classify(Some("conflict"), 409), None);
+        assert_eq!(Refusal::classify(Some("unauthorized"), 401), None);
+        assert_eq!(Refusal::classify(None, 500), None);
+    }
+
+    #[test]
+    fn plan_required_needs_no_lookup_and_is_needs_plan() {
+        assert!(!Refusal::PlanRequired.needs_subscription());
+        assert_eq!(Refusal::PlanRequired.resolve(None), Some(AccountState::NeedsPlan));
+    }
+
+    #[test]
+    fn account_lapsed_takes_the_date_from_the_subscription() {
+        assert!(Refusal::AccountLapsed.needs_subscription());
+        let fetched = AccountState::Lapsed {
+            data_deletion_at: Some(at("2026-11-27T10:00:00Z")),
+        };
+        assert_eq!(Refusal::AccountLapsed.resolve(Some(&fetched)), Some(fetched.clone()));
+    }
+
+    #[test]
+    fn account_lapsed_still_explains_without_a_usable_subscription() {
+        // Fetch failed, or a stale/odd subscription disagrees: the server's
+        // code wins, just without a date.
+        let dateless = Some(AccountState::Lapsed { data_deletion_at: None });
+        assert_eq!(Refusal::AccountLapsed.resolve(None), dateless);
+        assert_eq!(Refusal::AccountLapsed.resolve(Some(&AccountState::Ok)), dateless);
+    }
+
+    #[test]
+    fn quota_refusal_is_explained_only_by_a_blocking_state() {
+        assert!(Refusal::Quota.needs_subscription());
+        assert_eq!(Refusal::Quota.resolve(None), None);
+        assert_eq!(Refusal::Quota.resolve(Some(&AccountState::Ok)), None);
+        assert_eq!(
+            Refusal::Quota.resolve(Some(&AccountState::NeedsPlan)),
+            Some(AccountState::NeedsPlan)
+        );
     }
 
     #[test]

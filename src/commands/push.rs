@@ -717,7 +717,8 @@ fn dir_total_size(dir: &std::path::Path) -> u64 {
 /// These two GETs already ran before every `bb push`, so explaining a
 /// `needs_plan` / `lapsed` account here costs no extra round-trip. A failed
 /// fetch never blocks (`unwrap_or_default`) — the server's upload init stays
-/// the enforcer, and its refusal is explained in `ApiClient::upload_init_typed`.
+/// the enforcer (409 `plan_required` / `account_lapsed`), and its refusal is
+/// explained in `ApiClient::upload_init_typed`.
 async fn check_quota(api: &ApiClient, upload_size: u64) -> Result<(), String> {
     let (usage_res, sub_res) = tokio::join!(api.get_usage(), api.get_subscription());
 
@@ -806,7 +807,7 @@ mod check_quota_tests {
             "{err}"
         );
         assert!(err.contains("November 27, 2026"), "{err}");
-        assert!(err.ends_with("https://app.beebeeb.io/billing"), "{err}");
+        assert!(err.ends_with("https://app.beebeeb.io/billing?view=change"), "{err}");
     }
 
     #[test]
