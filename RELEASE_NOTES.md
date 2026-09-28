@@ -22,10 +22,18 @@ manifest version bump and two fixes to internal `prod-bots` test scripts) don't 
 
 ### Bug Fixes / Hardening
 
-- No other user-facing fixes in this release. beebeeb-io/cli#48 and #49 update the `prod-bots`
-  end-to-end test scripts (a login-flow selector and a vault-suite share check) to match server
-  changes; beebeeb-io/cli#47 bumped the Scoop manifest to the already-released v0.11.0. None of
-  the three touch `src/` or change `bb`'s behavior.
+- **A server error while re-opening a session no longer switches file ids.** If the server answers
+  a `5xx` to the init for the stored file id, `bb` now retries that same id (up to 3 times, with a
+  growing wait) instead of opening a second session under a fresh id — which could have left a
+  half-finished file next to a duplicate. Only a `404`, which proves the stored id itself is
+  unusable, falls back to a fresh id. A replace upload gets the same retry. (beebeeb-io/cli#50)
+- **Progress stays correct when a resumed upload is re-opened.** The bytes and the files-done
+  count from the failed attempt are rolled back before the retry, and the rollback is atomic, so
+  a `bb sync` with several uploads in flight no longer over- or under-counts. (beebeeb-io/cli#50)
+- beebeeb-io/cli#48 and #49 update the `prod-bots` end-to-end test scripts (a login-flow selector
+  and a vault-suite share check) to match server changes; beebeeb-io/cli#47 bumped the Scoop
+  manifest to the already-released v0.11.0. None of the three touch `src/` or change `bb`'s
+  behavior.
 
 ### Verification
 

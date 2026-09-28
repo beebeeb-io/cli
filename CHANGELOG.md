@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - An interrupted `bb push`/`bb sync` no longer fails forever with `chunk 0 upload: not found` once the server has expired its upload session (server task 1589: sessions now hold an expiring lease). On a 404 (or an older server's 400 `not writable: expired`) from the resumed session, the CLI drops the stale `pending-uploads.json` record, opens a new session for the same file id, and uploads from chunk 0 — once per file per run, never in a loop.
+- A `5xx` on the stored-id init while re-opening a swept session is retried with the same file id (bounded backoff) instead of opening a duplicate session under a fresh id; only a `404` falls back to a fresh id.
+- Upload progress is rolled back atomically before a re-opened attempt, so concurrent `bb sync` uploads no longer over- or under-count bytes and completed files.
 
 ## [0.11.0] - 2026-09-26
 
