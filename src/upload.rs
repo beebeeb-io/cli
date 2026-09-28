@@ -282,12 +282,23 @@ fn display_name(name: &str) -> String {
 enum SessionPlan {
     /// Reuse a session recorded by an interrupted earlier run (skip init).
     Resume { file_id: Uuid, session_id: Uuid },
-    /// Open a new session for `file_id`. `fallback_file_id` is set only on the
-    /// re-init after a swept session (task 1589): if the server refuses the
-    /// stored id, the driver may try once more with this fresh id.
+    /// Open a new session for `file_id`.
     Init {
         file_id: Uuid,
+        /// Set only on the re-init after a swept session (task 1589): if the
+        /// server refuses the stored id with the ONE status that proves it is
+        /// unusable, the driver may try once more with this fresh id. `None`
+        /// for a `--replace` recovery — there IS no fresh id a replace could
+        /// use, since it must land on this exact existing file (Codex thread
+        /// #1 follow-up on 3cb4daf).
         fallback_file_id: Option<Uuid>,
+        /// True for a re-init after a swept (resumed) session — eligible for
+        /// the bounded SAME-id 5xx retry regardless of whether
+        /// `fallback_file_id` is set. Kept SEPARATE from `fallback_file_id`
+        /// precisely because a replace recovery has no fallback id but must
+        /// still get the retry: gating the retry on `fallback_file_id.is_some()`
+        /// silently skipped it for every `--replace` upload.
+        is_recovery: bool,
     },
 }
 
@@ -427,6 +438,7 @@ pub async fn stream_encrypt_upload(
         None => SessionPlan::Init {
             file_id: spec.file_id,
             fallback_file_id: None,
+            is_recovery: false,
         },
     };
     loop {
@@ -464,12 +476,14 @@ pub async fn stream_encrypt_upload(
                 plan = SessionPlan::Init {
                     file_id,
                     fallback_file_id: (file_id != spec.file_id).then_some(spec.file_id),
+                    is_recovery: true,
                 };
             }
             Err(AttemptErr::InitRefused { fresh_file_id, .. }) => {
                 plan = SessionPlan::Init {
                     file_id: fresh_file_id,
                     fallback_file_id: None,
+                    is_recovery: false,
                 };
             }
             Err(e) => return Err(e.into_message()),
@@ -551,16 +565,13 @@ async fn upload_attempt(
         // `5xx` never proves the id itself is bad (Codex thread #1 — see
         // `fresh_id_can_fix`), so it is not treated as fallback-worthy, but
         // giving up on the FIRST one would surface transient failures a
-        // plain retry would have ridden out. An ordinary (non-recovery) init
-        // has no fallback id and is unaffected: it still fails on the first
+        // plain retry would have ridden out. Gated on `is_recovery`, NOT on
+        // `fallback_file_id.is_some()` — a `--replace` recovery has no
+        // fallback id (there is no OTHER id it could use) but must still get
+        // this retry (Codex thread #1 follow-up on 3cb4daf). An ordinary
+        // (non-recovery) init is unaffected: it still fails on the first
         // error, unchanged from before this fix.
-        let is_stored_id_recovery = matches!(
-            plan,
-            SessionPlan::Init {
-                fallback_file_id: Some(_),
-                ..
-            }
-        );
+        let is_stored_id_recovery = matches!(plan, SessionPlan::Init { is_recovery: true, .. });
         let mut retries_used = 0u32;
         let init = loop {
             match api
@@ -1549,6 +1560,41 @@ mod swept_session_reinit {
         );
         assert_eq!(out.server_id, stored_fid);
         assert_eq!(m.completed.len(), 1);
+    }
+
+    /// Codex thread #1 follow-up (found reviewing the fix at 3cb4daf): a
+    /// `--replace` upload's stored id EQUALS `spec.file_id` (both are the
+    /// existing target file's id — there is no OTHER id a replace could use),
+    /// so `fallback_file_id` is always `None` for it. The bounded SAME-id 5xx
+    /// retry must not be gated on a fallback id being available, or a
+    /// replace's re-init surfaces the FIRST transient 5xx instead of riding
+    /// it out like every other swept-session recovery does.
+    #[tokio::test]
+    async fn replace_upload_5xx_is_retried_with_same_id_even_with_no_fallback_available() {
+        let s = Scratch::new("replace-5xx-retry");
+        let (path, size, mtime) = s.file(64 * 1024);
+        let target_fid = Uuid::new_v4();
+        crate::resume::record(&path, target_fid, Uuid::new_v4(), size, mtime);
+        let mut mock = Mock::default();
+        mock.init_fail_then_succeed.insert(target_fid.to_string(), (500, 2));
+        let state: Shared = Arc::new(Mutex::new(mock));
+
+        // SAME id as the stored one — a replace can never fall back to a
+        // fresh id, since it must land on this exact existing file.
+        let mut replace_spec = spec(&path, target_fid);
+        replace_spec.base_version_number = Some(3);
+
+        let out = run(&state, replace_spec)
+            .await
+            .expect("a transient 5xx on a replace's stored-id re-init must be retried, not surfaced on the first one");
+        let m = state.lock().unwrap();
+        assert_eq!(
+            m.inits,
+            vec![target_fid.to_string(); 3],
+            "every retry must reuse the SAME id — a replace has no fresh id to fall back to: {:?}",
+            m.inits
+        );
+        assert_eq!(out.server_id, target_fid);
     }
 
     /// The bound: once every retry is spent, a persistent 5xx is surfaced —
