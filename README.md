@@ -43,6 +43,7 @@ Grab the archive for your platform from the [latest release](https://github.com/
 ## Quickstart
 
 ```sh
+bb signup                   # No account yet? Opens the web signup (then bb login)
 bb login                    # Browser handoff — token + master key arrive encrypted
 bb push ./report.pdf        # Encrypt locally, then upload
 bb ls                       # List your vault (names decrypted on your machine)
@@ -54,8 +55,9 @@ bb sync ~/vault /Documents  # Two-way sync, then watch for live changes
 
 | Command | What it does |
 | --- | --- |
+| `bb signup` | Open the web signup. Accounts are created in the web app (a new account starts a trial that needs a payment method); the CLI only signs in |
 | `bb login` / `bb logout` | Start or end a session via browser device authorization |
-| `bb whoami` / `bb status` | Show email, device, region, and quota |
+| `bb whoami` / `bb status` | Show email, device, region, quota, and account state (no plan yet, or trial ended and read-only) |
 | `bb quota` | Storage usage with a color-coded bar |
 | `bb config` | Print configuration with secrets masked |
 | `bb push <path>` | Encrypt and upload a file or folder (alias `bb upload`) |

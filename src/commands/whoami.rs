@@ -1,6 +1,7 @@
 use beebeeb_types::quota::{Plan, effective_quota, format_storage_si};
 use colored::Colorize;
 
+use crate::account_state::AccountState;
 use crate::api::ApiClient;
 use crate::config::load_config;
 use crate::ui;
@@ -54,7 +55,16 @@ pub async fn run() -> Result<(), String> {
         .get("quota_bytes")
         .and_then(|v| v.as_i64())
         .unwrap_or_else(|| effective_quota(plan, extra_tb, 0));
-    let plan_label = build_plan_label(plan, extra_tb, total_bytes);
+    // Task 1037: `needs_plan` / `lapsed` accounts have no usable plan (the
+    // server's `effective_plan` is "none", quota 0) even though `plan` may
+    // still name the trial's plan. Say so instead of "Pro — 0 B".
+    let account_state = AccountState::from_subscription(&sub);
+    let account_notice = account_state.notice(&crate::web_url::web_app_base());
+    let plan_label = if account_notice.is_some() {
+        "none".to_string()
+    } else {
+        build_plan_label(plan, extra_tb, total_bytes)
+    };
 
     let region_label = my_region
         .get("preferred_region")
@@ -132,6 +142,8 @@ pub async fn run() -> Result<(), String> {
                 "upload_limit": upload_limit_for_plan(plan),
                 "region": region_label,
                 "session_expires": expires_str,
+                "account_state": account_state.slug(),
+                "data_deletion_at": account_state.data_deletion_at_rfc3339(),
             }))
             .unwrap()
         );
@@ -158,6 +170,16 @@ pub async fn run() -> Result<(), String> {
         dim("plan    "),
         plan_label.custom_color(crate::colors::AMBER)
     );
+    let state_colour = if account_notice.is_some() {
+        crate::colors::RED_ERR
+    } else {
+        crate::colors::GREEN_OK
+    };
+    println!(
+        "  {} {}",
+        dim("state   "),
+        account_state.label().custom_color(state_colour)
+    );
     println!("  {} {}", dim("region  "), val(&region_label));
 
     // Storage line + visual quota bar
@@ -169,16 +191,24 @@ pub async fn run() -> Result<(), String> {
     );
 
     // Upload limit
-    println!(
-        "  {} {}",
-        dim("upload  "),
-        format!(
-            "up to {} \u{00b7} {} parallel",
-            upload_limit_for_plan(plan),
-            "4 connections"
-        )
-        .custom_color(crate::colors::INK),
-    );
+    if account_notice.is_some() {
+        println!(
+            "  {} {}",
+            dim("upload  "),
+            "blocked".custom_color(crate::colors::RED_ERR)
+        );
+    } else {
+        println!(
+            "  {} {}",
+            dim("upload  "),
+            format!(
+                "up to {} \u{00b7} {} parallel",
+                upload_limit_for_plan(plan),
+                "4 connections"
+            )
+            .custom_color(crate::colors::INK),
+        );
+    }
 
     // File count
     println!("  {} {}", dim("files   "), val(&format_number(file_count)));
@@ -201,6 +231,15 @@ pub async fn run() -> Result<(), String> {
 
     // Auth + e2ee badge
     println!("  {} {}", dim("auth    "), val(auth_label));
+
+    if let Some(notice) = &account_notice {
+        println!();
+        println!(
+            "  {} {}",
+            "!".custom_color(crate::colors::RED_ERR),
+            notice.custom_color(crate::colors::RED_ERR),
+        );
+    }
 
     println!();
     Ok(())

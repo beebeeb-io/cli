@@ -281,54 +281,16 @@ pub async fn list() -> Result<(), String> {
 /// is the only place that decides the host.
 const PASSKEY_ENROLLMENT_PATH: &str = "/settings/passkeys";
 
-/// Pull just the host (no scheme, no port, no path) out of an API base URL.
-/// Used instead of a whole-string substring search so a custom domain that
-/// merely *contains* "localhost" as a label (`api.localhost.example.com`)
-/// isn't misidentified as the local dev API (Codex review, PR #23).
-fn host_of(api_url: &str) -> &str {
-    let without_scheme = api_url
-        .strip_prefix("https://")
-        .or_else(|| api_url.strip_prefix("http://"))
-        .unwrap_or(api_url);
-    let host_and_port = without_scheme.split('/').next().unwrap_or(without_scheme);
-    // IPv6 literals are bracketed (`[::1]:3001`) — don't split those on ':'.
-    if let Some(rest) = host_and_port.strip_prefix('[') {
-        return rest.split(']').next().unwrap_or(rest);
-    }
-    host_and_port.split(':').next().unwrap_or(host_and_port)
-}
-
 /// Derive the web app's passkey-enrollment URL from a configured API base
-/// URL, never a hard-coded production host. Pure function of the API URL
-/// string so it's unit-testable without touching the real (possibly-live)
-/// on-disk config.
-///
-/// - `localhost`/`127.0.0.1`/`::1` (any port, matched on the parsed host —
-///   not a substring search) → the local dev web app, `localhost:5173`
-///   (`repos/web` `bun dev` default — see `repos/web/CLAUDE.md`).
-/// - `https://api.<host>` / `http://api.<host>` → the same scheme + host
-///   with `api.` swapped for `app.` — the convention every other
-///   Beebeeb-operated environment (prod `api.beebeeb.io` → `app.beebeeb.io`,
-///   and any future staging `api.<env>.beebeeb.io` → `app.<env>.beebeeb.io`)
-///   already follows.
-/// - Anything else (an API host with no recognizable `api.` prefix) → the
-///   API's own scheme+host, so an unrecognized `--api` never silently
-///   resolves to Beebeeb's production web app. It may well 404, but a 404
-///   is honest; a link to the wrong company's data is not.
+/// URL, never a hard-coded production host: the host comes from
+/// `crate::web_url::web_app_base_from_api` (shared with `bb signup` and the
+/// account-state notices — see its docs for the localhost / `api.`→`app.` /
+/// unknown-host rules).
 fn passkey_enrollment_url_from_api(api_url: &str) -> String {
-    let api = api_url.trim_end_matches('/');
-    let host = host_of(api);
-
-    if host == "localhost" || host == "127.0.0.1" || host == "::1" {
-        return format!("http://localhost:5173{PASSKEY_ENROLLMENT_PATH}");
-    }
-    if let Some(rest) = api.strip_prefix("https://api.") {
-        return format!("https://app.{rest}{PASSKEY_ENROLLMENT_PATH}");
-    }
-    if let Some(rest) = api.strip_prefix("http://api.") {
-        return format!("http://app.{rest}{PASSKEY_ENROLLMENT_PATH}");
-    }
-    format!("{api}{PASSKEY_ENROLLMENT_PATH}")
+    format!(
+        "{}{PASSKEY_ENROLLMENT_PATH}",
+        crate::web_url::web_app_base_from_api(api_url)
+    )
 }
 
 /// Read the configured API URL (respecting `--api`, same as every other
@@ -900,15 +862,6 @@ mod tests {
     fn enrollment_url_bracketed_ipv6_loopback_is_local_and_port_is_stripped() {
         let url = passkey_enrollment_url_from_api("http://[::1]:3001");
         assert_eq!(url, "http://localhost:5173/settings/passkeys");
-    }
-
-    // ── host_of ───────────────────────────────────────────────────────────
-
-    #[test]
-    fn host_of_strips_scheme_port_and_path() {
-        assert_eq!(host_of("https://api.beebeeb.io:8443/foo"), "api.beebeeb.io");
-        assert_eq!(host_of("http://localhost:3001"), "localhost");
-        assert_eq!(host_of("api.beebeeb.io"), "api.beebeeb.io");
     }
 
     // ── plan_add ──────────────────────────────────────────────────────────

@@ -132,6 +132,10 @@ pub struct ApiClient {
     client: Client,
     base_url: String,
     token: Option<String>,
+    /// Task 1037: the account-state explanation for a `quota_exceeded`
+    /// upload refusal, fetched lazily on the first refusal and reused for
+    /// every later one this client sees (see `explain_upload_refusal`).
+    upload_refusal_notice: tokio::sync::OnceCell<Option<String>>,
 }
 
 /// Parsed response from `POST /api/v1/uploads/init`. The session id keys the
@@ -212,6 +216,7 @@ impl ApiClient {
             client,
             base_url: config.api_url,
             token: config.session_token,
+            upload_refusal_notice: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -225,6 +230,7 @@ impl ApiClient {
             client: build_client(std::time::Duration::from_secs(300)),
             base_url,
             token: Some("test-token".to_string()),
+            upload_refusal_notice: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -236,19 +242,6 @@ impl ApiClient {
 
     fn url(&self, path: &str) -> String {
         format!("{}{path}", self.base_url)
-    }
-
-    #[allow(dead_code)]
-    pub async fn signup(&self, email: &str, password: &str) -> Result<Value, String> {
-        let resp = self
-            .client
-            .post(self.url("/api/v1/auth/signup"))
-            .json(&serde_json::json!({ "email": email, "password": password }))
-            .send()
-            .await
-            .map_err(format_request_error)?;
-
-        parse_response(resp).await
     }
 
     #[allow(dead_code)]
@@ -626,11 +619,40 @@ impl ApiClient {
                 .map_err(format_request_error)?;
             match parse_response_typed(resp).await {
                 Err(e) if e.message == "__rate_limited__" => continue,
-                Err(e) => return Err(e),
+                Err(e) => return Err(self.explain_upload_refusal(e).await),
                 Ok(v) => return UploadInit::from_value(&v).map_err(ApiError::from),
             }
         }
         Err("rate limited after 3 retries".to_string().into())
+    }
+
+    /// Task 1037: a `needs_plan` / `lapsed` account has upload quota 0, so
+    /// the server refuses the init with its generic `quota_exceeded`. When
+    /// that happens, look up `account_state` and, if it explains the refusal,
+    /// replace the display message with the account-state notice (choose a
+    /// plan / trial ended + deletion date). Code and status are kept.
+    ///
+    /// Failure path only — a successful init never pays for this — and the
+    /// lookup runs at most once per client, so a `bb sync` pass over many
+    /// files doesn't refetch per file. A failed lookup leaves the server's
+    /// error untouched.
+    async fn explain_upload_refusal(&self, mut e: ApiError) -> ApiError {
+        if !(e.is_code("quota_exceeded") || e.status == 413) {
+            return e;
+        }
+        let notice = self
+            .upload_refusal_notice
+            .get_or_init(|| async {
+                let sub = self.get_subscription().await.ok()?;
+                let app_base =
+                    crate::web_url::resolve_web_app_base(std::env::var("APP_URL").ok().as_deref(), &self.base_url);
+                crate::account_state::AccountState::from_subscription(&sub).notice(&app_base)
+            })
+            .await;
+        if let Some(notice) = notice {
+            e.message = notice.clone();
+        }
+        e
     }
 
     /// Upload one chunk to a v2 session: `PUT /api/v1/uploads/{session}/chunks/{index}`.
@@ -2876,5 +2898,147 @@ mod error_message_priority_tests {
             .await
             .expect_err("mock returns 400");
         assert_eq!(err, "some_code_with_no_message");
+    }
+}
+
+#[cfg(test)]
+mod upload_refusal_account_state_tests {
+    //! Task 1037: a `needs_plan` / `lapsed` account has quota 0, so the
+    //! server refuses `POST /uploads/init` with its generic `413
+    //! quota_exceeded`. `upload_init_typed` explains that refusal from
+    //! `GET /billing/subscription`'s `account_state` — on the FAILURE path
+    //! only (a successful init never costs an extra round-trip), at most once
+    //! per `ApiClient` (a `bb sync` of 1000 files doesn't fetch 1000 times).
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use axum::http::StatusCode;
+    use axum::routing::{get, post};
+    use axum::{Json, Router};
+    use serde_json::{Value, json};
+
+    use super::ApiClient;
+
+    /// `init_ok`: whether the init succeeds. `sub`: the subscription body.
+    /// Returns (base_url, subscription GET counter).
+    async fn spawn_mock(init_ok: bool, sub: Value) -> (String, Arc<AtomicUsize>) {
+        let sub_calls = Arc::new(AtomicUsize::new(0));
+        let counter = sub_calls.clone();
+        let app = Router::new()
+            .route(
+                "/api/v1/uploads/init",
+                post(move || async move {
+                    if init_ok {
+                        (
+                            StatusCode::OK,
+                            Json(json!({
+                                "upload_session_id": "11111111-1111-1111-1111-111111111111",
+                                "file_id": "22222222-2222-2222-2222-222222222222",
+                                "chunk_size_bytes": 10,
+                                "chunk_count": 1,
+                            })),
+                        )
+                    } else {
+                        // The live server's QuotaExceeded body: no `message`.
+                        (
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            Json(json!({ "error": "quota_exceeded", "limit_bytes": 0, "used_bytes": 0 })),
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/api/v1/billing/subscription",
+                get(move || {
+                    let counter = counter.clone();
+                    let sub = sub.clone();
+                    async move {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        Json(sub)
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), sub_calls)
+    }
+
+    async fn init(api: &ApiClient) -> Result<super::UploadInit, super::ApiError> {
+        api.upload_init_typed(None, "name", None, 10, 10, 1, false, None).await
+    }
+
+    #[tokio::test]
+    async fn lapsed_refusal_is_explained_with_the_deletion_date() {
+        let (base, sub_calls) = spawn_mock(
+            false,
+            json!({ "plan": "pro", "effective_plan": "none", "account_state": "lapsed",
+                    "data_deletion_at": "2026-11-27T10:00:00Z", "quota_bytes": 0 }),
+        )
+        .await;
+        let api = ApiClient::new_for_test(base);
+        let err = init(&api).await.unwrap_err();
+        assert!(
+            err.message
+                .starts_with("Your trial has ended; your vault is read-only and will be deleted on November 27, 2026."),
+            "{}",
+            err.message
+        );
+        // The mock API is on 127.0.0.1 → the local dev web app, never prod.
+        assert!(
+            err.message.ends_with("Subscribe at http://localhost:5173/billing"),
+            "{}",
+            err.message
+        );
+        // Code + status are kept for any caller that classifies on them.
+        assert!(err.is_code("quota_exceeded"));
+        assert_eq!(err.status, 413);
+        assert_eq!(sub_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn needs_plan_refusal_points_at_choose_plan_and_is_fetched_once() {
+        let (base, sub_calls) = spawn_mock(
+            false,
+            json!({ "plan": "free", "effective_plan": "none", "account_state": "needs_plan", "quota_bytes": 0 }),
+        )
+        .await;
+        let api = ApiClient::new_for_test(base);
+        for _ in 0..3 {
+            let err = init(&api).await.unwrap_err();
+            assert_eq!(
+                err.message,
+                "Your account has no plan yet \u{2014} choose one at http://localhost:5173/choose-plan"
+            );
+        }
+        assert_eq!(
+            sub_calls.load(Ordering::SeqCst),
+            1,
+            "account state must be fetched once per client"
+        );
+    }
+
+    #[tokio::test]
+    async fn ok_account_keeps_the_servers_quota_error() {
+        // Missing account_state (pre-1037 server) ⇒ ok ⇒ nothing to explain.
+        let (base, _) = spawn_mock(false, json!({ "plan": "pro", "quota_bytes": 1000 })).await;
+        let api = ApiClient::new_for_test(base);
+        let err = init(&api).await.unwrap_err();
+        assert_eq!(err.message, "quota_exceeded");
+    }
+
+    #[tokio::test]
+    async fn a_successful_init_never_fetches_the_subscription() {
+        let (base, sub_calls) = spawn_mock(true, json!({ "account_state": "lapsed" })).await;
+        let api = ApiClient::new_for_test(base);
+        init(&api).await.expect("init should succeed");
+        assert_eq!(
+            sub_calls.load(Ordering::SeqCst),
+            0,
+            "no extra round-trip on the happy path"
+        );
     }
 }

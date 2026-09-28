@@ -1,3 +1,4 @@
+mod account_state;
 mod api;
 mod colors;
 mod commands;
@@ -16,6 +17,7 @@ mod tui;
 mod ui;
 mod update;
 mod upload;
+mod web_url;
 
 #[cfg(test)]
 mod readme_flags_tests;
@@ -111,6 +113,14 @@ enum Commands {
         #[arg(long)]
         headless: bool,
     },
+
+    /// Create an account — opens the web signup (the CLI signs in, it doesn't sign up)
+    ///
+    /// New accounts start with a trial that needs a payment method, which
+    /// only the web app can collect. This prints the signup URL, opens it in
+    /// your browser when one is available, and exits. Afterwards run
+    /// `bb login`.
+    Signup,
 
     /// Show current session, device, region, quota
     Whoami,
@@ -859,6 +869,7 @@ async fn main() {
 
     let result = match cli.command {
         Commands::Login { headless } => commands::login::run(headless).await,
+        Commands::Signup => commands::signup::run().await,
         Commands::Whoami => commands::whoami::run().await,
         Commands::Status => commands::status::run().await,
         Commands::Quota => commands::quota::run().await,

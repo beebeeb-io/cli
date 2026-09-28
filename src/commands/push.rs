@@ -710,8 +710,14 @@ fn dir_total_size(dir: &std::path::Path) -> u64 {
         .sum()
 }
 
-/// Fetch the user's subscription and usage, then reject the upload if
+/// Fetch the user's subscription and usage, then reject the upload if the
+/// account can't upload at all (task 1037: `needs_plan` / `lapsed`) or
 /// `used_bytes + upload_size` exceeds the effective quota.
+///
+/// These two GETs already ran before every `bb push`, so explaining a
+/// `needs_plan` / `lapsed` account here costs no extra round-trip. A failed
+/// fetch never blocks (`unwrap_or_default`) — the server's upload init stays
+/// the enforcer, and its refusal is explained in `ApiClient::upload_init_typed`.
 async fn check_quota(api: &ApiClient, upload_size: u64) -> Result<(), String> {
     let (usage_res, sub_res) = tokio::join!(api.get_usage(), api.get_subscription());
 
@@ -719,6 +725,24 @@ async fn check_quota(api: &ApiClient, upload_size: u64) -> Result<(), String> {
     let sub = sub_res.unwrap_or_default();
 
     let used_bytes = usage.get("used_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
+    check_quota_against(&sub, used_bytes, upload_size, &crate::web_url::web_app_base())
+}
+
+/// Pure half of [`check_quota`]: decide from an already-fetched subscription
+/// and usage. `app_base` is the web app's base URL for the account-state
+/// notice.
+fn check_quota_against(
+    sub: &serde_json::Value,
+    used_bytes: i64,
+    upload_size: u64,
+    app_base: &str,
+) -> Result<(), String> {
+    // Task 1037: a `needs_plan` / `lapsed` account has quota 0, which the
+    // `quota > 0` guard below would wave through to a bare server refusal.
+    // Say what's actually wrong and where to fix it.
+    if let Some(notice) = crate::account_state::AccountState::from_subscription(sub).notice(app_base) {
+        return Err(notice);
+    }
 
     let plan_slug = sub.get("plan").and_then(|v| v.as_str()).unwrap_or("free");
     let plan = Plan::from_slug(plan_slug);
@@ -749,4 +773,61 @@ async fn check_quota(api: &ApiClient, upload_size: u64) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod check_quota_tests {
+    use super::*;
+    use serde_json::json;
+
+    const APP: &str = "https://app.beebeeb.io";
+
+    #[test]
+    fn needs_plan_account_is_refused_with_the_choose_plan_notice() {
+        let sub = json!({
+            "plan": "free", "effective_plan": "none", "quota_bytes": 0,
+            "account_state": "needs_plan", "data_deletion_at": null,
+        });
+        assert_eq!(
+            check_quota_against(&sub, 0, 10, APP),
+            Err("Your account has no plan yet \u{2014} choose one at https://app.beebeeb.io/choose-plan".to_string())
+        );
+    }
+
+    #[test]
+    fn lapsed_account_is_refused_with_the_deletion_date_and_billing_link() {
+        let sub = json!({
+            "plan": "pro", "effective_plan": "none", "quota_bytes": 0,
+            "account_state": "lapsed", "data_deletion_at": "2026-11-27T10:00:00Z",
+        });
+        let err = check_quota_against(&sub, 5, 10, APP).unwrap_err();
+        assert!(
+            err.starts_with("Your trial has ended; your vault is read-only"),
+            "{err}"
+        );
+        assert!(err.contains("November 27, 2026"), "{err}");
+        assert!(err.ends_with("https://app.beebeeb.io/billing"), "{err}");
+    }
+
+    #[test]
+    fn ok_account_within_quota_passes() {
+        let sub = json!({ "plan": "pro", "quota_bytes": 1_000, "account_state": "ok" });
+        assert_eq!(check_quota_against(&sub, 100, 10, APP), Ok(()));
+    }
+
+    #[test]
+    fn pre_1037_server_without_account_state_keeps_the_old_behaviour() {
+        // Missing fields ⇒ ok: within quota passes, over quota is "Storage full".
+        let sub = json!({ "plan": "pro", "quota_bytes": 1_000 });
+        assert_eq!(check_quota_against(&sub, 100, 10, APP), Ok(()));
+        let err = check_quota_against(&sub, 995, 10, APP).unwrap_err();
+        assert!(err.starts_with("Storage full"), "{err}");
+    }
+
+    #[test]
+    fn a_failed_subscription_fetch_never_blocks() {
+        // `check_quota` passes `Value::Null` (unwrap_or_default) when the
+        // GET failed — the server stays the enforcer.
+        assert_eq!(check_quota_against(&serde_json::Value::Null, 0, 10, APP), Ok(()));
+    }
 }

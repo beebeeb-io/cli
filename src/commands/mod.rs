@@ -20,6 +20,7 @@ pub mod rm;
 pub mod search;
 pub mod sessions;
 pub mod share;
+pub mod signup;
 pub mod speedtest;
 pub mod status;
 pub mod sync;
