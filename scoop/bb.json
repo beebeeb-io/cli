@@ -1,13 +1,13 @@
 {
   "$schema": "https://raw.githubusercontent.com/ScoopInstaller/Scoop/master/schema.json",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "description": "bb — Beebeeb CLI for end-to-end encrypted cloud storage",
   "homepage": "https://beebeeb.io",
   "license": "AGPL-3.0-or-later",
   "architecture": {
     "64bit": {
-      "url": "https://github.com/beebeeb-io/cli/releases/download/v0.11.0/beebeeb-cli-x86_64-pc-windows-msvc.zip",
-      "hash": "sha256:0ef086eb123f170513627d962a0a8078a0ca81ed6ab2e8174ae7eaf577a8ef97",
+      "url": "https://github.com/beebeeb-io/cli/releases/download/v0.11.1/beebeeb-cli-x86_64-pc-windows-msvc.zip",
+      "hash": "sha256:eea82f5e87c5fa4328dd948b247a39251c7006e3dbcb2e07fbd3f79886facb39",
       "bin": "bb.exe"
     }
   },
