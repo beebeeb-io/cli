@@ -122,6 +122,14 @@ pub trait ChunkProgress: Send + Sync {
     /// Tear down any shared UI (called once after the upload phase). No-op by
     /// default.
     fn finish_all(&self) {}
+    /// Undo ciphertext bytes a FAILED attempt already reported via
+    /// [`FileProgress::chunk_confirmed`] on the shared/overall counter (task
+    /// 1589, Codex thread #2). A swept-session recovery restarts the same
+    /// logical file from chunk 0 under a brand-new [`FileProgress`] handle; if
+    /// the failed attempt's bytes are left in place, the retry's own
+    /// confirmations on top of them make the run-wide total exceed the
+    /// run-wide plan. No-op by default (also correct for [`NoopProgress`]).
+    fn rollback(&self, _ciphertext_bytes: u64) {}
 }
 
 /// Per-file progress handle. `Sync` so a `&dyn FileProgress` can be held across
@@ -215,6 +223,16 @@ impl ChunkProgress for BarProgress {
         self.overall.finish_and_clear();
         let _ = self.mp.clear();
     }
+
+    fn rollback(&self, ciphertext_bytes: u64) {
+        // `ProgressBar` has no `dec`; subtract via `set_position`. This is a
+        // best-effort display correction (a `bb sync` file that rolls back
+        // while OTHER files are concurrently incrementing the same shared bar
+        // can race this read-then-write), guarded with `saturating_sub` so it
+        // can never wrap the position negative.
+        let pos = self.overall.position();
+        self.overall.set_position(pos.saturating_sub(ciphertext_bytes));
+    }
 }
 
 struct BarFileProgress {
@@ -278,8 +296,12 @@ enum SessionPlan {
 enum AttemptErr {
     /// The server no longer has the upload session (task 1589: its lease
     /// expired and the sweeper removed it). Recoverable once per file per run by
-    /// a re-init.
-    SessionGone(String),
+    /// a re-init. `bytes_confirmed` is how much ciphertext THIS attempt had
+    /// already reported to `FileProgress::chunk_confirmed` before it died —
+    /// the retry restarts at chunk 0 under a fresh progress handle, so the
+    /// caller must roll this amount back on the shared/overall counter before
+    /// looping, or a full resend double-counts it (Codex thread #2).
+    SessionGone { message: String, bytes_confirmed: u64 },
     /// The init for the stored `file_id` was refused in a way a fresh id can
     /// fix. Carries the fresh id to try (at most once).
     InitRefused { message: String, fresh_file_id: Uuid },
@@ -290,7 +312,9 @@ enum AttemptErr {
 impl AttemptErr {
     fn into_message(self) -> String {
         match self {
-            AttemptErr::SessionGone(m) | AttemptErr::InitRefused { message: m, .. } | AttemptErr::Other(m) => m,
+            AttemptErr::SessionGone { message, .. }
+            | AttemptErr::InitRefused { message, .. }
+            | AttemptErr::Other(message) => message,
         }
     }
 }
@@ -303,28 +327,52 @@ impl From<String> for AttemptErr {
 
 /// Map a chunk-PUT / complete failure: a swept session becomes
 /// [`AttemptErr::SessionGone`], everything else [`AttemptErr::Other`] with the
-/// same text the caller always saw.
-fn session_err(prefix: Option<String>, e: crate::api::ApiError) -> AttemptErr {
+/// same text the caller always saw. `bytes_confirmed` is the ciphertext this
+/// attempt had already gotten past the server before `e` — see
+/// [`AttemptErr::SessionGone`].
+fn session_err(prefix: Option<String>, e: crate::api::ApiError, bytes_confirmed: u64) -> AttemptErr {
     let gone = crate::api::is_upload_session_gone(&e);
     let text = match prefix {
         Some(p) => format!("{p}: {e}"),
         None => e.message,
     };
     if gone {
-        AttemptErr::SessionGone(text)
+        AttemptErr::SessionGone {
+            message: text,
+            bytes_confirmed,
+        }
     } else {
         AttemptErr::Other(text)
     }
 }
 
-/// Whether an init refused for a stored `file_id` may be retried with a fresh
-/// id. Only statuses a different id can plausibly fix: 400 (the stored id is
-/// unusable), 404, and a 5xx (e.g. the id collides with a trashed row). Never
-/// for 401/403 (auth), 409 (a live upload or a stale base version — a fresh id
-/// would create a duplicate), 402/413 (quota) or 429 (handled in `api`).
+/// Whether an init refused for the STORED `file_id` (the swept-session
+/// recovery path) may be retried with a fresh id instead. Grounded in the v2
+/// init handler (`beebeeb-api/src/routes/uploads.rs`, `init_upload`): the
+/// ONLY response that PROVES the stored id itself is unusable — rather than
+/// merely reflecting a transient or unrelated failure — is `404`, returned
+/// when an explicit `file_id` resolves to a file this caller can no longer
+/// read at all (cross-owner, shared access since revoked; ~line 433). Every
+/// other 4xx that handler can return is unrelated to the id: `400` is generic
+/// request validation (file name / chunk-plan shape) that would reject a
+/// fresh id identically; `409` is a live upload or a stale base version, and
+/// swapping ids there would create a duplicate file (excluded below); `402`/
+/// `413` are quota. A `5xx` proves nothing about the id EITHER WAY — it can be
+/// transient, or the server may have committed the init despite the response
+/// never arriving (task 1589, Codex thread #1) — so it is never treated as an
+/// id problem here; the caller retries it with the SAME id
+/// (`STORED_ID_INIT_RETRIES`, bounded, with backoff) and surfaces it if that
+/// runs out. Never for 401/403 (auth), 429 (handled in `api`).
 fn fresh_id_can_fix(status: u16) -> bool {
-    matches!(status, 400 | 404) || (500..=599).contains(&status)
+    status == 404
 }
+
+/// How many extra attempts a `5xx` from the STORED-id recovery init gets, with
+/// the SAME id, before it is surfaced — never replaced with a fresh id (task
+/// 1589, Codex thread #1). Exponential backoff starting at
+/// `STORED_ID_INIT_BACKOFF_BASE`, doubling each attempt.
+const STORED_ID_INIT_RETRIES: u32 = 3;
+const STORED_ID_INIT_BACKOFF_BASE: Duration = Duration::from_millis(150);
 
 /// Encrypt and upload one file with constant memory and honest progress.
 ///
@@ -384,7 +432,10 @@ pub async fn stream_encrypt_upload(
     loop {
         match upload_attempt(api, &master_key, &spec, size, mtime_ns, plan, progress).await {
             Ok(outcome) => return Ok(outcome),
-            Err(AttemptErr::SessionGone(msg)) => {
+            Err(AttemptErr::SessionGone {
+                message: msg,
+                bytes_confirmed,
+            }) => {
                 // Only a RESUMED session is re-inited, and a re-init always
                 // yields an `Init` plan — so this arm runs at most once per
                 // file per run (the loop bound). A session this run opened
@@ -392,6 +443,15 @@ pub async fn stream_encrypt_upload(
                 let SessionPlan::Resume { file_id, .. } = plan else {
                     return Err(msg);
                 };
+                // The dead attempt's chunk_confirmed reports must not survive
+                // into the retry's own count (Codex thread #2): the retry gets
+                // a BRAND NEW `FileProgress` from `begin_file` and re-sends
+                // every chunk from 0, so anything left on the shared/overall
+                // counter from this failed attempt would be double-counted
+                // once the retry's own confirmations land on top of it.
+                if bytes_confirmed > 0 {
+                    progress.rollback(bytes_confirmed);
+                }
                 // The recorded session is dead: drop it so neither this run nor
                 // a later one ever PUTs to it again.
                 crate::resume::clear(&spec.path);
@@ -486,31 +546,57 @@ async fn upload_attempt(
     let (upload_session_id, server_id) = if let Some(sid) = resumed_session {
         (sid.to_string(), file_id_str.clone())
     } else {
-        let init = match api
-            .upload_init_typed(
-                Some(file_id),
-                &name_encrypted,
-                spec.parent_id,
-                size as i64,
-                chunk_size as i64,
-                chunk_count as i32,
-                is_media,
-                spec.base_version_number,
-            )
-            .await
-        {
-            Ok(init) => init,
-            Err(e) => {
-                return Err(match plan {
-                    SessionPlan::Init {
-                        fallback_file_id: Some(fresh_file_id),
-                        ..
-                    } if fresh_id_can_fix(e.status) => AttemptErr::InitRefused {
-                        message: e.message,
-                        fresh_file_id,
-                    },
-                    _ => AttemptErr::Other(e.message),
-                });
+        // The STORED-id recovery init (a re-init after a swept session) gets a
+        // bounded, backed-off retry on a `5xx` before anything else runs: a
+        // `5xx` never proves the id itself is bad (Codex thread #1 — see
+        // `fresh_id_can_fix`), so it is not treated as fallback-worthy, but
+        // giving up on the FIRST one would surface transient failures a
+        // plain retry would have ridden out. An ordinary (non-recovery) init
+        // has no fallback id and is unaffected: it still fails on the first
+        // error, unchanged from before this fix.
+        let is_stored_id_recovery = matches!(
+            plan,
+            SessionPlan::Init {
+                fallback_file_id: Some(_),
+                ..
+            }
+        );
+        let mut retries_used = 0u32;
+        let init = loop {
+            match api
+                .upload_init_typed(
+                    Some(file_id),
+                    &name_encrypted,
+                    spec.parent_id,
+                    size as i64,
+                    chunk_size as i64,
+                    chunk_count as i32,
+                    is_media,
+                    spec.base_version_number,
+                )
+                .await
+            {
+                Ok(init) => break init,
+                Err(e)
+                    if is_stored_id_recovery
+                        && (500..=599).contains(&e.status)
+                        && retries_used < STORED_ID_INIT_RETRIES =>
+                {
+                    tokio::time::sleep(STORED_ID_INIT_BACKOFF_BASE * 2u32.pow(retries_used)).await;
+                    retries_used += 1;
+                }
+                Err(e) => {
+                    return Err(match plan {
+                        SessionPlan::Init {
+                            fallback_file_id: Some(fresh_file_id),
+                            ..
+                        } if fresh_id_can_fix(e.status) => AttemptErr::InitRefused {
+                            message: e.message,
+                            fresh_file_id,
+                        },
+                        _ => AttemptErr::Other(e.message),
+                    });
+                }
             }
         };
         // The server's plan is authoritative — frame the upload against it, not
@@ -550,16 +636,30 @@ async fn upload_attempt(
     )
     .await;
 
-    match &result {
-        Ok(()) => file_prog.finish(true),
-        Err(_) => file_prog.finish(false),
+    // `finish(true)` — which also advances the shared files-done counter — is
+    // deliberately NOT called here on `Ok(())`. Every chunk landing is not yet
+    // "this file is done": `complete` below can still fail (task 1589: the
+    // session's lease can expire between the last chunk PUT and `complete`).
+    // Calling `finish(true)` here and then retrying the whole file from chunk
+    // 0 on a swept `complete` used to advance files-done TWICE for one
+    // logical file (Codex thread #2). So a failure at either stage finishes
+    // the bar as `false`, and `finish(true)` fires only once both stages of
+    // THIS attempt actually succeeded.
+    if let Err(e) = result {
+        file_prog.finish(false);
+        return Err(e);
     }
-    result?;
 
     // 7. Finalise the version.
-    api.upload_complete_typed(&upload_session_id)
-        .await
-        .map_err(|e| session_err(None, e))?;
+    if let Err(e) = api.upload_complete_typed(&upload_session_id).await {
+        // Every chunk was confirmed (we only reach here on `result == Ok(())`,
+        // which `run_pipeline` only returns once `confirmed_bytes ==
+        // expected_total`) — so a swept-session retry must roll back exactly
+        // `expected_total`, the full amount THIS attempt reported.
+        file_prog.finish(false);
+        return Err(session_err(None, e, expected_total));
+    }
+    file_prog.finish(true);
 
     // 7b. Upload done — drop the resume record so a future upload of this path
     //     (e.g. a changed version) starts fresh rather than resuming this id.
@@ -662,7 +762,11 @@ async fn run_pipeline(
                 file_prog.chunk_confirmed(len);
             }
             Err(e) => {
-                consumer_err = Some(session_err(Some(format!("chunk {index} upload")), e));
+                // `confirmed_bytes` is every byte THIS chunk-PUT loop already
+                // reported to `file_prog.chunk_confirmed` before `e` — exactly
+                // what a swept-session retry (starting a fresh `FileProgress`
+                // at chunk 0) must roll back on the shared/overall counter.
+                consumer_err = Some(session_err(Some(format!("chunk {index} upload")), e, confirmed_bytes));
                 break;
             }
         }
@@ -929,7 +1033,7 @@ mod swept_session_reinit {
     use serde_json::json;
     use uuid::Uuid;
 
-    use super::{NoopProgress, UploadSpec, stream_encrypt_upload};
+    use super::{ChunkProgress, FileProgress, NoopProgress, UploadSpec, stream_encrypt_upload};
     use crate::api::ApiClient;
 
     /// What the mock answers for a session it no longer has.
@@ -950,8 +1054,19 @@ mod swept_session_reinit {
         /// When set, sessions opened by init are dead immediately (to prove the
         /// driver re-inits at most once).
         kill_new_sessions: bool,
-        /// Init answers this status for the given file_id.
+        /// Init answers this status for the given file_id, every time.
         init_refuse: HashMap<String, u16>,
+        /// Init answers `.0` for the given file_id, `.1` more times (counting
+        /// down), then succeeds normally — for proving a bounded SAME-id retry
+        /// (task 1589, Codex thread #1). Checked before `init_refuse`.
+        init_fail_then_succeed: HashMap<String, (u16, u32)>,
+        /// A session in `live` still goes "gone" once it has already ACCEPTED
+        /// this many chunk PUTs — proving a MID-pipeline sweep (some chunks
+        /// already confirmed) rolls those bytes back rather than
+        /// double-counting them on the retry's full resend (task 1589, Codex
+        /// thread #2).
+        dies_after_chunks: HashMap<String, u32>,
+        chunk_accept_count: HashMap<String, u32>,
         gone: Option<Gone>,
         /// file_id sent on every init, in order.
         inits: Vec<String>,
@@ -989,6 +1104,13 @@ mod swept_session_reinit {
                             .unwrap_or_else(|| Uuid::new_v4().to_string());
                         let mut m = st.lock().unwrap();
                         m.inits.push(file_id.clone());
+                        if let Some((code, remaining)) = m.init_fail_then_succeed.get_mut(&file_id) {
+                            if *remaining > 0 {
+                                *remaining -= 1;
+                                let status = StatusCode::from_u16(*code).unwrap();
+                                return (status, Json(json!({ "error": "refused by mock" }))).into_response();
+                            }
+                        }
                         if let Some(code) = m.init_refuse.get(&file_id).copied() {
                             let status = StatusCode::from_u16(code).unwrap();
                             return (status, Json(json!({ "error": "refused by mock" }))).into_response();
@@ -1021,6 +1143,13 @@ mod swept_session_reinit {
                         m.chunk_puts.push((sid.clone(), idx));
                         if !m.live.contains(&sid) {
                             return gone_response(m.gone);
+                        }
+                        if let Some(&limit) = m.dies_after_chunks.get(&sid) {
+                            let count = *m.chunk_accept_count.get(&sid).unwrap_or(&0);
+                            if count >= limit {
+                                return gone_response(m.gone);
+                            }
+                            m.chunk_accept_count.insert(sid.clone(), count + 1);
                         }
                         Json(json!({ "index": idx, "size": n, "skipped": false })).into_response()
                     },
@@ -1110,6 +1239,65 @@ mod swept_session_reinit {
         stream_encrypt_upload(&api, mk, spec, &NoopProgress).await
     }
 
+    async fn run_with_progress(
+        state: &Shared,
+        spec: UploadSpec,
+        progress: &dyn ChunkProgress,
+    ) -> Result<super::UploadOutcome, String> {
+        let base = spawn(state.clone()).await;
+        let api = ApiClient::new_for_test(base);
+        let mk = Arc::new(MasterKey::from_bytes([9u8; 32]));
+        stream_encrypt_upload(&api, mk, spec, progress).await
+    }
+
+    /// Records exactly the two run-wide numbers a REAL `ChunkProgress`
+    /// consumer (`BarProgress`) exposes to the user: the shared ciphertext
+    /// total after every `chunk_confirmed` and every `rollback`, and how many
+    /// times a file was reported finished successfully. Proves Codex thread
+    /// #2: a swept-session retry — a brand-new `FileProgress` per attempt,
+    /// restarting at chunk 0 — must not leave either number counting the same
+    /// logical file twice.
+    #[derive(Default)]
+    struct RecordingProgress {
+        overall_bytes: Arc<std::sync::atomic::AtomicU64>,
+        files_done: Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    impl ChunkProgress for RecordingProgress {
+        fn begin_file(&self, _file_name: &str, _expected_ciphertext: u64) -> Box<dyn FileProgress> {
+            Box::new(RecordingFileProgress {
+                overall_bytes: Arc::clone(&self.overall_bytes),
+                files_done: Arc::clone(&self.files_done),
+            })
+        }
+
+        fn rollback(&self, ciphertext_bytes: u64) {
+            let _ = self.overall_bytes.fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |v| Some(v.saturating_sub(ciphertext_bytes)),
+            );
+        }
+    }
+
+    struct RecordingFileProgress {
+        overall_bytes: Arc<std::sync::atomic::AtomicU64>,
+        files_done: Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    impl FileProgress for RecordingFileProgress {
+        fn chunk_confirmed(&self, ciphertext_bytes: u64) {
+            self.overall_bytes
+                .fetch_add(ciphertext_bytes, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        fn finish(self: Box<Self>, success: bool) {
+            if success {
+                self.files_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
     /// Shared body of the two "swept on the first chunk PUT" cases.
     async fn swept_on_chunk_recovers(gone: Gone, tag: &str) {
         let s = Scratch::new(tag);
@@ -1174,6 +1362,87 @@ mod swept_session_reinit {
         assert_eq!(crate::resume::resumable_upload(&path, size, mtime), None);
     }
 
+    /// Codex thread #2, the `complete` trigger: every chunk of the first
+    /// attempt landed (so `finish(true)` would have already fired under the
+    /// PRE-fix ordering) before `complete` answered "gone". The retry re-sends
+    /// every chunk from 0 under a brand-new `FileProgress`. The run-wide
+    /// totals must reflect ONE finished file at its real size — not two
+    /// finished-file counts, and not double the ciphertext.
+    #[tokio::test]
+    async fn swept_at_complete_does_not_double_count_progress() {
+        let s = Scratch::new("complete404-progress");
+        let (path, size, mtime) = s.file(64 * 1024);
+        let stored_fid = Uuid::new_v4();
+        let sid = Uuid::new_v4();
+        crate::resume::record(&path, stored_fid, sid, size, mtime);
+        let mut mock = Mock::default();
+        mock.live.insert(sid.to_string());
+        mock.complete_gone.insert(sid.to_string());
+        let state: Shared = Arc::new(Mutex::new(mock));
+        let progress = RecordingProgress::default();
+
+        let out = run_with_progress(&state, spec(&path, Uuid::new_v4()), &progress)
+            .await
+            .expect("upload must recover");
+
+        assert_eq!(
+            progress.files_done.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "one logical file finished once, not twice (finish(true) must not fire before complete() succeeds)"
+        );
+        assert_eq!(
+            progress.overall_bytes.load(std::sync::atomic::Ordering::Relaxed),
+            out.ciphertext_bytes,
+            "the failed attempt's fully-confirmed bytes must be rolled back, not left under the retry's own total"
+        );
+    }
+
+    /// Codex thread #2, the chunk-PUT trigger: the resumed session accepts
+    /// its FIRST chunk, then goes gone on the second — a genuine MID-pipeline
+    /// sweep with a nonzero partial byte count reported before the failure.
+    /// Needs >1 chunk, so the payload crosses the 4 MiB minimum chunk size.
+    #[tokio::test]
+    async fn swept_mid_pipeline_does_not_double_count_progress() {
+        let s = Scratch::new("midchunk-progress");
+        let (path, size, mtime) = s.file(5 * 1024 * 1024);
+        let stored_fid = Uuid::new_v4();
+        let dead_sid = Uuid::new_v4();
+        crate::resume::record(&path, stored_fid, dead_sid, size, mtime);
+        let mut mock = Mock::default();
+        mock.live.insert(dead_sid.to_string());
+        mock.dies_after_chunks.insert(dead_sid.to_string(), 1);
+        let state: Shared = Arc::new(Mutex::new(mock));
+        let progress = RecordingProgress::default();
+
+        let out = run_with_progress(&state, spec(&path, Uuid::new_v4()), &progress)
+            .await
+            .expect("upload must recover");
+
+        {
+            let m = state.lock().unwrap();
+            let dead_chunks: Vec<u32> = m
+                .chunk_puts
+                .iter()
+                .filter(|c| c.0 == dead_sid.to_string())
+                .map(|c| c.1)
+                .collect();
+            assert!(
+                dead_chunks.len() >= 2,
+                "premise: the dead session must take a successful chunk 0 before dying on chunk 1: {dead_chunks:?}"
+            );
+        }
+        assert_eq!(
+            progress.files_done.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "one logical file finished once"
+        );
+        assert_eq!(
+            progress.overall_bytes.load(std::sync::atomic::Ordering::Relaxed),
+            out.ciphertext_bytes,
+            "chunk 0's bytes from the failed attempt must be rolled back before the retry re-sends everything from 0"
+        );
+    }
+
     #[tokio::test]
     async fn reinit_happens_at_most_once_per_file_per_run() {
         let s = Scratch::new("once");
@@ -1205,12 +1474,17 @@ mod swept_session_reinit {
 
     #[tokio::test]
     async fn refused_stored_id_falls_back_to_one_fresh_id() {
+        // 404 is the ONE status the v2 init handler returns that PROVES the
+        // stored id is unusable (routes/uploads.rs: an explicit file_id the
+        // caller can no longer read at all) — see `fresh_id_can_fix`. It is
+        // the only status this fallback still fires on after Codex thread #1
+        // (a 400 or a 5xx no longer does; see the two tests below).
         let s = Scratch::new("fallback");
         let (path, size, mtime) = s.file(64 * 1024);
         let stored_fid = Uuid::new_v4();
         crate::resume::record(&path, stored_fid, Uuid::new_v4(), size, mtime);
         let mut mock = Mock::default();
-        mock.init_refuse.insert(stored_fid.to_string(), 400);
+        mock.init_refuse.insert(stored_fid.to_string(), 404);
         let state: Shared = Arc::new(Mutex::new(mock));
         let fresh_fid = Uuid::new_v4();
 
@@ -1221,6 +1495,91 @@ mod swept_session_reinit {
         assert_eq!(m.inits, vec![stored_fid.to_string(), fresh_fid.to_string()]);
         assert_eq!(out.server_id, fresh_fid);
         assert_eq!(m.completed.len(), 1);
+    }
+
+    /// Codex thread #1: a 400 from the stored-id init is GENERIC request
+    /// validation (file name / chunk-plan shape) that a fresh id would fail
+    /// identically — it says nothing about the id being bad, so (unlike 404)
+    /// it must be surfaced, never used to justify a fresh-id fallback.
+    #[tokio::test]
+    async fn refused_stored_id_400_is_surfaced_not_papered_over() {
+        let s = Scratch::new("400-surfaced");
+        let (path, size, mtime) = s.file(64 * 1024);
+        let stored_fid = Uuid::new_v4();
+        crate::resume::record(&path, stored_fid, Uuid::new_v4(), size, mtime);
+        let mut mock = Mock::default();
+        mock.init_refuse.insert(stored_fid.to_string(), 400);
+        let state: Shared = Arc::new(Mutex::new(mock));
+
+        let res = run(&state, spec(&path, Uuid::new_v4())).await;
+        assert!(res.is_err(), "a 400 must be surfaced, not silently worked around");
+        let m = state.lock().unwrap();
+        assert_eq!(
+            m.inits,
+            vec![stored_fid.to_string()],
+            "no fresh-id fallback for a 400: {:?}",
+            m.inits
+        );
+    }
+
+    /// Codex thread #1: a 5xx from the stored-id init proves nothing about the
+    /// id — it can be transient — so it must be retried with the SAME id
+    /// (bounded, with backoff), never swapped for a fresh one.
+    #[tokio::test]
+    async fn stored_id_5xx_is_retried_with_same_id_then_succeeds() {
+        let s = Scratch::new("5xx-retry-succeeds");
+        let (path, size, mtime) = s.file(64 * 1024);
+        let stored_fid = Uuid::new_v4();
+        crate::resume::record(&path, stored_fid, Uuid::new_v4(), size, mtime);
+        let mut mock = Mock::default();
+        // Fails with 500 twice, then succeeds on the third attempt — well
+        // within STORED_ID_INIT_RETRIES.
+        mock.init_fail_then_succeed.insert(stored_fid.to_string(), (500, 2));
+        let state: Shared = Arc::new(Mutex::new(mock));
+
+        let out = run(&state, spec(&path, Uuid::new_v4()))
+            .await
+            .expect("must succeed once the transient 5xx clears, on the SAME id");
+        let m = state.lock().unwrap();
+        assert_eq!(
+            m.inits,
+            vec![stored_fid.to_string(); 3],
+            "every retry must use the STORED id, never a fresh one: {:?}",
+            m.inits
+        );
+        assert_eq!(out.server_id, stored_fid);
+        assert_eq!(m.completed.len(), 1);
+    }
+
+    /// The bound: once every retry is spent, a persistent 5xx is surfaced —
+    /// still never falling back to a fresh id (which could leave a live
+    /// session under the stored id and complete a duplicate file under the
+    /// fresh one, per the review comment).
+    #[tokio::test]
+    async fn stored_id_5xx_exhausts_retries_and_is_surfaced() {
+        let s = Scratch::new("5xx-exhausted");
+        let (path, size, mtime) = s.file(64 * 1024);
+        let stored_fid = Uuid::new_v4();
+        crate::resume::record(&path, stored_fid, Uuid::new_v4(), size, mtime);
+        let mut mock = Mock::default();
+        mock.init_refuse.insert(stored_fid.to_string(), 503);
+        let state: Shared = Arc::new(Mutex::new(mock));
+
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            run(&state, spec(&path, Uuid::new_v4())),
+        )
+        .await
+        .expect("bounded retries must not hang");
+        assert!(res.is_err(), "a persistent 5xx must eventually be surfaced");
+        let m = state.lock().unwrap();
+        assert_eq!(
+            m.inits,
+            vec![stored_fid.to_string(); 1 + super::STORED_ID_INIT_RETRIES as usize],
+            "exactly the initial attempt plus the bounded retries, all on the STORED id: {:?}",
+            m.inits
+        );
+        assert!(m.completed.is_empty());
     }
 
     #[tokio::test]
@@ -1294,5 +1653,35 @@ mod swept_session_reinit {
         )));
         assert!(!is_upload_session_gone(&e(500, "internal")));
         assert!(!is_upload_session_gone(&e(0, "Can't reach the Beebeeb API")));
+    }
+
+    /// Codex thread #1: 404 is the ONLY status that proves the stored id is
+    /// unusable (see `fresh_id_can_fix`'s doc comment for why each other
+    /// status is excluded, grounded in the v2 init handler).
+    #[test]
+    fn fresh_id_can_fix_classifier() {
+        use super::fresh_id_can_fix;
+        assert!(fresh_id_can_fix(404));
+        assert!(
+            !fresh_id_can_fix(400),
+            "generic validation — a fresh id fails identically"
+        );
+        assert!(!fresh_id_can_fix(401), "auth — never a reason to change ids");
+        assert!(!fresh_id_can_fix(403), "auth — never a reason to change ids");
+        assert!(
+            !fresh_id_can_fix(409),
+            "a live upload or stale base version — a fresh id would create a duplicate"
+        );
+        assert!(!fresh_id_can_fix(402), "quota");
+        assert!(!fresh_id_can_fix(413), "quota");
+        assert!(!fresh_id_can_fix(429), "rate limiting, handled in `api`");
+        assert!(
+            !fresh_id_can_fix(500),
+            "a 5xx proves nothing about the id — retried with the SAME id instead"
+        );
+        assert!(
+            !fresh_id_can_fix(503),
+            "a 5xx proves nothing about the id — retried with the SAME id instead"
+        );
     }
 }
