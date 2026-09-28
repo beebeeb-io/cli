@@ -37,7 +37,7 @@ manifest version bump and two fixes to internal `prod-bots` test scripts) don't 
 
 ### Verification
 
-CI on the exact commit this release is cut from (`f6e9876`, main):
+CI on the code this release ships (`f6e9876`, main — the release commit on top of it only bumps the version to 0.11.1 and updates this file and the changelog; its own CI run on the release-notes PR is https://github.com/beebeeb-io/cli/actions/runs/36380139239, same checks green):
 https://github.com/beebeeb-io/cli/actions/runs/36363362059
 
 - `cargo build --verbose` — succeeds.
