@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-29
+
 ### Added
 - `bb signup` — accounts are now created in the web app (a new account starts a trial that needs a payment method, which only the web checkout can collect). The command prints the signup URL (derived from the configured API, `app.beebeeb.io` by default), opens it in a browser when one is available, and exits 0; afterwards run `bb login`. The CLI itself never creates accounts.
 - `bb whoami`/`bb status`, `bb quota` and `bb billing show` show the account state from the server (`account_state`): an account with no plan yet, or whose trial ended unpaid (read-only, with the date the vault will be deleted). `--json` on `whoami`/`quota` gains `account_state` and `data_deletion_at`.
