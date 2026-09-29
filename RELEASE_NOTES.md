@@ -106,5 +106,9 @@ scoop update bb                                  # Windows, Scoop
 
 macOS and Linux installs (shell installer or Homebrew) self-update on next run via the built-in
 OTA updater. Windows installs do not self-update yet — run `scoop update bb` to get 0.12.0.
+The Scoop manifest (`scoop/bb.json`) is bumped by a follow-up pull request that the release
+workflow opens once this release is published. Until that pull request is merged,
+`scoop update bb` still installs 0.11.1. To get 0.12.0 on Windows before then, download it from
+the assets below.
 
 Full changelog: https://github.com/beebeeb-io/cli/compare/v0.11.1...v0.12.0
