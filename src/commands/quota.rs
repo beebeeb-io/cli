@@ -46,6 +46,10 @@ pub async fn run() -> Result<(), String> {
     // Build the plan label: "Pro — 8.0 TB (5 TB base + 3 TB extra)"
     let plan_label = build_plan_label(plan, extra_tb, quota_bytes);
 
+    // Task 1037: `needs_plan` / `lapsed` ⇒ quota 0 and uploads refused.
+    let account_state = crate::account_state::AccountState::from_subscription(&sub);
+    let account_notice = account_state.notice(&crate::web_url::web_app_base());
+
     // ── JSON mode ────────────────────────────────────────────────────────────
 
     if ui::is_json() {
@@ -58,6 +62,8 @@ pub async fn run() -> Result<(), String> {
                 "files": file_count,
                 "plan": plan.slug(),
                 "extra_storage_tb": extra_tb,
+                "account_state": account_state.slug(),
+                "data_deletion_at": account_state.data_deletion_at_rfc3339(),
             }))
             .unwrap()
         );
@@ -101,11 +107,20 @@ pub async fn run() -> Result<(), String> {
     };
 
     println!();
-    println!(
-        "  {} {}",
-        dim("plan    "),
-        plan_label.custom_color(crate::colors::AMBER)
-    );
+    if account_notice.is_some() {
+        println!("  {} {}", dim("plan    "), "none".custom_color(crate::colors::AMBER));
+        println!(
+            "  {} {}",
+            dim("state   "),
+            account_state.label().custom_color(crate::colors::RED_ERR)
+        );
+    } else {
+        println!(
+            "  {} {}",
+            dim("plan    "),
+            plan_label.custom_color(crate::colors::AMBER)
+        );
+    }
     println!(
         "  {} {}",
         dim("used    "),
@@ -126,8 +141,16 @@ pub async fn run() -> Result<(), String> {
         files_str.custom_color(crate::colors::INK_DIM)
     );
 
-    // Over-quota warning
-    if quota_bytes > 0 && used_bytes >= quota_bytes {
+    // Account-state notice (task 1037) wins over the over-quota warning:
+    // quota is 0 because there is no plan, not because the vault is full.
+    if let Some(notice) = &account_notice {
+        println!();
+        println!(
+            "  {} {}",
+            "!".custom_color(crate::colors::RED_ERR),
+            notice.custom_color(crate::colors::RED_ERR),
+        );
+    } else if quota_bytes > 0 && used_bytes >= quota_bytes {
         println!();
         let msg = if plan.can_add_storage() {
             "Over quota \u{2014} uploads blocked. Add more storage at app.beebeeb.io/billing or delete files."

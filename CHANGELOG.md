@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `bb signup` — accounts are now created in the web app (a new account starts a trial that needs a payment method, which only the web checkout can collect). The command prints the signup URL (derived from the configured API, `app.beebeeb.io` by default), opens it in a browser when one is available, and exits 0; afterwards run `bb login`. The CLI itself never creates accounts.
+- `bb whoami`/`bb status`, `bb quota` and `bb billing show` show the account state from the server (`account_state`): an account with no plan yet, or whose trial ended unpaid (read-only, with the date the vault will be deleted). `--json` on `whoami`/`quota` gains `account_state` and `data_deletion_at`.
+
+### Changed
+- An upload or share refused because the account has no plan yet (`409 plan_required`) says so and links the plan chooser (`/choose-plan`); one refused because the trial ended (`409 account_lapsed`) says the vault is read-only, when it will be deleted, and links `/billing?view=change` — instead of the server's generic text. The older `413 quota_exceeded` refusal is explained the same way when the account state calls for it. `bb push` also checks this before uploading, from the subscription it already fetches. Other paths look the account state up only after a refusal, at most once per run.
+
 ## [0.11.1] - 2026-09-28
 
 ### Fixed

@@ -155,6 +155,9 @@ pub async fn show(json: bool) -> Result<(), String> {
         .filter(|s| !s.is_empty());
     let region_slug = sub.get("region").and_then(|v| v.as_str()).unwrap_or("europe");
     let trial_ends_at = sub.get("trial_ends_at").and_then(|v| v.as_str());
+    // Task 1037: `needs_plan` / `lapsed` — read-only, quota 0.
+    let account_notice =
+        crate::account_state::AccountState::from_subscription(&sub).notice(&crate::web_url::web_app_base());
 
     // ── Render ───────────────────────────────────────────────────────────────
 
@@ -162,6 +165,14 @@ pub async fn show(json: bool) -> Result<(), String> {
     let label = |s: &str| s.custom_color(crate::colors::INK_SAGE);
 
     println!();
+    if let Some(notice) = &account_notice {
+        println!(
+            "  {} {}",
+            "!".custom_color(crate::colors::RED_ERR),
+            notice.custom_color(crate::colors::RED_ERR),
+        );
+        println!();
+    }
     println!("  {}", "PLAN".custom_color(crate::colors::AMBER));
 
     let plan_name = capitalise(plan.slug());
