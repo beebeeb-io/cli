@@ -16,22 +16,29 @@ const FOLDER: &str = "44444444-4444-4444-8444-444444444444";
 type Calls = Arc<Mutex<Vec<(String, Value)>>>;
 
 async fn run(args: &[&str]) -> Vec<(String, Value)> {
+    run_with_target(args, json!(TARGET), true).await
+}
+
+async fn run_with_target(args: &[&str], target_id: Value, success: bool) -> Vec<(String, Value)> {
     let calls = Calls::default();
     let app = Router::new()
         .route(
             "/api/v1/files",
-            get(|Query(q): Query<HashMap<String, String>>| async move {
-                Json(json!({"files": match q.get("parent_id").map(String::as_str) {
-                    None => json!([
-                        {"id": SOURCE, "name_encrypted": "Source", "is_folder": true},
-                        {"id": TARGET, "name_encrypted": "Target", "is_folder": true}
-                    ]),
-                    Some(SOURCE) => json!([
-                        {"id": FILE, "name_encrypted": "file.txt", "is_folder": false, "parent_id": SOURCE},
-                        {"id": FOLDER, "name_encrypted": "Child", "is_folder": true, "parent_id": SOURCE}
-                    ]),
-                    _ => json!([])
-                }}))
+            get(move |Query(q): Query<HashMap<String, String>>| {
+                let target_id = target_id.clone();
+                async move {
+                    Json(json!({"files": match q.get("parent_id").map(String::as_str) {
+                        None => json!([
+                            {"id": SOURCE, "name_encrypted": "Source", "is_folder": true},
+                            {"id": target_id, "name_encrypted": "Target", "is_folder": true}
+                        ]),
+                        Some(SOURCE) => json!([
+                            {"id": FILE, "name_encrypted": "file.txt", "is_folder": false, "parent_id": SOURCE},
+                            {"id": FOLDER, "name_encrypted": "Child", "is_folder": true, "parent_id": SOURCE}
+                        ]),
+                        _ => json!([])
+                    }}))
+                }
             }),
         )
         .route(
@@ -84,11 +91,19 @@ async fn run(args: &[&str]) -> Vec<(String, Value)> {
     .unwrap();
     std::fs::remove_dir_all(home).unwrap();
     server.abort();
-    assert!(
+    assert_eq!(
         out.status.success(),
-        "{args:?}: {}",
+        success,
+        "{args:?}: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
+    if !success {
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("invalid UUID"),
+            "must explain invalid destination metadata"
+        );
+    }
     calls.lock().unwrap().clone()
 }
 
@@ -127,4 +142,28 @@ async fn folder_destination_sends_uuid_and_rename_only_omits_parent() {
     assert_eq!(calls[0].1.as_object().unwrap().len(), 1);
     assert!(calls[0].1.get("parent_id").is_none());
     assert!(calls[0].1.get("name_encrypted").unwrap().is_string());
+}
+
+#[tokio::test]
+async fn single_move_rejects_invalid_destination_without_patch() {
+    for id in [Value::Null, json!(""), json!("not-a-uuid")] {
+        let calls = run_with_target(&["/Source/file.txt", "/Target"], id, false).await;
+        assert_eq!(calls.len(), 0, "invalid destination must send no PATCH");
+    }
+}
+
+#[tokio::test]
+async fn single_rename_rejects_invalid_parent_without_patch() {
+    for id in [Value::Null, json!(""), json!("not-a-uuid")] {
+        let calls = run_with_target(&["/Source/file.txt", "/Target/renamed.txt"], id, false).await;
+        assert_eq!(calls.len(), 0, "invalid rename parent must send no PATCH");
+    }
+}
+
+#[tokio::test]
+async fn bulk_move_rejects_invalid_destination_without_patch() {
+    for id in [Value::Null, json!(""), json!("not-a-uuid")] {
+        let calls = run_with_target(&["/Source/file.txt", "/Source/Child", "/Target"], id, false).await;
+        assert_eq!(calls.len(), 0, "invalid bulk destination must send no PATCH");
+    }
 }

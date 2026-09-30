@@ -7,6 +7,7 @@ pub mod logout;
 pub mod ls;
 pub mod mkdir;
 pub mod mount;
+mod move_target;
 pub mod mv;
 pub mod passkey;
 pub mod pull;

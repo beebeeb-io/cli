@@ -58,6 +58,28 @@
 #[cfg(not(feature = "fuse"))]
 use std::path::PathBuf;
 
+#[cfg(any(feature = "fuse", test))]
+const ROOT_INO: u64 = 1;
+
+#[cfg(any(feature = "fuse", test))]
+fn rename_parent_target(
+    parent: u64,
+    newparent: u64,
+    entry: Option<(bool, Option<&str>)>,
+) -> Result<Option<Option<uuid::Uuid>>, super::move_target::ParentError> {
+    use super::move_target::{DestinationParent, parent_target};
+    let target = if newparent == ROOT_INO {
+        DestinationParent::Root
+    } else {
+        match entry {
+            Some((true, id)) => DestinationParent::Folder(id),
+            Some((false, _)) => DestinationParent::NotFolder,
+            None => DestinationParent::Missing,
+        }
+    };
+    parent_target(parent != newparent, target)
+}
+
 // ─── Stub (no FUSE feature) ───────────────────────────────────────────────────
 //
 // Release binaries (cargo-dist, `dist-workspace.toml`) are built WITHOUT the
@@ -145,7 +167,7 @@ mod fuse_impl {
 
     // ── Constants ─────────────────────────────────────────────────────────────
 
-    const ROOT_INO: u64 = 1;
+    use super::{ROOT_INO, rename_parent_target};
     const ATTR_TTL: Duration = Duration::from_secs(5);
     // Chunk size is now computed dynamically via beebeeb_types::plan_chunks().
     // See the adaptive chunk-size ladder in beebeeb-types/src/chunk.rs.
@@ -1042,6 +1064,24 @@ mod fuse_impl {
                 }
             };
 
+            // Validate before local pending-file changes or conflict deletion.
+            let new_parent_file_id = match rename_parent_target(
+                parent,
+                newparent,
+                self.inodes.get(&newparent).map(|e| (e.is_dir, e.file_id.as_deref())),
+            ) {
+                Ok(target) => target,
+                Err(e) => {
+                    eprintln!("[mount] rename parent {newparent}: {e}");
+                    let errno = match e {
+                        crate::commands::move_target::ParentError::NotFound => libc::ENOENT,
+                        _ => libc::EIO,
+                    };
+                    reply.error(errno);
+                    return;
+                }
+            };
+
             let file_id = match file_id {
                 Some(id) => id,
                 None => {
@@ -1086,18 +1126,6 @@ mod fuse_impl {
                         return;
                     }
                 }
-            } else {
-                None
-            };
-
-            // Resolve new parent file_id (None = root).
-            let new_parent_file_id: Option<Option<uuid::Uuid>> = if parent_changed {
-                Some(
-                    self.inodes
-                        .get(&newparent)
-                        .and_then(|e| e.file_id.as_deref())
-                        .and_then(|s| s.parse().ok()),
-                )
             } else {
                 None
             };
@@ -1266,3 +1294,49 @@ mod fuse_impl {
 
 #[cfg(feature = "fuse")]
 pub use fuse_impl::{run, unmount};
+
+#[cfg(test)]
+mod parent_target_tests {
+    use super::*;
+    use crate::commands::move_target::ParentError;
+
+    #[test]
+    fn fuse_parent_target_root_folder_unchanged() {
+        let id = uuid::Uuid::new_v4();
+        assert_eq!(rename_parent_target(2, ROOT_INO, None), Ok(Some(None)));
+        assert_eq!(
+            rename_parent_target(ROOT_INO, 2, Some((true, Some(&id.to_string())))),
+            Ok(Some(Some(id)))
+        );
+        assert_eq!(rename_parent_target(2, 2, None), Ok(None));
+    }
+
+    #[test]
+    fn fuse_parent_target_unknown_inode() {
+        assert_eq!(rename_parent_target(ROOT_INO, 9, None), Err(ParentError::NotFound));
+    }
+
+    #[test]
+    fn fuse_parent_target_missing_id() {
+        assert_eq!(
+            rename_parent_target(ROOT_INO, 9, Some((true, None))),
+            Err(ParentError::MissingId)
+        );
+    }
+
+    #[test]
+    fn fuse_parent_target_invalid_id() {
+        assert_eq!(
+            rename_parent_target(ROOT_INO, 9, Some((true, Some("invalid")))),
+            Err(ParentError::InvalidId)
+        );
+    }
+
+    #[test]
+    fn fuse_parent_target_file() {
+        assert_eq!(
+            rename_parent_target(ROOT_INO, 9, Some((false, Some("invalid")))),
+            Err(ParentError::NotFolder)
+        );
+    }
+}
