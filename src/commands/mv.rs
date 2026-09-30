@@ -48,7 +48,7 @@ async fn move_bulk(
             "{dst} is a file, not a folder (bulk mv needs a folder destination)"
         ));
     }
-    let dst_id: Option<Uuid> = resolved_dst.file_id.as_deref().and_then(|s| s.parse().ok());
+    let dst_id = destination_parent(&resolved_dst)?;
 
     // Resolve every source first so a typo doesn't half-finish the move.
     let mut resolved_srcs: Vec<(String, String)> = Vec::with_capacity(srcs.len());
@@ -69,7 +69,7 @@ async fn move_bulk(
     let mut ok = 0u32;
     let mut failures: Vec<(String, String)> = Vec::new();
     for (input, id) in resolved_srcs {
-        match api.move_file(&id, None, dst_id).await {
+        match api.move_file(&id, None, Some(dst_id)).await {
             Ok(_) => ok += 1,
             Err(e) => failures.push((input, e)),
         }
@@ -137,7 +137,7 @@ async fn move_single(
     let (new_parent_id, new_name): (Option<Uuid>, Option<String>) = if let Some(d) = dst_existing {
         if d.is_folder {
             // Case 1: dst is an existing folder → move into it, keep the name.
-            (d.file_id.and_then(|s| s.parse::<Uuid>().ok()), None)
+            (destination_parent(&d)?, None)
         } else {
             // Case 3: dst is an existing file → refuse to overwrite.
             return Err(format!(
@@ -153,16 +153,16 @@ async fn move_single(
                 if !parent.is_folder {
                     return Err(format!("{p} is a file, not a folder"));
                 }
-                parent.file_id.and_then(|s| s.parse::<Uuid>().ok())
+                destination_parent(&parent)?
             }
             None => None,
         };
         (parent_id, Some(leaf))
     };
 
-    // Build the PATCH: send parent_id only when we have a target parent (a
-    // move); send name_encrypted only when the name actually changes.
-    let new_parent_send = new_parent_id;
+    // Preserve omitted/NULL/UUID: a changed parent at root is an explicit
+    // Some(None), while a rename within the same directory omits parent_id.
+    let new_parent_send = (src.parent_id != new_parent_id).then_some(new_parent_id);
     let mut name_changed = false;
     let new_name_encrypted = match new_name {
         Some(name) if name != src.name => {
@@ -195,7 +195,7 @@ async fn move_single(
         } else if name_changed {
             format!("moved + renamed {src_arg} → {dst_arg}")
         } else {
-            format!("moved {src_arg} → {dst_arg}/{}", src.name)
+            format!("moved {src_arg} → {}/{}", dst_arg.trim_end_matches('/'), src.name)
         };
         println!(
             "  {} {}",
@@ -205,6 +205,22 @@ async fn move_single(
     }
 
     Ok(())
+}
+
+/// The path resolver creates the root entry with name "/" and no file ID.
+/// Missing IDs on any other resolved entry are corrupt metadata, not root.
+fn destination_parent(entry: &path::ResolvedPath) -> Result<Option<Uuid>, String> {
+    use super::move_target::{DestinationParent, parent_target};
+    let target = if !entry.is_folder {
+        DestinationParent::NotFolder
+    } else if entry.name == "/" && entry.file_id.is_none() {
+        DestinationParent::Root
+    } else {
+        DestinationParent::Folder(entry.file_id.as_deref())
+    };
+    parent_target(true, target)
+        .map(Option::flatten)
+        .map_err(|e| e.to_string())
 }
 
 fn noop(dst_arg: &str) -> Result<(), String> {
@@ -227,5 +243,45 @@ fn split_dst(dst: &str) -> Result<(Option<String>, String), String> {
         Some(("", leaf)) | Some(("/", leaf)) => Ok((None, leaf.to_string())),
         Some((parent, leaf)) if !leaf.is_empty() => Ok((Some(parent.to_string()), leaf.to_string())),
         _ => Ok((None, trimmed.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod parent_target_tests {
+    use super::*;
+
+    fn folder(name: &str, id: Option<&str>) -> path::ResolvedPath {
+        path::ResolvedPath {
+            file_id: id.map(str::to_owned),
+            parent_id: None,
+            name: name.into(),
+            is_folder: true,
+        }
+    }
+
+    #[test]
+    fn mv_parent_target_root_and_folder() {
+        let id = Uuid::new_v4();
+        assert_eq!(destination_parent(&folder("/", None)), Ok(None));
+        assert_eq!(
+            destination_parent(&folder("Target", Some(&id.to_string()))),
+            Ok(Some(id))
+        );
+    }
+
+    #[test]
+    fn mv_parent_target_missing_id() {
+        assert_eq!(
+            destination_parent(&folder("Target", None)),
+            Err("destination folder is missing its file ID".into())
+        );
+    }
+
+    #[test]
+    fn mv_parent_target_invalid_id() {
+        assert_eq!(
+            destination_parent(&folder("Target", Some("invalid"))),
+            Err("destination folder has an invalid UUID".into())
+        );
     }
 }

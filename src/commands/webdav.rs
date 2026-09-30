@@ -855,41 +855,32 @@ async fn move_response(state: &Arc<DavState>, src_path: &str, destination: &str)
         None
     };
 
-    // Resolve new parent if moved
-    let new_parent_id: Option<uuid::Uuid> = if !same_parent {
-        if dst_parent_path == "/" {
-            // Moving to root: pass `null` parent.  Server interprets null as root.
-            // We signal "move to root" by passing Some(uuid::Uuid::nil()) — but the
-            // server PATCH endpoint treats parent_id as the new parent.
-            // We'll pass None to the move_file call to set parent_id = null.
-            None // will be handled specially below
-        } else {
-            match resolve_path(state, dst_parent_path).await {
-                Ok(e) if e.is_collection => e.file_id.as_deref().and_then(|s| s.parse::<uuid::Uuid>().ok()),
-                Ok(_) => {
-                    return (StatusCode::CONFLICT, "destination parent is not a folder").into_response();
-                }
-                Err(e) => {
-                    return (StatusCode::CONFLICT, format!("destination parent not found: {e}")).into_response();
-                }
+    // Resolve only changed, non-root destinations; lookup failure cannot mean root.
+    let destination_parent = if !same_parent && !dst_parent_path.trim_matches('/').is_empty() {
+        match resolve_path(state, dst_parent_path).await {
+            Ok(entry) => Some(entry),
+            Err(e) => {
+                return (StatusCode::CONFLICT, format!("destination parent not found: {e}")).into_response();
             }
         }
     } else {
-        // Same parent — skip parent_id in the PATCH
-        // We'll only send name_encrypted
         None
     };
-
-    // Determine what to send to PATCH
-    let patch_parent = if same_parent {
-        None // don't change parent
-    } else {
-        Some(new_parent_id) // change parent (may be None = root)
+    let patch_parent = match move_parent_target(same_parent, dst_parent_path, destination_parent.as_ref()) {
+        Ok(target) => target,
+        Err(e) => {
+            use super::move_target::ParentError;
+            let status = match e {
+                ParentError::NotFound | ParentError::NotFolder => StatusCode::CONFLICT,
+                ParentError::MissingId | ParentError::InvalidId => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            return (status, e.to_string()).into_response();
+        }
     };
 
     match state
         .api
-        .move_file(&file_id, new_name_encrypted.as_deref(), patch_parent.flatten())
+        .move_file(&file_id, new_name_encrypted.as_deref(), patch_parent)
         .await
     {
         Ok(_) => {
@@ -900,6 +891,24 @@ async fn move_response(state: &Arc<DavState>, src_path: &str, destination: &str)
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
+}
+
+fn move_parent_target(
+    same_parent: bool,
+    parent_path: &str,
+    entry: Option<&ResolvedEntry>,
+) -> Result<Option<Option<Uuid>>, super::move_target::ParentError> {
+    use super::move_target::{DestinationParent, parent_target};
+    let target = if parent_path.trim_matches('/').is_empty() {
+        DestinationParent::Root
+    } else {
+        match entry {
+            Some(e) if e.is_collection => DestinationParent::Folder(e.file_id.as_deref()),
+            Some(_) => DestinationParent::NotFolder,
+            None => DestinationParent::Missing,
+        }
+    };
+    parent_target(!same_parent, target)
 }
 
 // ─── LOCK ─────────────────────────────────────────────────────────────────────
@@ -1330,4 +1339,131 @@ fn xml_escape(s: &str) -> String {
 /// Falls back to application/octet-stream for unknown extensions.
 fn resolve_mime(filename: &str) -> String {
     mime_guess::from_path(filename).first_or_octet_stream().to_string()
+}
+
+#[cfg(test)]
+mod parent_target_tests {
+    use super::*;
+    use crate::commands::move_target::ParentError;
+
+    fn folder(id: Option<&str>) -> ResolvedEntry {
+        ResolvedEntry {
+            file_id: id.map(str::to_owned),
+            display_name: "Target".into(),
+            is_collection: true,
+            size_bytes: None,
+            chunk_count: 0,
+            modified: None,
+        }
+    }
+
+    #[test]
+    fn webdav_parent_target_root_folder_unchanged() {
+        let id = Uuid::new_v4();
+        assert_eq!(move_parent_target(false, "/", None), Ok(Some(None)));
+        assert_eq!(
+            move_parent_target(false, "/Target", Some(&folder(Some(&id.to_string())))),
+            Ok(Some(Some(id)))
+        );
+        assert_eq!(move_parent_target(true, "/Target", None), Ok(None));
+    }
+
+    #[test]
+    fn webdav_parent_target_unknown_folder() {
+        assert_eq!(move_parent_target(false, "/Target", None), Err(ParentError::NotFound));
+    }
+
+    #[test]
+    fn webdav_parent_target_missing_id() {
+        assert_eq!(
+            move_parent_target(false, "/Target", Some(&folder(None))),
+            Err(ParentError::MissingId)
+        );
+    }
+
+    #[test]
+    fn webdav_parent_target_invalid_id() {
+        assert_eq!(
+            move_parent_target(false, "/Target", Some(&folder(Some("invalid")))),
+            Err(ParentError::InvalidId)
+        );
+    }
+
+    #[test]
+    fn webdav_parent_target_file() {
+        let mut e = folder(None);
+        e.is_collection = false;
+        assert_eq!(
+            move_parent_target(false, "/Target", Some(&e)),
+            Err(ParentError::NotFolder)
+        );
+    }
+    #[tokio::test]
+    async fn webdav_move_rejects_invalid_parent_without_patch() {
+        use axum::{
+            Json,
+            routing::{get, patch},
+        };
+        use serde_json::json;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for (id, status) in [
+            (json!("not-a-uuid"), StatusCode::INTERNAL_SERVER_ERROR),
+            (json!(""), StatusCode::INTERNAL_SERVER_ERROR),
+            (serde_json::Value::Null, StatusCode::CONFLICT),
+        ] {
+            let patches = Arc::new(AtomicUsize::new(0));
+            let reads = Arc::new(AtomicUsize::new(0));
+            let get_reads = reads.clone();
+            let patch_count = patches.clone();
+            let app = Router::new()
+                .route("/api/v1/files", get(move || {
+                    let id = id.clone();
+                    let reads = get_reads.clone();
+                    async move {
+                        reads.fetch_add(1, Ordering::SeqCst);
+                        Json(json!({"files": [
+                            {"id": "33333333-3333-4333-8333-333333333333", "name_encrypted": "file.txt", "is_folder": false},
+                            {"id": id, "name_encrypted": "Target", "is_folder": true}
+                        ]}))
+                    }
+                }))
+                .route("/api/v1/files/:id", patch(move || {
+                    let count = patch_count.clone();
+                    async move {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        Json(json!({"ok": true}))
+                    }
+                }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let state = Arc::new(DavState {
+                api: ApiClient::new_for_test(format!("http://{}", listener.local_addr().unwrap())),
+                master_key: beebeeb_core::kdf::MasterKey::from_bytes([0; 32]),
+                read_only: false,
+                dir_cache: Mutex::new(HashMap::new()),
+                cache_ttl: Duration::ZERO,
+                locks: Mutex::new(HashMap::new()),
+                request_count: std::sync::atomic::AtomicU64::new(0),
+                error_count: std::sync::atomic::AtomicU64::new(0),
+                verbose: false,
+            });
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let response = move_response(&state, "/file.txt", "/Target/file.txt").await;
+            server.abort();
+            assert_eq!(
+                response.status(),
+                status,
+                "invalid destination must fail the WebDAV MOVE"
+            );
+            let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+            assert!(!body.is_empty(), "WebDAV error must have an explanation");
+            assert_eq!(reads.load(Ordering::SeqCst), 2, "must resolve source and destination");
+            assert_eq!(
+                patches.load(Ordering::SeqCst),
+                0,
+                "invalid WebDAV parent must send no PATCH"
+            );
+        }
+    }
 }
