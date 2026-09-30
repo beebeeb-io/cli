@@ -195,7 +195,7 @@ async fn move_single(
         } else if name_changed {
             format!("moved + renamed {src_arg} → {dst_arg}")
         } else {
-            format!("moved {src_arg} → {dst_arg}/{}", src.name)
+            format!("moved {src_arg} → {}/{}", dst_arg.trim_end_matches('/'), src.name)
         };
         println!(
             "  {} {}",
