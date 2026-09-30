@@ -1091,11 +1091,13 @@ mod fuse_impl {
             };
 
             // Resolve new parent file_id (None = root).
-            let new_parent_file_id: Option<uuid::Uuid> = if parent_changed {
-                self.inodes
-                    .get(&newparent)
-                    .and_then(|e| e.file_id.as_deref())
-                    .and_then(|s| s.parse().ok())
+            let new_parent_file_id: Option<Option<uuid::Uuid>> = if parent_changed {
+                Some(
+                    self.inodes
+                        .get(&newparent)
+                        .and_then(|e| e.file_id.as_deref())
+                        .and_then(|s| s.parse().ok()),
+                )
             } else {
                 None
             };

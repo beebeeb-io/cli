@@ -69,7 +69,7 @@ async fn move_bulk(
     let mut ok = 0u32;
     let mut failures: Vec<(String, String)> = Vec::new();
     for (input, id) in resolved_srcs {
-        match api.move_file(&id, None, dst_id).await {
+        match api.move_file(&id, None, Some(dst_id)).await {
             Ok(_) => ok += 1,
             Err(e) => failures.push((input, e)),
         }
@@ -160,9 +160,9 @@ async fn move_single(
         (parent_id, Some(leaf))
     };
 
-    // Build the PATCH: send parent_id only when we have a target parent (a
-    // move); send name_encrypted only when the name actually changes.
-    let new_parent_send = new_parent_id;
+    // Preserve omitted/NULL/UUID: a changed parent at root is an explicit
+    // Some(None), while a rename within the same directory omits parent_id.
+    let new_parent_send = (src.parent_id != new_parent_id).then_some(new_parent_id);
     let mut name_changed = false;
     let new_name_encrypted = match new_name {
         Some(name) if name != src.name => {

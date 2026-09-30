@@ -858,11 +858,8 @@ async fn move_response(state: &Arc<DavState>, src_path: &str, destination: &str)
     // Resolve new parent if moved
     let new_parent_id: Option<uuid::Uuid> = if !same_parent {
         if dst_parent_path == "/" {
-            // Moving to root: pass `null` parent.  Server interprets null as root.
-            // We signal "move to root" by passing Some(uuid::Uuid::nil()) — but the
-            // server PATCH endpoint treats parent_id as the new parent.
-            // We'll pass None to the move_file call to set parent_id = null.
-            None // will be handled specially below
+            // The outer Some below preserves the explicit root/null target.
+            None
         } else {
             match resolve_path(state, dst_parent_path).await {
                 Ok(e) if e.is_collection => e.file_id.as_deref().and_then(|s| s.parse::<uuid::Uuid>().ok()),
@@ -889,7 +886,7 @@ async fn move_response(state: &Arc<DavState>, src_path: &str, destination: &str)
 
     match state
         .api
-        .move_file(&file_id, new_name_encrypted.as_deref(), patch_parent.flatten())
+        .move_file(&file_id, new_name_encrypted.as_deref(), patch_parent)
         .await
     {
         Ok(_) => {

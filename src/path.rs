@@ -114,6 +114,8 @@ fn hex_val(b: u8) -> Option<u8> {
 pub struct ResolvedPath {
     /// Server file UUID. `None` means the vault root (has no ID).
     pub file_id: Option<String>,
+    /// Current parent UUID; `None` means the entry is at the vault root.
+    pub parent_id: Option<uuid::Uuid>,
     /// Decrypted display name of the final segment (or `"/"` for root).
     pub name: String,
     /// Whether the resolved entry is a folder.
@@ -133,6 +135,7 @@ pub async fn resolve_path(api: &ApiClient, master_key: &MasterKey, path: &str) -
     if trimmed.is_empty() {
         return Ok(ResolvedPath {
             file_id: None,
+            parent_id: None,
             name: "/".to_string(),
             is_folder: true,
         });
@@ -142,6 +145,7 @@ pub async fn resolve_path(api: &ApiClient, master_key: &MasterKey, path: &str) -
 
     let mut current = ResolvedPath {
         file_id: None,
+        parent_id: None,
         name: "/".to_string(),
         is_folder: true,
     };
@@ -172,6 +176,7 @@ pub async fn resolve_path(api: &ApiClient, master_key: &MasterKey, path: &str) -
             if decrypted.eq_ignore_ascii_case(&decoded) {
                 current = ResolvedPath {
                     file_id: Some(id.to_string()),
+                    parent_id: current.file_id.as_deref().and_then(|s| s.parse().ok()),
                     name: decrypted,
                     is_folder,
                 };
@@ -214,6 +219,7 @@ pub async fn find_child_by_name(
         if decrypted.eq_ignore_ascii_case(name) {
             return Ok(Some(ResolvedPath {
                 file_id: Some(id.to_string()),
+                parent_id: parent_id.and_then(|s| s.parse().ok()),
                 name: decrypted,
                 is_folder,
             }));
