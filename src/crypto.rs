@@ -276,8 +276,10 @@ fn decrypt_json_chunks(
         };
         offset += de.byte_offset();
 
-        let decrypted =
-            beebeeb_core::encrypt::decrypt_chunk(file_key, &blob).map_err(|e| format!("decrypt chunk {i}: {e}"))?;
+        // Wiped on drop: only the copy appended to `plaintext` (which the caller owns) survives.
+        let decrypted = zeroize::Zeroizing::new(
+            beebeeb_core::encrypt::decrypt_chunk(file_key, &blob).map_err(|e| format!("decrypt chunk {i}: {e}"))?,
+        );
         plaintext.extend_from_slice(&decrypted);
     }
 
@@ -451,7 +453,11 @@ fn decrypt_raw_chunks(
             ));
         }
 
-        let decrypted = decrypt_raw_frame(file_key, &encrypted_bytes[offset..offset + this_chunk_size], i)?;
+        let decrypted = zeroize::Zeroizing::new(decrypt_raw_frame(
+            file_key,
+            &encrypted_bytes[offset..offset + this_chunk_size],
+            i,
+        )?);
         plaintext.extend_from_slice(&decrypted);
 
         offset += this_chunk_size;

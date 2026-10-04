@@ -111,6 +111,57 @@ fn check_component_for(name: &str, portable: bool, windows: bool) -> Result<(), 
     Ok(())
 }
 
+/// Bidirectional-control characters (embeddings, overrides, isolates). They are
+/// not control characters to `char::is_control`, but a name containing one can
+/// render as a different name (`evil\u{202e}fdp.exe` shows as `evilexe.pdf`).
+fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}' | '\u{061c}')
+}
+
+/// One name as it may appear INSIDE AN ARCHIVE (`bb pull --zip`).
+///
+/// An archive is extracted somewhere else, often on Windows, so the host's own
+/// rules are not enough. The structural checks of [`Rules::Portable`] still
+/// REFUSE the name (separators, `.`/`..`, control characters, drive prefixes:
+/// those are traversal, not cosmetics). Everything else that Windows or a
+/// renderer would mangle is REWRITTEN instead, so the file is not lost:
+///
+/// - `: < > " | ? *` become `_` (a `:` is an NTFS alternate data stream);
+/// - trailing dots and spaces become `_` (Windows silently strips them);
+/// - a reserved device name (`CON`, `NUL`, `COM1`, ... with or without an
+///   extension) gets a leading `_`;
+/// - bidi overrides are removed.
+///
+/// Rewriting can make two names equal; the caller de-duplicates afterwards.
+pub fn archive_component(name: &str) -> Result<String, UnsafeName> {
+    check_component(name, Rules::Portable)?;
+    let mut out: String = name
+        .chars()
+        .filter(|c| !is_bidi_control(*c))
+        .map(|c| {
+            if matches!(c, ':' | '<' | '>' | '"' | '|' | '?' | '*') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let trimmed = out.trim_end_matches(['.', ' ']).len();
+    if trimmed != out.len() {
+        let pad = "_".repeat(out.len() - trimmed);
+        out.truncate(trimmed);
+        out.push_str(&pad);
+    }
+    let stem = out.split('.').next().unwrap_or(&out).trim_end();
+    if WINDOWS_RESERVED.iter().any(|r| r.eq_ignore_ascii_case(stem)) {
+        out.insert(0, '_');
+    }
+    // The result must satisfy the strictest rule set; if some shape slipped
+    // through the rewrite, refuse rather than emit it.
+    check_component_for(&out, true, true)?;
+    Ok(out)
+}
+
 /// Canonicalise the deepest EXISTING ancestor of `path` (resolving symlinks),
 /// then re-append the not-yet-existing tail. The tail may only contain plain
 /// components; anything else (`..`, a root) means the caller skipped validation.
@@ -392,5 +443,56 @@ mod tests {
         assert!(ensure_contained(&dir.join("in"), &dir.join("in").join("a").join("b")).is_ok());
         assert!(ensure_contained(&dir.join("in"), &dir.join("in").join("..").join("x")).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn archive_component_rewrites_what_windows_or_a_renderer_would_mangle() {
+        for (input, want) in [
+            ("plain.txt", "plain.txt"),
+            ("Q3 \u{00e9}.pdf", "Q3 \u{00e9}.pdf"),
+            ("CON", "_CON"),
+            ("con.txt", "_con.txt"),
+            ("NUL.tar.gz", "_NUL.tar.gz"),
+            ("COM1", "_COM1"),
+            ("LPT9.log", "_LPT9.log"),
+            ("report.", "report_"),
+            ("trail ", "trail_"),
+            ("dots...", "dots___"),
+            ("ab:c", "ab_c"),
+            ("x.txt:stream", "x.txt_stream"),
+            ("q?<>|*\".txt", "q______.txt"),
+            ("evil\u{202e}fdp.exe", "evilfdp.exe"),
+            ("iso\u{2066}late", "isolate"),
+            ("console.txt", "console.txt"),
+        ] {
+            assert_eq!(archive_component(input).as_deref(), Ok(want), "{input:?}");
+        }
+    }
+
+    #[test]
+    fn archive_component_still_refuses_what_is_traversal() {
+        for bad in [
+            "",
+            ".",
+            "..",
+            "a/b",
+            "..\\x",
+            "C:x",
+            "C:\\x",
+            "a\0b",
+            "line\nbreak",
+            "/abs",
+        ] {
+            assert!(archive_component(bad).is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn archive_component_output_always_passes_the_strictest_rules() {
+        for input in ["CON", "a:b", "x. ", "\u{202e}", "..a", "COM1.", " ", "nul "] {
+            if let Ok(out) = archive_component(input) {
+                assert!(check_component_for(&out, true, true).is_ok(), "{input:?} -> {out:?}");
+            }
+        }
     }
 }

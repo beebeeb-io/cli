@@ -128,6 +128,23 @@ pub struct DownloadStats {
     pub encrypted_bytes: u64,
 }
 
+/// Download a file's raw encrypted body into memory together with the server's
+/// `X-Chunk-Size` (the uniform plaintext chunk size, V2 files), for callers that
+/// must decrypt with a key the streaming path does not know (file-request
+/// uploads, `bb pull --zip`). The chunk size is what lets the decrypt path split
+/// a multi-chunk body exactly: every frame but the last is `chunk_size + 28`
+/// bytes and the last one is usually shorter. Like the streaming path it treats
+/// the header as untrusted (zero, or past core's `MAX_CHUNK_SIZE`, is "absent").
+pub async fn download_buffered(api: &ApiClient, file_id: &str) -> Result<(Vec<u8>, Option<u64>), String> {
+    let resp = api.download_stream(file_id).await?;
+    let chunk_size = header_u64(&resp, "X-Chunk-Size").filter(|&v| v > 0 && v <= MAX_CHUNK_SIZE);
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("failed to read response: {e}"))?;
+    Ok((bytes.to_vec(), chunk_size))
+}
+
 /// Stream-download `file_id`, decrypt to `out_path` with constant memory, and
 /// report progress. Falls back to the buffered legacy decrypt for JSON-blob /
 /// binary-UUID / unknown-frame-size files (see module docs).
