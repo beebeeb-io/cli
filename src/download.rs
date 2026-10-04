@@ -50,13 +50,39 @@ const CHUNK_OVERHEAD: u64 = 28;
 /// small by construction; a body past this is refused whatever the headers say.
 const FALLBACK_HARD_CEILING: u64 = 4 * 1024 * 1024 * 1024;
 
-/// Max bytes the buffered fallback may hold: the larger of the declared body
-/// length and `original_size + 28 * count`, never above the hard ceiling.
+/// Worst-case JSON expansion of a legacy `EncryptedBlob` chunk: `nonce` and
+/// `ciphertext` are serialised as arrays of decimal numbers, so every byte costs
+/// at most 4 bytes on the wire (`255,`). Verified against real serialisation by
+/// the `json_bound_covers_serialised_blobs` test.
+const JSON_BYTES_PER_BYTE: u64 = 4;
+
+/// Worst-case per-chunk JSON envelope on top of the 4x-expanded
+/// `nonce(12) + ciphertext(plaintext + 16)`: `{"cipher_suite":"...","nonce":[],
+/// "ciphertext":[]}` measured at 55 bytes, rounded up to 128 for headroom.
+const JSON_CHUNK_ENVELOPE: u64 = 128;
+
+/// Upper bound on the legacy JSON-blob wire size for `original_size` plaintext
+/// bytes in `count` chunks.
+fn json_wire_bound(original_size: u64, count: u32) -> u64 {
+    let per_chunk = JSON_BYTES_PER_BYTE
+        .saturating_mul(CHUNK_OVERHEAD)
+        .saturating_add(JSON_CHUNK_ENVELOPE);
+    original_size
+        .saturating_mul(JSON_BYTES_PER_BYTE)
+        .saturating_add(per_chunk.saturating_mul(count as u64))
+}
+
+/// Max bytes the buffered fallback may hold. With a `Content-Length` it is the
+/// larger of that and the raw-frame size `original_size + 28 * count`. With
+/// chunked transfer (no length) the format is unknown, so it is the worst-case
+/// legacy JSON-blob size ([`json_wire_bound`], which dominates the raw size).
+/// Never above the hard ceiling.
 fn fallback_cap(content_len: Option<u64>, original_size: Option<u64>, count: u32) -> u64 {
-    let declared = original_size.map(|os| os.saturating_add(CHUNK_OVERHEAD.saturating_mul(count as u64)));
-    match (content_len, declared) {
+    let raw = original_size.map(|os| os.saturating_add(CHUNK_OVERHEAD.saturating_mul(count as u64)));
+    match (content_len, raw) {
         (Some(a), Some(b)) => a.max(b),
-        (Some(a), None) | (None, Some(a)) => a,
+        (Some(a), None) => a,
+        (None, Some(_)) => json_wire_bound(original_size.unwrap_or(0), count),
         (None, None) => FALLBACK_HARD_CEILING,
     }
     .min(FALLBACK_HARD_CEILING)
@@ -621,8 +647,79 @@ mod tests {
     #[test]
     fn fallback_cap_bounds() {
         assert_eq!(fallback_cap(Some(500), Some(100), 3), 500);
-        assert_eq!(fallback_cap(None, Some(100), 3), 100 + 28 * 3);
+        assert_eq!(fallback_cap(None, Some(100), 3), json_wire_bound(100, 3));
+        assert!(fallback_cap(None, Some(100), 3) >= 100 + 28 * 3);
         assert_eq!(fallback_cap(Some(u64::MAX), Some(u64::MAX), 3), FALLBACK_HARD_CEILING);
         assert_eq!(fallback_cap(None, None, 3), FALLBACK_HARD_CEILING);
+    }
+
+    /// Round 4 P1: chunked transfer (no Content-Length) + X-Original-Size +
+    /// legacy JSON-blob chunks. The wire is several times the plaintext, so the
+    /// raw-frame cap refused a valid download.
+    #[tokio::test]
+    async fn chunked_legacy_json_blob_with_original_size_downloads() {
+        let m = mk();
+        let fk = derive_file_key(&m, FID.as_bytes());
+        let pt = payload(3 * 300 + 5);
+        let mut wire = Vec::new();
+        for chunk in pt.chunks(300) {
+            wire.extend(serde_json::to_vec(&encrypt_chunk(&fk, chunk).unwrap()).unwrap());
+        }
+        assert!(
+            wire.len() as u64 > pt.len() as u64 + 28 * 4,
+            "JSON must exceed the raw cap"
+        );
+        let got = try_download_chunked(wire, vec![("x-original-size", pt.len().to_string())], 4, &m)
+            .await
+            .expect("legacy JSON download must not be refused by the cap");
+        assert_eq!(got, pt);
+    }
+
+    /// A body far past the JSON worst case is still refused.
+    #[tokio::test]
+    async fn chunked_body_far_beyond_json_bound_is_refused() {
+        let m = mk();
+        let pt_len = 1000u64;
+        let bound = json_wire_bound(pt_len, 4);
+        let body = vec![0x5au8; (bound as usize) * 10 + 4096];
+        let err = try_download_chunked(body, vec![("x-original-size", pt_len.to_string())], 4, &m)
+            .await
+            .expect_err("must be refused");
+        assert!(err.contains("exceeds"), "got: {err}");
+    }
+
+    /// The JSON bound constants dominate real serialisation, worst case
+    /// included (all-0xFF bytes serialise to 3 digits + comma). Prints the
+    /// measured factors.
+    #[test]
+    fn json_bound_covers_serialised_blobs() {
+        use beebeeb_types::{CipherSuite, EncryptedBlob};
+        let mut max_ratio = 0f64;
+        let mut envelope = 0usize;
+        for n in [0usize, 1, 16, 300, 4096, 65536] {
+            // Real random blob.
+            let m = mk();
+            let fk = derive_file_key(&m, FID.as_bytes());
+            let real = serde_json::to_vec(&encrypt_chunk(&fk, &vec![7u8; n]).unwrap()).unwrap();
+            // Synthetic worst case: every byte is 0xFF.
+            let worst = serde_json::to_vec(&EncryptedBlob {
+                cipher_suite: CipherSuite::V1Aes256Gcm,
+                nonce: vec![0xff; 12],
+                ciphertext: vec![0xff; n + 16],
+            })
+            .unwrap();
+            assert!(real.len() <= worst.len());
+            let digits_len = 4 * (12 + n + 16);
+            envelope = envelope.max(worst.len().saturating_sub(digits_len));
+            max_ratio = max_ratio.max(worst.len() as f64 / (n as f64 + 1.0));
+            assert!(
+                worst.len() as u64 <= json_wire_bound(n as u64, 1),
+                "n={n}: {} > {}",
+                worst.len(),
+                json_wire_bound(n as u64, 1)
+            );
+        }
+        eprintln!("measured JSON envelope overhead = {envelope} bytes; max wire/plaintext ratio = {max_ratio:.2}");
+        assert!(envelope as u64 <= JSON_CHUNK_ENVELOPE);
     }
 }
