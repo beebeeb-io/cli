@@ -31,7 +31,7 @@ async fn browser_login(headless_flag: bool) -> Result<(), String> {
         .map_err(|e| format!("WebSocket connection failed: {e}"))?;
 
     // 3. Send CLI public key so browser can do ECDH on its end
-    let init_msg = serde_json::json!({ "ecdh_public_key_b64": pub_key_b64 });
+    let init_msg = init_frame(&pub_key_b64, device_hostname());
     ws_stream
         .send(Message::Text(init_msg.to_string()))
         .await
@@ -157,64 +157,122 @@ async fn browser_login(headless_flag: bool) -> Result<(), String> {
     Ok(())
 }
 
+// ─── Init frame ──────────────────────────────────────────────────────────────
+
+/// This machine's name, if it has one.
+fn device_hostname() -> Option<String> {
+    hostname::get().ok().and_then(|h| h.into_string().ok())
+}
+
+/// The first WebSocket frame: our public key (so the browser can do its half of
+/// the ECDH) plus what this program can honestly say about itself, which the
+/// approval page shows the person labelled "reported by the device" - a fake
+/// client can say anything, so the page treats it as a hint, never as proof.
+/// The server ignores anything it does not recognise.
+fn init_frame(pub_key_b64: &str, hostname: Option<String>) -> serde_json::Value {
+    let mut frame = serde_json::json!({
+        "ecdh_public_key_b64": pub_key_b64,
+        "client": "cli",
+        "client_version": env!("CARGO_PKG_VERSION"),
+        "os": std::env::consts::OS,
+    });
+    if let Some(name) = hostname.map(|h| h.trim().to_string()).filter(|h| !h.is_empty()) {
+        frame["device_name"] = serde_json::Value::String(name);
+    }
+    frame
+}
+
 // ─── Output blocks ───────────────────────────────────────────────────────────
 
-fn print_browser_block(user_code: &str, verification_uri: &str) {
-    println!();
-    println!(
-        "  {} Opening Beebeeb in your browser...",
+fn browser_block(user_code: &str, verification_uri: &str) -> String {
+    let mut out = String::new();
+    out.push('\n');
+    out.push_str(&format!(
+        "  {} Opening Beebeeb in your browser...\n\n",
         "→".custom_color(crate::colors::AMBER)
-    );
-    println!();
-    println!(
-        "  {} {}",
+    ));
+    out.push_str(&format!(
+        "  {} {}\n",
         "Authorization code:".custom_color(crate::colors::INK_SAGE),
         user_code.bold().custom_color(crate::colors::AMBER)
-    );
-    println!(
-        "  {} {}",
+    ));
+    out.push_str(&format!(
+        "  {} {}\n\n",
         "URL:               ".custom_color(crate::colors::INK_SAGE),
         verification_uri.custom_color(crate::colors::INK_SAGE)
-    );
-    println!();
-    println!(
-        "  {}",
+    ));
+    out.push_str(&format!(
+        "  {}\n",
+        "Type the code above on the page that opens. It is not in the link on".custom_color(crate::colors::INK)
+    ));
+    out.push_str(&format!(
+        "  {}\n\n",
+        "purpose: a link someone else sends you has no code to approve.".custom_color(crate::colors::INK_DIM)
+    ));
+    out.push_str(&format!(
+        "  {}\n",
         "If your browser did not open, paste the URL above into any".custom_color(crate::colors::INK_DIM)
-    );
-    println!(
-        "  {}",
-        "signed-in browser. The code shown there must match the one above.".custom_color(crate::colors::INK_DIM)
-    );
-    println!();
+    ));
+    out.push_str(&format!(
+        "  {}\n",
+        "signed-in browser. Only approve it if you started this sign-in".custom_color(crate::colors::INK_DIM)
+    ));
+    out.push_str(&format!(
+        "  {}\n\n",
+        "yourself, just now, on this machine.".custom_color(crate::colors::INK_DIM)
+    ));
+    out
+}
+
+fn headless_block(user_code: &str, verification_uri: &str) -> String {
+    let mut out = String::new();
+    out.push('\n');
+    out.push_str(&format!(
+        "  {}\n",
+        "No browser detected on this machine.".custom_color(crate::colors::INK)
+    ));
+    out.push_str(&format!(
+        "  {}\n\n",
+        "Open this URL in a browser on any device you trust:".custom_color(crate::colors::INK)
+    ));
+    out.push_str(&format!(
+        "      {}\n\n",
+        verification_uri.custom_color(crate::colors::AMBER)
+    ));
+    out.push_str(&format!(
+        "  {} {}\n\n",
+        "Authorization code:".custom_color(crate::colors::INK_SAGE),
+        user_code.bold().custom_color(crate::colors::AMBER)
+    ));
+    out.push_str(&format!(
+        "  {}\n",
+        "Type that code on the page when it asks. It is not in the link on".custom_color(crate::colors::INK)
+    ));
+    out.push_str(&format!(
+        "  {}\n",
+        "purpose: a link someone else sends you has no code to approve.".custom_color(crate::colors::INK_DIM)
+    ));
+    out.push_str(&format!(
+        "  {}\n\n",
+        "Only approve it if you started this sign-in yourself, just now.".custom_color(crate::colors::INK_DIM)
+    ));
+    out.push_str(&format!(
+        "  {}\n",
+        "(If you are not signed in there, you will be asked to sign in".custom_color(crate::colors::INK_DIM)
+    ));
+    out.push_str(&format!(
+        "  {}\n\n",
+        " and complete two-factor authentication first.)".custom_color(crate::colors::INK_DIM)
+    ));
+    out
+}
+
+fn print_browser_block(user_code: &str, verification_uri: &str) {
+    print!("{}", browser_block(user_code, verification_uri));
 }
 
 fn print_headless_block(user_code: &str, verification_uri: &str) {
-    println!();
-    println!(
-        "  {}",
-        "No browser detected on this machine.".custom_color(crate::colors::INK)
-    );
-    println!(
-        "  {}",
-        "Open this URL in a browser on any device you trust:".custom_color(crate::colors::INK)
-    );
-    println!();
-    println!("      {}", verification_uri.custom_color(crate::colors::AMBER));
-    println!();
-    println!(
-        "  When prompted, confirm the code shown:  {}",
-        user_code.bold().custom_color(crate::colors::AMBER)
-    );
-    println!();
-    println!(
-        "  {}",
-        "(If you are not signed in there, you will be asked to sign in".custom_color(crate::colors::INK_DIM)
-    );
-    println!(
-        "  {}",
-        " and complete two-factor authentication first.)".custom_color(crate::colors::INK_DIM)
-    );
-    println!();
+    print!("{}", headless_block(user_code, verification_uri));
 }
 
 // ─── Countdown updater ───────────────────────────────────────────────────────
@@ -279,4 +337,116 @@ pub async fn run(headless: bool) -> Result<(), String> {
     }
 
     browser_login(headless).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Plain text of a rendered block: every ANSI escape sequence removed, so the
+    /// assertions read the words however the block was coloured when it was
+    /// rendered (a TTY, CLICOLOR_FORCE, another test flipping the global switch).
+    fn plain(block: String) -> String {
+        let mut out = String::with_capacity(block.len());
+        let mut chars = block.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c != '\u{1b}' {
+                out.push(c);
+                continue;
+            }
+            // CSI: ESC [ <parameter/intermediate bytes> <final byte 0x40..=0x7e>
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for f in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&f) {
+                        break;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    const CODE: &str = "ABCD-EFGH";
+    const URI: &str = "https://app.beebeeb.io/cli-auth";
+
+    // Task 1734: the approval page no longer shows a code to "match" - the
+    // person TYPES the code from this terminal. The instructions must say so,
+    // and must never tell anyone to compare or "confirm" a code they were shown.
+    #[test]
+    fn browser_block_tells_the_user_to_type_the_code_into_the_page() {
+        let out = plain(browser_block(CODE, URI));
+        assert!(out.contains(CODE), "the code must be shown: {out}");
+        assert!(out.contains(URI), "the page must be named: {out}");
+        let lower = out.to_lowercase();
+        assert!(lower.contains("type"), "must tell the user to TYPE the code: {out}");
+        assert!(
+            lower.contains("started this"),
+            "must warn to approve only what they started: {out}"
+        );
+        assert!(
+            !lower.contains("must match"),
+            "the page shows no code to match any more: {out}"
+        );
+        assert!(!out.contains("code="), "the link must carry no code: {out}");
+    }
+
+    #[test]
+    fn headless_block_tells_the_user_to_type_the_code_into_the_page() {
+        let out = plain(headless_block(CODE, URI));
+        assert!(out.contains(CODE), "the code must be shown: {out}");
+        assert!(out.contains(URI), "the page must be named: {out}");
+        let lower = out.to_lowercase();
+        assert!(lower.contains("type"), "must tell the user to TYPE the code: {out}");
+        assert!(
+            lower.contains("started this"),
+            "must warn to approve only what they started: {out}"
+        );
+        assert!(
+            !lower.contains("confirm the code"),
+            "the page shows no code to confirm any more: {out}"
+        );
+        assert!(!out.contains("code="), "the link must carry no code: {out}");
+    }
+
+    // Codex review on cli#60: the blocks used to be rendered BEFORE colour was
+    // switched off, so with colour forced on (a TTY, CLICOLOR_FORCE) the escape
+    // sequences split "Authorization code:" from the code and the labels were
+    // not found. Rendering with colour forced ON must still read as plain words.
+    #[test]
+    fn labels_are_found_even_when_colour_is_forced_on() {
+        colored::control::set_override(true);
+        let browser = plain(browser_block(CODE, URI));
+        let headless = plain(headless_block(CODE, URI));
+        colored::control::unset_override();
+        for out in [browser, headless] {
+            assert!(out.contains(&format!("Authorization code: {CODE}")), "{out:?}");
+            assert!(!out.contains('\u{1b}'), "an escape sequence survived: {out:?}");
+        }
+    }
+
+    #[test]
+    fn both_blocks_label_the_code_so_scripts_and_people_can_find_it() {
+        for out in [plain(browser_block(CODE, URI)), plain(headless_block(CODE, URI))] {
+            assert!(out.contains(&format!("Authorization code: {CODE}")), "{out}");
+        }
+    }
+
+    #[test]
+    fn init_frame_carries_the_key_and_what_this_device_can_say_about_itself() {
+        let frame = init_frame("cHVia2V5", Some("Guus-MBP".to_string()));
+        assert_eq!(frame["ecdh_public_key_b64"], "cHVia2V5");
+        assert_eq!(frame["client"], "cli");
+        assert_eq!(frame["client_version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(frame["device_name"], "Guus-MBP");
+        assert_eq!(frame["os"], std::env::consts::OS);
+    }
+
+    #[test]
+    fn init_frame_omits_a_device_name_when_the_machine_has_none() {
+        let frame = init_frame("cHVia2V5", None);
+        assert!(frame.get("device_name").is_none(), "{frame}");
+        let blank = init_frame("cHVia2V5", Some("   ".to_string()));
+        assert!(blank.get("device_name").is_none(), "{blank}");
+    }
 }
