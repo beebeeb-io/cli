@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **[P0]** `bb pull` could write files anywhere the user can: names are server-provided, and for file-request uploads they are chosen by an anonymous uploader (`../../.ssh/authorized_keys`, an absolute path), then joined onto the output folder unchecked. Every name now has to be one plain path component (no `..`, separators, drive prefixes or control characters), the target must resolve inside the output folder (a pre-existing symlink is never followed out of it), and `bb pull <id>` without `-o` refuses an unsafe default name and says to pass `-o`. An unsafe item in a folder pull is skipped with a warning on stderr and the run exits 3; the rest still pulls. `bb pull --zip` leaves unsafe names out of the archive the same way, and `bb sync` skips unsafe remote names and never downloads or deletes outside the sync root. A request-uploaded file also no longer silently replaces a local file of the same name in a folder pull (use `--force`).
+
 ## [0.12.0] - 2026-09-29
 
 ### Added
