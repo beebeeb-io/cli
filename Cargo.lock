@@ -311,6 +311,7 @@ dependencies = [
  "walkdir",
  "xz2",
  "zeroize",
+ "zip",
 ]
 
 [[package]]

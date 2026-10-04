@@ -792,3 +792,84 @@ fn zip_pull_leaves_hostile_names_out_of_the_archive() {
     );
     assert_eq!(out.status.code(), Some(3), "{}", describe(&out));
 }
+
+/// Read every entry of a zip archive into `name -> bytes`.
+fn read_zip(path: &Path) -> HashMap<String, Vec<u8>> {
+    use std::io::Read;
+    let f = std::fs::File::open(path).unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
+    let mut z = zip::ZipArchive::new(f).expect("valid zip archive");
+    (0..z.len())
+        .map(|i| {
+            let mut e = z.by_index(i).unwrap();
+            let mut buf = Vec::new();
+            e.read_to_end(&mut buf).unwrap();
+            (e.name().to_string(), buf)
+        })
+        .collect()
+}
+
+/// Task 1760: `bb pull --zip` on a folder holding a file-request upload used
+/// to die with `zip failed: decryption failed` (the zip path only knew the
+/// master-key derivation). The entry must carry the DECRYPTED name + content.
+#[test]
+fn zip_pull_decrypts_request_uploads() {
+    let mut fx = Fixture::new();
+    let vault = fx.add_plain_folder("", "vault");
+    fx.add_request_file(&vault, "from-stranger.txt", b"sent through a file request\n");
+    let sub = fx.add_request_folder(&vault, "inbox");
+    fx.add_request_file(&sub, "nested \u{00e9}.txt", b"nested request upload\n");
+    fx.add_plain_file(&vault, "mine.txt", BENIGN);
+    let url = fx.serve();
+    let s = Scratch::new("zip-req", &url);
+
+    let out = s.bb(&["pull", "vault", "--zip", "-o", "out.zip"]);
+
+    assert!(out.status.success(), "{}", describe(&out));
+    let entries = read_zip(&s.cwd.join("out.zip"));
+    assert_eq!(
+        entries.get("vault/from-stranger.txt").map(Vec::as_slice),
+        Some(&b"sent through a file request\n"[..]),
+        "request upload missing or wrong in archive: {:?}\n{}",
+        entries.keys().collect::<Vec<_>>(),
+        describe(&out)
+    );
+    assert_eq!(
+        entries.get("vault/inbox/nested \u{00e9}.txt").map(Vec::as_slice),
+        Some(&b"nested request upload\n"[..])
+    );
+    assert_eq!(entries.get("vault/mine.txt").map(Vec::as_slice), Some(BENIGN));
+    assert_eq!(
+        entries.len(),
+        3,
+        "unexpected entries: {:?}",
+        entries.keys().collect::<Vec<_>>()
+    );
+}
+
+/// Task 1760 x 1733: the request-key branch must not reopen the zip-slip hole.
+/// A request upload whose DECRYPTED name is `../..` is left out and flagged.
+#[test]
+fn zip_pull_keeps_safe_path_checks_on_request_names() {
+    let mut fx = Fixture::new();
+    let vault = fx.add_plain_folder("", "vault");
+    fx.add_request_file(&vault, "../../zipslip-req-marker.txt", PAYLOAD);
+    fx.add_request_file(&vault, "good.txt", BENIGN);
+    let url = fx.serve();
+    let s = Scratch::new("zip-req-evil", &url);
+
+    let out = s.bb(&["pull", "vault", "--zip", "-o", "out.zip"]);
+
+    let entries = read_zip(&s.cwd.join("out.zip"));
+    assert_eq!(
+        entries.get("vault/good.txt").map(Vec::as_slice),
+        Some(BENIGN),
+        "{}",
+        describe(&out)
+    );
+    assert!(
+        entries.keys().all(|k| !k.contains("zipslip")),
+        "hostile request name reached the archive: {:?}",
+        entries.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(out.status.code(), Some(3), "{}", describe(&out));
+}

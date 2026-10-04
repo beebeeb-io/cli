@@ -2,7 +2,6 @@ use colored::Colorize;
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 
 use crate::api::ApiClient;
 use crate::commands::push::load_master_key;
@@ -561,13 +560,25 @@ async fn run_zip(api: &ApiClient, path_arg: &str, output: Option<PathBuf>, force
 
     // Recursively collect all files in the folder tree.
     let mut zip_skipped = 0usize;
-    let entries = collect_zip_entries(api, &master_key, &folder_id, &folder_name, &mut zip_skipped).await?;
+    // One resolver for the whole tree: file-request uploads are sealed to a
+    // per-file content key, not the master key (task 1760), and the resolver
+    // fetches `GET /file-requests` once and unwraps each R_priv once.
+    let mut request_keys: Option<crate::commands::request::RequestKeyResolver> = None;
+    let entries = collect_zip_entries(
+        api,
+        &master_key,
+        &folder_id,
+        &folder_name,
+        &mut zip_skipped,
+        &mut request_keys,
+    )
+    .await?;
 
     if entries.is_empty() {
         return Err(format!("folder '{}' is empty — nothing to zip.", folder_name));
     }
 
-    let total_size: u64 = entries.iter().map(|e| e.size_bytes).sum();
+    let total_size: u64 = entries.iter().map(|e| e.entry.size_bytes).sum();
 
     // Summary line
     if crate::ui::is_rich() {
@@ -594,11 +605,11 @@ async fn run_zip(api: &ApiClient, path_arg: &str, output: Option<PathBuf>, force
                 "fetching".custom_color(crate::colors::INK_DIM),
                 (i + 1).to_string().custom_color(crate::colors::INK),
                 entries.len().to_string().custom_color(crate::colors::INK_DIM),
-                entry.path.custom_color(crate::colors::INK_DIM),
+                entry.entry.path.custom_color(crate::colors::INK_DIM),
             );
         }
-        let blob = api.download_file(&entry.file_id).await?;
-        blob_cache.insert(entry.file_id.clone(), blob);
+        let blob = api.download_file(&entry.entry.file_id).await?;
+        blob_cache.insert(entry.entry.file_id.clone(), blob);
     }
 
     let dl_elapsed = dl_start.elapsed();
@@ -610,53 +621,6 @@ async fn run_zip(api: &ApiClient, path_arg: &str, output: Option<PathBuf>, force
 
     // Create the output file
     let file = std::fs::File::create(&out_path).map_err(|e| format!("failed to create {}: {e}", out_path.display()))?;
-
-    // Build the fetch_chunk callback.
-    // For single-chunk files (chunk_count=1, the vast majority), the entire blob
-    // IS the one chunk. For multi-chunk files, we split by uniform chunk size
-    // (each raw chunk = nonce(12) + ciphertext(plaintext_chunk + 16)).
-    //
-    // NOTE: stream_folder_zip uses decrypt_chunk_raw which expects raw
-    // nonce||ciphertext format. CLI-uploaded files may use JSON EncryptedBlob
-    // format. For v1, this works with web-uploaded files (raw format) and
-    // single-chunk CLI files where we detect and convert JSON blobs.
-    // Multi-chunk CLI-uploaded files with JSON format need future work.
-    let mut fetch_chunk = |file_id: &str, chunk_idx: u32| -> Result<Vec<u8>, beebeeb_core::CoreError> {
-        let blob = blob_cache
-            .get(file_id)
-            .ok_or_else(|| beebeeb_core::CoreError::Io(format!("no cached blob for {file_id}")))?;
-
-        let entry = entries
-            .iter()
-            .find(|e| e.file_id == file_id)
-            .ok_or_else(|| beebeeb_core::CoreError::Io(format!("no entry for {file_id}")))?;
-
-        if entry.chunk_count <= 1 {
-            // Single-chunk: return the entire blob as chunk 0.
-            return Ok(blob.clone());
-        }
-
-        // Multi-chunk: split evenly, last chunk takes the remainder.
-        // Each chunk is nonce(12) + ciphertext, and all but the last are the same size.
-        let count = entry.chunk_count as usize;
-        let chunk_size = blob.len() / count;
-        let idx = chunk_idx as usize;
-
-        let start = idx * chunk_size;
-        let end = if idx == count - 1 {
-            blob.len()
-        } else {
-            start + chunk_size
-        };
-
-        if start >= blob.len() {
-            return Err(beebeeb_core::CoreError::Io(format!(
-                "chunk {chunk_idx} out of range for {file_id}"
-            )));
-        }
-
-        Ok(blob[start..end].to_vec())
-    };
 
     // Progress callback
     let zip_start = std::time::Instant::now();
@@ -678,10 +642,11 @@ async fn run_zip(api: &ApiClient, path_arg: &str, output: Option<PathBuf>, force
         }
     };
 
-    let cancel = AtomicBool::new(false);
-
-    beebeeb_core::zip::stream_folder_zip(&master_key, &entries, &mut fetch_chunk, file, &on_progress, &cancel)
-        .map_err(|e| format!("zip failed: {e}"))?;
+    // The archive is written here, not by `beebeeb_core::zip::stream_folder_zip`:
+    // that function derives every entry's key from the master key and the file
+    // id, so it cannot open a file-request upload (task 1760). Follow-up: let
+    // core take a per-entry key, then this can call it again.
+    write_zip(&master_key, &entries, &blob_cache, file, &on_progress).map_err(|e| format!("zip failed: {e}"))?;
 
     let zip_elapsed = zip_start.elapsed();
     let total_elapsed = dl_start.elapsed();
@@ -739,6 +704,57 @@ async fn run_zip(api: &ApiClient, path_arg: &str, output: Option<PathBuf>, force
     Ok(())
 }
 
+/// One archive member: the core `ZipEntry` plus, for a file-request upload,
+/// the per-file content key that opens it (`None` = master-key-derived).
+struct ZipItem {
+    entry: beebeeb_core::zip::ZipEntry,
+    content_key: Option<beebeeb_core::kdf::FileKey>,
+}
+
+/// Write the archive. Each blob is decrypted whole: with its request content
+/// key when it has one, otherwise through the master-key path every other
+/// `bb pull` uses. Entry paths were already vetted by `collect_zip_entries`.
+fn write_zip<W: std::io::Write + std::io::Seek>(
+    master_key: &beebeeb_core::kdf::MasterKey,
+    items: &[ZipItem],
+    blobs: &HashMap<String, Vec<u8>>,
+    writer: W,
+    on_progress: &dyn Fn(&beebeeb_core::zip::ZipProgress),
+) -> Result<(), String> {
+    use std::io::Write as _;
+    let bytes_total: u64 = items.iter().map(|i| i.entry.size_bytes).sum();
+    let mut bytes_done: u64 = 0;
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .compression_level(Some(6));
+    let mut archive = zip::write::ZipWriter::new(writer);
+
+    for (file_index, item) in items.iter().enumerate() {
+        let e = &item.entry;
+        let blob = blobs
+            .get(&e.file_id)
+            .ok_or_else(|| format!("no cached blob for {}", e.file_id))?;
+        let plaintext = match &item.content_key {
+            Some(c) => crate::crypto::try_decrypt_all_chunks(c, blob, e.chunk_count)
+                .map_err(|err| format!("decryption failed for {}: {err}", e.path))?,
+            None => crate::crypto::decrypt_file_chunks(master_key, &e.file_id, blob, e.chunk_count)
+                .map_err(|err| format!("decryption failed for {}: {err}", e.path))?,
+        };
+        archive.start_file(&e.path, options).map_err(|err| err.to_string())?;
+        archive.write_all(&plaintext).map_err(|err| err.to_string())?;
+        bytes_done += blob.len() as u64;
+        on_progress(&beebeeb_core::zip::ZipProgress {
+            bytes_done,
+            bytes_total,
+            file_index,
+            file_count: items.len(),
+            current_file: e.path.clone(),
+        });
+    }
+    archive.finish().map_err(|err| err.to_string())?;
+    Ok(())
+}
+
 /// Recursively walk a folder tree and build a flat list of ZipEntry items
 /// with paths relative to the top-level folder name (e.g. "Music/Old/track.flac").
 async fn collect_zip_entries(
@@ -747,7 +763,8 @@ async fn collect_zip_entries(
     folder_id: &str,
     prefix: &str,
     skipped: &mut usize,
-) -> Result<Vec<beebeeb_core::zip::ZipEntry>, String> {
+    request_keys: &mut Option<crate::commands::request::RequestKeyResolver>,
+) -> Result<Vec<ZipItem>, String> {
     let listing = api.list_files(Some(folder_id)).await?;
     let files = listing
         .get("files")
@@ -763,8 +780,14 @@ async fn collect_zip_entries(
         let size_bytes = item.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
         let chunk_count = item.get("chunk_count").and_then(|v| v.as_i64()).unwrap_or(1) as u32;
 
-        let decrypted_name =
-            crate::crypto::decrypt_name(master_key, item_id, name_enc).unwrap_or_else(|| item_id.to_string());
+        // Request-uploaded files decrypt their name (and later their chunks)
+        // with the per-file content key, like the non-zip folder pull.
+        let content_key = resolve_request_key(api, master_key, item, request_keys).await;
+        let decrypted_name = content_key
+            .as_ref()
+            .and_then(|c| crate::crypto::decrypt_name_with_key(c, name_enc))
+            .or_else(|| crate::crypto::decrypt_name(master_key, item_id, name_enc))
+            .unwrap_or_else(|| item_id.to_string());
 
         // Zip entry paths are `prefix/name`: a server-provided name with `..` or
         // a separator would be a zip-slip entry for whoever extracts the archive
@@ -778,14 +801,25 @@ async fn collect_zip_entries(
 
         if is_folder {
             // Recurse into subfolders
-            let sub_entries = Box::pin(collect_zip_entries(api, master_key, item_id, &path, skipped)).await?;
+            let sub_entries = Box::pin(collect_zip_entries(
+                api,
+                master_key,
+                item_id,
+                &path,
+                skipped,
+                request_keys,
+            ))
+            .await?;
             entries.extend(sub_entries);
         } else {
-            entries.push(beebeeb_core::zip::ZipEntry {
-                path,
-                file_id: item_id.to_string(),
-                chunk_count,
-                size_bytes,
+            entries.push(ZipItem {
+                entry: beebeeb_core::zip::ZipEntry {
+                    path,
+                    file_id: item_id.to_string(),
+                    chunk_count,
+                    size_bytes,
+                },
+                content_key,
             });
         }
     }
