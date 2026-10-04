@@ -527,6 +527,15 @@ async fn pull_single_file(
 // --zip: download folder as a streaming zip archive
 // ---------------------------------------------------------------------------
 
+/// The top-level folder name is both the archive prefix and the default output
+/// name, so it needs the same single-safe-component check as every descendant
+/// (task 1733 round 2): `..` would make a child the zip entry `../child`.
+fn zip_root_name(name: &str) -> Result<String, String> {
+    crate::safe_path::check_component(name, crate::safe_path::Rules::Portable)
+        .map_err(|e| format!("folder name {name:?} is not safe to use as an archive name ({e}); refusing to zip it"))?;
+    Ok(name.to_string())
+}
+
 /// Resolve the argument as a folder and download all its files into a zip archive.
 async fn run_zip(api: &ApiClient, path_arg: &str, output: Option<PathBuf>, force: bool) -> Result<(), String> {
     let master_key = load_master_key()?;
@@ -542,7 +551,7 @@ async fn run_zip(api: &ApiClient, path_arg: &str, output: Option<PathBuf>, force
     }
 
     let folder_id = resolved.file_id.ok_or("cannot zip the vault root")?;
-    let folder_name = resolved.name;
+    let folder_name = zip_root_name(&resolved.name)?;
 
     // Determine the output path up front so an existing archive is refused
     // before any blob is fetched.
@@ -782,4 +791,21 @@ async fn collect_zip_entries(
     }
 
     Ok(entries)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::zip_root_name;
+
+    #[test]
+    fn zip_root_name_rejects_hostile_names() {
+        for bad in ["../evil", "/abs", "a/b", "..", ".", "", "C:\\escape", "a\\b", "x\0y"] {
+            assert!(zip_root_name(bad).is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn zip_root_name_accepts_plain_names() {
+        assert_eq!(zip_root_name("Photos 2026").unwrap(), "Photos 2026");
+    }
 }
