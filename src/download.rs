@@ -72,20 +72,54 @@ fn json_wire_bound(original_size: u64, count: u32) -> u64 {
         .saturating_add(per_chunk.saturating_mul(count as u64))
 }
 
-/// Max bytes the buffered fallback may hold. With a `Content-Length` it is the
-/// larger of that and the raw-frame size `original_size + 28 * count`. With
-/// chunked transfer (no length) the format is unknown, so it is the worst-case
-/// legacy JSON-blob size ([`json_wire_bound`], which dominates the raw size).
-/// Never above the hard ceiling.
-fn fallback_cap(content_len: Option<u64>, original_size: Option<u64>, count: u32) -> u64 {
-    let raw = original_size.map(|os| os.saturating_add(CHUNK_OVERHEAD.saturating_mul(count as u64)));
-    match (content_len, raw) {
-        (Some(a), Some(b)) => a.max(b),
-        (Some(a), None) => a,
-        (None, Some(_)) => json_wire_bound(original_size.unwrap_or(0), count),
-        (None, None) => FALLBACK_HARD_CEILING,
+/// Max bytes the buffered fallback may hold, and whether that bound is a
+/// guess (`chunked`) or the server's declared `Content-Length`.
+///
+/// - With a `Content-Length` the cap IS that length, with no ceiling: memory is
+///   bounded by bytes the server actually sends, exactly like any download, so
+///   a legacy file larger than the ceiling still downloads (lead ruling, task
+///   1759 round 5; `main` buffered unbounded).
+/// - Without one (chunked transfer) the format is unknown, so the cap is the
+///   worst-case legacy JSON-blob size ([`json_wire_bound`]) clamped to
+///   `ceiling`, and an overrun gets the "legacy file / chunked limit" message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FallbackCap {
+    cap: u64,
+    chunked: bool,
+}
+
+fn fallback_cap(ceiling: u64, content_len: Option<u64>, original_size: Option<u64>, count: u32) -> FallbackCap {
+    match content_len {
+        Some(cl) => FallbackCap {
+            cap: cl,
+            chunked: false,
+        },
+        None => FallbackCap {
+            cap: original_size
+                .map_or(ceiling, |os| json_wire_bound(os, count))
+                .min(ceiling),
+            chunked: true,
+        },
     }
-    .min(FALLBACK_HARD_CEILING)
+}
+
+/// `Err` when `len` bytes exceed the cap, with a message that says why.
+fn check_cap(c: FallbackCap, len: u64) -> Result<(), String> {
+    if len <= c.cap {
+        return Ok(());
+    }
+    if c.chunked {
+        Err(format!(
+            "this is a legacy-format file larger than the chunked-download limit ({} bytes; {len} bytes read); \
+             retry the download, or the server must send Content-Length for it",
+            c.cap
+        ))
+    } else {
+        Err(format!(
+            "download body exceeds its declared Content-Length of {} bytes ({len} bytes read); aborting",
+            c.cap
+        ))
+    }
 }
 
 /// Outcome of a streaming download.
@@ -106,6 +140,32 @@ pub async fn stream_download_decrypt(
     progress: &dyn ChunkProgress,
     display_name: &str,
 ) -> Result<DownloadStats, String> {
+    stream_download_decrypt_with(
+        api,
+        master_key,
+        file_id,
+        chunk_count,
+        out_path,
+        progress,
+        display_name,
+        FALLBACK_HARD_CEILING,
+    )
+    .await
+}
+
+/// [`stream_download_decrypt`] with an explicit chunked-fallback ceiling
+/// (production passes [`FALLBACK_HARD_CEILING`]; tests lower it).
+#[allow(clippy::too_many_arguments)]
+async fn stream_download_decrypt_with(
+    api: &ApiClient,
+    master_key: &MasterKey,
+    file_id: &str,
+    chunk_count: u32,
+    out_path: &Path,
+    progress: &dyn ChunkProgress,
+    display_name: &str,
+    ceiling: u64,
+) -> Result<DownloadStats, String> {
     let count = chunk_count.max(1);
 
     let mut resp = api.download_stream(file_id).await?;
@@ -117,7 +177,7 @@ pub async fn stream_download_decrypt(
     // cap core's own ChunkEncryptor/Decryptor enforce) is treated as absent so a
     // hostile server cannot make us buffer (or overflow on) a huge "frame".
     let chunk_size = header_u64(&resp, "X-Chunk-Size").filter(|&v| v > 0 && v <= MAX_CHUNK_SIZE);
-    let fb_cap = fallback_cap(content_len, original_size, count);
+    let fb_cap = fallback_cap(ceiling, content_len, original_size, count);
 
     // Best estimate of the total encrypted length, used only to size the first
     // N-1 frames; the last frame always drains the remainder, so a small
@@ -172,7 +232,7 @@ async fn stream_raw(
     count: u32,
     total: u64,
     chunk_size: Option<u64>,
-    fb_cap: u64,
+    fb_cap: FallbackCap,
     out_path: &Path,
     mut carry: Vec<u8>,
     prog: &dyn crate::upload::FileProgress,
@@ -296,17 +356,11 @@ async fn fill_to(resp: &mut reqwest::Response, buf: &mut Vec<u8>, want: usize) -
 }
 
 /// Drain the rest of the response body into `buf`, refusing to hold more than
-/// `cap` bytes (see [`fallback_cap`]).
-async fn drain_rest(resp: &mut reqwest::Response, buf: &mut Vec<u8>, cap: u64) -> Result<(), String> {
-    let over =
-        |len: usize| format!("download body exceeds the {cap}-byte buffering limit ({len} bytes read); aborting");
-    if buf.len() as u64 > cap {
-        return Err(over(buf.len()));
-    }
+/// the cap (see [`fallback_cap`]).
+async fn drain_rest(resp: &mut reqwest::Response, buf: &mut Vec<u8>, cap: FallbackCap) -> Result<(), String> {
+    check_cap(cap, buf.len() as u64)?;
     while let Some(b) = resp.chunk().await.map_err(|e| format!("download read: {e}"))? {
-        if (buf.len() as u64).saturating_add(b.len() as u64) > cap {
-            return Err(over(buf.len() + b.len()));
-        }
+        check_cap(cap, (buf.len() as u64).saturating_add(b.len() as u64))?;
         buf.extend_from_slice(&b);
     }
     Ok(())
@@ -453,6 +507,16 @@ mod tests {
     /// Download `body` through the real streaming path against a local mock;
     /// returns (decrypted file, number of progress confirmations).
     async fn download(body: Vec<u8>, chunk_size: Option<u64>, chunk_count: u32, m: &MasterKey) -> (Vec<u8>, usize) {
+        download_with(body, chunk_size, chunk_count, m, FALLBACK_HARD_CEILING).await
+    }
+
+    async fn download_with(
+        body: Vec<u8>,
+        chunk_size: Option<u64>,
+        chunk_count: u32,
+        m: &MasterKey,
+        ceiling: u64,
+    ) -> (Vec<u8>, usize) {
         let app = Router::new()
             .route("/api/v1/files/:id/download", get(serve))
             .with_state(Served {
@@ -469,9 +533,18 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("bb-dl-1759-{}-{}", std::process::id(), rand::random::<u32>()));
         let out = dir.join("out.bin");
         let confirmed = Arc::new(AtomicUsize::new(0));
-        stream_download_decrypt(&api, m, FID, chunk_count, &out, &Counting(confirmed.clone()), "out.bin")
-            .await
-            .expect("download + decrypt succeeds");
+        stream_download_decrypt_with(
+            &api,
+            m,
+            FID,
+            chunk_count,
+            &out,
+            &Counting(confirmed.clone()),
+            "out.bin",
+            ceiling,
+        )
+        .await
+        .expect("download + decrypt succeeds");
         let got = std::fs::read(&out).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         (got, confirmed.load(Ordering::SeqCst))
@@ -560,6 +633,16 @@ mod tests {
         chunk_count: u32,
         m: &MasterKey,
     ) -> Result<Vec<u8>, String> {
+        try_download_chunked_with(body, headers, chunk_count, m, FALLBACK_HARD_CEILING).await
+    }
+
+    async fn try_download_chunked_with(
+        body: Vec<u8>,
+        headers: Vec<(&'static str, String)>,
+        chunk_count: u32,
+        m: &MasterKey,
+        ceiling: u64,
+    ) -> Result<Vec<u8>, String> {
         let body = Arc::new(body);
         let headers = Arc::new(headers);
         let app = Router::new().route(
@@ -589,7 +672,17 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("bb-dl-1759-{}-{}", std::process::id(), rand::random::<u32>()));
         let out = dir.join("out.bin");
         let confirmed = Arc::new(AtomicUsize::new(0));
-        let r = stream_download_decrypt(&api, m, FID, chunk_count, &out, &Counting(confirmed), "out.bin").await;
+        let r = stream_download_decrypt_with(
+            &api,
+            m,
+            FID,
+            chunk_count,
+            &out,
+            &Counting(confirmed),
+            "out.bin",
+            ceiling,
+        )
+        .await;
         let got = r.map(|_| std::fs::read(&out).unwrap());
         let _ = std::fs::remove_dir_all(&dir);
         got
@@ -640,17 +733,101 @@ mod tests {
         )
         .await
         .expect_err("oversized fallback body must be refused");
-        assert!(err.contains("exceeds"), "clear cap error, got: {err}");
+        assert!(err.contains("chunked-download limit"), "clear cap error, got: {err}");
     }
 
-    /// The cap function: known sizes win, the hard ceiling bounds everything.
+    /// The cap function. Content-Length wins outright (no ceiling); chunked is
+    /// the JSON bound clamped to the ceiling.
     #[test]
     fn fallback_cap_bounds() {
-        assert_eq!(fallback_cap(Some(500), Some(100), 3), 500);
-        assert_eq!(fallback_cap(None, Some(100), 3), json_wire_bound(100, 3));
-        assert!(fallback_cap(None, Some(100), 3) >= 100 + 28 * 3);
-        assert_eq!(fallback_cap(Some(u64::MAX), Some(u64::MAX), 3), FALLBACK_HARD_CEILING);
-        assert_eq!(fallback_cap(None, None, 3), FALLBACK_HARD_CEILING);
+        let c = FALLBACK_HARD_CEILING;
+        assert_eq!(
+            fallback_cap(c, Some(500), Some(100), 3),
+            FallbackCap {
+                cap: 500,
+                chunked: false
+            }
+        );
+        // Round 5: a declared length above the ceiling is NOT clamped.
+        assert_eq!(
+            fallback_cap(c, Some(c + 1), Some(100), 3),
+            FallbackCap {
+                cap: c + 1,
+                chunked: false
+            }
+        );
+        let ch = fallback_cap(c, None, Some(100), 3);
+        assert_eq!(
+            ch,
+            FallbackCap {
+                cap: json_wire_bound(100, 3),
+                chunked: true
+            }
+        );
+        assert!(ch.cap >= 100 + 28 * 3);
+        // Chunked is clamped to the ceiling.
+        assert_eq!(fallback_cap(c, None, Some(u64::MAX), 3).cap, c);
+        assert_eq!(fallback_cap(1000, None, Some(10_000), 3).cap, 1000);
+        assert_eq!(fallback_cap(c, None, None, 3).cap, c);
+    }
+
+    /// A body past its own declared length is refused with the Content-Length
+    /// message; chunked overrun gets the legacy-format message.
+    #[test]
+    fn check_cap_messages() {
+        let cl = FallbackCap {
+            cap: 10,
+            chunked: false,
+        };
+        assert!(check_cap(cl, 10).is_ok());
+        let e = check_cap(cl, 11).unwrap_err();
+        assert!(e.contains("declared Content-Length of 10"), "{e}");
+        let ch = FallbackCap { cap: 10, chunked: true };
+        let e = check_cap(ch, 11).unwrap_err();
+        assert!(
+            e.contains("legacy-format file larger than the chunked-download limit"),
+            "{e}"
+        );
+        assert!(e.contains("retry") && e.contains("Content-Length"), "{e}");
+    }
+
+    /// Round 5 P1: legacy JSON-blob body WITH Content-Length above the (test
+    /// lowered) ceiling downloads: memory is bounded by what the server sends.
+    #[tokio::test]
+    async fn legacy_json_with_content_length_above_ceiling_downloads() {
+        let m = mk();
+        let fk = derive_file_key(&m, FID.as_bytes());
+        let pt = payload(3 * 300 + 5);
+        let mut wire = Vec::new();
+        for chunk in pt.chunks(300) {
+            wire.extend(serde_json::to_vec(&encrypt_chunk(&fk, chunk).unwrap()).unwrap());
+        }
+        let ceiling = 1000u64;
+        assert!(wire.len() as u64 > ceiling, "test body must exceed the lowered ceiling");
+        let (got, _) = download_with(wire, None, 4, &m, ceiling).await;
+        assert_eq!(got, pt);
+    }
+
+    /// Round 5 P1: the same body chunked (no Content-Length) over the ceiling
+    /// is refused with the legacy-format message.
+    #[tokio::test]
+    async fn legacy_json_chunked_over_ceiling_is_refused_with_new_message() {
+        let m = mk();
+        let fk = derive_file_key(&m, FID.as_bytes());
+        let pt = payload(3 * 300 + 5);
+        let mut wire = Vec::new();
+        for chunk in pt.chunks(300) {
+            wire.extend(serde_json::to_vec(&encrypt_chunk(&fk, chunk).unwrap()).unwrap());
+        }
+        let ceiling = 1000u64;
+        assert!(wire.len() as u64 > ceiling);
+        let err = try_download_chunked_with(wire, vec![("x-original-size", pt.len().to_string())], 4, &m, ceiling)
+            .await
+            .expect_err("chunked over ceiling must be refused");
+        assert!(
+            err.contains("legacy-format file larger than the chunked-download limit"),
+            "got: {err}"
+        );
     }
 
     /// Round 4 P1: chunked transfer (no Content-Length) + X-Original-Size +
@@ -685,7 +862,7 @@ mod tests {
         let err = try_download_chunked(body, vec![("x-original-size", pt_len.to_string())], 4, &m)
             .await
             .expect_err("must be refused");
-        assert!(err.contains("exceeds"), "got: {err}");
+        assert!(err.contains("chunked-download limit"), "got: {err}");
     }
 
     /// The JSON bound constants dominate real serialisation, worst case
