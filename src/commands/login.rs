@@ -343,10 +343,28 @@ pub async fn run(headless: bool) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    /// Plain text of a rendered block (colour off), so assertions read the words.
+    /// Plain text of a rendered block: every ANSI escape sequence removed, so the
+    /// assertions read the words however the block was coloured when it was
+    /// rendered (a TTY, CLICOLOR_FORCE, another test flipping the global switch).
     fn plain(block: String) -> String {
-        colored::control::set_override(false);
-        block
+        let mut out = String::with_capacity(block.len());
+        let mut chars = block.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c != '\u{1b}' {
+                out.push(c);
+                continue;
+            }
+            // CSI: ESC [ <parameter/intermediate bytes> <final byte 0x40..=0x7e>
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for f in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&f) {
+                        break;
+                    }
+                }
+            }
+        }
+        out
     }
 
     const CODE: &str = "ABCD-EFGH";
@@ -389,6 +407,22 @@ mod tests {
             "the page shows no code to confirm any more: {out}"
         );
         assert!(!out.contains("code="), "the link must carry no code: {out}");
+    }
+
+    // Codex review on cli#60: the blocks used to be rendered BEFORE colour was
+    // switched off, so with colour forced on (a TTY, CLICOLOR_FORCE) the escape
+    // sequences split "Authorization code:" from the code and the labels were
+    // not found. Rendering with colour forced ON must still read as plain words.
+    #[test]
+    fn labels_are_found_even_when_colour_is_forced_on() {
+        colored::control::set_override(true);
+        let browser = plain(browser_block(CODE, URI));
+        let headless = plain(headless_block(CODE, URI));
+        colored::control::unset_override();
+        for out in [browser, headless] {
+            assert!(out.contains(&format!("Authorization code: {CODE}")), "{out:?}");
+            assert!(!out.contains('\u{1b}'), "an escape sequence survived: {out:?}");
+        }
     }
 
     #[test]
