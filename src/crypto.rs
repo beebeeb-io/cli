@@ -285,7 +285,9 @@ fn decrypt_json_chunks(
 }
 
 /// Upper bound on the AEAD work spent probing for the frame size when the
-/// caller has no chunk-size metadata (bytes of ciphertext authenticated).
+/// caller has no chunk-size metadata (bytes of ciphertext authenticated). This
+/// bounds the exhaustive scan (step 4 of [`raw_frame_size`]) only: the known
+/// size and the power-of-two ladder always run in full.
 const FRAME_PROBE_BUDGET: u64 = 64 * 1024 * 1024;
 
 /// Plaintext chunk sizes the platform has ever emitted as powers of two: 1 KiB
@@ -299,12 +301,9 @@ fn ladder_frame_sizes() -> impl Iterator<Item = u64> {
 const FRAME_OVERHEAD: u64 = (NONCE_LEN + TAG_LEN) as u64;
 
 fn decrypt_raw_frame(file_key: &beebeeb_core::kdf::FileKey, frame: &[u8], index: usize) -> Result<Vec<u8>, String> {
-    let blob = EncryptedBlob {
-        cipher_suite: beebeeb_types::CipherSuite::V1Aes256Gcm,
-        nonce: frame[..NONCE_LEN].to_vec(),
-        ciphertext: frame[NONCE_LEN..].to_vec(),
-    };
-    beebeeb_core::encrypt::decrypt_chunk(file_key, &blob).map_err(|e| format!("decrypt raw chunk {index}: {e}"))
+    // Core's raw decrypt takes the frame as-is (no to_vec copies) and rejects
+    // frames shorter than nonce + tag instead of panicking on the slice.
+    beebeeb_core::encrypt::decrypt_chunk_raw(file_key, frame).map_err(|e| format!("decrypt raw chunk {index}: {e}"))
 }
 
 /// Work out the wire frame size of the first `count - 1` frames of a raw
@@ -315,7 +314,8 @@ fn decrypt_raw_frame(file_key: &beebeeb_core::kdf::FileKey, frame: &[u8], index:
 /// 1. `chunk_size` (the `X-Chunk-Size` header), when the caller has it;
 /// 2. the powers of two the planner emits (1 KiB..256 MiB);
 /// 3. the uniform split `ceil(total / count)` (every chunk the same size);
-/// 4. every other size the byte count allows, within [`FRAME_PROBE_BUDGET`].
+/// 4. every other size the byte count allows, until the scan budget
+///    [`FRAME_PROBE_BUDGET`] (ciphertext bytes authenticated) is spent.
 ///
 /// A candidate is accepted only if the first frame AUTHENTICATES under the file
 /// key, so a wrong guess costs time and can never produce wrong plaintext.
@@ -392,7 +392,9 @@ impl FrameProbe<'_> {
         }
         self.tried.push(f);
         self.spent = self.spent.saturating_add(f);
-        decrypt_raw_frame(self.file_key, &self.data[..f as usize], 0).is_ok()
+        decrypt_raw_frame(self.file_key, &self.data[..f as usize], 0)
+            .map(zeroize::Zeroizing::new) // wiped on drop; only the verdict is kept
+            .is_ok()
     }
 }
 
@@ -419,10 +421,12 @@ fn decrypt_raw_chunks(
 
     // Minimum valid chunk: NONCE_LEN + TAG_LEN (empty plaintext encrypted).
     let min_chunk_overhead = NONCE_LEN + TAG_LEN;
-    if total < count * min_chunk_overhead {
+    let min_total = count
+        .checked_mul(min_chunk_overhead)
+        .ok_or_else(|| format!("chunk count {count} is too large"))?;
+    if total < min_total {
         return Err(format!(
-            "raw data too short: {total} bytes for {count} chunks (minimum {})",
-            count * min_chunk_overhead
+            "raw data too short: {total} bytes for {count} chunks (minimum {min_total})"
         ));
     }
 

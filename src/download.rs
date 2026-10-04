@@ -36,7 +36,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use beebeeb_core::chunk_stream::ChunkDecryptor;
+use beebeeb_core::chunk_stream::{ChunkDecryptor, MAX_CHUNK_SIZE};
 use beebeeb_core::kdf::MasterKey;
 
 use crate::api::ApiClient;
@@ -44,6 +44,23 @@ use crate::upload::ChunkProgress;
 
 /// Per-chunk AEAD overhead: `nonce(12) + tag(16)`.
 const CHUNK_OVERHEAD: u64 = 28;
+
+/// Hard ceiling (4 GiB) on the buffered-fallback payload. The fallback exists
+/// for legacy JSON-blob / binary-UUID / unknown-frame-size files, which are
+/// small by construction; a body past this is refused whatever the headers say.
+const FALLBACK_HARD_CEILING: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Max bytes the buffered fallback may hold: the larger of the declared body
+/// length and `original_size + 28 * count`, never above the hard ceiling.
+fn fallback_cap(content_len: Option<u64>, original_size: Option<u64>, count: u32) -> u64 {
+    let declared = original_size.map(|os| os.saturating_add(CHUNK_OVERHEAD.saturating_mul(count as u64)));
+    match (content_len, declared) {
+        (Some(a), Some(b)) => a.max(b),
+        (Some(a), None) | (None, Some(a)) => a,
+        (None, None) => FALLBACK_HARD_CEILING,
+    }
+    .min(FALLBACK_HARD_CEILING)
+}
 
 /// Outcome of a streaming download.
 pub struct DownloadStats {
@@ -70,7 +87,11 @@ pub async fn stream_download_decrypt(
     let original_size = header_u64(&resp, "X-Original-Size");
     // Uniform plaintext chunk size for this file's version (V2 files only). When
     // present it is authoritative for frame sizing; absent → legacy V1 fallback.
-    let chunk_size = header_u64(&resp, "X-Chunk-Size").filter(|&v| v > 0);
+    // The header is untrusted: a value past core's MAX_CHUNK_SIZE (256 MiB, the
+    // cap core's own ChunkEncryptor/Decryptor enforce) is treated as absent so a
+    // hostile server cannot make us buffer (or overflow on) a huge "frame".
+    let chunk_size = header_u64(&resp, "X-Chunk-Size").filter(|&v| v > 0 && v <= MAX_CHUNK_SIZE);
+    let fb_cap = fallback_cap(content_len, original_size, count);
 
     // Best estimate of the total encrypted length, used only to size the first
     // N-1 frames; the last frame always drains the remainder, so a small
@@ -101,6 +122,7 @@ pub async fn stream_download_decrypt(
         count,
         total,
         chunk_size,
+        fb_cap,
         out_path,
         carry,
         prog.as_ref(),
@@ -124,6 +146,7 @@ async fn stream_raw(
     count: u32,
     total: u64,
     chunk_size: Option<u64>,
+    fb_cap: u64,
     out_path: &Path,
     mut carry: Vec<u8>,
     prog: &dyn crate::upload::FileProgress,
@@ -140,7 +163,9 @@ async fn stream_raw(
     let frame_size = if n <= 1 {
         usize::MAX // sentinel: the single frame is "everything"
     } else if let Some(cs) = chunk_size {
-        (cs + CHUNK_OVERHEAD) as usize
+        cs.checked_add(CHUNK_OVERHEAD)
+            .and_then(|v| usize::try_from(v).ok())
+            .ok_or_else(|| format!("chunk size {cs} is not addressable"))?
     } else {
         (total / count as u64) as usize
     };
@@ -153,10 +178,19 @@ async fn stream_raw(
     for i in 0..n {
         let is_last = i == n - 1;
         let frame: Vec<u8> = if is_last || frame_size == usize::MAX {
-            drain_rest(resp, &mut carry).await?;
+            drain_rest(resp, &mut carry, fb_cap).await?;
             std::mem::take(&mut carry)
         } else {
             fill_to(resp, &mut carry, frame_size).await?;
+            if carry.len() < frame_size && i == 0 {
+                // Frame 0 is shorter than the header claims: a JSON-blob /
+                // legacy file served with a V2 header. Not a truncation —
+                // hand everything to the buffered path (capped).
+                writer.abort();
+                let mut full = std::mem::take(&mut carry);
+                drain_rest(resp, &mut full, fb_cap).await?;
+                return buffered_fallback(master_key, file_id, &full, count, chunk_size, out_path, prog);
+            }
             if carry.len() < frame_size {
                 return Err(format!(
                     "download truncated: chunk {i}/{n} wanted {frame_size} bytes, got {}",
@@ -180,11 +214,10 @@ async fn stream_raw(
                 // path try both parsers, both keys and the frame-size probe.
                 writer.abort();
                 let mut full = frame; // the first frame we already read
-                // `carry` already holds the bytes read past frame 0; drain_rest
-                // APPENDS the remainder to it, so extend `full` exactly once
-                // (extending before the drain duplicated those bytes).
-                drain_rest(resp, &mut carry).await?;
-                full.extend_from_slice(&carry);
+                // `carry` holds the bytes read past frame 0; append it once,
+                // then drain the remainder under the fallback cap.
+                full.append(&mut carry);
+                drain_rest(resp, &mut full, fb_cap).await?;
                 return buffered_fallback(master_key, file_id, &full, count, chunk_size, out_path, prog);
             }
             Err(e) => {
@@ -236,9 +269,18 @@ async fn fill_to(resp: &mut reqwest::Response, buf: &mut Vec<u8>, want: usize) -
     Ok(())
 }
 
-/// Drain the rest of the response body into `buf`.
-async fn drain_rest(resp: &mut reqwest::Response, buf: &mut Vec<u8>) -> Result<(), String> {
+/// Drain the rest of the response body into `buf`, refusing to hold more than
+/// `cap` bytes (see [`fallback_cap`]).
+async fn drain_rest(resp: &mut reqwest::Response, buf: &mut Vec<u8>, cap: u64) -> Result<(), String> {
+    let over =
+        |len: usize| format!("download body exceeds the {cap}-byte buffering limit ({len} bytes read); aborting");
+    if buf.len() as u64 > cap {
+        return Err(over(buf.len()));
+    }
     while let Some(b) = resp.chunk().await.map_err(|e| format!("download read: {e}"))? {
+        if (buf.len() as u64).saturating_add(b.len() as u64) > cap {
+            return Err(over(buf.len() + b.len()));
+        }
         buf.extend_from_slice(&b);
     }
     Ok(())
@@ -482,5 +524,105 @@ mod tests {
         let (got, confirmed) = download(wire, Some(4096), 1, &m).await;
         assert_eq!(got, pt);
         assert_eq!(confirmed, 1);
+    }
+
+    /// Serve `body` with arbitrary extra headers and WITHOUT a Content-Length
+    /// (chunked transfer), then run the real download. Returns the result.
+    async fn try_download_chunked(
+        body: Vec<u8>,
+        headers: Vec<(&'static str, String)>,
+        chunk_count: u32,
+        m: &MasterKey,
+    ) -> Result<Vec<u8>, String> {
+        let body = Arc::new(body);
+        let headers = Arc::new(headers);
+        let app = Router::new().route(
+            "/api/v1/files/:id/download",
+            get(move || {
+                let body = body.clone();
+                let headers = headers.clone();
+                async move {
+                    let mut h = axum::http::HeaderMap::new();
+                    for (k, v) in headers.iter() {
+                        h.insert(*k, v.parse().unwrap());
+                    }
+                    let parts: Vec<Result<bytes::Bytes, std::convert::Infallible>> = body
+                        .chunks(8192)
+                        .map(|c| Ok(bytes::Bytes::copy_from_slice(c)))
+                        .collect();
+                    (h, axum::body::Body::from_stream(futures_util::stream::iter(parts)))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let api = ApiClient::new_for_test(format!("http://{addr}"));
+        let dir = std::env::temp_dir().join(format!("bb-dl-1759-{}-{}", std::process::id(), rand::random::<u32>()));
+        let out = dir.join("out.bin");
+        let confirmed = Arc::new(AtomicUsize::new(0));
+        let r = stream_download_decrypt(&api, m, FID, chunk_count, &out, &Counting(confirmed), "out.bin").await;
+        let got = r.map(|_| std::fs::read(&out).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+        got
+    }
+
+    /// Round 3 P2-1: a hostile X-Chunk-Size (2^40, u64::MAX) must be treated as
+    /// absent — no giant frame buffering, no overflow — and the file still
+    /// decrypts through the probing fallback.
+    #[tokio::test]
+    async fn hostile_chunk_size_header_is_ignored() {
+        let m = mk();
+        let pt = payload(3 * 4096 + 77);
+        for hostile in [1u64 << 40, u64::MAX, u64::MAX - 27, MAX_CHUNK_SIZE + 1] {
+            let wire = raw_wire(&m, &pt, 4096, false);
+            let (got, _) = download(wire, Some(hostile), 4, &m).await;
+            assert_eq!(got, pt, "hostile X-Chunk-Size {hostile}");
+        }
+    }
+
+    /// Round 3 P2-3: V2 header present but frame 0 is short (a JSON-blob file
+    /// served with the header) takes the buffered fallback, not "truncated".
+    #[tokio::test]
+    async fn short_frame_zero_with_chunk_size_header_falls_back() {
+        let m = mk();
+        let fk = derive_file_key(&m, FID.as_bytes());
+        let pt = payload(2 * 300 + 5);
+        let mut wire = Vec::new();
+        for chunk in pt.chunks(300) {
+            wire.extend(serde_json::to_vec(&encrypt_chunk(&fk, chunk).unwrap()).unwrap());
+        }
+        let (got, confirmed) = download(wire, Some(1 << 20), 3, &m).await;
+        assert_eq!(got, pt);
+        assert_eq!(confirmed, 1, "buffered fallback");
+    }
+
+    /// Round 3 P2-2: the frame-0-failure fallback buffer is capped at
+    /// original_size + 28*count; a body that keeps coming is aborted.
+    #[tokio::test]
+    async fn fallback_buffer_is_capped() {
+        let m = mk();
+        // Garbage that fails frame-0 auth, far larger than the declared size.
+        let body = vec![0x5au8; 2 * 1024 * 1024];
+        let err = try_download_chunked(
+            body,
+            vec![("x-original-size", "1000".into()), ("x-chunk-size", "4096".into())],
+            4,
+            &m,
+        )
+        .await
+        .expect_err("oversized fallback body must be refused");
+        assert!(err.contains("exceeds"), "clear cap error, got: {err}");
+    }
+
+    /// The cap function: known sizes win, the hard ceiling bounds everything.
+    #[test]
+    fn fallback_cap_bounds() {
+        assert_eq!(fallback_cap(Some(500), Some(100), 3), 500);
+        assert_eq!(fallback_cap(None, Some(100), 3), 100 + 28 * 3);
+        assert_eq!(fallback_cap(Some(u64::MAX), Some(u64::MAX), 3), FALLBACK_HARD_CEILING);
+        assert_eq!(fallback_cap(None, None, 3), FALLBACK_HARD_CEILING);
     }
 }
