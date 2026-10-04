@@ -11,16 +11,17 @@
 //!
 //! ## Legacy compatibility (user-data regression risk — preserved carefully)
 //!
-//! Only the **current raw format with the string-UUID key** streams. Two legacy
-//! shapes fall back to the buffered [`crate::crypto::decrypt_file_chunks`],
-//! which is unchanged:
+//! Only the **current raw format with the string-UUID key** streams. The
+//! format is never guessed from the first byte (a random raw nonce starts with
+//! `{` 1 time in 256, task 1759): raw streaming is always tried first, and the
+//! frame-0 AEAD tag is the arbiter. If the first frame fails to authenticate,
+//! the whole payload is buffered and handed to [`crate::crypto::decrypt_file_chunks_with_chunk_size`],
+//! which covers both legacy shapes:
 //!
-//! - **JSON-blob chunks** (first byte `{`, old CLI uploads) — detected by
-//!   peeking the first byte, then buffered + decrypted as today.
+//! - **JSON-blob chunks** (old CLI uploads) — buffered + decrypted as before.
 //! - **binary-UUID key derivation** (pre-`bb repair` legacy files) — the
-//!   [`ChunkDecryptor`] only derives the string-UUID key, so if the first frame
-//!   fails to decrypt we buffer the whole payload and hand it to the buffered
-//!   path, which retries with the binary-UUID key. `bb repair` semantics intact.
+//!   [`ChunkDecryptor`] only derives the string-UUID key, so the buffered path
+//!   retries with the binary-UUID key. `bb repair` semantics intact.
 //!
 //! Framing: the server's `X-Chunk-Size` header (the uniform plaintext chunk
 //! size for the file's version) is authoritative — each wire frame is
@@ -28,9 +29,9 @@
 //! last. Streaming uploads make every chunk but the last exactly that size, so
 //! the old `total / chunk_count` average mis-sized frame 0 whenever the file
 //! size was not an exact multiple of the chunk size (e.g. a 150 MiB file with
-//! 8 MiB chunks), failing the GCM tag and forcing a buffered fallback. When the
-//! header is absent (legacy V1 responses) we fall back to `total / chunk_count`,
-//! matching the buffered splitter.
+//! 8 MiB chunks). When the header is absent (legacy V1 responses) the streaming
+//! guess `total / chunk_count` is only a first attempt; if it fails, the
+//! buffered path recovers the real frame size by AEAD-validated probing.
 
 use std::io::Write;
 use std::path::Path;
@@ -52,7 +53,7 @@ pub struct DownloadStats {
 
 /// Stream-download `file_id`, decrypt to `out_path` with constant memory, and
 /// report progress. Falls back to the buffered legacy decrypt for JSON-blob /
-/// binary-UUID files (see module docs).
+/// binary-UUID / unknown-frame-size files (see module docs).
 pub async fn stream_download_decrypt(
     api: &ApiClient,
     master_key: &MasterKey,
@@ -78,7 +79,8 @@ pub async fn stream_download_decrypt(
         .or_else(|| original_size.map(|os| os + CHUNK_OVERHEAD * count as u64))
         .unwrap_or(0);
 
-    // Peek the first byte to detect the JSON-blob legacy format.
+    // Read until the first body bytes arrive (an empty body is an error). The
+    // bytes are NOT inspected: the format is decided by frame-0 authentication.
     let mut carry: Vec<u8> = Vec::new();
     while carry.is_empty() {
         match resp.chunk().await.map_err(|e| format!("download read: {e}"))? {
@@ -92,25 +94,18 @@ pub async fn stream_download_decrypt(
 
     let prog = progress.begin_file(display_name, total);
 
-    let result = if carry[0] == b'{' {
-        // ── Legacy JSON-blob format → buffered decrypt (unchanged path) ──
-        drain_rest(&mut resp, &mut carry).await?;
-        let stats = buffered_fallback(master_key, file_id, &carry, count, out_path, prog.as_ref())?;
-        Ok(stats)
-    } else {
-        stream_raw(
-            &mut resp,
-            master_key,
-            file_id,
-            count,
-            total,
-            chunk_size,
-            out_path,
-            carry,
-            prog.as_ref(),
-        )
-        .await
-    };
+    let result = stream_raw(
+        &mut resp,
+        master_key,
+        file_id,
+        count,
+        total,
+        chunk_size,
+        out_path,
+        carry,
+        prog.as_ref(),
+    )
+    .await;
 
     match &result {
         Ok(_) => prog.finish(true),
@@ -138,9 +133,10 @@ async fn stream_raw(
     // When the server sends `X-Chunk-Size` (V2 files), each wire frame is the
     // uniform plaintext chunk size + CHUNK_OVERHEAD (nonce + tag) — this is
     // exact even when the file size is not a multiple of the chunk size. Only
-    // legacy V1 responses (no header) fall back to the `total / count` average,
-    // which matches crypto::decrypt_raw_chunks. For a single chunk the whole
-    // payload is the frame.
+    // legacy V1 responses (no header) start from the `total / count` average;
+    // if that mis-sizes frame 0 the first-frame fallback below hands the payload
+    // to the buffered path, which recovers the real frame size by AEAD-validated
+    // probing. For a single chunk the whole payload is the frame.
     let frame_size = if n <= 1 {
         usize::MAX // sentinel: the single frame is "everything"
     } else if let Some(cs) = chunk_size {
@@ -178,15 +174,18 @@ async fn stream_raw(
                 prog.chunk_confirmed(frame.len() as u64);
             }
             Err(_) if i == 0 => {
-                // First frame failed with the string-UUID key → likely a
-                // pre-`bb repair` binary-UUID legacy file. Reassemble the full
-                // payload and let the buffered path retry with the binary key.
+                // First frame failed to authenticate: a JSON-blob file, a
+                // pre-`bb repair` binary-UUID file, or a frame-size guess that
+                // was wrong. Reassemble the full payload and let the buffered
+                // path try both parsers, both keys and the frame-size probe.
                 writer.abort();
                 let mut full = frame; // the first frame we already read
-                full.extend_from_slice(&carry);
+                // `carry` already holds the bytes read past frame 0; drain_rest
+                // APPENDS the remainder to it, so extend `full` exactly once
+                // (extending before the drain duplicated those bytes).
                 drain_rest(resp, &mut carry).await?;
                 full.extend_from_slice(&carry);
-                return buffered_fallback(master_key, file_id, &full, count, out_path, prog);
+                return buffered_fallback(master_key, file_id, &full, count, chunk_size, out_path, prog);
             }
             Err(e) => {
                 writer.abort();
@@ -202,17 +201,20 @@ async fn stream_raw(
     })
 }
 
-/// Buffered legacy decrypt via the unchanged `crypto::decrypt_file_chunks`
-/// (handles JSON-blob + binary/string dual-key). Writes atomically.
+/// Buffered legacy decrypt via `crypto::decrypt_file_chunks_with_chunk_size`
+/// (handles JSON-blob, binary/string dual-key and unknown frame sizes). Writes
+/// atomically.
 fn buffered_fallback(
     master_key: &MasterKey,
     file_id: &str,
     encrypted: &[u8],
     count: u32,
+    chunk_size: Option<u64>,
     out_path: &Path,
     prog: &dyn crate::upload::FileProgress,
 ) -> Result<DownloadStats, String> {
-    let plaintext = crate::crypto::decrypt_file_chunks(master_key, file_id, encrypted, count)?;
+    let plaintext =
+        crate::crypto::decrypt_file_chunks_with_chunk_size(master_key, file_id, encrypted, count, chunk_size)?;
     let mut writer = AtomicFile::create(out_path)?;
     writer.write_all(&plaintext)?;
     writer.commit()?;
@@ -314,5 +316,171 @@ impl Drop for AtomicFile {
             self.writer.take();
             let _ = std::fs::remove_file(&self.tmp);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{Router, extract::State, http::header, response::IntoResponse, routing::get};
+    use beebeeb_core::encrypt::{encrypt_chunk, encrypt_chunk_raw};
+    use beebeeb_core::kdf::{derive_file_key, derive_master_key};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const FID: &str = "3e15382b-1111-2222-3333-444455556666";
+
+    /// Counts server-confirmed frames. Streaming reports one per frame; the
+    /// buffered fallback reports the whole payload once.
+    struct Counting(Arc<AtomicUsize>);
+    struct CountingFile(Arc<AtomicUsize>);
+    impl ChunkProgress for Counting {
+        fn begin_file(&self, _name: &str, _expected: u64) -> Box<dyn crate::upload::FileProgress> {
+            Box::new(CountingFile(self.0.clone()))
+        }
+    }
+    impl crate::upload::FileProgress for CountingFile {
+        fn chunk_confirmed(&self, _bytes: u64) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        fn finish(self: Box<Self>, _success: bool) {}
+    }
+
+    #[derive(Clone)]
+    struct Served {
+        body: Arc<Vec<u8>>,
+        chunk_size: Option<u64>,
+        chunk_count: u32,
+    }
+
+    async fn serve(State(s): State<Served>) -> impl IntoResponse {
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
+        h.insert("x-chunk-count", s.chunk_count.to_string().parse().unwrap());
+        if let Some(cs) = s.chunk_size {
+            h.insert("x-chunk-size", cs.to_string().parse().unwrap());
+        }
+        (h, s.body.as_ref().clone())
+    }
+
+    /// Raw multi-chunk wire bytes; `brace_first` re-rolls frame 0's nonce until
+    /// it starts with 0x7b.
+    fn raw_wire(m: &MasterKey, pt: &[u8], cs: usize, brace_first: bool) -> Vec<u8> {
+        let fk = derive_file_key(m, FID.as_bytes());
+        let mut out = Vec::new();
+        for (i, chunk) in pt.chunks(cs).enumerate() {
+            let frame = if i == 0 && brace_first {
+                (0..100_000)
+                    .map(|_| encrypt_chunk_raw(&fk, chunk).unwrap())
+                    .find(|f| f[0] == b'{')
+                    .expect("a 0x7b nonce within 100k tries")
+            } else {
+                encrypt_chunk_raw(&fk, chunk).unwrap()
+            };
+            out.extend_from_slice(&frame);
+        }
+        out
+    }
+
+    /// Download `body` through the real streaming path against a local mock;
+    /// returns (decrypted file, number of progress confirmations).
+    async fn download(body: Vec<u8>, chunk_size: Option<u64>, chunk_count: u32, m: &MasterKey) -> (Vec<u8>, usize) {
+        let app = Router::new()
+            .route("/api/v1/files/:id/download", get(serve))
+            .with_state(Served {
+                body: Arc::new(body),
+                chunk_size,
+                chunk_count,
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let api = ApiClient::new_for_test(format!("http://{addr}"));
+        let dir = std::env::temp_dir().join(format!("bb-dl-1759-{}-{}", std::process::id(), rand::random::<u32>()));
+        let out = dir.join("out.bin");
+        let confirmed = Arc::new(AtomicUsize::new(0));
+        stream_download_decrypt(&api, m, FID, chunk_count, &out, &Counting(confirmed.clone()), "out.bin")
+            .await
+            .expect("download + decrypt succeeds");
+        let got = std::fs::read(&out).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        (got, confirmed.load(Ordering::SeqCst))
+    }
+
+    fn mk() -> MasterKey {
+        derive_master_key("test-password", b"test-salt-16bytes").unwrap()
+    }
+
+    fn payload(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
+
+    /// Task 1759 round 2: raw multi-chunk file, uneven last chunk, frame 0's
+    /// nonce starts with '{', X-Chunk-Size present. Must decrypt AND stream
+    /// (one confirmation per frame), not be shunted to the buffered path by a
+    /// first-byte sniff.
+    #[tokio::test]
+    async fn streams_raw_uneven_last_chunk_with_brace_first_byte() {
+        let m = mk();
+        let pt = payload(3 * 4096 + 77);
+        let wire = raw_wire(&m, &pt, 4096, true);
+        assert_eq!(wire[0], b'{');
+        let (got, confirmed) = download(wire, Some(4096), 4, &m).await;
+        assert_eq!(got, pt);
+        assert_eq!(confirmed, 4, "4 frames streamed, not one buffered blob");
+    }
+
+    /// Same file with a non-brace nonce streams too (control).
+    #[tokio::test]
+    async fn streams_raw_uneven_last_chunk() {
+        let m = mk();
+        let pt = payload(3 * 4096 + 77);
+        let wire = raw_wire(&m, &pt, 4096, false);
+        let (got, confirmed) = download(wire, Some(4096), 4, &m).await;
+        assert_eq!(got, pt);
+        assert_eq!(confirmed, 4);
+    }
+
+    /// Legacy V1 response (no X-Chunk-Size): the total/count guess mis-sizes
+    /// frame 0, so the buffered path recovers the real frame size by probing.
+    #[tokio::test]
+    async fn legacy_response_without_chunk_size_header_uneven_last_chunk() {
+        let m = mk();
+        let pt = payload(3 * 4096 + 77);
+        for brace in [false, true] {
+            let wire = raw_wire(&m, &pt, 4096, brace);
+            let (got, confirmed) = download(wire, None, 4, &m).await;
+            assert_eq!(got, pt, "brace_first={brace}");
+            assert_eq!(confirmed, 1, "buffered fallback reports the payload once");
+        }
+    }
+
+    /// Legacy CLI JSON-blob multi-chunk file still downloads (buffered).
+    #[tokio::test]
+    async fn legacy_json_blob_file_still_downloads() {
+        let m = mk();
+        let fk = derive_file_key(&m, FID.as_bytes());
+        let pt = payload(2 * 300 + 5);
+        let mut wire = Vec::new();
+        for chunk in pt.chunks(300) {
+            wire.extend(serde_json::to_vec(&encrypt_chunk(&fk, chunk).unwrap()).unwrap());
+        }
+        assert_eq!(wire[0], b'{');
+        let (got, confirmed) = download(wire, None, 3, &m).await;
+        assert_eq!(got, pt);
+        assert_eq!(confirmed, 1);
+    }
+
+    /// Single raw chunk whose nonce starts with '{' streams (was sniffed away).
+    #[tokio::test]
+    async fn single_raw_chunk_with_brace_first_byte() {
+        let m = mk();
+        let pt = payload(500);
+        let wire = raw_wire(&m, &pt, 4096, true);
+        let (got, confirmed) = download(wire, Some(4096), 1, &m).await;
+        assert_eq!(got, pt);
+        assert_eq!(confirmed, 1);
     }
 }

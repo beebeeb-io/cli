@@ -25,7 +25,9 @@
 //! either the UUID's 16-byte binary form (CLI) or the UUID string as UTF-8 bytes
 //! (web app).
 //!
-//! [`decrypt_file_chunks`] handles all combinations transparently.
+//! [`decrypt_file_chunks`] handles all combinations transparently. The format is
+//! never trusted from the first byte alone (a raw nonce starts with `{` 1 time
+//! in 256): both parsers are tried, and AEAD authentication is the arbiter.
 
 use base64::Engine as _;
 use beebeeb_types::EncryptedBlob;
@@ -155,15 +157,33 @@ const TAG_LEN: usize = 16;
 ///
 /// The server streams chunk blobs back-to-back. For CLI uploads each chunk is
 /// a JSON object; for web uploads each chunk is raw `nonce (12) | ciphertext`.
-/// This function detects the format from the first byte (`{` = JSON, otherwise
-/// raw binary) and applies the matching parser for all chunks.
+/// The format is never trusted from the bytes alone (a random raw nonce starts
+/// with `{` about 1 time in 256): the first byte only picks which parser is
+/// tried first, and the other is the fallback. Every chunk is AEAD-authenticated,
+/// so a wrong parse fails and can never yield wrong plaintext.
 ///
-/// Returns the reassembled plaintext on success.
+/// Returns the reassembled plaintext on success. Callers that know the file's
+/// plaintext chunk size (the `X-Chunk-Size` download header) should use
+/// [`decrypt_file_chunks_with_chunk_size`].
 pub fn decrypt_file_chunks(
     master_key: &beebeeb_core::kdf::MasterKey,
     file_id_str: &str,
     encrypted_bytes: &[u8],
     chunk_count: u32,
+) -> Result<Vec<u8>, String> {
+    decrypt_file_chunks_with_chunk_size(master_key, file_id_str, encrypted_bytes, chunk_count, None)
+}
+
+/// [`decrypt_file_chunks`] with the file's uniform plaintext chunk size, when
+/// the caller has it. For raw multi-chunk files this is the exact wire frame
+/// size (`chunk_size + 28`); without it the frame size is recovered by
+/// AEAD-validated probing (see [`decrypt_raw_chunks`]).
+pub fn decrypt_file_chunks_with_chunk_size(
+    master_key: &beebeeb_core::kdf::MasterKey,
+    file_id_str: &str,
+    encrypted_bytes: &[u8],
+    chunk_count: u32,
+    chunk_size: Option<u64>,
 ) -> Result<Vec<u8>, String> {
     let file_uuid: uuid::Uuid = file_id_str.parse().map_err(|e| format!("invalid file ID: {e}"))?;
 
@@ -173,7 +193,7 @@ pub fn decrypt_file_chunks(
 
     // Attempt decryption with each key. The first successful full decryption wins.
     for file_key in [&key_from_binary, &key_from_string] {
-        match try_decrypt_all_chunks(file_key, encrypted_bytes, chunk_count) {
+        match try_decrypt_all_chunks_with_chunk_size(file_key, encrypted_bytes, chunk_count, chunk_size) {
             Ok(plaintext) => return Ok(plaintext),
             Err(_) => continue,
         }
@@ -184,12 +204,24 @@ pub fn decrypt_file_chunks(
     ))
 }
 
-/// Try to decrypt all chunks with a given file key. Detects the chunk format
-/// from the first byte of the buffer and parses accordingly.
+/// Try to decrypt all chunks with a given file key. The chunk format is NOT
+/// detected from the bytes: the first byte only orders the two parsers (JSON
+/// blob vs raw `nonce|ciphertext`), and the other one is the fallback.
 pub fn try_decrypt_all_chunks(
     file_key: &beebeeb_core::kdf::FileKey,
     encrypted_bytes: &[u8],
     chunk_count: u32,
+) -> Result<Vec<u8>, String> {
+    try_decrypt_all_chunks_with_chunk_size(file_key, encrypted_bytes, chunk_count, None)
+}
+
+/// [`try_decrypt_all_chunks`] with the file's uniform plaintext chunk size, when
+/// known (`X-Chunk-Size`). Only the raw parser uses it.
+pub fn try_decrypt_all_chunks_with_chunk_size(
+    file_key: &beebeeb_core::kdf::FileKey,
+    encrypted_bytes: &[u8],
+    chunk_count: u32,
+    chunk_size: Option<u64>,
 ) -> Result<Vec<u8>, String> {
     if encrypted_bytes.is_empty() && chunk_count == 0 {
         return Ok(Vec::new());
@@ -203,18 +235,20 @@ pub fn try_decrypt_all_chunks(
     // misrouted to the JSON parser. Try the hinted format first, then the
     // other. A false success is impossible: every chunk is AEAD-authenticated,
     // so a wrong parse can only fail, never yield wrong plaintext.
-    let (first, second): (ChunkParser, ChunkParser) = if encrypted_bytes[0] == b'{' {
-        (decrypt_json_chunks, decrypt_raw_chunks)
-    } else {
-        (decrypt_raw_chunks, decrypt_json_chunks)
+    let raw = |k: &beebeeb_core::kdf::FileKey| decrypt_raw_chunks(k, encrypted_bytes, chunk_count, chunk_size);
+    let json = |k: &beebeeb_core::kdf::FileKey| decrypt_json_chunks(k, encrypted_bytes, chunk_count);
+    let raw_first = encrypted_bytes[0] != b'{';
+    let attempt = |as_raw: bool| {
+        if as_raw { raw(file_key) } else { json(file_key) }
     };
-    match first(file_key, encrypted_bytes, chunk_count) {
+    match attempt(raw_first) {
         Ok(p) => Ok(p),
-        Err(e1) => second(file_key, encrypted_bytes, chunk_count).map_err(|_| e1),
+        Err(e1) => attempt(!raw_first).map_err(|e2| {
+            let (raw_err, json_err) = if raw_first { (&e1, &e2) } else { (&e2, &e1) };
+            format!("raw parser: {raw_err}; json parser: {json_err}")
+        }),
     }
 }
-
-type ChunkParser = fn(&beebeeb_core::kdf::FileKey, &[u8], u32) -> Result<Vec<u8>, String>;
 
 /// Parse and decrypt CLI-format chunks: concatenated JSON `EncryptedBlob` objects.
 fn decrypt_json_chunks(
@@ -250,18 +284,131 @@ fn decrypt_json_chunks(
     Ok(plaintext)
 }
 
+/// Upper bound on the AEAD work spent probing for the frame size when the
+/// caller has no chunk-size metadata (bytes of ciphertext authenticated).
+const FRAME_PROBE_BUDGET: u64 = 64 * 1024 * 1024;
+
+/// Plaintext chunk sizes the platform has ever emitted as powers of two: 1 KiB
+/// up to 256 MiB (`beebeeb_types` chunk planner is 4 MiB..256 MiB; 1 MiB is the
+/// pre-V2 fixed size). Probed first when no chunk size is known.
+fn ladder_frame_sizes() -> impl Iterator<Item = u64> {
+    (10..=28u32).map(|k| (1u64 << k) + FRAME_OVERHEAD)
+}
+
+/// Per-frame AEAD overhead: `nonce (12) + tag (16)`.
+const FRAME_OVERHEAD: u64 = (NONCE_LEN + TAG_LEN) as u64;
+
+fn decrypt_raw_frame(file_key: &beebeeb_core::kdf::FileKey, frame: &[u8], index: usize) -> Result<Vec<u8>, String> {
+    let blob = EncryptedBlob {
+        cipher_suite: beebeeb_types::CipherSuite::V1Aes256Gcm,
+        nonce: frame[..NONCE_LEN].to_vec(),
+        ciphertext: frame[NONCE_LEN..].to_vec(),
+    };
+    beebeeb_core::encrypt::decrypt_chunk(file_key, &blob).map_err(|e| format!("decrypt raw chunk {index}: {e}"))
+}
+
+/// Work out the wire frame size of the first `count - 1` frames of a raw
+/// multi-chunk file (every frame but the last is `chunk_size + 28` bytes; the
+/// last holds the remainder and is usually shorter).
+///
+/// The wire carries no per-chunk lengths, so the size comes from, in order:
+/// 1. `chunk_size` (the `X-Chunk-Size` header), when the caller has it;
+/// 2. the powers of two the planner emits (1 KiB..256 MiB);
+/// 3. the uniform split `ceil(total / count)` (every chunk the same size);
+/// 4. every other size the byte count allows, within [`FRAME_PROBE_BUDGET`].
+///
+/// A candidate is accepted only if the first frame AUTHENTICATES under the file
+/// key, so a wrong guess costs time and can never produce wrong plaintext.
+fn raw_frame_size(
+    file_key: &beebeeb_core::kdf::FileKey,
+    data: &[u8],
+    count: usize,
+    chunk_size: Option<u64>,
+) -> Result<usize, String> {
+    let total = data.len() as u64;
+    let n = count as u64;
+    // total = (n-1)*F + last, 28 <= last <= F  =>  F in [ceil(total/n), (total-28)/(n-1)].
+    let lo = total.div_ceil(n);
+    let hi = total.saturating_sub(FRAME_OVERHEAD) / (n - 1);
+    if lo > hi {
+        return Err(format!(
+            "raw data of {total} bytes cannot be split into {count} chunks of >= {FRAME_OVERHEAD} bytes"
+        ));
+    }
+
+    let mut probe = FrameProbe {
+        file_key,
+        data,
+        lo,
+        hi,
+        tried: Vec::new(),
+        spent: 0,
+    };
+
+    if let Some(cs) = chunk_size.and_then(|cs| cs.checked_add(FRAME_OVERHEAD))
+        && probe.accepts(cs)
+    {
+        return Ok(cs as usize);
+    }
+    for f in ladder_frame_sizes() {
+        if probe.accepts(f) {
+            return Ok(f as usize);
+        }
+    }
+    if probe.accepts(lo) {
+        return Ok(lo as usize);
+    }
+    let mut f = lo;
+    while f <= hi && probe.spent < FRAME_PROBE_BUDGET {
+        if probe.accepts(f) {
+            return Ok(f as usize);
+        }
+        f += 1;
+    }
+    Err(format!(
+        "no chunk size splits {total} bytes into {count} authenticating chunks \
+         (tried {} candidate frame sizes)",
+        probe.tried.len()
+    ))
+}
+
+/// Candidate-frame-size prober for [`raw_frame_size`].
+struct FrameProbe<'a> {
+    file_key: &'a beebeeb_core::kdf::FileKey,
+    data: &'a [u8],
+    lo: u64,
+    hi: u64,
+    tried: Vec<u64>,
+    /// Ciphertext bytes authenticated so far (against [`FRAME_PROBE_BUDGET`]).
+    spent: u64,
+}
+
+impl FrameProbe<'_> {
+    /// True if `f` is a feasible frame size (the byte count allows it) whose
+    /// first frame authenticates. Each size is tried at most once.
+    fn accepts(&mut self, f: u64) -> bool {
+        if f < self.lo || f > self.hi || self.tried.contains(&f) {
+            return false;
+        }
+        self.tried.push(f);
+        self.spent = self.spent.saturating_add(f);
+        decrypt_raw_frame(self.file_key, &self.data[..f as usize], 0).is_ok()
+    }
+}
+
 /// Parse and decrypt web-app-format chunks: raw `nonce (12 bytes) | ciphertext`.
 ///
-/// The server knows each chunk's stored size and streams them back-to-back.
-/// With a single-chunk file the entire download is one chunk. For multi-chunk
-/// files the server returns them sequentially; since AES-256-GCM ciphertext is
-/// `plaintext_len + 16` bytes (tag), and the nonce is 12 bytes, each raw chunk
-/// is `12 + plaintext_len + 16` bytes. We split evenly for equal-sized chunks
-/// and handle the potentially shorter last chunk.
+/// Chunks are stored back-to-back with no length prefix. Every chunk but the
+/// last is exactly `chunk_size + 28` bytes (nonce + ciphertext + tag); the last
+/// is the remainder and is normally SHORTER, so the frame size cannot be
+/// derived as `total / count` (task 1759 round 2). It is taken from `chunk_size`
+/// when the caller knows it, otherwise recovered by AEAD-validated probing
+/// (see [`raw_frame_size`]).
 fn decrypt_raw_chunks(
     file_key: &beebeeb_core::kdf::FileKey,
     encrypted_bytes: &[u8],
     chunk_count: u32,
+    chunk_size: Option<u64>,
 ) -> Result<Vec<u8>, String> {
     let total = encrypted_bytes.len();
     let count = chunk_count as usize;
@@ -279,17 +426,11 @@ fn decrypt_raw_chunks(
         ));
     }
 
-    // For single-chunk files, the entire buffer is the chunk.
-    // For multi-chunk files, split evenly — all chunks except the last have
-    // the same encrypted size; the last may be shorter.
-    let chunk_enc_size = if count == 1 {
+    // A single chunk is the whole buffer; otherwise find the uniform frame size.
+    let frame_size = if count == 1 {
         total
     } else {
-        // Each chunk has the same plaintext size except the last, so the
-        // encrypted size (nonce + ciphertext + tag) is uniform for all but
-        // the last. We compute it by dividing the total evenly among the
-        // first N-1 chunks.
-        total / count
+        raw_frame_size(file_key, encrypted_bytes, count, chunk_size)?
     };
 
     let mut plaintext = Vec::with_capacity(total);
@@ -297,27 +438,16 @@ fn decrypt_raw_chunks(
 
     for i in 0..count {
         let remaining = total - offset;
-        // Last chunk takes whatever is left; earlier chunks take the uniform size.
-        let this_chunk_size = if i == count - 1 { remaining } else { chunk_enc_size };
+        // Last chunk takes whatever is left; earlier chunks take the frame size.
+        let this_chunk_size = if i == count - 1 { remaining } else { frame_size };
 
-        if this_chunk_size < min_chunk_overhead {
+        if this_chunk_size < min_chunk_overhead || this_chunk_size > remaining {
             return Err(format!(
-                "chunk {i} too short: {this_chunk_size} bytes (minimum {min_chunk_overhead})"
+                "chunk {i} has an invalid size: {this_chunk_size} bytes (minimum {min_chunk_overhead}, {remaining} left)"
             ));
         }
 
-        let chunk_data = &encrypted_bytes[offset..offset + this_chunk_size];
-        let nonce = &chunk_data[..NONCE_LEN];
-        let ciphertext = &chunk_data[NONCE_LEN..];
-
-        let blob = EncryptedBlob {
-            cipher_suite: beebeeb_types::CipherSuite::V1Aes256Gcm,
-            nonce: nonce.to_vec(),
-            ciphertext: ciphertext.to_vec(),
-        };
-
-        let decrypted =
-            beebeeb_core::encrypt::decrypt_chunk(file_key, &blob).map_err(|e| format!("decrypt raw chunk {i}: {e}"))?;
+        let decrypted = decrypt_raw_frame(file_key, &encrypted_bytes[offset..offset + this_chunk_size], i)?;
         plaintext.extend_from_slice(&decrypted);
 
         offset += this_chunk_size;
@@ -360,6 +490,122 @@ mod tests {
         let mut all = first;
         all.extend(encrypt_chunk_raw(&fk, b"BBBBBBBB").unwrap());
         assert_eq!(try_decrypt_all_chunks(&fk, &all, 2).unwrap(), b"AAAAAAAABBBBBBBB");
+    }
+
+    /// Encrypt `plaintext` as the platform's raw multi-chunk wire format:
+    /// uniform `chunk_size` plaintext chunks, the last one shorter. When
+    /// `brace_first` is set, the FIRST frame is re-rolled until its random
+    /// nonce starts with 0x7b ('{'), the byte that used to misroute the file.
+    fn raw_file(fk: &beebeeb_core::kdf::FileKey, plaintext: &[u8], chunk_size: usize, brace_first: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (i, chunk) in plaintext.chunks(chunk_size).enumerate() {
+            let frame = if i == 0 && brace_first {
+                (0..100_000)
+                    .map(|_| encrypt_chunk_raw(fk, chunk).unwrap())
+                    .find(|f| f[0] == b'{')
+                    .expect("a nonce starting with 0x7b within 100k tries")
+            } else {
+                encrypt_chunk_raw(fk, chunk).unwrap()
+            };
+            out.extend_from_slice(&frame);
+        }
+        out
+    }
+
+    /// Task 1759 round 2 (P1-a): a raw multi-chunk file whose LAST chunk is
+    /// shorter than the rest, the normal case for any file that is not an
+    /// exact multiple of the chunk size, must decrypt. The old splitter used
+    /// `total / count` for every frame and mis-sized frame 0.
+    #[test]
+    fn raw_multi_chunk_uneven_last_chunk_decrypts() {
+        let m = mk();
+        let fk = derive_file_key(&m, FID.as_bytes());
+        let pt: Vec<u8> = (0..(3 * 64 + 10)).map(|i| (i % 251) as u8).collect();
+        let wire = raw_file(&fk, &pt, 64, false);
+        assert_eq!(try_decrypt_all_chunks(&fk, &wire, 4).unwrap(), pt);
+        assert_eq!(decrypt_file_chunks(&m, FID, &wire, 4).unwrap(), pt);
+    }
+
+    /// Same, with a '{' first nonce byte on frame 0: both defects at once.
+    #[test]
+    fn raw_multi_chunk_uneven_last_chunk_with_brace_first_byte_decrypts() {
+        let m = mk();
+        let fk = derive_file_key(&m, FID.as_bytes());
+        let pt: Vec<u8> = (0..(3 * 64 + 10)).map(|i| (i % 251) as u8).collect();
+        let wire = raw_file(&fk, &pt, 64, true);
+        assert_eq!(wire[0], b'{');
+        assert_eq!(try_decrypt_all_chunks(&fk, &wire, 4).unwrap(), pt);
+        assert_eq!(decrypt_file_chunks(&m, FID, &wire, 4).unwrap(), pt);
+    }
+
+    /// Frame size recovered from the power-of-two ladder: a pre-V2 1 MiB chunk
+    /// file with an uneven last chunk, and a 4 MiB (planner minimum) one.
+    #[test]
+    fn raw_multi_chunk_ladder_sizes_uneven_last_chunk() {
+        let m = mk();
+        let fk = derive_file_key(&m, FID.as_bytes());
+        for cs in [1usize << 20, 4usize << 20] {
+            let pt: Vec<u8> = (0..(2 * cs + 12_345)).map(|i| (i % 253) as u8).collect();
+            let wire = raw_file(&fk, &pt, cs, false);
+            assert_eq!(try_decrypt_all_chunks(&fk, &wire, 3).unwrap(), pt, "chunk size {cs}");
+        }
+    }
+
+    /// Two chunks with a tiny last chunk: the widest feasible range, where the
+    /// uniform split `total / 2` is wrong by a lot.
+    #[test]
+    fn raw_two_chunks_tiny_last_chunk() {
+        let m = mk();
+        let fk = derive_file_key(&m, FID.as_bytes());
+        let pt = vec![7u8; 1000 + 1];
+        let wire = raw_file(&fk, &pt, 1000, true);
+        assert_eq!(try_decrypt_all_chunks(&fk, &wire, 2).unwrap(), pt);
+    }
+
+    /// With the caller-supplied chunk size the frame is exact (no probing), and
+    /// a WRONG hint is not trusted: it falls back to probing and still decrypts.
+    #[test]
+    fn raw_multi_chunk_chunk_size_hint_exact_and_wrong() {
+        let m = mk();
+        let fk = derive_file_key(&m, FID.as_bytes());
+        let pt: Vec<u8> = (0..(5 * 100 + 3)).map(|i| (i % 249) as u8).collect();
+        let wire = raw_file(&fk, &pt, 100, true);
+        assert_eq!(
+            try_decrypt_all_chunks_with_chunk_size(&fk, &wire, 6, Some(100)).unwrap(),
+            pt
+        );
+        assert_eq!(
+            try_decrypt_all_chunks_with_chunk_size(&fk, &wire, 6, Some(4096)).unwrap(),
+            pt
+        );
+        assert_eq!(
+            decrypt_file_chunks_with_chunk_size(&m, FID, &wire, 6, Some(100)).unwrap(),
+            pt
+        );
+    }
+
+    /// A raw file with a corrupted middle chunk fails (no partial plaintext),
+    /// and a wrong key on an uneven multi-chunk file fails.
+    #[test]
+    fn raw_multi_chunk_corruption_and_wrong_key_fail() {
+        let m = mk();
+        let fk = derive_file_key(&m, FID.as_bytes());
+        let pt = vec![9u8; 3 * 64 + 10];
+        let mut wire = raw_file(&fk, &pt, 64, false);
+        assert!(try_decrypt_all_chunks(&derive_file_key(&m, b"other"), &wire, 4).is_err());
+        let mid = 64 + 28 + 20;
+        wire[mid] ^= 0xff;
+        assert!(try_decrypt_all_chunks(&fk, &wire, 4).is_err());
+    }
+
+    /// P2-c: when neither parser works, the error names BOTH reasons.
+    #[test]
+    fn failure_reports_both_parser_errors() {
+        let m = mk();
+        let fk = derive_file_key(&m, FID.as_bytes());
+        let junk = vec![0x41u8; 200];
+        let err = try_decrypt_all_chunks(&fk, &junk, 2).unwrap_err();
+        assert!(err.contains("raw parser:") && err.contains("json parser:"), "{err}");
     }
 
     /// A wrong key must still fail on both parsers (no false success).
@@ -408,9 +654,9 @@ mod tests {
         assert_eq!(out, pt);
     }
 
-    /// LEGACY CLI JSON-blob chunk format (first byte `{`): detected and
-    /// decrypted via the buffered path. The streaming download peeks the first
-    /// byte and routes these here unchanged.
+    /// LEGACY CLI JSON-blob chunk format (first byte `{`): decrypted via the
+    /// buffered path. The streaming download tries the raw frames first; when
+    /// frame 0 fails to authenticate it hands the whole payload to this path.
     #[test]
     fn json_blob_legacy_format_detected_and_decrypted() {
         let m = mk();
