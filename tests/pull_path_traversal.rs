@@ -46,12 +46,24 @@ fn b64() -> base64::engine::GeneralPurpose {
 // Fixture: a vault tree served by the mock API
 // ---------------------------------------------------------------------------
 
+/// What `GET /files/:id/download` serves for one file.
+struct Body {
+    data: Vec<u8>,
+    /// Plaintext size for `X-Original-Size`.
+    size: usize,
+    /// `X-Chunk-Count`.
+    count: usize,
+    /// `X-Chunk-Size` (the uniform plaintext chunk size), when the server sends one.
+    chunk_size: Option<u64>,
+}
+
 struct Served {
     rows: HashMap<String, Value>,
     children: HashMap<String, Vec<String>>,
-    /// id -> (download body, plaintext size for `X-Original-Size`)
-    bodies: HashMap<String, (Vec<u8>, usize)>,
+    bodies: HashMap<String, Body>,
     requests: Value,
+    /// `GET /file-requests` answers 500 (the request keys cannot be loaded).
+    requests_fail: bool,
 }
 
 struct Fixture {
@@ -81,6 +93,7 @@ impl Fixture {
             children: HashMap::new(),
             bodies: HashMap::new(),
             requests,
+            requests_fail: false,
         };
         served.rows.insert(
             ROOT_ID.to_string(),
@@ -102,20 +115,44 @@ impl Fixture {
     /// A file or folder uploaded through the file request: the name is sealed
     /// under a per-item content key C that the uploader chose.
     fn add_request_item(&mut self, parent: &str, name: &str, is_folder: bool, body: &[u8]) -> String {
+        self.add_request_item_chunked(parent, name, is_folder, body, None, None)
+    }
+
+    /// As [`Self::add_request_item`]; `chunk` splits the body into raw chunks of
+    /// that many plaintext bytes (the last one shorter, like a real upload), and
+    /// `header` is the `X-Chunk-Size` the server sends for it.
+    fn add_request_item_chunked(
+        &mut self,
+        parent: &str,
+        name: &str,
+        is_folder: bool,
+        body: &[u8],
+        chunk: Option<usize>,
+        header: Option<u64>,
+    ) -> String {
         use rand::RngCore;
         let id = self.fresh_id();
-        // `bb`'s chunk-format sniffing treats a body whose first byte is `{` as
-        // a legacy JSON blob; the random nonce hits that 1 time in 256 (a
-        // separate, pre-existing flake, see task 1733 Notes). Re-roll the
-        // content key until the fixture body is unambiguous, so these tests
-        // are deterministic.
-        let (c, fk, ct) = loop {
+        // A raw body whose random nonce starts with `{` is now handled by the
+        // decrypt path (task 1759); the single-chunk fixtures still re-roll so
+        // the older tests stay deterministic.
+        let (c, fk, ct, count) = loop {
             let mut c = [0u8; 32];
             rand::rngs::OsRng.fill_bytes(&mut c);
             let fk = FileKey::from_bytes(c);
-            let ct = beebeeb_core::encrypt::encrypt_chunk_raw(&fk, body).unwrap();
+            let (ct, count) = match chunk {
+                Some(cs) => {
+                    let mut ct = Vec::new();
+                    let mut n = 0;
+                    for piece in body.chunks(cs) {
+                        ct.extend(beebeeb_core::encrypt::encrypt_chunk_raw(&fk, piece).unwrap());
+                        n += 1;
+                    }
+                    (ct, n)
+                }
+                None => (beebeeb_core::encrypt::encrypt_chunk_raw(&fk, body).unwrap(), 1),
+            };
             if ct.first() != Some(&b'{') {
-                break (c, fk, ct);
+                break (c, fk, ct, count);
             }
         };
         let meta = json!({ "name": name, "mime_type": null }).to_string();
@@ -126,7 +163,7 @@ impl Fixture {
             "id": id,
             "name_encrypted": name_encrypted,
             "is_folder": is_folder,
-            "chunk_count": if is_folder { 0 } else { 1 },
+            "chunk_count": if is_folder { 0 } else { count },
             "size_bytes": body.len(),
             "file_request_id": REQUEST_ID,
             "sender_ephemeral_pubkey": b64().encode(sealed.e_pub),
@@ -139,9 +176,70 @@ impl Fixture {
             .or_default()
             .push(id.clone());
         if !is_folder {
-            self.served.bodies.insert(id.clone(), (ct, body.len()));
+            self.served.bodies.insert(
+                id.clone(),
+                Body {
+                    data: ct,
+                    size: body.len(),
+                    count,
+                    chunk_size: header,
+                },
+            );
         }
         id
+    }
+
+    /// A multi-chunk request upload (see [`Self::add_request_item_chunked`]).
+    fn add_request_file_chunked(
+        &mut self,
+        parent: &str,
+        name: &str,
+        body: &[u8],
+        chunk: usize,
+        send_header: bool,
+    ) -> String {
+        let header = send_header.then_some(chunk as u64);
+        self.add_request_item_chunked(parent, name, false, body, Some(chunk), header)
+    }
+
+    /// An ordinary file whose body is not valid ciphertext under any key.
+    fn add_corrupt_file(&mut self, parent: &str, name: &str) -> String {
+        let id = self.add_plain_row(parent, name);
+        self.served.bodies.insert(
+            id.clone(),
+            Body {
+                data: vec![0xAB; 96],
+                size: 68,
+                count: 1,
+                chunk_size: None,
+            },
+        );
+        id
+    }
+
+    /// A file row the server lists but cannot serve (download answers 404).
+    fn add_plain_row(&mut self, parent: &str, name: &str) -> String {
+        let id = self.fresh_id();
+        let row = json!({
+            "id": id, "name_encrypted": name, "is_folder": false, "chunk_count": 1, "size_bytes": 68,
+        });
+        self.served.rows.insert(id.clone(), row);
+        self.served
+            .children
+            .entry(parent.to_string())
+            .or_default()
+            .push(id.clone());
+        id
+    }
+
+    /// List the existing item `child` under `parent` as well (a hostile server
+    /// can hand back a folder cycle).
+    fn link_child(&mut self, parent: &str, child: &str) {
+        self.served
+            .children
+            .entry(parent.to_string())
+            .or_default()
+            .push(child.to_string());
     }
 
     fn add_request_file(&mut self, parent: &str, name: &str, body: &[u8]) -> String {
@@ -199,8 +297,21 @@ impl Fixture {
                 break chunk.data;
             }
         };
-        self.served.bodies.insert(id.clone(), (data, body.len()));
+        self.served.bodies.insert(
+            id.clone(),
+            Body {
+                data,
+                size: body.len(),
+                count: 1,
+                chunk_size: None,
+            },
+        );
         id
+    }
+
+    /// Make `GET /file-requests` fail, so the request keys cannot be loaded.
+    fn fail_requests_endpoint(&mut self) {
+        self.served.requests_fail = true;
     }
 
     fn serve(self) -> String {
@@ -229,20 +340,24 @@ impl Fixture {
                 }
                 async fn download(State(s): State<Arc<Served>>, AxPath(id): AxPath<String>) -> impl IntoResponse {
                     match s.bodies.get(&id) {
-                        Some((body, size)) => (
-                            [
-                                (header::CONTENT_TYPE, "application/octet-stream".to_string()),
-                                (header::HeaderName::from_static("x-chunk-count"), "1".to_string()),
-                                (header::HeaderName::from_static("x-original-size"), size.to_string()),
-                            ],
-                            body.clone(),
-                        )
-                            .into_response(),
+                        Some(b) => {
+                            let mut h = header::HeaderMap::new();
+                            h.insert(header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
+                            h.insert("x-chunk-count", b.count.to_string().parse().unwrap());
+                            h.insert("x-original-size", b.size.to_string().parse().unwrap());
+                            if let Some(cs) = b.chunk_size {
+                                h.insert("x-chunk-size", cs.to_string().parse().unwrap());
+                            }
+                            (h, b.data.clone()).into_response()
+                        }
                         None => (StatusCode::NOT_FOUND, "not found").into_response(),
                     }
                 }
                 async fn requests(State(s): State<Arc<Served>>) -> impl IntoResponse {
-                    Json(s.requests.clone())
+                    if s.requests_fail {
+                        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "boom" }))).into_response();
+                    }
+                    Json(s.requests.clone()).into_response()
                 }
                 let app = Router::new()
                     .route("/api/v1/files", get(list))
@@ -321,6 +436,35 @@ impl Scratch {
             .stdin(Stdio::null())
             .output()
             .expect("run bb")
+    }
+
+    /// As [`Self::bb`], but killed (own child PID) after `secs` seconds.
+    /// `None` = it did not finish in time.
+    fn bb_timeout(&self, args: &[&str], secs: u64) -> Option<Output> {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_bb"))
+            .args(args)
+            .current_dir(&self.cwd)
+            .env("HOME", &self.home)
+            .env("XDG_CONFIG_HOME", self.home.join(".config"))
+            .env("BB_NO_UPDATE", "1")
+            .env("NO_COLOR", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn bb");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+        loop {
+            if child.try_wait().expect("try_wait").is_some() {
+                return Some(child.wait_with_output().expect("collect output"));
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 
     /// Every path in the scratch tree EXCEPT the contents of `out/` (symlinks
@@ -791,4 +935,387 @@ fn zip_pull_leaves_hostile_names_out_of_the_archive() {
         describe(&out)
     );
     assert_eq!(out.status.code(), Some(3), "{}", describe(&out));
+}
+
+/// Read every entry of a zip archive into `name -> bytes`.
+fn read_zip(path: &Path) -> HashMap<String, Vec<u8>> {
+    use std::io::Read;
+    let f = std::fs::File::open(path).unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
+    let mut z = zip::ZipArchive::new(f).expect("valid zip archive");
+    (0..z.len())
+        .map(|i| {
+            let mut e = z.by_index(i).unwrap();
+            let mut buf = Vec::new();
+            e.read_to_end(&mut buf).unwrap();
+            (e.name().to_string(), buf)
+        })
+        .collect()
+}
+
+/// Task 1760: `bb pull --zip` on a folder holding a file-request upload used
+/// to die with `zip failed: decryption failed` (the zip path only knew the
+/// master-key derivation). The entry must carry the DECRYPTED name + content.
+#[test]
+fn zip_pull_decrypts_request_uploads() {
+    let mut fx = Fixture::new();
+    let vault = fx.add_plain_folder("", "vault");
+    fx.add_request_file(&vault, "from-stranger.txt", b"sent through a file request\n");
+    let sub = fx.add_request_folder(&vault, "inbox");
+    fx.add_request_file(&sub, "nested \u{00e9}.txt", b"nested request upload\n");
+    fx.add_plain_file(&vault, "mine.txt", BENIGN);
+    let url = fx.serve();
+    let s = Scratch::new("zip-req", &url);
+
+    let out = s.bb(&["pull", "vault", "--zip", "-o", "out.zip"]);
+
+    assert!(out.status.success(), "{}", describe(&out));
+    let entries = read_zip(&s.cwd.join("out.zip"));
+    assert_eq!(
+        entries.get("vault/from-stranger.txt").map(Vec::as_slice),
+        Some(&b"sent through a file request\n"[..]),
+        "request upload missing or wrong in archive: {:?}\n{}",
+        entries.keys().collect::<Vec<_>>(),
+        describe(&out)
+    );
+    assert_eq!(
+        entries.get("vault/inbox/nested \u{00e9}.txt").map(Vec::as_slice),
+        Some(&b"nested request upload\n"[..])
+    );
+    assert_eq!(entries.get("vault/mine.txt").map(Vec::as_slice), Some(BENIGN));
+    assert_eq!(
+        entries.len(),
+        3,
+        "unexpected entries: {:?}",
+        entries.keys().collect::<Vec<_>>()
+    );
+}
+
+/// Task 1760 x 1733: the request-key branch must not reopen the zip-slip hole.
+/// A request upload whose DECRYPTED name is `../..` is left out and flagged.
+#[test]
+fn zip_pull_keeps_safe_path_checks_on_request_names() {
+    let mut fx = Fixture::new();
+    let vault = fx.add_plain_folder("", "vault");
+    fx.add_request_file(&vault, "../../zipslip-req-marker.txt", PAYLOAD);
+    fx.add_request_file(&vault, "good.txt", BENIGN);
+    let url = fx.serve();
+    let s = Scratch::new("zip-req-evil", &url);
+
+    let out = s.bb(&["pull", "vault", "--zip", "-o", "out.zip"]);
+
+    let entries = read_zip(&s.cwd.join("out.zip"));
+    assert_eq!(
+        entries.get("vault/good.txt").map(Vec::as_slice),
+        Some(BENIGN),
+        "{}",
+        describe(&out)
+    );
+    assert!(
+        entries.keys().all(|k| !k.contains("zipslip")),
+        "hostile request name reached the archive: {:?}",
+        entries.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(out.status.code(), Some(3), "{}", describe(&out));
+}
+
+// ---------------------------------------------------------------------------
+// Task 1760 round 2
+// ---------------------------------------------------------------------------
+
+/// Archive entry names, sorted (unlike [`read_zip`], duplicates stay visible).
+fn zip_names(path: &Path) -> Vec<String> {
+    let f = std::fs::File::open(path).unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
+    let mut z = zip::ZipArchive::new(f).expect("valid zip archive");
+    let mut names: Vec<String> = (0..z.len())
+        .map(|i| z.by_index(i).unwrap().name().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+/// A deterministic body that is not a multiple of any chunk size used below.
+fn uneven_body(len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i % 251) as u8).collect()
+}
+
+/// P1-b: a multi-chunk request upload whose last chunk is shorter than the rest
+/// (every real upload whose size is not a chunk multiple). The chunk size is
+/// 100_000: not a power of two, so blind probing would burn its whole budget
+/// before reaching it. The server's `X-Chunk-Size` header is authoritative, and
+/// the zip path has to use it.
+#[test]
+fn zip_pull_decrypts_multichunk_request_upload_using_the_chunk_size_header() {
+    let body = uneven_body(350_001);
+    let mut fx = Fixture::new();
+    let vault = fx.add_plain_folder("", "vault");
+    fx.add_request_file_chunked(&vault, "big.bin", &body, 100_000, true);
+    fx.add_request_file(&vault, "ok.txt", BENIGN);
+    let url = fx.serve();
+    let s = Scratch::new("zip-multichunk-header", &url);
+
+    let out = s.bb(&["pull", "vault", "--zip", "-o", "out.zip"]);
+
+    assert!(out.status.success(), "{}", describe(&out));
+    let entries = read_zip(&s.cwd.join("out.zip"));
+    assert_eq!(
+        entries.get("vault/big.bin").map(Vec::as_slice),
+        Some(body.as_slice()),
+        "multi-chunk upload wrong or missing: {:?}\n{}",
+        entries.keys().collect::<Vec<_>>(),
+        describe(&out)
+    );
+    assert_eq!(entries.get("vault/ok.txt").map(Vec::as_slice), Some(BENIGN));
+}
+
+/// P1-b, legacy responses: no `X-Chunk-Size`; a power-of-two chunk size is
+/// recovered by AEAD-validated probing (task 1759's frame-size logic).
+#[test]
+fn zip_pull_decrypts_multichunk_request_upload_without_the_header() {
+    let body = uneven_body(2_500);
+    let mut fx = Fixture::new();
+    let vault = fx.add_plain_folder("", "vault");
+    fx.add_request_file_chunked(&vault, "big.bin", &body, 1024, false);
+    let url = fx.serve();
+    let s = Scratch::new("zip-multichunk-probe", &url);
+
+    let out = s.bb(&["pull", "vault", "--zip", "-o", "out.zip"]);
+
+    assert!(out.status.success(), "{}", describe(&out));
+    let entries = read_zip(&s.cwd.join("out.zip"));
+    assert_eq!(entries.get("vault/big.bin").map(Vec::as_slice), Some(body.as_slice()));
+}
+
+/// P1-c: an uploader controls the names, so two uploads called `scan.pdf` (or
+/// `A.txt` / `a.txt`, which collide on macOS and Windows) must not abort the
+/// archive or overwrite each other on extraction. Later ones get `name (2).ext`,
+/// per directory, and no two entries may differ only by case.
+#[test]
+fn zip_pull_dedupes_duplicate_and_case_colliding_names() {
+    let mut fx = Fixture::new();
+    let vault = fx.add_plain_folder("", "vault");
+    fx.add_request_file(&vault, "scan.pdf", b"first scan\n");
+    fx.add_request_file(&vault, "scan.pdf", b"second scan\n");
+    fx.add_request_file(&vault, "A.txt", b"upper\n");
+    fx.add_request_file(&vault, "a.txt", b"lower\n");
+    let first = fx.add_request_folder(&vault, "inbox");
+    fx.add_request_file(&first, "scan.pdf", b"in inbox\n");
+    let second = fx.add_request_folder(&vault, "inbox");
+    fx.add_request_file(&second, "note.txt", b"in the second inbox\n");
+    let url = fx.serve();
+    let s = Scratch::new("zip-dupes", &url);
+
+    let out = s.bb(&["pull", "vault", "--zip", "-o", "out.zip"]);
+
+    assert!(out.status.success(), "{}", describe(&out));
+    let names = zip_names(&s.cwd.join("out.zip"));
+    assert_eq!(
+        names,
+        vec![
+            "vault/A.txt",
+            "vault/a (2).txt",
+            "vault/inbox (2)/note.txt",
+            "vault/inbox/scan.pdf",
+            "vault/scan (2).pdf",
+            "vault/scan.pdf",
+        ],
+        "{}",
+        describe(&out)
+    );
+    let lower: BTreeSet<String> = names.iter().map(|n| n.to_lowercase()).collect();
+    assert_eq!(lower.len(), names.len(), "case-insensitive collision in {names:?}");
+    let entries = read_zip(&s.cwd.join("out.zip"));
+    assert_eq!(entries["vault/scan.pdf"], b"first scan\n");
+    assert_eq!(entries["vault/scan (2).pdf"], b"second scan\n");
+    assert_eq!(entries["vault/a (2).txt"], b"lower\n");
+}
+
+/// P2-d: a file that cannot be decrypted is left out and flagged (exit 3), the
+/// rest of the archive is still written.
+#[test]
+fn zip_pull_skips_and_flags_an_undecryptable_item() {
+    let mut fx = Fixture::new();
+    let vault = fx.add_plain_folder("", "vault");
+    fx.add_corrupt_file(&vault, "broken.bin");
+    fx.add_request_file(&vault, "ok.txt", BENIGN);
+    let url = fx.serve();
+    let s = Scratch::new("zip-corrupt", &url);
+
+    let out = s.bb(&["pull", "vault", "--zip", "-o", "out.zip"]);
+
+    assert_eq!(out.status.code(), Some(3), "{}", describe(&out));
+    let entries = read_zip(&s.cwd.join("out.zip"));
+    assert_eq!(
+        entries.keys().cloned().collect::<Vec<_>>(),
+        vec!["vault/ok.txt".to_string()],
+        "{}",
+        describe(&out)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("broken.bin"),
+        "the skipped item is not named\n{}",
+        describe(&out)
+    );
+}
+
+/// P2-d: `--force` over a good archive must not leave a truncated zip behind
+/// when the run produces nothing (here: the only item cannot be decrypted).
+#[test]
+fn zip_force_failure_keeps_the_existing_archive() {
+    let mut fx = Fixture::new();
+    let vault = fx.add_plain_folder("", "vault");
+    fx.add_corrupt_file(&vault, "broken.bin");
+    let url = fx.serve();
+    let s = Scratch::new("zip-force-keeps", &url);
+    std::fs::write(s.cwd.join("out.zip"), b"PRECIOUS EXISTING ARCHIVE").unwrap();
+
+    let out = s.bb(&["pull", "vault", "--zip", "--force", "-o", "out.zip"]);
+
+    assert!(!out.status.success(), "{}", describe(&out));
+    assert_eq!(
+        std::fs::read(s.cwd.join("out.zip")).unwrap(),
+        b"PRECIOUS EXISTING ARCHIVE",
+        "the existing archive was clobbered\n{}",
+        describe(&out)
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(&s.cwd)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "out.zip")
+        .collect();
+    assert!(leftovers.is_empty(), "temp file left behind: {leftovers:?}");
+}
+
+/// P2-d: a download that fails after the archive is under way (404 on the
+/// second file) must also leave the existing archive alone and clean up.
+#[test]
+fn zip_force_mid_run_download_failure_keeps_the_existing_archive() {
+    let mut fx = Fixture::new();
+    let vault = fx.add_plain_folder("", "vault");
+    fx.add_request_file(&vault, "ok.txt", BENIGN);
+    fx.add_plain_row(&vault, "vanished.bin");
+    let url = fx.serve();
+    let s = Scratch::new("zip-force-mid", &url);
+    std::fs::write(s.cwd.join("out.zip"), b"PRECIOUS EXISTING ARCHIVE").unwrap();
+
+    let out = s.bb(&["pull", "vault", "--zip", "--force", "-o", "out.zip"]);
+
+    assert!(!out.status.success(), "{}", describe(&out));
+    assert_eq!(
+        std::fs::read(s.cwd.join("out.zip")).unwrap(),
+        b"PRECIOUS EXISTING ARCHIVE",
+        "{}",
+        describe(&out)
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(&s.cwd)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "out.zip")
+        .collect();
+    assert!(leftovers.is_empty(), "temp file left behind: {leftovers:?}");
+}
+
+/// P2-g: when the request keys cannot be loaded, say so ONCE (not once per
+/// file, not never); the request uploads are left out and flagged.
+#[test]
+fn zip_pull_warns_once_when_request_keys_cannot_be_loaded() {
+    let mut fx = Fixture::new();
+    let vault = fx.add_plain_folder("", "vault");
+    fx.add_request_file(&vault, "one.txt", b"1\n");
+    fx.add_request_file(&vault, "two.txt", b"2\n");
+    fx.add_plain_file(&vault, "mine.txt", BENIGN);
+    fx.fail_requests_endpoint();
+    let url = fx.serve();
+    let s = Scratch::new("zip-keys-fail", &url);
+
+    let out = s.bb(&["pull", "vault", "--zip", "-o", "out.zip"]);
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        stderr.matches("could not load your file-request keys").count(),
+        1,
+        "{}",
+        describe(&out)
+    );
+    assert_eq!(out.status.code(), Some(3), "{}", describe(&out));
+    let entries = read_zip(&s.cwd.join("out.zip"));
+    assert_eq!(
+        entries.keys().cloned().collect::<Vec<_>>(),
+        vec!["vault/mine.txt".to_string()]
+    );
+}
+
+/// P2-h: names that are fine on this host but break on Windows (device names,
+/// trailing dot/space, `:` streams, reserved characters) or spoof a file type
+/// (bidi override) are made safe in the archive, not passed through. Nothing is
+/// lost: every file is still in the archive, just under a safe name.
+#[test]
+fn zip_pull_makes_windows_unsafe_names_safe() {
+    let mut fx = Fixture::new();
+    let vault = fx.add_plain_folder("", "vault");
+    for (i, name) in [
+        "CON.txt",
+        "nul",
+        "report.",
+        "trail ",
+        "ab:c.txt",
+        "evil\u{202e}fdp.exe",
+        "q?.txt",
+        "ads.txt:stream",
+    ]
+    .iter()
+    .enumerate()
+    {
+        fx.add_request_file(&vault, name, format!("body {i}\n").as_bytes());
+    }
+    fx.add_request_file(&vault, "ok.txt", BENIGN);
+    let url = fx.serve();
+    let s = Scratch::new("zip-winnames", &url);
+
+    let out = s.bb(&["pull", "vault", "--zip", "-o", "out.zip"]);
+
+    assert!(out.status.success(), "{}", describe(&out));
+    assert_eq!(
+        zip_names(&s.cwd.join("out.zip")),
+        vec![
+            "vault/_CON.txt",
+            "vault/_nul",
+            "vault/ab_c.txt",
+            "vault/ads.txt_stream",
+            "vault/evilfdp.exe",
+            "vault/ok.txt",
+            "vault/q_.txt",
+            "vault/report_",
+            "vault/trail_",
+        ],
+        "{}",
+        describe(&out)
+    );
+}
+
+/// P2-i: a hostile server can list a folder inside itself. The walk must stop,
+/// flag the cycle, and still produce the archive for everything else.
+#[test]
+fn zip_pull_survives_a_folder_cycle() {
+    let mut fx = Fixture::new();
+    let vault = fx.add_plain_folder("", "vault");
+    fx.add_request_file(&vault, "ok.txt", BENIGN);
+    let sub = fx.add_plain_folder(&vault, "sub");
+    fx.add_request_file(&sub, "inner.txt", b"inner\n");
+    fx.link_child(&sub, &vault);
+    let url = fx.serve();
+    let s = Scratch::new("zip-cycle", &url);
+
+    let out = s
+        .bb_timeout(&["pull", "vault", "--zip", "-o", "out.zip"], 20)
+        .expect("bb pull --zip did not terminate on a folder cycle");
+
+    assert_eq!(out.status.code(), Some(3), "{}", describe(&out));
+    assert_eq!(
+        zip_names(&s.cwd.join("out.zip")),
+        vec!["vault/ok.txt", "vault/sub/inner.txt"],
+        "{}",
+        describe(&out)
+    );
 }

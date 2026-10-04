@@ -525,6 +525,16 @@ pub struct RequestKeyResolver {
 }
 
 impl RequestKeyResolver {
+    /// A resolver that knows no request keys: every request upload resolves to
+    /// `None`. Stands in when `GET /file-requests` failed, so the failure is
+    /// reported once instead of being retried (and swallowed) for every file.
+    pub fn empty() -> Self {
+        Self {
+            wrapped: std::collections::HashMap::new(),
+            privs: std::collections::HashMap::new(),
+        }
+    }
+
     /// Build by fetching `GET /api/v1/file-requests`. Empty (but valid) when the
     /// user owns no requests.
     pub async fn load(api: &ApiClient) -> Result<Self, String> {

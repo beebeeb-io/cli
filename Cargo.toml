@@ -37,6 +37,8 @@ rpassword = "7"
 hostname = "0.4"
 rand = "0.8"
 base64 = "0.22"
+# Archive writer for `bb pull --zip` (same version/features as beebeeb-core: no new crate in the lockfile).
+zip = { version = "8", default-features = false, features = ["deflate"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 # Login handshake crypto (P-256 ECDH + HKDF-SHA256 + AES-256-GCM) now lives in
 # beebeeb-core::cli_auth — the CLI no longer pulls p256/aes-gcm/hkdf directly.

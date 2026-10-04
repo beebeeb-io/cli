@@ -1,8 +1,6 @@
 use colored::Colorize;
-use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 
 use crate::api::ApiClient;
 use crate::commands::push::load_master_key;
@@ -424,7 +422,18 @@ async fn resolve_request_key(
         return None;
     }
     if request_keys.is_none() {
-        *request_keys = crate::commands::request::RequestKeyResolver::load(api).await.ok();
+        *request_keys = Some(match crate::commands::request::RequestKeyResolver::load(api).await {
+            Ok(rk) => rk,
+            Err(e) => {
+                // Say so once; an empty resolver stops every later request
+                // upload from retrying (and failing silently) on its own.
+                eprintln!(
+                    "  {} could not load your file-request keys ({e}); files received through a file request cannot be decrypted in this run",
+                    "!".custom_color(crate::colors::AMBER)
+                );
+                crate::commands::request::RequestKeyResolver::empty()
+            }
+        });
     }
     request_keys.as_mut().and_then(|rk| rk.content_key(master_key, file))
 }
@@ -524,16 +533,22 @@ async fn pull_single_file(
 }
 
 // ---------------------------------------------------------------------------
-// --zip: download folder as a streaming zip archive
+// --zip: download folder as a zip archive
 // ---------------------------------------------------------------------------
+
+/// How deep `--zip` follows folders. A real vault is a few levels deep; a
+/// server that nests folders without end (or lists a folder inside itself) must
+/// not make the walk recurse until the process dies.
+const MAX_ZIP_DEPTH: usize = 64;
 
 /// The top-level folder name is both the archive prefix and the default output
 /// name, so it needs the same single-safe-component check as every descendant
 /// (task 1733 round 2): `..` would make a child the zip entry `../child`.
+/// Names that are only unsafe on Windows are rewritten (see
+/// [`crate::safe_path::archive_component`]).
 fn zip_root_name(name: &str) -> Result<String, String> {
-    crate::safe_path::check_component(name, crate::safe_path::Rules::Portable)
-        .map_err(|e| format!("folder name {name:?} is not safe to use as an archive name ({e}); refusing to zip it"))?;
-    Ok(name.to_string())
+    crate::safe_path::archive_component(name)
+        .map_err(|e| format!("folder name {name:?} is not safe to use as an archive name ({e}); refusing to zip it"))
 }
 
 /// Resolve the argument as a folder and download all its files into a zip archive.
@@ -559,15 +574,26 @@ async fn run_zip(api: &ApiClient, path_arg: &str, output: Option<PathBuf>, force
     let out_path = output.unwrap_or_else(|| PathBuf::from(&zip_filename));
     guard_existing_output(&out_path, force)?;
 
-    // Recursively collect all files in the folder tree.
-    let mut zip_skipped = 0usize;
-    let entries = collect_zip_entries(api, &master_key, &folder_id, &folder_name, &mut zip_skipped).await?;
+    // Recursively collect all files in the folder tree. One walker for the whole
+    // tree: file-request uploads are sealed to a per-file content key, not the
+    // master key (task 1760), and its resolver fetches `GET /file-requests` once
+    // and unwraps each R_priv once.
+    let mut walk = ZipWalk {
+        api,
+        master_key: &master_key,
+        request_keys: None,
+        skipped: 0,
+        ancestors: Vec::new(),
+        items: Vec::new(),
+    };
+    walk.collect(&folder_id, &folder_name).await?;
+    let ZipWalk { items, mut skipped, .. } = walk;
 
-    if entries.is_empty() {
+    if items.is_empty() {
         return Err(format!("folder '{}' is empty — nothing to zip.", folder_name));
     }
 
-    let total_size: u64 = entries.iter().map(|e| e.size_bytes).sum();
+    let total_size: u64 = items.iter().map(|e| e.entry.size_bytes).sum();
 
     // Summary line
     if crate::ui::is_rich() {
@@ -575,95 +601,26 @@ async fn run_zip(api: &ApiClient, path_arg: &str, output: Option<PathBuf>, force
             "  {} {} ({} {} {})",
             "\u{2193}".custom_color(crate::colors::GREEN_OK),
             format!("Downloading {}", folder_name).custom_color(crate::colors::INK),
-            format!("{} files", entries.len()).custom_color(crate::colors::INK_DIM),
+            format!("{} files", items.len()).custom_color(crate::colors::INK_DIM),
             "\u{00b7}".custom_color(crate::colors::INK_DIM),
             crate::ui::human_size(total_size).custom_color(crate::colors::INK_DIM),
         );
     }
 
-    // Download all encrypted blobs upfront into a HashMap.
-    // stream_folder_zip is synchronous and needs all data available via the
-    // blocking fetch_chunk callback. This is fine for v1 — CLI has plenty of RAM.
-    let mut blob_cache: HashMap<String, Vec<u8>> = HashMap::new();
-    let dl_start = std::time::Instant::now();
+    // The archive is written to a sibling temp file and renamed over `out_path`
+    // only when it is complete: a failed run (or `--force` over a good archive)
+    // never leaves a truncated zip behind. Dropping the guard removes the temp.
+    let mut temp = TempArchive::create(&out_path)?;
+    let file = temp.take_file();
 
-    for (i, entry) in entries.iter().enumerate() {
-        if crate::ui::is_rich() {
-            eprint!(
-                "\r    {} {}/{}  {}",
-                "fetching".custom_color(crate::colors::INK_DIM),
-                (i + 1).to_string().custom_color(crate::colors::INK),
-                entries.len().to_string().custom_color(crate::colors::INK_DIM),
-                entry.path.custom_color(crate::colors::INK_DIM),
-            );
-        }
-        let blob = api.download_file(&entry.file_id).await?;
-        blob_cache.insert(entry.file_id.clone(), blob);
-    }
-
-    let dl_elapsed = dl_start.elapsed();
-
-    if crate::ui::is_rich() {
-        // Clear the fetching line
-        eprint!("\r{}\r", " ".repeat(80));
-    }
-
-    // Create the output file
-    let file = std::fs::File::create(&out_path).map_err(|e| format!("failed to create {}: {e}", out_path.display()))?;
-
-    // Build the fetch_chunk callback.
-    // For single-chunk files (chunk_count=1, the vast majority), the entire blob
-    // IS the one chunk. For multi-chunk files, we split by uniform chunk size
-    // (each raw chunk = nonce(12) + ciphertext(plaintext_chunk + 16)).
-    //
-    // NOTE: stream_folder_zip uses decrypt_chunk_raw which expects raw
-    // nonce||ciphertext format. CLI-uploaded files may use JSON EncryptedBlob
-    // format. For v1, this works with web-uploaded files (raw format) and
-    // single-chunk CLI files where we detect and convert JSON blobs.
-    // Multi-chunk CLI-uploaded files with JSON format need future work.
-    let mut fetch_chunk = |file_id: &str, chunk_idx: u32| -> Result<Vec<u8>, beebeeb_core::CoreError> {
-        let blob = blob_cache
-            .get(file_id)
-            .ok_or_else(|| beebeeb_core::CoreError::Io(format!("no cached blob for {file_id}")))?;
-
-        let entry = entries
-            .iter()
-            .find(|e| e.file_id == file_id)
-            .ok_or_else(|| beebeeb_core::CoreError::Io(format!("no entry for {file_id}")))?;
-
-        if entry.chunk_count <= 1 {
-            // Single-chunk: return the entire blob as chunk 0.
-            return Ok(blob.clone());
-        }
-
-        // Multi-chunk: split evenly, last chunk takes the remainder.
-        // Each chunk is nonce(12) + ciphertext, and all but the last are the same size.
-        let count = entry.chunk_count as usize;
-        let chunk_size = blob.len() / count;
-        let idx = chunk_idx as usize;
-
-        let start = idx * chunk_size;
-        let end = if idx == count - 1 {
-            blob.len()
-        } else {
-            start + chunk_size
-        };
-
-        if start >= blob.len() {
-            return Err(beebeeb_core::CoreError::Io(format!(
-                "chunk {chunk_idx} out of range for {file_id}"
-            )));
-        }
-
-        Ok(blob[start..end].to_vec())
-    };
-
-    // Progress callback
-    let zip_start = std::time::Instant::now();
+    // The archive is written here, not by `beebeeb_core::zip::stream_folder_zip`:
+    // that function derives every entry's key from the master key and the file
+    // id, so it cannot open a file-request upload (task 1760). Follow-up: let
+    // core take a per-entry key, then this can call it again.
     let on_progress = |progress: &beebeeb_core::zip::ZipProgress| {
         if crate::ui::is_rich() {
             let pct = if progress.bytes_total > 0 {
-                (progress.bytes_done as f64 / progress.bytes_total as f64 * 100.0) as u64
+                ((progress.bytes_done as f64 / progress.bytes_total as f64 * 100.0) as u64).min(100)
             } else {
                 0
             };
@@ -677,22 +634,72 @@ async fn run_zip(api: &ApiClient, path_arg: &str, output: Option<PathBuf>, force
             );
         }
     };
+    let mut sink = ZipSink::new(file, total_size, items.len());
 
-    let cancel = AtomicBool::new(false);
+    // One file at a time: fetch, decrypt, write, drop. Peak memory is the
+    // largest single file, not the whole folder.
+    let mut dl_elapsed = std::time::Duration::ZERO;
+    let mut zip_elapsed = std::time::Duration::ZERO;
+    for (i, item) in items.iter().enumerate() {
+        if crate::ui::is_rich() {
+            eprint!(
+                "\r    {} {}/{}  {}",
+                "fetching".custom_color(crate::colors::INK_DIM),
+                (i + 1).to_string().custom_color(crate::colors::INK),
+                items.len().to_string().custom_color(crate::colors::INK_DIM),
+                item.entry.path.custom_color(crate::colors::INK_DIM),
+            );
+        }
+        let t = std::time::Instant::now();
+        let (blob, chunk_size) = crate::download::download_buffered(api, &item.entry.file_id).await?;
+        dl_elapsed += t.elapsed();
 
-    beebeeb_core::zip::stream_folder_zip(&master_key, &entries, &mut fetch_chunk, file, &on_progress, &cancel)
-        .map_err(|e| format!("zip failed: {e}"))?;
+        let t = std::time::Instant::now();
+        let plaintext = match decrypt_zip_item(&master_key, item, &blob, chunk_size) {
+            Ok(p) => p,
+            Err(e) => {
+                warn_skipped(&format!("{:?}: {e}", item.entry.path));
+                skipped += 1;
+                continue;
+            }
+        };
+        drop(blob);
+        if let Err(e) = sink.add(i, &item.entry.path, &plaintext, &on_progress) {
+            // An entry that is not a safe archive path never reaches the writer;
+            // anything else is an I/O failure on the archive itself.
+            match e {
+                ZipAddError::UnsafePath(msg) => {
+                    warn_skipped(&format!("{:?}: {msg}", item.entry.path));
+                    skipped += 1;
+                }
+                ZipAddError::Write(msg) => return Err(format!("zip failed: {msg}")),
+            }
+        }
+        zip_elapsed += t.elapsed();
+    }
 
-    let zip_elapsed = zip_start.elapsed();
-    let total_elapsed = dl_start.elapsed();
+    if crate::ui::is_rich() {
+        // Clear the fetching/zipping line
+        eprint!("\r{}\r", " ".repeat(80));
+    }
+
+    let written = sink.written;
+    if written == 0 {
+        // Nothing made it into the archive: leave `out_path` exactly as it was.
+        return Err(crate::exit::with_code(
+            crate::exit::INCOMPLETE,
+            format!("no file could be added to the archive ({skipped} item(s) left out, see the warnings above)"),
+        ));
+    }
+    sink.finish().map_err(|e| format!("zip failed: {e}"))?;
+    temp.commit(&out_path, force)?;
+
+    let total_elapsed = dl_elapsed + zip_elapsed;
 
     // Get final file size
     let zip_size = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
 
     if crate::ui::is_rich() {
-        // Clear the zipping line
-        eprint!("\r{}\r", " ".repeat(80));
-
         println!(
             "  {} {}  {}  {:.1}s",
             "\u{2713}".custom_color(crate::colors::GREEN_OK),
@@ -704,7 +711,7 @@ async fn run_zip(api: &ApiClient, path_arg: &str, output: Option<PathBuf>, force
             "    {}",
             format!(
                 "{} files \u{00b7} {:.1}s download \u{00b7} {:.1}s zip",
-                entries.len(),
+                written,
                 dl_elapsed.as_secs_f64(),
                 zip_elapsed.as_secs_f64(),
             )
@@ -715,7 +722,7 @@ async fn run_zip(api: &ApiClient, path_arg: &str, output: Option<PathBuf>, force
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "folder": folder_name,
-                "file_count": entries.len(),
+                "file_count": written,
                 "total_size_bytes": total_size,
                 "zip_size_bytes": zip_size,
                 "download_ms": dl_elapsed.as_millis() as u64,
@@ -729,73 +736,306 @@ async fn run_zip(api: &ApiClient, path_arg: &str, output: Option<PathBuf>, force
         println!("{}", out_path.display());
     }
 
-    if zip_skipped > 0 {
+    if skipped > 0 {
         return Err(crate::exit::with_code(
             crate::exit::INCOMPLETE,
-            format!("{zip_skipped} item(s) were left out of the archive (unsafe names, see the warnings above)"),
+            format!(
+                "{skipped} item(s) were left out of the archive (unsafe names, folder loops, or files that could not be decrypted; see the warnings above)"
+            ),
         ));
     }
 
     Ok(())
 }
 
-/// Recursively walk a folder tree and build a flat list of ZipEntry items
-/// with paths relative to the top-level folder name (e.g. "Music/Old/track.flac").
-async fn collect_zip_entries(
-    api: &ApiClient,
+/// Decrypt one archive member. The result is wiped when dropped. It is decrypted
+/// whole, not chunk by chunk into the archive: the decrypt path falls back
+/// between the two on-wire formats, and a fallback after bytes were already
+/// written into the archive would corrupt it.
+fn decrypt_zip_item(
     master_key: &beebeeb_core::kdf::MasterKey,
-    folder_id: &str,
-    prefix: &str,
-    skipped: &mut usize,
-) -> Result<Vec<beebeeb_core::zip::ZipEntry>, String> {
-    let listing = api.list_files(Some(folder_id)).await?;
-    let files = listing
-        .get("files")
-        .and_then(|v| v.as_array())
-        .ok_or("invalid file listing response")?;
-
-    let mut entries = Vec::new();
-
-    for item in files {
-        let item_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
-        let is_folder = item.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
-        let name_enc = item.get("name_encrypted").and_then(|v| v.as_str()).unwrap_or("");
-        let size_bytes = item.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
-        let chunk_count = item.get("chunk_count").and_then(|v| v.as_i64()).unwrap_or(1) as u32;
-
-        let decrypted_name =
-            crate::crypto::decrypt_name(master_key, item_id, name_enc).unwrap_or_else(|| item_id.to_string());
-
-        // Zip entry paths are `prefix/name`: a server-provided name with `..` or
-        // a separator would be a zip-slip entry for whoever extracts the archive
-        // (task 1733), so only single safe components are accepted.
-        if let Err(e) = crate::safe_path::check_component(&decrypted_name, crate::safe_path::Rules::Portable) {
-            warn_skipped(&format!("{decrypted_name:?} in {prefix}: unsafe name ({e})"));
-            *skipped += 1;
-            continue;
+    item: &ZipItem,
+    blob: &[u8],
+    chunk_size: Option<u64>,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
+    let e = &item.entry;
+    let plaintext = match &item.content_key {
+        // File-request upload: the per-file content key opens it.
+        Some(c) => crate::crypto::try_decrypt_all_chunks_with_chunk_size(c, blob, e.chunk_count, chunk_size),
+        // Everything else goes through the master-key path every other `bb pull` uses.
+        None => {
+            crate::crypto::decrypt_file_chunks_with_chunk_size(master_key, &e.file_id, blob, e.chunk_count, chunk_size)
         }
-        let path = format!("{}/{}", prefix, decrypted_name);
+    }
+    .map_err(|err| format!("could not be decrypted ({err})"))?;
+    Ok(zeroize::Zeroizing::new(plaintext))
+}
 
-        if is_folder {
-            // Recurse into subfolders
-            let sub_entries = Box::pin(collect_zip_entries(api, master_key, item_id, &path, skipped)).await?;
-            entries.extend(sub_entries);
-        } else {
-            entries.push(beebeeb_core::zip::ZipEntry {
-                path,
-                file_id: item_id.to_string(),
-                chunk_count,
-                size_bytes,
-            });
+/// One archive member: the core `ZipEntry` plus, for a file-request upload,
+/// the per-file content key that opens it (`None` = master-key-derived).
+struct ZipItem {
+    entry: beebeeb_core::zip::ZipEntry,
+    content_key: Option<beebeeb_core::kdf::FileKey>,
+}
+
+enum ZipAddError {
+    /// The entry path is not a safe archive path; nothing was written.
+    UnsafePath(String),
+    /// Writing to the archive failed.
+    Write(String),
+}
+
+/// Archive writer: deflates plaintext into entries and reports progress in
+/// PLAINTEXT bytes (the unit `bytes_total` is summed in).
+struct ZipSink<W: std::io::Write + std::io::Seek> {
+    archive: zip::write::ZipWriter<W>,
+    bytes_done: u64,
+    bytes_total: u64,
+    file_count: usize,
+    /// Entries actually written.
+    written: usize,
+}
+
+impl<W: std::io::Write + std::io::Seek> ZipSink<W> {
+    fn new(writer: W, bytes_total: u64, file_count: usize) -> Self {
+        Self {
+            archive: zip::write::ZipWriter::new(writer),
+            bytes_done: 0,
+            bytes_total,
+            file_count,
+            written: 0,
         }
     }
 
-    Ok(entries)
+    fn add(
+        &mut self,
+        file_index: usize,
+        path: &str,
+        plaintext: &[u8],
+        on_progress: &dyn Fn(&beebeeb_core::zip::ZipProgress),
+    ) -> Result<(), ZipAddError> {
+        use std::io::Write as _;
+        // Defence in depth: the walk already vetted every component, but the
+        // writer is what puts the path into the archive, so it checks again.
+        check_archive_path(path).map_err(ZipAddError::UnsafePath)?;
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .compression_level(Some(6))
+            .large_file(plaintext.len() as u64 >= u32::MAX as u64);
+        self.archive
+            .start_file(path, options)
+            .map_err(|e| ZipAddError::Write(e.to_string()))?;
+        self.archive
+            .write_all(plaintext)
+            .map_err(|e| ZipAddError::Write(e.to_string()))?;
+        self.written += 1;
+        self.bytes_done += plaintext.len() as u64;
+        on_progress(&beebeeb_core::zip::ZipProgress {
+            bytes_done: self.bytes_done,
+            bytes_total: self.bytes_total,
+            file_index,
+            file_count: self.file_count,
+            current_file: path.to_string(),
+        });
+        Ok(())
+    }
+
+    fn finish(self) -> Result<W, String> {
+        self.archive.finish().map_err(|e| e.to_string())
+    }
+}
+
+/// Every `/`-separated component of an archive path must already be a safe
+/// archive name (unchanged by [`crate::safe_path::archive_component`]).
+fn check_archive_path(path: &str) -> Result<(), String> {
+    for seg in path.split('/') {
+        match crate::safe_path::archive_component(seg) {
+            Ok(ok) if ok == seg => {}
+            Ok(_) => return Err(format!("component {seg:?} is not a safe archive name")),
+            Err(e) => return Err(format!("unsafe archive path ({e})")),
+        }
+    }
+    Ok(())
+}
+
+/// The archive under construction: a sibling temp file that is removed on drop
+/// unless [`TempArchive::commit`] renamed it into place.
+struct TempArchive {
+    path: PathBuf,
+    file: Option<std::fs::File>,
+    done: bool,
+}
+
+impl TempArchive {
+    /// Create `.<name>.<pid>.partial` next to `dest` (same directory, so the
+    /// final rename cannot cross a filesystem). `create_new`: never reuses or
+    /// writes through something that is already there.
+    fn create(dest: &std::path::Path) -> Result<Self, String> {
+        let dir = match dest.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        let name = dest.file_name().and_then(|n| n.to_str()).unwrap_or("archive.zip");
+        let path = dir.join(format!(".{name}.{}.partial", std::process::id()));
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| format!("failed to create {}: {e}", path.display()))?;
+        Ok(Self {
+            path,
+            file: Some(file),
+            done: false,
+        })
+    }
+
+    fn take_file(&mut self) -> std::fs::File {
+        self.file.take().expect("temp archive file already taken")
+    }
+
+    /// Move the finished archive to `dest`. Without `--force` an archive that
+    /// appeared at `dest` while this run was working is not replaced.
+    fn commit(&mut self, dest: &std::path::Path, force: bool) -> Result<(), String> {
+        if !force && std::fs::symlink_metadata(dest).is_ok() {
+            return Err(format!(
+                "{} appeared while the archive was being written; not replacing it (pass --force to overwrite)",
+                dest.display()
+            ));
+        }
+        std::fs::rename(&self.path, dest).map_err(|e| format!("failed to write {}: {e}", dest.display()))?;
+        self.done = true;
+        Ok(())
+    }
+}
+
+impl Drop for TempArchive {
+    fn drop(&mut self) {
+        if !self.done {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Walks a folder tree and builds the flat list of archive members, with paths
+/// relative to the top-level folder name (e.g. "Music/Old/track.flac").
+struct ZipWalk<'a> {
+    api: &'a ApiClient,
+    master_key: &'a beebeeb_core::kdf::MasterKey,
+    request_keys: Option<crate::commands::request::RequestKeyResolver>,
+    /// Items left out (unsafe name, folder loop, too deep).
+    skipped: usize,
+    /// Folder ids from the root down to the folder being listed.
+    ancestors: Vec<String>,
+    items: Vec<ZipItem>,
+}
+
+impl ZipWalk<'_> {
+    async fn collect(&mut self, folder_id: &str, prefix: &str) -> Result<(), String> {
+        self.ancestors.push(folder_id.to_string());
+        let r = self.collect_level(folder_id, prefix).await;
+        self.ancestors.pop();
+        r
+    }
+
+    async fn collect_level(&mut self, folder_id: &str, prefix: &str) -> Result<(), String> {
+        let listing = self.api.list_files(Some(folder_id)).await?;
+        let files = listing
+            .get("files")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        // Names already taken in THIS directory, lowercased: macOS and Windows
+        // extract case-insensitively, and an uploader controls the names.
+        let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for item in &files {
+            let item_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            let name_enc = item.get("name_encrypted").and_then(|v| v.as_str()).unwrap_or("");
+            let is_folder = item.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
+            let size_bytes = item.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+            let chunk_count = item.get("chunk_count").and_then(|v| v.as_i64()).unwrap_or(1) as u32;
+
+            // Request-uploaded files decrypt their name (and later their chunks)
+            // with the per-file content key, like the non-zip folder pull.
+            let content_key = resolve_request_key(self.api, self.master_key, item, &mut self.request_keys).await;
+            let decrypted_name = content_key
+                .as_ref()
+                .and_then(|c| crate::crypto::decrypt_name_with_key(c, name_enc))
+                .or_else(|| crate::crypto::decrypt_name(self.master_key, item_id, name_enc))
+                .unwrap_or_else(|| item_id.to_string());
+
+            // Zip entry paths are `prefix/name`: a server-provided name with `..`
+            // or a separator would be a zip-slip entry for whoever extracts the
+            // archive (task 1733), so only single safe components are accepted.
+            // Names that are merely unsafe on Windows are rewritten, not dropped.
+            let safe_name = match crate::safe_path::archive_component(&decrypted_name) {
+                Ok(n) => n,
+                Err(e) => {
+                    warn_skipped(&format!("{decrypted_name:?} in {prefix}: unsafe name ({e})"));
+                    self.skipped += 1;
+                    continue;
+                }
+            };
+
+            if is_folder && (self.ancestors.iter().any(|a| a == item_id) || self.ancestors.len() >= MAX_ZIP_DEPTH) {
+                warn_skipped(&format!(
+                    "folder {decrypted_name:?} in {prefix}: it contains itself or nests more than {MAX_ZIP_DEPTH} levels deep"
+                ));
+                self.skipped += 1;
+                continue;
+            }
+
+            let unique = unique_name(&mut used, &safe_name);
+            if unique != decrypted_name {
+                eprintln!(
+                    "  {} {decrypted_name:?} in {prefix} is stored as {unique:?} (the name is not safe or unique on every system)",
+                    "!".custom_color(crate::colors::AMBER)
+                );
+            }
+            let path = format!("{prefix}/{unique}");
+
+            if is_folder {
+                // Recurse into subfolders
+                Box::pin(self.collect(item_id, &path)).await?;
+            } else {
+                self.items.push(ZipItem {
+                    entry: beebeeb_core::zip::ZipEntry {
+                        path,
+                        file_id: item_id.to_string(),
+                        chunk_count,
+                        size_bytes,
+                    },
+                    content_key,
+                });
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// `name`, or `stem (2).ext`, `stem (3).ext`, ... if its lowercase form is
+/// already in `used`. The chosen name is recorded in `used`.
+fn unique_name(used: &mut std::collections::HashSet<String>, name: &str) -> String {
+    let mut candidate = name.to_string();
+    let mut n = 1u32;
+    while used.contains(&candidate.to_lowercase()) {
+        n += 1;
+        candidate = match name.rfind('.') {
+            // A leading dot (".bashrc") is part of the stem, not an extension.
+            Some(i) if i > 0 && i + 1 < name.len() => format!("{} ({n}){}", &name[..i], &name[i..]),
+            _ => format!("{name} ({n})"),
+        };
+    }
+    used.insert(candidate.to_lowercase());
+    candidate
 }
 
 #[cfg(test)]
 mod tests {
-    use super::zip_root_name;
+    use super::{ZipSink, unique_name, zip_root_name};
+    use std::collections::HashSet;
 
     #[test]
     fn zip_root_name_rejects_hostile_names() {
@@ -807,5 +1047,52 @@ mod tests {
     #[test]
     fn zip_root_name_accepts_plain_names() {
         assert_eq!(zip_root_name("Photos 2026").unwrap(), "Photos 2026");
+    }
+
+    #[test]
+    fn zip_root_name_rewrites_windows_unsafe_names() {
+        assert_eq!(zip_root_name("CON").unwrap(), "_CON");
+        assert_eq!(zip_root_name("Meeting: notes?").unwrap(), "Meeting_ notes_");
+    }
+
+    #[test]
+    fn unique_name_suffixes_collisions_case_insensitively() {
+        let mut used = HashSet::new();
+        assert_eq!(unique_name(&mut used, "scan.pdf"), "scan.pdf");
+        assert_eq!(unique_name(&mut used, "scan.pdf"), "scan (2).pdf");
+        assert_eq!(unique_name(&mut used, "scan.pdf"), "scan (3).pdf");
+        assert_eq!(unique_name(&mut used, "SCAN.PDF"), "SCAN (4).PDF");
+        assert_eq!(unique_name(&mut used, "A.txt"), "A.txt");
+        assert_eq!(unique_name(&mut used, "a.txt"), "a (2).txt");
+        assert_eq!(unique_name(&mut used, "Makefile"), "Makefile");
+        assert_eq!(unique_name(&mut used, "makefile"), "makefile (2)");
+        assert_eq!(unique_name(&mut used, ".env"), ".env");
+        assert_eq!(unique_name(&mut used, ".ENV"), ".ENV (2)");
+        // A generated name can itself collide with a real one that comes later.
+        assert_eq!(unique_name(&mut used, "scan (2).pdf"), "scan (2) (2).pdf");
+    }
+
+    /// Progress is counted in PLAINTEXT bytes, the unit `bytes_total` is summed
+    /// in; counting the (larger) ciphertext pushed the percentage past 100.
+    #[test]
+    fn zip_progress_counts_plaintext_bytes() {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let on_progress = |p: &beebeeb_core::zip::ZipProgress| seen.borrow_mut().push((p.bytes_done, p.bytes_total));
+        let mut sink = ZipSink::new(std::io::Cursor::new(Vec::new()), 30, 2);
+        assert!(sink.add(0, "d/a.txt", &[1u8; 10], &on_progress).is_ok());
+        assert!(sink.add(1, "d/b.txt", &[2u8; 20], &on_progress).is_ok());
+        assert_eq!(*seen.borrow(), vec![(10, 30), (30, 30)]);
+        assert_eq!(sink.written, 2);
+    }
+
+    #[test]
+    fn zip_sink_refuses_unsafe_entry_paths() {
+        let on_progress = |_: &beebeeb_core::zip::ZipProgress| {};
+        let mut sink = ZipSink::new(std::io::Cursor::new(Vec::new()), 0, 1);
+        for bad in ["../x", "/abs", "d/../x", "d/CON", "d/a:b", "d/trail.", "d//x", ""] {
+            assert!(sink.add(0, bad, b"x", &on_progress).is_err(), "{bad:?} must be refused");
+        }
+        assert_eq!(sink.written, 0);
+        assert!(sink.add(0, "d/ok.txt", b"x", &on_progress).is_ok());
     }
 }
