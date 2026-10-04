@@ -198,13 +198,23 @@ pub fn try_decrypt_all_chunks(
         return Err("no data but chunk_count > 0".to_string());
     }
 
-    // Detect format: JSON blobs start with '{', raw binary does not.
-    if encrypted_bytes[0] == b'{' {
-        decrypt_json_chunks(file_key, encrypted_bytes, chunk_count)
+    // The first byte is only a HINT (task 1759): a raw chunk starts with a
+    // random nonce, so ~1 in 256 raw files begin with 0x7b ('{') and would be
+    // misrouted to the JSON parser. Try the hinted format first, then the
+    // other. A false success is impossible: every chunk is AEAD-authenticated,
+    // so a wrong parse can only fail, never yield wrong plaintext.
+    let (first, second): (ChunkParser, ChunkParser) = if encrypted_bytes[0] == b'{' {
+        (decrypt_json_chunks, decrypt_raw_chunks)
     } else {
-        decrypt_raw_chunks(file_key, encrypted_bytes, chunk_count)
+        (decrypt_raw_chunks, decrypt_json_chunks)
+    };
+    match first(file_key, encrypted_bytes, chunk_count) {
+        Ok(p) => Ok(p),
+        Err(e1) => second(file_key, encrypted_bytes, chunk_count).map_err(|_| e1),
     }
 }
+
+type ChunkParser = fn(&beebeeb_core::kdf::FileKey, &[u8], u32) -> Result<Vec<u8>, String>;
 
 /// Parse and decrypt CLI-format chunks: concatenated JSON `EncryptedBlob` objects.
 fn decrypt_json_chunks(
@@ -322,6 +332,48 @@ mod tests {
     use beebeeb_core::chunk_stream::ChunkDecryptor;
     use beebeeb_core::encrypt::{encrypt_chunk, encrypt_chunk_raw};
     use beebeeb_core::kdf::{MasterKey, derive_file_key, derive_master_key};
+
+    /// Task 1759: a raw-format file whose random nonce starts with 0x7b must
+    /// still decrypt (was misrouted to the JSON parser: "key must be a string").
+    #[test]
+    fn raw_chunk_with_brace_first_byte_decrypts() {
+        let m = mk();
+        let fk = derive_file_key(&m, FID.as_bytes());
+        let pt = b"nonce starts with a brace";
+        let frame = (0..100_000)
+            .map(|_| encrypt_chunk_raw(&fk, pt).unwrap())
+            .find(|f| f[0] == b'{')
+            .expect("a nonce starting with 0x7b within 100k tries");
+        assert_eq!(frame[0], 0x7b);
+        assert_eq!(try_decrypt_all_chunks(&fk, &frame, 1).unwrap(), pt);
+    }
+
+    /// Multi-chunk variant: only the first chunk's nonce byte matters.
+    #[test]
+    fn raw_multi_chunk_with_brace_first_byte_decrypts() {
+        let m = mk();
+        let fk = derive_file_key(&m, FID.as_bytes());
+        let first = (0..100_000)
+            .map(|_| encrypt_chunk_raw(&fk, b"AAAAAAAA").unwrap())
+            .find(|f| f[0] == b'{')
+            .unwrap();
+        let mut all = first;
+        all.extend(encrypt_chunk_raw(&fk, b"BBBBBBBB").unwrap());
+        assert_eq!(try_decrypt_all_chunks(&fk, &all, 2).unwrap(), b"AAAAAAAABBBBBBBB");
+    }
+
+    /// A wrong key must still fail on both parsers (no false success).
+    #[test]
+    fn brace_first_byte_wrong_key_still_fails() {
+        let m = mk();
+        let fk = derive_file_key(&m, FID.as_bytes());
+        let other = derive_file_key(&m, b"other");
+        let frame = (0..100_000)
+            .map(|_| encrypt_chunk_raw(&fk, b"x").unwrap())
+            .find(|f| f[0] == b'{')
+            .unwrap();
+        assert!(try_decrypt_all_chunks(&other, &frame, 1).is_err());
+    }
 
     // A fixed file id used across the legacy/dual-key tests.
     const FID: &str = "3e15382b-1111-2222-3333-444455556666";
