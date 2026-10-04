@@ -12,6 +12,7 @@ mod exit;
 mod loopback;
 mod path;
 mod resume;
+mod safe_path;
 mod thumbnail;
 mod tui;
 mod ui;

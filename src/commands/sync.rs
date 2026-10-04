@@ -226,7 +226,17 @@ fn reconcile_remote_deletions(
         match classify_remote_absent(local_files.get(&rel), prior.as_ref()) {
             RemoteAbsent::DeleteLocal => {
                 if !dry_run {
-                    let path = local_dir.join(&rel);
+                    // Same containment rule as downloads: never unlink outside the sync root.
+                    let path = match crate::safe_path::safe_rel_join(local_dir, &rel, crate::safe_path::Rules::Host) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            eprintln!(
+                                "  {} could not remove {rel:?}: {e}",
+                                "!".custom_color(crate::colors::AMBER)
+                            );
+                            continue;
+                        }
+                    };
                     // Best-effort unlink: a NotFound means the user already
                     // deleted it locally, which is fine.
                     if let Err(e) = std::fs::remove_file(&path) {
@@ -545,7 +555,17 @@ pub async fn run(
             }
         }
         if !local_folders.contains(folder_rel) {
-            let local_path = local_dir.join(folder_rel);
+            let local_path =
+                match crate::safe_path::safe_rel_join(&local_dir, folder_rel, crate::safe_path::Rules::Host) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!(
+                            "  {} skipped local folder {folder_rel:?}: {e}",
+                            "!".custom_color(crate::colors::AMBER)
+                        );
+                        continue;
+                    }
+                };
             if !dry_run {
                 std::fs::create_dir_all(&local_path).map_err(|e| format!("mkdir {}: {e}", local_path.display()))?;
             }
@@ -964,7 +984,16 @@ pub async fn run(
     // server is authoritative and the file is recoverable from server trash.
     for rel in &pending_remote_deletes {
         if !dry_run {
-            let path = local_dir.join(rel);
+            let path = match crate::safe_path::safe_rel_join(&local_dir, rel, crate::safe_path::Rules::Host) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!(
+                        "  {} could not remove {rel:?}: {e}",
+                        "!".custom_color(crate::colors::AMBER)
+                    );
+                    continue;
+                }
+            };
             match std::fs::remove_file(&path) {
                 Ok(()) => {}
                 // Already gone locally (e.g. user deleted both sides): fine.
@@ -2344,6 +2373,18 @@ async fn walk_remote(
             None => continue,
         };
 
+        // A remote name becomes a local path segment (and part of every `rel`
+        // below), so a name that could climb out of the sync root or smuggle a
+        // separator is skipped with a warning, never joined (task 1733).
+        if let Err(e) = crate::safe_path::check_component(&name, crate::safe_path::Rules::Host) {
+            eprintln!(
+                "  {} skipped remote {} {name:?}: unsafe name ({e})",
+                "!".custom_color(crate::colors::AMBER),
+                if is_folder { "folder" } else { "file" },
+            );
+            continue;
+        }
+
         if let Some(pb) = scan {
             pb.inc(1);
         }
@@ -2453,7 +2494,18 @@ async fn do_download(
         return Ok(());
     }
 
-    let out_path = local_dir.join(rel);
+    // Resolve the destination through the containment check: a symlinked
+    // subdirectory inside the sync root must not redirect a download elsewhere.
+    let out_path = match crate::safe_path::safe_rel_join(local_dir, rel, crate::safe_path::Rules::Host) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "  {} skipped download of {rel:?}: {e}",
+                "!".custom_color(crate::colors::AMBER)
+            );
+            return Ok(());
+        }
+    };
     match download_to(api, master_key, remote.id, remote.chunk_count, &out_path).await {
         Ok(()) => {}
         Err(e) if e.contains("still in progress") || e.contains("409") => {

@@ -19,7 +19,13 @@ pub async fn run(file_id: String, output: Option<PathBuf>, zip: bool, force: boo
     let (file_id, resolved_name) = resolve_file_arg(&api, &file_id).await?;
 
     // If no --output was given and we resolved a path, use the resolved name.
-    let output = output.or_else(|| resolved_name.as_deref().map(PathBuf::from));
+    // That name still goes through the same safety check as any server-provided
+    // name (task 1733): an explicit `-o` is the only unchecked path.
+    let output = match (output, resolved_name.as_deref()) {
+        (Some(o), _) => Some(o),
+        (None, Some(n)) => Some(crate::safe_path::default_output_path(n)?),
+        (None, None) => None,
+    };
 
     // Step 1: Get file metadata to learn chunk count and encrypted name
     let file_meta = api.get_file(&file_id).await?;
@@ -60,14 +66,22 @@ pub async fn run(file_id: String, output: Option<PathBuf>, zip: bool, force: boo
 
     if is_folder {
         let folder_name = decrypted_name.as_deref().unwrap_or(&file_id);
-        let out_dir = output.unwrap_or_else(|| PathBuf::from(folder_name));
-        return pull_folder(&api, &file_id, &out_dir).await;
+        let out_dir = match output {
+            Some(o) => o,
+            None => crate::safe_path::default_output_path(folder_name)?,
+        };
+        return pull_folder(&api, &file_id, &out_dir, force).await;
     }
 
     let display_name = decrypted_name.as_deref().unwrap_or(&file_id);
 
     // Output path (needed up front for the streaming write).
-    let out_path = output.unwrap_or_else(|| PathBuf::from(decrypted_name.as_deref().unwrap_or(&file_id)));
+    // The default (no `-o`) comes from a server-provided name, so it must be a
+    // single safe component; `-o` is the user's own choice and is taken as-is.
+    let out_path = match output {
+        Some(o) => o,
+        None => crate::safe_path::default_output_path(decrypted_name.as_deref().unwrap_or(&file_id))?,
+    };
 
     // Never clobber a local file silently (flow "CLI end to end", issue 5):
     // checked before any bytes are downloaded, for both decrypt paths below.
@@ -305,19 +319,35 @@ async fn resolve_as_path(api: &ApiClient, path: &str) -> Result<(String, Option<
     Ok((resolved.file_id.unwrap(), Some(resolved.name)))
 }
 
-async fn pull_folder(api: &ApiClient, folder_id: &str, out_dir: &std::path::Path) -> Result<(), String> {
+async fn pull_folder(api: &ApiClient, folder_id: &str, out_dir: &std::path::Path, force: bool) -> Result<(), String> {
     // A single resolver, shared across the whole folder tree, so request-uploaded
     // files only trigger one `GET /file-requests` and each R_priv is unwrapped once.
     let mut request_keys: Option<crate::commands::request::RequestKeyResolver> = None;
-    pull_folder_inner(api, folder_id, out_dir, &mut request_keys).await
+    let skipped = pull_folder_inner(api, folder_id, out_dir, force, &mut request_keys).await?;
+    if skipped > 0 {
+        // Everything safe was pulled; the run is not a clean success, though.
+        return Err(crate::exit::with_code(
+            crate::exit::INCOMPLETE,
+            format!("{skipped} item(s) were skipped (see the warnings above); the rest was pulled"),
+        ));
+    }
+    Ok(())
 }
 
+/// Warn (stderr, always) that an item was skipped instead of written.
+fn warn_skipped(what: &str) {
+    eprintln!("  {} skipped {what}", "!".custom_color(crate::colors::AMBER));
+}
+
+/// Pull one folder level into `out_dir`. Returns how many items were skipped
+/// (unsafe name, symlink, refused overwrite) across this level and below.
 async fn pull_folder_inner(
     api: &ApiClient,
     folder_id: &str,
     out_dir: &std::path::Path,
+    force: bool,
     request_keys: &mut Option<crate::commands::request::RequestKeyResolver>,
-) -> Result<(), String> {
+) -> Result<usize, String> {
     let master_key = load_master_key()?;
 
     std::fs::create_dir_all(out_dir).map_err(|e| format!("failed to create directory: {e}"))?;
@@ -335,6 +365,7 @@ async fn pull_folder_inner(
         format!("{} items", files.len()).custom_color(crate::colors::INK_DIM),
     );
 
+    let mut skipped = 0usize;
     for item in files {
         let item_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
         let is_subfolder = item.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -348,16 +379,37 @@ async fn pull_folder_inner(
             .or_else(|| crate::crypto::decrypt_name(&master_key, item_id, name_enc))
             .unwrap_or_else(|| item_id.to_string());
 
+        // The name is server-provided (for file-request uploads: chosen by an
+        // anonymous stranger). It becomes exactly ONE path component under
+        // `out_dir`, never a path, and the result must resolve inside `out_dir`
+        // (task 1733). An unsafe item is skipped, not fatal: the rest still pulls.
+        let target = match crate::safe_path::safe_child(out_dir, &decrypted_name, crate::safe_path::Rules::Portable) {
+            Ok(p) => p,
+            Err(e) => {
+                warn_skipped(&format!("{decrypted_name:?} in {}: {e}", out_dir.display()));
+                skipped += 1;
+                continue;
+            }
+        };
+
         if is_subfolder {
-            let sub_dir = out_dir.join(&decrypted_name);
-            Box::pin(pull_folder_inner(api, item_id, &sub_dir, request_keys)).await?;
+            skipped += Box::pin(pull_folder_inner(api, item_id, &target, force, request_keys)).await?;
         } else {
-            let out_path = out_dir.join(&decrypted_name);
-            pull_single_file(api, item_id, &out_path, content_key).await?;
+            // A request upload's name is attacker-chosen, so it must not silently
+            // replace a local file of the same name (same rule as a single-file
+            // `bb pull`): refuse without --force.
+            if content_key.is_some() {
+                if let Err(e) = guard_existing_output(&target, force) {
+                    warn_skipped(&format!("{}: {e}", target.display()));
+                    skipped += 1;
+                    continue;
+                }
+            }
+            pull_single_file(api, item_id, &target, content_key).await?;
         }
     }
 
-    Ok(())
+    Ok(skipped)
 }
 
 /// Resolve a row's request content key, lazily loading the shared resolver the
@@ -499,7 +551,8 @@ async fn run_zip(api: &ApiClient, path_arg: &str, output: Option<PathBuf>, force
     guard_existing_output(&out_path, force)?;
 
     // Recursively collect all files in the folder tree.
-    let entries = collect_zip_entries(api, &master_key, &folder_id, &folder_name).await?;
+    let mut zip_skipped = 0usize;
+    let entries = collect_zip_entries(api, &master_key, &folder_id, &folder_name, &mut zip_skipped).await?;
 
     if entries.is_empty() {
         return Err(format!("folder '{}' is empty — nothing to zip.", folder_name));
@@ -667,6 +720,13 @@ async fn run_zip(api: &ApiClient, path_arg: &str, output: Option<PathBuf>, force
         println!("{}", out_path.display());
     }
 
+    if zip_skipped > 0 {
+        return Err(crate::exit::with_code(
+            crate::exit::INCOMPLETE,
+            format!("{zip_skipped} item(s) were left out of the archive (unsafe names, see the warnings above)"),
+        ));
+    }
+
     Ok(())
 }
 
@@ -677,6 +737,7 @@ async fn collect_zip_entries(
     master_key: &beebeeb_core::kdf::MasterKey,
     folder_id: &str,
     prefix: &str,
+    skipped: &mut usize,
 ) -> Result<Vec<beebeeb_core::zip::ZipEntry>, String> {
     let listing = api.list_files(Some(folder_id)).await?;
     let files = listing
@@ -696,11 +757,19 @@ async fn collect_zip_entries(
         let decrypted_name =
             crate::crypto::decrypt_name(master_key, item_id, name_enc).unwrap_or_else(|| item_id.to_string());
 
+        // Zip entry paths are `prefix/name`: a server-provided name with `..` or
+        // a separator would be a zip-slip entry for whoever extracts the archive
+        // (task 1733), so only single safe components are accepted.
+        if let Err(e) = crate::safe_path::check_component(&decrypted_name, crate::safe_path::Rules::Portable) {
+            warn_skipped(&format!("{decrypted_name:?} in {prefix}: unsafe name ({e})"));
+            *skipped += 1;
+            continue;
+        }
         let path = format!("{}/{}", prefix, decrypted_name);
 
         if is_folder {
             // Recurse into subfolders
-            let sub_entries = Box::pin(collect_zip_entries(api, master_key, item_id, &path)).await?;
+            let sub_entries = Box::pin(collect_zip_entries(api, master_key, item_id, &path, skipped)).await?;
             entries.extend(sub_entries);
         } else {
             entries.push(beebeeb_core::zip::ZipEntry {
