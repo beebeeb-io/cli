@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "stage": "account",
+  "client": {
+    "status": "ok"
+  },
+  "account": {
+    "state": "needs_plan",
+    "legacy_account_state": "needs_plan",
+    "email_verified": false,
+    "capabilities": {
+      "download": {
+        "allowed": true
+      },
+      "upload": {
+        "allowed": false,
+        "reason": "email_unverified"
+      },
+      "share": {
+        "allowed": false,
+        "reason": "plan_required"
+      }
+    },
+    "storage": {
+      "quota_bytes": 0,
+      "used_bytes": 0
+    }
+  },
+  "purchase": {
+    "surface": "none",
+    "cta_allowed": false,
+    "price_visibility": "hidden",
+    "methods": [],
+    "copy": {
+      "plans_managed_on_web": "Plans are managed from your account on the web."
+    }
+  },
+  "steps": [
+    {
+      "id": "verify_email",
+      "status": "todo",
+      "required": true,
+      "ui": "action"
+    }
+  ],
+  "blocking": true
+}

@@ -1,0 +1,1230 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://beebeeb.io/contracts/onboarding/schema.v1.json",
+  "title": "GET /api/v1/onboarding, schema major 1",
+  "description": "Contract for the backend-driven onboarding document (spec docs/specs/2026-10-04-backend-driven-onboarding.md rev 3, section 5). This schema describes what the SERVER emits at schema major 1. Clients MUST NOT use it as a strict parser: they ignore unknown fields and apply the fallback rules of spec 5.8 (unknown step id, unknown step status, unknown purchase.surface, unknown account.state). Dates are RFC 3339 UTC strings (pattern-checked, no format keyword so validation needs no plugin).",
+  "type": "object",
+  "required": [
+    "schema",
+    "stage",
+    "steps",
+    "blocking"
+  ],
+  "properties": {
+    "schema": {
+      "const": 1
+    },
+    "generated_at": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "ttl_seconds": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "client": {
+      "$ref": "#/$defs/client"
+    },
+    "stage": {
+      "enum": [
+        "pre_account",
+        "account"
+      ]
+    },
+    "signup": {
+      "$ref": "#/$defs/signup"
+    },
+    "policy": {
+      "$ref": "#/$defs/policy"
+    },
+    "account": {
+      "$ref": "#/$defs/account"
+    },
+    "offers": {
+      "$ref": "#/$defs/offers"
+    },
+    "purchase": {
+      "$ref": "#/$defs/purchase"
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/step"
+      }
+    },
+    "blocking": {
+      "type": "boolean"
+    },
+    "copy": {
+      "$ref": "#/$defs/copy"
+    },
+    "fallback": {
+      "$ref": "#/$defs/fallback"
+    }
+  },
+  "allOf": [
+    {
+      "$comment": "5.2/5.3: pre_account carries signup + policy; account carries account + purchase.",
+      "if": {
+        "properties": {
+          "stage": {
+            "const": "pre_account"
+          }
+        },
+        "required": [
+          "stage"
+        ]
+      },
+      "then": {
+        "required": [
+          "signup",
+          "policy"
+        ],
+        "not": {
+          "required": [
+            "account"
+          ]
+        }
+      },
+      "else": {
+        "required": [
+          "account",
+          "purchase"
+        ]
+      }
+    },
+    {
+      "$comment": "5.4 closing text / 5.3: offers is omitted entirely when purchase.cta_allowed is false, and start_trial never appears then (Apple 3.1.3(f), fail closed on money).",
+      "if": {
+        "required": [
+          "purchase"
+        ],
+        "properties": {
+          "purchase": {
+            "properties": {
+              "cta_allowed": {
+                "const": false
+              }
+            },
+            "required": [
+              "cta_allowed"
+            ]
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "required": [
+            "offers"
+          ]
+        },
+        "properties": {
+          "steps": {
+            "items": {
+              "not": {
+                "properties": {
+                  "id": {
+                    "const": "start_trial"
+                  }
+                },
+                "required": [
+                  "id"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "4b.8: blocking is false for allowance, trialing_no_card, trial_ended while no required step is outstanding (task 1740: an unaccepted accept_terms is one, and 5.3 says a required unfinished step blocks); true for needs_plan (4.5 full-screen explanation).",
+      "if": {
+        "required": [
+          "account",
+          "steps"
+        ],
+        "properties": {
+          "account": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "enum": [
+                  "allowance",
+                  "trialing_no_card",
+                  "trial_ended"
+                ]
+              }
+            }
+          },
+          "steps": {
+            "not": {
+              "contains": {
+                "required": [
+                  "required",
+                  "status"
+                ],
+                "properties": {
+                  "required": {
+                    "const": true
+                  },
+                  "status": {
+                    "not": {
+                      "const": "done"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "blocking": {
+            "const": false
+          }
+        }
+      }
+    },
+    {
+      "$comment": "5.3 inverse of 4b.8 (task 1740 round 2, security review P2): a document with a required step that is not done MUST be blocking:true, in every account state. Without this a server bug or a hand-built document could carry an outstanding accept_terms (or any required step) with blocking:false and a client would let the person through.",
+      "if": {
+        "required": [
+          "steps"
+        ],
+        "properties": {
+          "steps": {
+            "contains": {
+              "required": [
+                "required",
+                "status"
+              ],
+              "properties": {
+                "required": {
+                  "const": true
+                },
+                "status": {
+                  "not": {
+                    "const": "done"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "blocking"
+        ],
+        "properties": {
+          "blocking": {
+            "const": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "account"
+        ],
+        "properties": {
+          "account": {
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "const": "needs_plan"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "blocking": {
+            "const": true
+          }
+        }
+      }
+    },
+    {
+      "$comment": "5.8 rule 1/4: update_required blocks everything but sign out and the store update. Codex P2: the fallback must be the store update (kind update_app); use_web/contact_support would strand the client.",
+      "if": {
+        "required": [
+          "client"
+        ],
+        "properties": {
+          "client": {
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "const": "update_required"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "blocking": {
+            "const": true
+          },
+          "fallback": {
+            "properties": {
+              "kind": {
+                "const": "update_app"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "fallback"
+        ]
+      }
+    },
+    {
+      "$comment": "5.8 rule 3: an unknown step id with required:true makes an old client stop, so it needs something to show: the step fallback or the document fallback. Known ids are listed in $defs/step.",
+      "if": {
+        "not": {
+          "required": [
+            "fallback"
+          ]
+        }
+      },
+      "then": {
+        "properties": {
+          "steps": {
+            "items": {
+              "if": {
+                "properties": {
+                  "required": {
+                    "const": true
+                  },
+                  "id": {
+                    "not": {
+                      "enum": [
+                        "enter_email",
+                        "verify_email_code",
+                        "pilot_key",
+                        "accept_terms",
+                        "set_password",
+                        "save_recovery_phrase",
+                        "create_account",
+                        "verify_email",
+                        "billing_profile",
+                        "choose_plan",
+                        "start_trial",
+                        "subscribe",
+                        "done"
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "id",
+                  "required"
+                ]
+              },
+              "then": {
+                "required": [
+                  "fallback"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"
+    },
+    "semver": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "url": {
+      "type": "string",
+      "pattern": "^https://"
+    },
+    "client": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "enum": [
+            "ok",
+            "update_recommended",
+            "update_required"
+          ]
+        },
+        "min_version": {
+          "$ref": "#/$defs/semver"
+        },
+        "recommended_version": {
+          "$ref": "#/$defs/semver"
+        }
+      },
+      "required": [
+        "status"
+      ]
+    },
+    "signup": {
+      "type": "object",
+      "properties": {
+        "allowed": {
+          "type": "boolean"
+        },
+        "mode": {
+          "enum": [
+            "native",
+            "web_handoff",
+            "web_only"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "web_url": {
+          "$ref": "#/$defs/url"
+        }
+      },
+      "required": [
+        "allowed",
+        "mode"
+      ]
+    },
+    "policy": {
+      "type": "object",
+      "properties": {
+        "password": {
+          "type": "object",
+          "properties": {
+            "min_length": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "breach_check": {
+              "type": "object",
+              "properties": {
+                "endpoint": {
+                  "type": "string",
+                  "pattern": "^/api/v1/[^:]*$",
+                  "description": "Same-origin path template, never an absolute URL. {prefix} is the k-anonymity hash prefix."
+                },
+                "fail_open": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "endpoint",
+                "fail_open"
+              ]
+            }
+          },
+          "required": [
+            "min_length",
+            "breach_check"
+          ]
+        },
+        "recovery_phrase": {
+          "type": "object",
+          "properties": {
+            "word_count": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "verify_word_count": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": [
+            "word_count",
+            "verify_word_count"
+          ]
+        },
+        "terms": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+            },
+            "url": {
+              "$ref": "#/$defs/url"
+            },
+            "privacy_url": {
+              "$ref": "#/$defs/url"
+            }
+          },
+          "required": [
+            "version",
+            "url"
+          ]
+        },
+        "email_code": {
+          "type": "object",
+          "properties": {
+            "length": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "ttl_seconds": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "resend_after_seconds": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "ticket_ttl_seconds": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": [
+            "length",
+            "ttl_seconds",
+            "resend_after_seconds",
+            "ticket_ttl_seconds"
+          ]
+        },
+        "pilot_key": {
+          "type": "object",
+          "properties": {
+            "required": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "required"
+          ]
+        },
+        "promo_code": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "password",
+        "recovery_phrase",
+        "terms",
+        "email_code",
+        "pilot_key"
+      ]
+    },
+    "capability": {
+      "type": "object",
+      "properties": {
+        "allowed": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string",
+          "description": "Existing typed error code or an additive new one (plan_required, account_lapsed, trial_cancelled_read_only, email_unverified, trial_ended, ...)."
+        },
+        "limit_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "limit": {
+          "type": "object",
+          "properties": {
+            "active_links": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      },
+      "required": [
+        "allowed"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "allowed": {
+                "const": false
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "reason"
+            ]
+          }
+        }
+      ]
+    },
+    "capabilities": {
+      "type": "object",
+      "description": "Closed set per schema major (spec 5.3, 5.8 rule 11): an absent capability means not allowed, and a name outside download, upload, share, delete is rejected (a new capability needs a new schema major).",
+      "properties": {
+        "download": {
+          "$ref": "#/$defs/capability"
+        },
+        "upload": {
+          "$ref": "#/$defs/capability"
+        },
+        "share": {
+          "$ref": "#/$defs/capability"
+        },
+        "delete": {
+          "$ref": "#/$defs/capability"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "download",
+        "upload",
+        "share"
+      ]
+    },
+    "storage": {
+      "type": "object",
+      "properties": {
+        "quota_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "used_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "allowance_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "over_allowance": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "quota_bytes",
+        "used_bytes"
+      ]
+    },
+    "trial": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "no_card",
+            "mandated",
+            "promo"
+          ]
+        },
+        "started_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "ends_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "cap_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "converts_automatically": {
+          "type": "boolean"
+        },
+        "first_charge_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "started_at",
+        "ends_at",
+        "cap_bytes",
+        "converts_automatically",
+        "first_charge_at"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "no_card"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "first_charge_at": {
+                "type": "null"
+              },
+              "converts_automatically": {
+                "const": false
+              }
+            }
+          }
+        }
+      ]
+    },
+    "lifecycle": {
+      "type": "object",
+      "properties": {
+        "read_only_since": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data_deletion_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "read_only_since",
+        "data_deletion_at",
+        "reason"
+      ]
+    },
+    "account": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "enum": [
+            "allowance",
+            "needs_plan",
+            "trialing_no_card",
+            "trial_ended",
+            "trialing",
+            "trial_cancelling",
+            "active",
+            "past_due",
+            "read_only",
+            "frozen",
+            "lapsed",
+            "legacy_free"
+          ]
+        },
+        "legacy_account_state": {
+          "enum": [
+            "ok",
+            "needs_plan",
+            "lapsed"
+          ]
+        },
+        "email_verified": {
+          "type": "boolean"
+        },
+        "capabilities": {
+          "$ref": "#/$defs/capabilities"
+        },
+        "storage": {
+          "$ref": "#/$defs/storage"
+        },
+        "trial": {
+          "$ref": "#/$defs/trial"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/lifecycle"
+        }
+      },
+      "required": [
+        "state",
+        "legacy_account_state",
+        "email_verified",
+        "capabilities",
+        "storage"
+      ],
+      "allOf": [
+        {
+          "$comment": "4b.8 legacy mapping",
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "allowance",
+                  "needs_plan"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "legacy_account_state": {
+                "const": "needs_plan"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "trialing_no_card"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "legacy_account_state": {
+                "const": "ok"
+              },
+              "trial": {
+                "properties": {
+                  "kind": {
+                    "const": "no_card"
+                  }
+                }
+              }
+            },
+            "required": [
+              "trial"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "trial_ended"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "legacy_account_state": {
+                "enum": [
+                  "lapsed",
+                  "needs_plan"
+                ]
+              }
+            },
+            "required": [
+              "trial",
+              "lifecycle"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "trialing"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "trial": {
+                "properties": {
+                  "kind": {
+                    "const": "mandated"
+                  }
+                }
+              }
+            },
+            "required": [
+              "trial"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "allowance",
+                  "trialing_no_card",
+                  "trial_ended"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "storage": {
+                "required": [
+                  "allowance_bytes",
+                  "over_allowance"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "trial_ended",
+                  "lapsed",
+                  "read_only"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "lifecycle"
+            ]
+          }
+        },
+        {
+          "$comment": "email_verified:true cannot coexist with a capability denied for email_unverified (fixture consistency, Codex P2).",
+          "if": {
+            "properties": {
+              "email_verified": {
+                "const": true
+              }
+            },
+            "required": [
+              "email_verified"
+            ]
+          },
+          "then": {
+            "properties": {
+              "capabilities": {
+                "properties": {
+                  "download": {
+                    "properties": {
+                      "reason": {
+                        "not": {
+                          "const": "email_unverified"
+                        }
+                      }
+                    }
+                  },
+                  "upload": {
+                    "properties": {
+                      "reason": {
+                        "not": {
+                          "const": "email_unverified"
+                        }
+                      }
+                    }
+                  },
+                  "share": {
+                    "properties": {
+                      "reason": {
+                        "not": {
+                          "const": "email_unverified"
+                        }
+                      }
+                    }
+                  },
+                  "delete": {
+                    "properties": {
+                      "reason": {
+                        "not": {
+                          "const": "email_unverified"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "offers": {
+      "type": "object",
+      "properties": {
+        "trial": {
+          "type": "object",
+          "properties": {
+            "available": {
+              "type": "boolean"
+            },
+            "unavailable_reason": {
+              "enum": [
+                "already_used",
+                "email_unverified",
+                "temporarily_unavailable",
+                "not_offered_here",
+                null
+              ]
+            },
+            "length_days": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "cap_bytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "start_endpoint": {
+              "type": "string",
+              "pattern": "^/api/v1/"
+            }
+          },
+          "required": [
+            "available",
+            "unavailable_reason",
+            "length_days",
+            "cap_bytes",
+            "start_endpoint"
+          ],
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "available": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "unavailable_reason": {
+                    "type": "null"
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "unavailable_reason": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "purchase": {
+      "type": "object",
+      "properties": {
+        "surface": {
+          "enum": [
+            "none",
+            "in_page",
+            "system_browser",
+            "external_link"
+          ]
+        },
+        "cta_allowed": {
+          "type": "boolean"
+        },
+        "price_visibility": {
+          "enum": [
+            "full",
+            "hidden",
+            "n/a"
+          ]
+        },
+        "methods": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "checkout": {
+          "type": "object",
+          "properties": {
+            "open_with": {
+              "type": "string"
+            },
+            "return_kind": {
+              "type": "string"
+            },
+            "poll_seconds": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "copy": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "surface",
+        "cta_allowed",
+        "price_visibility",
+        "methods"
+      ],
+      "allOf": [
+        {
+          "$comment": "5.7: surface none implies no call to action, no checkout.",
+          "if": {
+            "properties": {
+              "surface": {
+                "const": "none"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "cta_allowed": {
+                "const": false
+              },
+              "methods": {
+                "maxItems": 0
+              }
+            },
+            "not": {
+              "required": [
+                "checkout"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "step": {
+      "type": "object",
+      "description": "id is an open string on purpose: clients meet step ids they do not know (5.8 rule 3). Known ids: enter_email, verify_email_code, pilot_key, accept_terms, set_password, save_recovery_phrase, create_account, verify_email, billing_profile, choose_plan, start_trial, subscribe, done.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "todo",
+            "in_progress",
+            "done",
+            "blocked"
+          ]
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "ui": {
+          "enum": [
+            "action",
+            "info"
+          ]
+        },
+        "params": {
+          "type": "object"
+        },
+        "fallback": {
+          "$ref": "#/$defs/fallback"
+        }
+      },
+      "required": [
+        "id",
+        "status",
+        "required",
+        "ui"
+      ],
+      "allOf": [
+        {
+          "$comment": "5.8 rule 3: consent and security steps are never required:false.",
+          "if": {
+            "properties": {
+              "id": {
+                "enum": [
+                  "accept_terms",
+                  "verify_email_code",
+                  "verify_email",
+                  "create_account"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "required": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "$comment": "4b.8: start_trial is never required and carries no_card params.",
+          "if": {
+            "properties": {
+              "id": {
+                "const": "start_trial"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "required": {
+                "const": false
+              },
+              "params": {
+                "required": [
+                  "length_days",
+                  "cap_bytes",
+                  "no_card"
+                ],
+                "properties": {
+                  "no_card": {
+                    "const": true
+                  }
+                }
+              }
+            },
+            "required": [
+              "params"
+            ]
+          }
+        }
+      ]
+    },
+    "copy": {
+      "type": "object",
+      "description": "Legal-sensitive strings rendered verbatim. Known keys: locale, region_line, trial_terms, plans_managed_on_web, trial_end_over_allowance, trial_ended_over_allowance.",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "fallback": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "update_app",
+            "use_web",
+            "contact_support"
+          ]
+        },
+        "url": {
+          "$ref": "#/$defs/url"
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    }
+  }
+}

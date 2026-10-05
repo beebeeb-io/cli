@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "stage": "account",
+  "client": {
+    "status": "ok"
+  },
+  "account": {
+    "state": "trial_cancelling",
+    "legacy_account_state": "ok",
+    "email_verified": true,
+    "capabilities": {
+      "download": {
+        "allowed": true
+      },
+      "upload": {
+        "allowed": false,
+        "reason": "trial_cancelled_read_only"
+      },
+      "share": {
+        "allowed": false,
+        "reason": "trial_cancelled_read_only"
+      }
+    },
+    "storage": {
+      "quota_bytes": 25000000000,
+      "used_bytes": 3000000000
+    },
+    "lifecycle": {
+      "data_deletion_at": "2026-11-01T09:00:00Z",
+      "read_only_since": "2026-10-06T09:00:00Z",
+      "reason": "trial_cancelled_read_only"
+    }
+  },
+  "purchase": {
+    "surface": "in_page",
+    "cta_allowed": true,
+    "price_visibility": "full",
+    "methods": [
+      "banktransfer",
+      "directdebit",
+      "ideal",
+      "paypal"
+    ]
+  },
+  "steps": [],
+  "blocking": false
+}

@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "stage": "account",
+  "client": {
+    "status": "ok"
+  },
+  "account": {
+    "state": "trialing",
+    "legacy_account_state": "ok",
+    "email_verified": true,
+    "capabilities": {
+      "download": {
+        "allowed": true
+      },
+      "upload": {
+        "allowed": true,
+        "limit_bytes": 25000000000
+      },
+      "share": {
+        "allowed": true
+      }
+    },
+    "storage": {
+      "quota_bytes": 25000000000,
+      "used_bytes": 3000000000
+    },
+    "trial": {
+      "kind": "mandated",
+      "started_at": "2026-10-04T09:00:00Z",
+      "ends_at": "2026-10-18T09:00:00Z",
+      "cap_bytes": 25000000000,
+      "converts_automatically": true,
+      "first_charge_at": "2026-10-18T09:00:00Z"
+    }
+  },
+  "purchase": {
+    "surface": "system_browser",
+    "cta_allowed": true,
+    "price_visibility": "full",
+    "methods": [
+      "banktransfer",
+      "directdebit",
+      "ideal",
+      "paypal"
+    ],
+    "checkout": {
+      "open_with": "system_browser",
+      "poll_seconds": 3
+    }
+  },
+  "steps": [],
+  "blocking": false
+}

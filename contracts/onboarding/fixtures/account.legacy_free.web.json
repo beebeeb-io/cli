@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "stage": "account",
+  "client": {
+    "status": "ok"
+  },
+  "account": {
+    "state": "legacy_free",
+    "legacy_account_state": "ok",
+    "email_verified": true,
+    "capabilities": {
+      "download": {
+        "allowed": true
+      },
+      "upload": {
+        "allowed": true
+      },
+      "share": {
+        "allowed": true
+      }
+    },
+    "storage": {
+      "quota_bytes": 5000000000,
+      "used_bytes": 1000000000
+    }
+  },
+  "purchase": {
+    "surface": "in_page",
+    "cta_allowed": true,
+    "price_visibility": "full",
+    "methods": [
+      "banktransfer",
+      "directdebit",
+      "ideal",
+      "paypal"
+    ]
+  },
+  "steps": [],
+  "blocking": false
+}

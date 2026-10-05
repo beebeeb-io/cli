@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "stage": "account",
+  "client": {
+    "status": "ok"
+  },
+  "account": {
+    "state": "allowance",
+    "legacy_account_state": "needs_plan",
+    "email_verified": true,
+    "capabilities": {
+      "download": {
+        "allowed": true
+      },
+      "upload": {
+        "allowed": true,
+        "limit_bytes": 2000000000
+      },
+      "share": {
+        "allowed": false,
+        "reason": "plan_required"
+      }
+    },
+    "storage": {
+      "quota_bytes": 2000000000,
+      "used_bytes": 0,
+      "allowance_bytes": 2000000000,
+      "over_allowance": false
+    }
+  },
+  "purchase": {
+    "surface": "in_page",
+    "cta_allowed": true,
+    "price_visibility": "full",
+    "methods": [
+      "banktransfer",
+      "directdebit",
+      "ideal",
+      "paypal"
+    ]
+  },
+  "steps": [
+    {
+      "id": "accept_terms",
+      "status": "todo",
+      "required": true,
+      "ui": "action",
+      "params": {
+        "version": "2026-10-01"
+      }
+    },
+    {
+      "id": "choose_plan",
+      "status": "todo",
+      "required": false,
+      "ui": "action"
+    },
+    {
+      "id": "start_trial",
+      "status": "todo",
+      "required": false,
+      "ui": "action",
+      "params": {
+        "length_days": 14,
+        "cap_bytes": 10000000000,
+        "no_card": true
+      }
+    }
+  ],
+  "blocking": false,
+  "offers": {
+    "trial": {
+      "available": true,
+      "unavailable_reason": null,
+      "length_days": 14,
+      "cap_bytes": 10000000000,
+      "start_endpoint": "/api/v1/billing/trial/start"
+    }
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "stage": "account",
+  "client": {
+    "status": "ok"
+  },
+  "account": {
+    "state": "allowance",
+    "legacy_account_state": "needs_plan",
+    "email_verified": true,
+    "capabilities": {
+      "download": {
+        "allowed": true
+      },
+      "upload": {
+        "allowed": true,
+        "limit_bytes": 2000000000
+      },
+      "share": {
+        "allowed": false,
+        "reason": "plan_required"
+      }
+    },
+    "storage": {
+      "quota_bytes": 2000000000,
+      "used_bytes": 0,
+      "allowance_bytes": 2000000000,
+      "over_allowance": false
+    }
+  },
+  "purchase": {
+    "surface": "none",
+    "cta_allowed": false,
+    "price_visibility": "hidden",
+    "methods": [],
+    "copy": {
+      "plans_managed_on_web": "Plans are managed from your account on the web."
+    }
+  },
+  "steps": [],
+  "blocking": false
+}

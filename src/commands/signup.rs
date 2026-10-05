@@ -9,8 +9,26 @@
 //!
 //! The command name is kept so muscle memory and older docs still land
 //! somewhere useful.
+//!
+//! Task 1750: the server's onboarding document (`GET /api/v1/onboarding`,
+//! anonymous, so `stage: "pre_account"`) is read for `signup.mode` and the
+//! command says what it found. It changes WORDS only, never the destination:
+//! the CLI is never lifted for native signup (policy matrix, task 1741), so a
+//! `native` answer is explained, not obeyed. Older server, or any fetch
+//! failure: the behaviour above, unchanged.
 
 use colored::Colorize;
+
+use crate::account_state::{OnboardingDoc, signup_explanation};
+
+/// The anonymous onboarding document, or `None` when the server is older than
+/// the endpoint, unreachable, or answers something that is not schema major 1.
+/// Never fails the command: signup guidance does not depend on it.
+async fn fetch_document() -> Option<OnboardingDoc> {
+    let api = crate::api::ApiClient::from_config();
+    let body = api.get_onboarding(false).await.ok()??;
+    OnboardingDoc::parse(&body)
+}
 
 /// The web app's signup route.
 const SIGNUP_PATH: &str = "/signup";
@@ -54,6 +72,12 @@ pub async fn run() -> Result<(), String> {
     use crate::{colors, env_detect, ui};
 
     let url = signup_url(&crate::web_url::web_app_base());
+    let doc = fetch_document().await;
+    let explanation = doc.as_ref().and_then(|d| d.signup()).map(|i| signup_explanation(&i));
+    let update_hint = doc
+        .as_ref()
+        .is_some_and(OnboardingDoc::update_required)
+        .then_some("This version of bb is too old for the server. Update bb, then run `bb login`.");
 
     match plan_signup(ui::is_json(), ui::is_quiet(), env_detect::is_headless()) {
         SignupAction::Json => {
@@ -63,6 +87,9 @@ pub async fn run() -> Result<(), String> {
                     "url": url,
                     "next": "bb login",
                     "note": "accounts are created in the web app; the CLI only signs in",
+                    // The server's `signup` block verbatim, `null` when the
+                    // server has no onboarding document (task 1750).
+                    "signup": doc.as_ref().and_then(|d| d.signup_raw()),
                 })
             );
         }
@@ -70,11 +97,13 @@ pub async fn run() -> Result<(), String> {
         SignupAction::Headless => {
             println!();
             println!("  {}", signup_message(&url).custom_color(colors::INK));
+            print_extra(explanation.as_deref(), update_hint);
             println!();
         }
         SignupAction::Open => {
             println!();
             println!("  {}", signup_message(&url).custom_color(colors::INK));
+            print_extra(explanation.as_deref(), update_hint);
             // Best-effort — the URL is already printed, so a failed launch
             // (no default browser) still leaves something to click or paste.
             if open::that(&url).is_ok() {
@@ -85,6 +114,12 @@ pub async fn run() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn print_extra(explanation: Option<&str>, update_hint: Option<&str>) {
+    for line in [explanation, update_hint].into_iter().flatten() {
+        println!("  {}", line.custom_color(crate::colors::INK_DIM));
+    }
 }
 
 #[cfg(test)]

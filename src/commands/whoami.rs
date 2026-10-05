@@ -1,7 +1,7 @@
 use beebeeb_types::quota::{Plan, effective_quota, format_storage_si};
 use colored::Colorize;
 
-use crate::account_state::AccountState;
+use crate::account_state::{AccountState, OnboardingDoc};
 use crate::api::ApiClient;
 use crate::config::load_config;
 use crate::ui;
@@ -17,13 +17,14 @@ pub async fn run() -> Result<(), String> {
     let api = ApiClient::from_config();
 
     // Fetch everything in parallel
-    let (me_res, sub_res, my_region_res, sessions_res, usage_res, count_res) = tokio::join!(
+    let (me_res, sub_res, my_region_res, sessions_res, usage_res, count_res, onboarding_res) = tokio::join!(
         api.get_me(),
         api.get_subscription(),
         api.get_my_region(),
         api.get_sessions(),
         api.get_usage(),
         api.get_file_count(),
+        api.get_onboarding(true),
     );
 
     // Identity, plan and usage are what this command exists to report — if
@@ -60,6 +61,22 @@ pub async fn run() -> Result<(), String> {
     // still name the trial's plan. Say so instead of "Pro — 0 B".
     let account_state = AccountState::from_subscription(&sub);
     let account_notice = account_state.notice(&crate::web_url::web_app_base());
+    // Task 1750: the onboarding document is the richer, current statement of
+    // the account state (12 states, per-capability reasons). Best-effort: any
+    // failure, an older server (404) or a document that is not schema major 1
+    // leaves `doc_summary` empty and the legacy subscription logic above is
+    // what is shown, exactly as before. It only drives the `state` row, its
+    // explanation and the upload row; plan and quota stay the subscription's.
+    let doc_summary = onboarding_res
+        .ok()
+        .flatten()
+        .and_then(|body| OnboardingDoc::parse(&body))
+        .and_then(|doc| doc.account_summary(&crate::web_url::web_app_base()));
+    let upload_blocked = account_notice.is_some() || doc_summary.as_ref().is_some_and(|d| d.upload_denied());
+    let (state_label, state_notice) = match &doc_summary {
+        Some(d) => (d.label.clone(), d.notice.clone()),
+        None => (account_state.label().to_string(), account_notice.clone()),
+    };
     let plan_label = if account_notice.is_some() {
         "none".to_string()
     } else {
@@ -144,6 +161,14 @@ pub async fn run() -> Result<(), String> {
                 "session_expires": expires_str,
                 "account_state": account_state.slug(),
                 "data_deletion_at": account_state.data_deletion_at_rfc3339(),
+                "account": doc_summary.as_ref().map(|d| serde_json::json!({
+                    "state": d.state.slug(),
+                    "notice": d.notice,
+                    "denied": d.denied.iter().map(|x| serde_json::json!({
+                        "capability": x.capability,
+                        "reason": x.reason,
+                    })).collect::<Vec<_>>(),
+                })),
             }))
             .unwrap()
         );
@@ -170,16 +195,12 @@ pub async fn run() -> Result<(), String> {
         dim("plan    "),
         plan_label.custom_color(crate::colors::AMBER)
     );
-    let state_colour = if account_notice.is_some() {
+    let state_colour = if upload_blocked {
         crate::colors::RED_ERR
     } else {
         crate::colors::GREEN_OK
     };
-    println!(
-        "  {} {}",
-        dim("state   "),
-        account_state.label().custom_color(state_colour)
-    );
+    println!("  {} {}", dim("state   "), state_label.custom_color(state_colour));
     println!("  {} {}", dim("region  "), val(&region_label));
 
     // Storage line + visual quota bar
@@ -191,7 +212,7 @@ pub async fn run() -> Result<(), String> {
     );
 
     // Upload limit
-    if account_notice.is_some() {
+    if upload_blocked {
         println!(
             "  {} {}",
             dim("upload  "),
@@ -232,13 +253,14 @@ pub async fn run() -> Result<(), String> {
     // Auth + e2ee badge
     println!("  {} {}", dim("auth    "), val(auth_label));
 
-    if let Some(notice) = &account_notice {
+    if let Some(notice) = &state_notice {
+        let colour = if upload_blocked {
+            crate::colors::RED_ERR
+        } else {
+            crate::colors::INK_DIM
+        };
         println!();
-        println!(
-            "  {} {}",
-            "!".custom_color(crate::colors::RED_ERR),
-            notice.custom_color(crate::colors::RED_ERR),
-        );
+        println!("  {} {}", "!".custom_color(colour), notice.custom_color(colour));
     }
 
     println!();

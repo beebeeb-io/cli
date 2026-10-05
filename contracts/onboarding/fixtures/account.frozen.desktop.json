@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "stage": "account",
+  "client": {
+    "status": "ok"
+  },
+  "account": {
+    "state": "frozen",
+    "legacy_account_state": "ok",
+    "email_verified": true,
+    "capabilities": {
+      "download": {
+        "allowed": true
+      },
+      "upload": {
+        "allowed": false,
+        "reason": "account_frozen"
+      },
+      "share": {
+        "allowed": false,
+        "reason": "account_frozen"
+      }
+    },
+    "storage": {
+      "quota_bytes": 1000000000000,
+      "used_bytes": 120000000000
+    }
+  },
+  "purchase": {
+    "surface": "system_browser",
+    "cta_allowed": true,
+    "price_visibility": "full",
+    "methods": [
+      "banktransfer",
+      "directdebit",
+      "ideal",
+      "paypal"
+    ],
+    "checkout": {
+      "open_with": "system_browser",
+      "poll_seconds": 3
+    }
+  },
+  "steps": [],
+  "blocking": false
+}

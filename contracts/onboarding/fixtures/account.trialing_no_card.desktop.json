@@ -1,0 +1,68 @@
+{
+  "schema": 1,
+  "stage": "account",
+  "client": {
+    "status": "ok"
+  },
+  "account": {
+    "state": "trialing_no_card",
+    "legacy_account_state": "ok",
+    "email_verified": true,
+    "capabilities": {
+      "download": {
+        "allowed": true
+      },
+      "upload": {
+        "allowed": true,
+        "limit_bytes": 10000000000
+      },
+      "share": {
+        "allowed": true,
+        "limit": {
+          "active_links": 5
+        }
+      }
+    },
+    "storage": {
+      "quota_bytes": 10000000000,
+      "used_bytes": 6300000000,
+      "allowance_bytes": 2000000000,
+      "over_allowance": true
+    },
+    "trial": {
+      "kind": "no_card",
+      "started_at": "2026-10-04T09:00:00Z",
+      "ends_at": "2026-10-18T09:00:00Z",
+      "cap_bytes": 10000000000,
+      "converts_automatically": false,
+      "first_charge_at": null
+    }
+  },
+  "purchase": {
+    "surface": "system_browser",
+    "cta_allowed": true,
+    "price_visibility": "full",
+    "methods": [
+      "banktransfer",
+      "directdebit",
+      "ideal",
+      "paypal"
+    ],
+    "checkout": {
+      "open_with": "system_browser",
+      "poll_seconds": 3
+    }
+  },
+  "steps": [
+    {
+      "id": "choose_plan",
+      "status": "todo",
+      "required": false,
+      "ui": "action"
+    }
+  ],
+  "blocking": false,
+  "copy": {
+    "trial_end_over_allowance": "Your trial ends on 18 Oct. Files above 2 GB become read-only and are deleted 14 days later unless you subscribe or free up space."
+  }
+}
