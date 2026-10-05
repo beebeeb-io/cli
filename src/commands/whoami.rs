@@ -72,7 +72,10 @@ pub async fn run() -> Result<(), String> {
         .flatten()
         .and_then(|body| OnboardingDoc::parse(&body))
         .and_then(|doc| doc.account_summary(&crate::web_url::web_app_base()));
-    let upload_blocked = account_notice.is_some() || doc_summary.as_ref().is_some_and(|d| d.upload_denied());
+    // The document's capabilities are authoritative when it is available; the
+    // legacy notice only decides when it is not (an `allowance` account is
+    // `needs_plan` in the legacy view but may upload).
+    let upload_blocked = crate::account_state::upload_blocked(account_notice.as_deref(), doc_summary.as_ref());
     let (state_label, state_notice) = match &doc_summary {
         Some(d) => (d.label.clone(), d.notice.clone()),
         None => (account_state.label().to_string(), account_notice.clone()),

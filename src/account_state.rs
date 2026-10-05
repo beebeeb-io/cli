@@ -287,6 +287,36 @@ impl AccountSummary {
     }
 }
 
+/// Is upload blocked for this account?
+///
+/// The onboarding document is authoritative whenever it is available: its
+/// `upload` capability is the answer, even when the legacy subscription
+/// notice disagrees (an `allowance` account is `needs_plan` in the legacy
+/// view yet may upload). The legacy notice is consulted ONLY when the
+/// document is unavailable.
+pub(crate) fn upload_blocked(legacy_notice: Option<&str>, doc: Option<&AccountSummary>) -> bool {
+    match doc {
+        Some(d) => d.upload_denied(),
+        None => legacy_notice.is_some(),
+    }
+}
+
+/// Why an upload must be refused up front, in words, or `None` to let it
+/// proceed. Same rule as [`upload_blocked`]: the document decides when it is
+/// available (its notice, else a plain sentence), the legacy notice only when
+/// it is not.
+pub(crate) fn upload_refusal(legacy_notice: Option<String>, doc: Option<&AccountSummary>) -> Option<String> {
+    match doc {
+        Some(d) if d.upload_denied() => Some(
+            d.notice
+                .clone()
+                .unwrap_or_else(|| "Your account cannot upload right now.".to_string()),
+        ),
+        Some(_) => None,
+        None => legacy_notice,
+    }
+}
+
 impl OnboardingDoc {
     /// Parse a response body. `None` unless it is a JSON object of schema
     /// major 1 (the only major this CLI asks for and understands).

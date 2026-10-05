@@ -720,13 +720,23 @@ fn dir_total_size(dir: &std::path::Path) -> u64 {
 /// the enforcer (409 `plan_required` / `account_lapsed`), and its refusal is
 /// explained in `ApiClient::upload_init_typed`.
 async fn check_quota(api: &ApiClient, upload_size: u64) -> Result<(), String> {
-    let (usage_res, sub_res) = tokio::join!(api.get_usage(), api.get_subscription());
+    let (usage_res, sub_res, onboarding_res) =
+        tokio::join!(api.get_usage(), api.get_subscription(), api.get_onboarding(true));
 
     let usage = usage_res.unwrap_or_default();
     let sub = sub_res.unwrap_or_default();
 
     let used_bytes = usage.get("used_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
-    check_quota_against(&sub, used_bytes, upload_size, &crate::web_url::web_app_base())
+    // Task 1750: the onboarding document's capabilities decide when it is
+    // available (best-effort: any failure, a 404 or another schema major
+    // leaves the legacy subscription logic exactly as before).
+    let app_base = crate::web_url::web_app_base();
+    let doc = onboarding_res
+        .ok()
+        .flatten()
+        .and_then(|body| crate::account_state::OnboardingDoc::parse(&body))
+        .and_then(|doc| doc.account_summary(&app_base));
+    check_quota_against(&sub, used_bytes, upload_size, &app_base, doc.as_ref())
 }
 
 /// Pure half of [`check_quota`]: decide from an already-fetched subscription
@@ -737,11 +747,18 @@ fn check_quota_against(
     used_bytes: i64,
     upload_size: u64,
     app_base: &str,
+    doc: Option<&crate::account_state::AccountSummary>,
 ) -> Result<(), String> {
     // Task 1037: a `needs_plan` / `lapsed` account has quota 0, which the
     // `quota > 0` guard below would wave through to a bare server refusal.
     // Say what's actually wrong and where to fix it.
-    if let Some(notice) = crate::account_state::AccountState::from_subscription(sub).notice(app_base) {
+    //
+    // Task 1750: the onboarding document, when available, is authoritative
+    // for "can this account upload" (an `allowance` account is `needs_plan`
+    // in the legacy view yet may upload); the legacy notice only decides when
+    // there is no document.
+    let legacy_notice = crate::account_state::AccountState::from_subscription(sub).notice(app_base);
+    if let Some(notice) = crate::account_state::upload_refusal(legacy_notice, doc) {
         return Err(notice);
     }
 
@@ -790,7 +807,7 @@ mod check_quota_tests {
             "account_state": "needs_plan", "data_deletion_at": null,
         });
         assert_eq!(
-            check_quota_against(&sub, 0, 10, APP),
+            check_quota_against(&sub, 0, 10, APP, None),
             Err("Your account has no plan yet \u{2014} choose one at https://app.beebeeb.io/choose-plan".to_string())
         );
     }
@@ -801,7 +818,7 @@ mod check_quota_tests {
             "plan": "pro", "effective_plan": "none", "quota_bytes": 0,
             "account_state": "lapsed", "data_deletion_at": "2026-11-27T10:00:00Z",
         });
-        let err = check_quota_against(&sub, 5, 10, APP).unwrap_err();
+        let err = check_quota_against(&sub, 5, 10, APP, None).unwrap_err();
         assert!(
             err.starts_with("Your trial has ended; your vault is read-only"),
             "{err}"
@@ -813,15 +830,15 @@ mod check_quota_tests {
     #[test]
     fn ok_account_within_quota_passes() {
         let sub = json!({ "plan": "pro", "quota_bytes": 1_000, "account_state": "ok" });
-        assert_eq!(check_quota_against(&sub, 100, 10, APP), Ok(()));
+        assert_eq!(check_quota_against(&sub, 100, 10, APP, None), Ok(()));
     }
 
     #[test]
     fn pre_1037_server_without_account_state_keeps_the_old_behaviour() {
         // Missing fields ⇒ ok: within quota passes, over quota is "Storage full".
         let sub = json!({ "plan": "pro", "quota_bytes": 1_000 });
-        assert_eq!(check_quota_against(&sub, 100, 10, APP), Ok(()));
-        let err = check_quota_against(&sub, 995, 10, APP).unwrap_err();
+        assert_eq!(check_quota_against(&sub, 100, 10, APP, None), Ok(()));
+        let err = check_quota_against(&sub, 995, 10, APP, None).unwrap_err();
         assert!(err.starts_with("Storage full"), "{err}");
     }
 
@@ -829,6 +846,38 @@ mod check_quota_tests {
     fn a_failed_subscription_fetch_never_blocks() {
         // `check_quota` passes `Value::Null` (unwrap_or_default) when the
         // GET failed — the server stays the enforcer.
-        assert_eq!(check_quota_against(&serde_json::Value::Null, 0, 10, APP), Ok(()));
+        assert_eq!(check_quota_against(&serde_json::Value::Null, 0, 10, APP, None), Ok(()));
+    }
+
+    fn doc(name: &str) -> crate::account_state::AccountSummary {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("contracts/onboarding/fixtures")
+            .join(format!("{name}.json"));
+        let body: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        crate::account_state::OnboardingDoc::parse(&body)
+            .unwrap()
+            .account_summary(APP)
+            .unwrap()
+    }
+
+    #[test]
+    fn document_allowing_upload_overrides_the_legacy_needs_plan_refusal() {
+        // `allowance`: legacy view says needs_plan, document says upload allowed.
+        let sub = json!({
+            "plan": "free", "effective_plan": "none", "quota_bytes": 0,
+            "account_state": "needs_plan", "data_deletion_at": null,
+        });
+        let allowance = doc("account.allowance.web");
+        assert_eq!(check_quota_against(&sub, 0, 10, APP, Some(&allowance)), Ok(()));
+        // No document: the legacy refusal is unchanged.
+        assert!(check_quota_against(&sub, 0, 10, APP, None).is_err());
+    }
+
+    #[test]
+    fn document_denying_upload_refuses_with_its_own_notice() {
+        let sub = json!({ "plan": "pro", "quota_bytes": 1_000, "account_state": "ok" });
+        let ended = doc("account.trial_ended.ios");
+        let err = check_quota_against(&sub, 0, 10, APP, Some(&ended)).unwrap_err();
+        assert!(err.starts_with("Your trial has ended"), "{err}");
     }
 }

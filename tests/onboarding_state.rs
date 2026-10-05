@@ -90,14 +90,25 @@ enum Onboarding {
 #[derive(Clone)]
 struct Mock {
     onboarding: Onboarding,
+    subscription: Value,
     seen: Arc<Mutex<Vec<HeaderMap>>>,
 }
 
 /// Mock API: the onboarding route plus the routes `bb whoami` needs.
 fn spawn_mock(onboarding: Onboarding) -> (String, Arc<Mutex<Vec<HeaderMap>>>) {
+    spawn_mock_with_subscription(
+        onboarding,
+        json!({ "plan": "pro", "quota_bytes": 1_000_000_000_000i64, "account_state": "ok" }),
+    )
+}
+
+/// As [`spawn_mock`], with the legacy `GET /billing/subscription` body chosen
+/// by the test (the legacy and document views of an account can disagree).
+fn spawn_mock_with_subscription(onboarding: Onboarding, subscription: Value) -> (String, Arc<Mutex<Vec<HeaderMap>>>) {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let state = Mock {
         onboarding,
+        subscription,
         seen: seen.clone(),
     };
     let (tx, rx) = std::sync::mpsc::channel();
@@ -123,9 +134,7 @@ fn spawn_mock(onboarding: Onboarding) -> (String, Arc<Mutex<Vec<HeaderMap>>>) {
                 )
                 .route(
                     "/api/v1/billing/subscription",
-                    get(|| async {
-                        Json(json!({ "plan": "pro", "quota_bytes": 1_000_000_000_000i64, "account_state": "ok" }))
-                    }),
+                    get(|State(m): State<Mock>| async move { Json(m.subscription) }),
                 )
                 .route(
                     "/api/v1/me/region",
@@ -351,4 +360,33 @@ fn whoami_survives_a_broken_onboarding_answer() {
     let out = bb(&home, &["whoami", "--json"]);
     assert_eq!(out.status.code(), Some(0), "stderr: {}", text(&out.stderr));
     assert_eq!(json_of(&out)["account"], Value::Null);
+}
+
+/// Codex P2 on PR #61: for an `allowance` account the legacy subscription says
+/// `needs_plan` while the document says `upload.allowed = true`. The document
+/// is authoritative whenever it is available, so `whoami` must not show the
+/// upload row as blocked, nor the state in the error colour.
+#[test]
+fn whoami_document_allowing_upload_overrides_the_legacy_needs_plan_notice() {
+    let legacy = json!({
+        "plan": "free", "effective_plan": "none", "quota_bytes": 0,
+        "account_state": "needs_plan", "data_deletion_at": null,
+    });
+    let (api, _) = spawn_mock_with_subscription(Onboarding::Doc(fixture("account.allowance.web")), legacy.clone());
+    let home = scratch_home();
+    write_config(&home, &api, Some("tok"));
+    let out = bb(&home, &["whoami"]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", text(&out.stderr));
+    assert!(stdout.contains("free allowance"), "{stdout}");
+    assert!(!stdout.contains("blocked"), "upload must not be blocked: {stdout}");
+    assert!(stdout.contains("up to"), "normal upload row expected: {stdout}");
+
+    // With the document unavailable the legacy notice is all there is, and it
+    // still blocks (the fallback is unchanged).
+    let (api, _) = spawn_mock_with_subscription(Onboarding::Status(404, ""), legacy);
+    let home = scratch_home();
+    write_config(&home, &api, Some("tok"));
+    let stdout = text(&bb(&home, &["whoami"]).stdout);
+    assert!(stdout.contains("blocked"), "legacy fallback still blocks: {stdout}");
 }
