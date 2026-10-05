@@ -1020,6 +1020,40 @@
               }
             }
           ]
+        },
+        "coupon": {
+          "$comment": "Task 1814, additive within v1 (README rule 2): present only when the client sent X-Beebeeb-Coupon, the coupon is usable and this account holds no plan. Free in slice A (price_cents 0). Never present when purchase.cta_allowed is false (offers is omitted then).",
+          "type": "object",
+          "properties": {
+            "code_hint": {
+              "type": "string"
+            },
+            "plan": {
+              "type": "string"
+            },
+            "plan_label": {
+              "type": "string"
+            },
+            "duration_months": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "price_cents": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "redeem_endpoint": {
+              "type": "string",
+              "pattern": "^/api/v1/"
+            }
+          },
+          "required": [
+            "code_hint",
+            "plan",
+            "duration_months",
+            "price_cents",
+            "redeem_endpoint"
+          ]
         }
       }
     },

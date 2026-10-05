@@ -12,7 +12,7 @@ implemented yet (task 1739, T2).** This directory defines what it must emit.
 
 ## Fixtures
 
-One per `account.state` value (12), plus platform and forward-compat variants (19 files):
+One per `account.state` value (12), plus platform and forward-compat variants (20 files):
 
 | Fixture | Shows |
 |---|---|
@@ -20,6 +20,7 @@ One per `account.state` value (12), plus platform and forward-compat variants (1
 | `account.allowance.{ios,desktop,web}` | allowance; iOS has no `offers`, no purchase CTA; desktop/web offer the no-card trial (5.4 B, C) |
 | `account.trialing_no_card.desktop` | no-card trial running, over the allowance (5.4 D) |
 | `account.trial_ended.ios` | trial over, usage above the allowance, deletion date (5.4 E) |
+| `account.needs_plan.web.coupon` | task 1814: a plan-less web account that arrived through a coupon link: `offers.coupon` (free, 3 months of Pro) and an optional `redeem_coupon` step ahead of `choose_plan`. iOS never gets either (`offers` is omitted when `cta_allowed` is false) |
 | `account.{needs_plan,trialing,trial_cancelling,active,past_due,read_only,frozen,lapsed,legacy_free}.*` | remaining states; values are illustrative where the spec gives none (see open questions) |
 | `client.update_required.ios` | `client.status = update_required` with `fallback.kind = update_app` |
 | `forward_compat.unknown_step.ios` | unknown required step id, unknown optional step id, unknown top-level and policy fields |
@@ -27,7 +28,7 @@ One per `account.state` value (12), plus platform and forward-compat variants (1
 ## Versioning and forward-compatibility rules (spec 5.8)
 
 1. `schema` is an integer major. The client sends the highest it understands in `X-Beebeeb-Onboarding-Schema`; the server never answers above it. Breaking changes (removed or re-typed fields) need a new major (`schema.v2.json`, new fixtures) and a deprecation window of at least one release per client.
-2. Within a major, changes are additive: new optional fields, new step ids, new enum values.
+2. Within a major, changes are additive: new optional fields, new step ids, new enum values. (Task 1814 is one: `offers.coupon` and the optional `redeem_coupon` step, sent only when the client sends the optional `X-Beebeeb-Coupon` request header.)
 3. Clients ignore unknown fields. **This schema is for validating server output and fixtures; clients must not use it as a strict parser.**
 4. Unknown step id: if `required: true`, stop at that step and show the step `fallback` or the document `fallback` (the schema requires one of the two); if `required: false`, skip silently. The server never marks `accept_terms`, `verify_email_code`, `verify_email`, `create_account` as `required: false` (the schema enforces it).
 5. Unknown step `status` is `blocked`. Unknown `purchase.surface` is `none`. Unknown `account.state`: decide from `capabilities`, the state is only a label. `capabilities` is a closed set per major: absent means not allowed, and the schema rejects any name outside `download`, `upload`, `share`, `delete`.
