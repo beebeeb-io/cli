@@ -1,114 +1,130 @@
-# Beebeeb CLI 0.12.0 — accounts are created on the web; `bb` explains a missing or lapsed plan
+# Beebeeb CLI 0.13.0 — safer `bb pull` and `bb login`, and `bb` reads the server's onboarding document
 
-Beebeeb no longer has free signups. A new account starts a trial on Starter, Basic or Pro, and
-that trial needs a payment method: a card, or iDEAL, which sets up a SEPA direct debit. Only the
-web checkout can take that payment. So accounts are now created on the web, and the server
-(beebeeb-io/server#125) refuses account creation from the CLI and the mobile apps with
-`403 signup_web_only`. `bb` does not create accounts. `bb signup` sends you to the web signup,
-and `bb login` works as before.
+Two of the changes in this release are security fixes, so upgrade.
 
-The same server change adds two account states that `bb` now shows and explains:
+- `bb pull` could be made to write a file anywhere you can write, by whoever uploaded it through
+  one of your file-request links. That is fixed.
+- `bb login` could be used to trick you into handing your session and encryption key to someone
+  else's terminal. The server and web page changes for that are already live; this release
+  changes what `bb` prints and sends so it fits them.
 
-- **no plan yet**: an account that never started a trial.
-- **trial ended unpaid**: the vault is read-only and is deleted 60 days later unless you
-  subscribe.
-
-Existing Free accounts are grandfathered and see no change. This is a minor release (0.11.1 →
-0.12.0) because it adds a command and changes what `bb` prints. Two pull requests merged since
-v0.11.1; only one of them (beebeeb-io/cli#53) changes the `bb` binary.
+Alongside those, `bb pull` no longer fails on about 1 file in 256, `bb pull --zip` now works on
+file-request uploads, `bb mv <x> /` actually moves to the root, and `bb signup` / `bb whoami`
+read the server's new onboarding document. It is a minor release (0.12.0 → 0.13.0) because it
+adds output and JSON keys. Six pull requests changed `bb` since v0.12.0
+(beebeeb-io/cli#56 to #61), plus a Scoop manifest bump that does not touch the binary.
 
 ### What's New
 
-- **`bb signup` opens the web signup instead of creating an account.** It prints
-  "Create your account at https://app.beebeeb.io/signup — then run `bb login`.", opens that page
-  in your browser when one is available, and exits 0. It doesn't open a browser under `--json`
-  (`{"url", "next", "note"}`), under `--quiet` (bare URL), or over SSH / without a display.
-  - The web address follows the API `bb` is pointed at: `APP_URL` if set, otherwise `api.X` →
-    `app.X`, and a local API → `localhost:5173`. A `--api` pointed at a local or staging server
-    never hands out a production link. `bb passkey add` now uses the same logic.
-  - `bb` never had a working signup command on `main`. beebeeb-io/cli#34, which would have added
-    an email-code + OPAQUE registration flow, was closed without merging in favour of this.
-    (beebeeb-io/cli#53)
-- **`bb whoami` / `bb status`, `bb quota` and `bb billing show` show the account state.** The
-  state comes from `GET /api/v1/billing/subscription`. An account with no plan yet shows plan
-  `none`, state `no plan yet`, upload `blocked` and "Your account has no plan yet — choose one
-  at https://app.beebeeb.io/choose-plan". A lapsed account shows `read-only (trial ended)` and
-  "Your trial has ended; your vault is read-only and will be deleted on <date>. Subscribe at
-  https://app.beebeeb.io/billing?view=change". `--json` on `whoami` and `quota` gains
-  `account_state` (`ok` / `needs_plan` / `lapsed`) and `data_deletion_at`. A server that
-  predates the change sends neither field, which reads as `ok`, and so does any value `bb`
-  doesn't recognise. (beebeeb-io/cli#53)
+- **`bb whoami` and `bb signup` read the onboarding document.** `bb` now fetches
+  `GET /api/v1/onboarding` (schema major 1). `bb whoami` shows the account state label from the
+  document, its explanation, and the capabilities your account is denied; `--json` gains an
+  `account` key. `bb signup` still only points you at the web signup. It now adds one line
+  explaining the server's answer (mode, whether it is allowed, why), and `--json` gains a
+  `signup` key with the server's block verbatim. If the document says this version of `bb` is too
+  old, `bb signup` tells you to update. (beebeeb-io/cli#61)
+  - Plan and quota rows still come from the subscription, as before.
+  - A server that has no such endpoint, or any answer that is not schema major 1, gets exactly
+    the 0.12.0 behaviour. On such a server `account` and `signup` are `null` in `--json`.
+  - When the document says a native signup is allowed, `bb` explains that and does not act on
+    it. Accounts are still created on the web.
+  - The document's capabilities now decide whether an upload is shown as blocked, in `bb whoami`
+    and in the `bb push` pre-check. An account whose capabilities allow uploading no longer sees
+    "upload blocked".
 
 ### Bug Fixes / Hardening
 
-- **Refused uploads and shares say why and where to fix it.** For an account without a plan,
-  the server refuses upload init and share creation with `409 plan_required` or
-  `409 account_lapsed`. `bb push`, `bb sync`, `bb webdav`, `bb mount`, `bb repair` and
-  `bb share` now show the matching message above, with the plan-chooser or billing link,
-  instead of the server's generic text. The older `413 quota_exceeded` refusal is explained the
-  same way when the account state calls for it; on an account whose state is `ok` it is left as
-  it was.
-  - Any other `409`, such as an upload already in progress or a stale base version, reaches you
-    unchanged.
-  - The error code and HTTP status are kept, so retry behaviour is unchanged. (beebeeb-io/cli#53)
-- **No extra round-trip on the happy path.** `bb push` checks the account state from the
-  subscription it already fetched before uploading. Every other path fetches the subscription
-  only after a refusal. It skips the fetch for `plan_required` and fetches at most once per run
-  otherwise, so a `bb sync` of many files doesn't refetch per file. If that fetch fails, the
-  lapsed message still appears, just without a date. (beebeeb-io/cli#53)
-- An unused `ApiClient::signup` (a plain-password `/auth/signup` call with no callers) was
-  removed, so the CLI now has no account-creation code at all. (beebeeb-io/cli#53)
-- beebeeb-io/cli#52 bumped the Scoop manifest to the already-released v0.11.1. It doesn't touch
-  `src/` or change `bb`'s behavior.
+- **[Security] `bb pull` could write files outside the folder you chose.** File names come from
+  the server, and for a file-request upload the name is chosen by whoever uploaded the file,
+  anonymously. `bb` joined that name onto your output folder without checking it, so a name such
+  as `../../.ssh/authorized_keys` or an absolute path could overwrite a file you own. Every name
+  now has to be a single plain path component, the target has to resolve inside the output folder
+  (a symlink already there is never followed out of it), and `bb pull <id>` without `-o` refuses
+  an unsafe default name and tells you to pass `-o`. In a folder pull, an unsafe item is skipped
+  with a warning on stderr and the run exits 3; the rest still downloads. `bb pull --zip` leaves
+  such names out of the archive, and `bb sync` skips unsafe remote names and never downloads or
+  deletes outside the sync root. A file uploaded through a request also no longer silently
+  replaces a local file of the same name in a folder pull; use `--force`. (beebeeb-io/cli#57)
+- **[Security] `bb login` tells you to type the code, and says who is asking.** The approval link
+  used to carry the code, so someone could start a login on their own machine, send you the link,
+  and a single click in your signed-in browser would approve it. The link `bb login` prints no
+  longer carries the code. You type the code your own terminal shows; the approval page shows
+  where the request came from and asks for your password or passkey again before it releases
+  anything. `bb login` now says all of this, and its first message to the server also says what
+  is asking (`bb`, its version, the operating system and the machine's hostname), which the page
+  shows labelled as reported by the device. This release only changes the `bb` side; the page and
+  server changes shipped earlier. One risk remains and no software removes it: if someone
+  persuades you to type their code and your password, you have approved them. Approve a login
+  only if you started it yourself, just now. (beebeeb-io/cli#60)
+- **`bb pull` failed on about 1 file in 256.** `bb` told the two stored chunk formats apart by
+  the first byte of the file, and a random first byte of `{` sent a normal file down the wrong
+  path (`parse chunk 0: key must be a string`). The first byte is now only a hint. Chunk
+  boundaries are found by trying the sizes the file can have and accepting only one under which
+  the data authenticates, so a wrong guess fails and cannot return wrong data. Downloads try the
+  streaming path first, so such files stay constant-memory. The data on the server was never
+  affected; other clients could read these files. (beebeeb-io/cli#59)
+- **`bb pull --zip` could not decrypt file-request uploads.** It exited 1 with `decryption
+  failed: ciphertext is invalid or key is wrong`. The archive is now written by the CLI so each
+  entry uses its own key. Duplicate names, and names that differ only by case, are renamed
+  (`name (2).ext`). An entry that cannot be decrypted is skipped with a warning and the run exits
+  3, instead of aborting the archive. The archive is written to a temporary file and renamed,
+  so `--force` can no longer leave a truncated zip over a good one, and a folder cycle no longer
+  overflows the stack. (beebeeb-io/cli#58)
+- **`bb mv <x> /` did nothing.** The CLI left the parent out of the request for a move to the
+  root, and the server reads that as "unchanged". It now sends the root explicitly, in `bb mv`
+  (single and bulk), WebDAV MOVE and FUSE rename. A destination that cannot be resolved is now an
+  error and sends nothing, rather than becoming a move to the root. A single move to the root
+  prints `/file.txt` instead of `//file.txt`. (beebeeb-io/cli#56)
 
 ### Verification
 
-CI on the code this release ships (`175d8f7`, main — the release commit on top of it only bumps the version to 0.12.0 and updates this file and the changelog; its own CI run on the release-notes PR carries the same checks):
-https://github.com/beebeeb-io/cli/actions/runs/36518562618
+Code under test: `f5a6cea` (cli `main`). The release commit on top of it only changes the version
+to 0.13.0, `Cargo.lock` (that one line), this file, and the changelog.
 
-- `cargo build --verbose` — succeeds.
-- `cargo test --verbose` — every test binary green:
-  - main suite (`bb`): `test result: ok. 317 passed; 0 failed; 2 ignored; 0 measured; 0 filtered
-    out; finished in 76.37s`. That is 51 more than 0.11.1's 266. The new tests cover the web-URL
-    derivation, account-state parsing with missing, null and unknown fields, the signup and
-    lapsed/no-plan messages, the `bb push` pre-check, and mock-server tests of the `409` / `413`
-    mapping. The mock-server tests include no subscription lookup on a successful upload, one
-    lookup per client, an unrelated `409` left untouched, and share creation.
-  - `auth_errors`: `test result: ok. 6 passed; 0 failed`
-  - `ecdh_compat`: `test result: ok. 4 passed; 0 failed`
-  - `mount_availability`: `test result: ok. 3 passed; 0 failed`
-  - `non_interactive`: `test result: ok. 6 passed; 0 failed`
-  - `pull_overwrite`: `test result: ok. 5 passed; 0 failed`
-  - `share_resolves_like_pull`: `test result: ok. 1 passed; 0 failed`
-  - `zero_byte_files`: `test result: ok. 4 passed; 0 failed`
-  - Total: 346 passed, 0 failed, 2 ignored across 8 binaries.
-- `cargo test --bin bb help_links_return_200 -- --ignored --nocapture` (network-dependent, run
-  separately from the main suite) — `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured;
-  318 filtered out`.
-- `cargo clippy --all-targets -- -D warnings` — clean (CI job "Clippy & Format", same run).
-- `cargo fmt -- --check` — clean (same job).
-- A debug build of this code was run against a local mock API for each account state (not a
-  real server). For no
-  plan and for lapsed, `bb push` refused with the messages above and exited 1, and
-  `bb whoami` / `bb quota` / `bb billing show` showed the notice. For a pre-0.12 server
-  response, `bb whoami` shows state `ok` and the plan as before.
-- `dist plan` was not run for this notes PR — cargo-dist isn't installed on the machine that
-  prepared it. It still runs as the first, fail-closed step of the tag-triggered release
-  workflow, which also re-validates this file names `0.12.0` before anything builds.
+This release was built and published from a maintainer's machine, not by the GitHub Actions
+release workflow, whose minutes ran out. The artifacts and checksums use the same names and
+layout `dist` produces, built with `dist` 0.31.0.
+
+- `cargo test --locked` — 472 passed, 0 failed, 2 ignored across 11 test binaries:
+  main suite (`bb`) 406, `auth_errors` 6, `ecdh_compat` 4, `mount_availability` 3,
+  `move_parent` 7, `non_interactive` 6, `onboarding_state` 9, `pull_overwrite` 5,
+  `pull_path_traversal` 21, `share_resolves_like_pull` 1, `zero_byte_files` 4. 0.12.0 had 346.
+- `cargo clippy --locked --all-targets -- -D warnings` — clean. `cargo fmt -- --check` — clean.
+- `dist plan --tag=v0.13.0` — five archives, the installer script, `bb.rb`, `sha256.sum`
+  and `source.tar.gz`.
+- Before release, the changes were run against a local server with a scratch home directory, never
+  production: `bb signup --json` against the server's published onboarding fixture, and
+  `bb whoami` for five account states (#61); root moves with 9 API and 9 database checks (#56).
+  The security fixes were checked with failing-first tests, and each new test was seen to fail
+  against the old behaviour before it was trusted.
+- Not verified: `bb pull --zip` on file-request uploads was tested against a mock API only, not
+  a live server. This release has not been run against production.
+
+- Builds, one per target, with `dist build --artifacts=local`: the two macOS targets on an Apple
+  Silicon Mac (the x86_64 one cross-compiled), the two Linux musl targets cross-compiled with
+  Zig, Windows cross-compiled with clang-cl and the Windows SDK. This differs from 0.12.0, whose
+  Linux builds used a native musl toolchain on Linux runners, so expect different file sizes.
+- What was executed: `bb --version` printed `bb 0.13.0` for macOS arm64, macOS x86_64 (under
+  Rosetta), Linux x86_64 and Linux aarch64 (both in containers). The Windows `bb.exe` was **not
+  executed**: there was no Windows machine available. It is a PE32+ x86-64 executable whose
+  imports are Windows system DLLs only. Please report a Windows problem if you see one.
+- Two build differences from 0.12.0 that you may care about: the macOS binaries link `liblzma`
+  statically (0.12.0's linked a Homebrew copy that is not present on every Mac), and the Windows
+  build compiled the bundled WebP library without its SSE4.1 code paths, which is what the macOS
+  and Linux builds do too. No source file in this repository changed for either.
 
 ### Install / Update
 
 ```
-curl -fsSL https://get.beebeeb.io | sh    # macOS / Linux
+curl -fsSL https://get.beebeeb.io | sh           # macOS / Linux
 brew upgrade beebeeb-io/tap/bb                   # macOS, Homebrew
 scoop update bb                                  # Windows, Scoop
 ```
 
 macOS and Linux installs (shell installer or Homebrew) self-update on next run via the built-in
-OTA updater. Windows installs do not self-update yet — run `scoop update bb` to get 0.12.0.
-The Scoop manifest (`scoop/bb.json`) is bumped by a follow-up pull request that the release
-workflow opens once this release is published. Until that pull request is merged,
-`scoop update bb` still installs 0.11.1. To get 0.12.0 on Windows before then, download it from
-the assets below.
+OTA updater. Windows installs do not self-update yet — run `scoop update bb` to get 0.13.0.
+The Scoop manifest (`scoop/bb.json`) is bumped by a follow-up pull request. Until that pull
+request is merged, `scoop update bb` still installs 0.12.0. To get 0.13.0 on Windows before then,
+download it from the assets below.
 
-Full changelog: https://github.com/beebeeb-io/cli/compare/v0.11.1...v0.12.0
+Full changelog: https://github.com/beebeeb-io/cli/compare/v0.12.0...v0.13.0
