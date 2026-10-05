@@ -153,6 +153,358 @@ pub(crate) fn format_deletion_date(at: &DateTime<Utc>) -> String {
     at.format("%B %-d, %Y").to_string()
 }
 
+// ── Onboarding document (task 1750, spec 5.9 / T13) ─────────────────────────
+//
+// `GET /api/v1/onboarding` is the server's single statement of (a) whether this
+// client may create an account and (b) what state the signed-in account is in.
+// The CLI reads it; it never acts on it beyond explaining:
+//
+// - **The CLI is never lifted for native signup** (policy matrix, task 1741).
+//   Whatever `signup.mode` says, `bb signup` sends the user to the web app. A
+//   `native` answer is reported honestly ("the server would allow it, the CLI
+//   does not do it"), never obeyed.
+// - **Lenient on purpose** (contract rule 3): unknown fields are ignored, an
+//   unknown `account.state` is only a label (decide from `capabilities`), an
+//   unknown `signup.mode` reads as `web_only`. The schema file is for
+//   validating server output, not a strict parser.
+// - **Legacy fallback** (rule 6): `Ok(None)` / an error / a document that is not
+//   schema major 1 means the callers keep the `/billing/subscription`
+//   `AccountState` logic above, unchanged.
+//
+// Crypto, prices and purchase flows are not in this module and never will be:
+// the document carries parameters only.
+
+/// `signup.mode`. Unknown values fail closed to [`SignupMode::WebOnly`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SignupMode {
+    Native,
+    WebHandoff,
+    WebOnly,
+}
+
+impl SignupMode {
+    pub(crate) fn from_wire(raw: &str) -> Self {
+        match raw {
+            "native" => SignupMode::Native,
+            "web_handoff" => SignupMode::WebHandoff,
+            _ => SignupMode::WebOnly,
+        }
+    }
+}
+
+/// `account.state`. `Other` carries a value this CLI does not know yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DocState {
+    Allowance,
+    NeedsPlan,
+    TrialingNoCard,
+    TrialEnded,
+    Trialing,
+    TrialCancelling,
+    Active,
+    PastDue,
+    ReadOnly,
+    Frozen,
+    Lapsed,
+    LegacyFree,
+    Other(String),
+}
+
+impl DocState {
+    pub(crate) fn from_wire(raw: &str) -> Self {
+        match raw {
+            "allowance" => DocState::Allowance,
+            "needs_plan" => DocState::NeedsPlan,
+            "trialing_no_card" => DocState::TrialingNoCard,
+            "trial_ended" => DocState::TrialEnded,
+            "trialing" => DocState::Trialing,
+            "trial_cancelling" => DocState::TrialCancelling,
+            "active" => DocState::Active,
+            "past_due" => DocState::PastDue,
+            "read_only" => DocState::ReadOnly,
+            "frozen" => DocState::Frozen,
+            "lapsed" => DocState::Lapsed,
+            "legacy_free" => DocState::LegacyFree,
+            other => DocState::Other(other.to_string()),
+        }
+    }
+
+    pub(crate) fn slug(&self) -> &str {
+        match self {
+            DocState::Allowance => "allowance",
+            DocState::NeedsPlan => "needs_plan",
+            DocState::TrialingNoCard => "trialing_no_card",
+            DocState::TrialEnded => "trial_ended",
+            DocState::Trialing => "trialing",
+            DocState::TrialCancelling => "trial_cancelling",
+            DocState::Active => "active",
+            DocState::PastDue => "past_due",
+            DocState::ReadOnly => "read_only",
+            DocState::Frozen => "frozen",
+            DocState::Lapsed => "lapsed",
+            DocState::LegacyFree => "legacy_free",
+            DocState::Other(s) => s,
+        }
+    }
+}
+
+/// The parts of the document the CLI reads. Everything is optional.
+#[derive(Debug, Clone)]
+pub(crate) struct OnboardingDoc {
+    raw: Value,
+}
+
+/// `signup` of a `pre_account` document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SignupInfo {
+    pub(crate) mode: SignupMode,
+    pub(crate) allowed: bool,
+    pub(crate) reason: Option<String>,
+    pub(crate) web_url: Option<String>,
+}
+
+/// One capability the account is denied, with the server's reason code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Denied {
+    pub(crate) capability: String,
+    pub(crate) reason: Option<String>,
+}
+
+/// What `bb whoami` shows for a signed-in account, from the document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AccountSummary {
+    pub(crate) state: DocState,
+    /// Short row text for `state`.
+    pub(crate) label: String,
+    /// `None` when there is nothing to explain.
+    pub(crate) notice: Option<String>,
+    pub(crate) denied: Vec<Denied>,
+}
+
+impl AccountSummary {
+    pub(crate) fn upload_denied(&self) -> bool {
+        self.denied.iter().any(|d| d.capability == "upload")
+    }
+}
+
+/// Is upload blocked for this account?
+///
+/// The onboarding document is authoritative whenever it is available: its
+/// `upload` capability is the answer, even when the legacy subscription
+/// notice disagrees (an `allowance` account is `needs_plan` in the legacy
+/// view yet may upload). The legacy notice is consulted ONLY when the
+/// document is unavailable.
+pub(crate) fn upload_blocked(legacy_notice: Option<&str>, doc: Option<&AccountSummary>) -> bool {
+    match doc {
+        Some(d) => d.upload_denied(),
+        None => legacy_notice.is_some(),
+    }
+}
+
+/// Why an upload must be refused up front, in words, or `None` to let it
+/// proceed. Same rule as [`upload_blocked`]: the document decides when it is
+/// available (its notice, else a plain sentence), the legacy notice only when
+/// it is not.
+pub(crate) fn upload_refusal(legacy_notice: Option<String>, doc: Option<&AccountSummary>) -> Option<String> {
+    match doc {
+        Some(d) if d.upload_denied() => Some(
+            d.notice
+                .clone()
+                .unwrap_or_else(|| "Your account cannot upload right now.".to_string()),
+        ),
+        Some(_) => None,
+        None => legacy_notice,
+    }
+}
+
+impl OnboardingDoc {
+    /// Parse a response body. `None` unless it is a JSON object of schema
+    /// major 1 (the only major this CLI asks for and understands).
+    pub(crate) fn parse(body: &Value) -> Option<Self> {
+        if body.get("schema").and_then(Value::as_u64) != Some(1) || !body.is_object() {
+            return None;
+        }
+        Some(OnboardingDoc { raw: body.clone() })
+    }
+
+    pub(crate) fn stage(&self) -> Option<&str> {
+        self.raw.get("stage").and_then(Value::as_str)
+    }
+
+    /// The document's `signup` block, if it has one.
+    pub(crate) fn signup(&self) -> Option<SignupInfo> {
+        let s = self.raw.get("signup").filter(|v| v.is_object())?;
+        let str_of = |k: &str| s.get(k).and_then(Value::as_str).map(str::to_string);
+        Some(SignupInfo {
+            mode: SignupMode::from_wire(s.get("mode").and_then(Value::as_str).unwrap_or("web_only")),
+            // A missing `allowed` is not permission.
+            allowed: s.get("allowed").and_then(Value::as_bool).unwrap_or(false),
+            reason: str_of("reason"),
+            web_url: str_of("web_url"),
+        })
+    }
+
+    /// The `signup` block exactly as the server sent it (for `--json`).
+    pub(crate) fn signup_raw(&self) -> Option<&Value> {
+        self.raw.get("signup").filter(|v| v.is_object())
+    }
+
+    /// `client.status == "update_required"`: this `bb` is too old for the
+    /// server. Said in words, never acted on.
+    pub(crate) fn update_required(&self) -> bool {
+        self.raw.pointer("/client/status").and_then(Value::as_str) == Some("update_required")
+    }
+
+    /// The signed-in account, if this is a `stage: account` document with a
+    /// state. `app_base` is the web app base (for the "do this on the web"
+    /// links), no trailing slash needed.
+    pub(crate) fn account_summary(&self, app_base: &str) -> Option<AccountSummary> {
+        if self.stage() == Some("pre_account") {
+            return None;
+        }
+        let acct = self.raw.get("account").filter(|v| v.is_object())?;
+        let state = DocState::from_wire(acct.get("state").and_then(Value::as_str)?);
+        let denied = denied_capabilities(acct);
+        let base = app_base.trim_end_matches('/');
+        let date_at = |ptr: &str| {
+            self.raw
+                .pointer(ptr)
+                .and_then(Value::as_str)
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                .map(|d| format_deletion_date(&d.with_timezone(&Utc)))
+        };
+        let deletion = date_at("/account/lifecycle/data_deletion_at");
+        let trial_end = date_at("/account/trial/ends_at");
+        let will_be_deleted = |lead: &str| match &deletion {
+            Some(d) => format!("{lead} and will be deleted on {d}."),
+            None => format!("{lead}."),
+        };
+
+        let (label, notice): (String, Option<String>) = match &state {
+            DocState::Allowance => ("free allowance".into(), None),
+            DocState::LegacyFree => ("free (legacy plan)".into(), None),
+            DocState::Active => ("active".into(), None),
+            DocState::NeedsPlan => (
+                "no plan yet".into(),
+                Some(format!(
+                    "Your account has no plan yet \u{2014} choose one at {base}/choose-plan"
+                )),
+            ),
+            DocState::Trialing => ("trial".into(), trial_end.map(|d| format!("Your trial runs until {d}."))),
+            DocState::TrialingNoCard => (
+                "trial (no card)".into(),
+                Some(match trial_end {
+                    Some(d) => format!(
+                        "Your trial runs until {d}. No card is on file, so it will not convert by itself \u{2014} \
+                         choose a plan at {base}/choose-plan before then."
+                    ),
+                    None => format!(
+                        "No card is on file, so your trial will not convert by itself \u{2014} choose a plan at {base}/choose-plan."
+                    ),
+                }),
+            ),
+            DocState::TrialCancelling => (
+                "trial (cancelling)".into(),
+                Some(match trial_end {
+                    Some(d) => format!("Your trial is cancelled and ends on {d}; it will not convert to a paid plan."),
+                    None => "Your trial is cancelled; it will not convert to a paid plan.".to_string(),
+                }),
+            ),
+            DocState::TrialEnded | DocState::Lapsed => (
+                "read-only (trial ended)".into(),
+                Some(format!(
+                    "{} Subscribe at {base}/billing?view=change",
+                    will_be_deleted("Your trial has ended; your vault is read-only")
+                )),
+            ),
+            DocState::PastDue => (
+                "payment overdue".into(),
+                Some(format!(
+                    "Your last payment did not go through. Update it at {base}/billing"
+                )),
+            ),
+            DocState::ReadOnly => (
+                "read-only".into(),
+                Some(format!(
+                    "{} Resolve it at {base}/billing",
+                    will_be_deleted("Your vault is read-only: you can download and delete, not upload or share")
+                )),
+            ),
+            DocState::Frozen => (
+                "frozen".into(),
+                Some("Your account is frozen. Contact support to find out why and to unfreeze it.".into()),
+            ),
+            // A state this CLI does not know: the label is only a label, the
+            // capabilities decide (contract rule 5).
+            DocState::Other(s) => (
+                s.replace('_', " "),
+                (!denied.is_empty()).then(|| {
+                    format!(
+                        "Some actions are turned off for this account ({}). Details at {base}",
+                        denied
+                            .iter()
+                            .map(|d| d.capability.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }),
+            ),
+        };
+        Some(AccountSummary {
+            state,
+            label,
+            notice,
+            denied,
+        })
+    }
+}
+
+/// Capabilities the document marks `allowed: false`. `delete` and unknown
+/// names are included as sent; ordering follows the document.
+fn denied_capabilities(acct: &Value) -> Vec<Denied> {
+    let Some(caps) = acct.get("capabilities").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut out: Vec<Denied> = caps
+        .iter()
+        .filter(|(_, v)| v.get("allowed").and_then(Value::as_bool) == Some(false))
+        .map(|(name, v)| Denied {
+            capability: name.clone(),
+            reason: v.get("reason").and_then(Value::as_str).map(str::to_string),
+        })
+        .collect();
+    out.sort_by(|a, b| a.capability.cmp(&b.capability));
+    out
+}
+
+/// What `bb signup` says about the document's `signup` block. The destination
+/// never depends on it (see the module notes above): the CLI always sends the
+/// user to the web app.
+pub(crate) fn signup_explanation(info: &SignupInfo) -> String {
+    let why = |r: &Option<String>| r.as_deref().map(|r| format!(" ({r})")).unwrap_or_default();
+    match (info.allowed, info.mode) {
+        // The ordinary answer for a client the policy keeps on the web
+        // (`signup_web_only`, task 1741): not a closed door, just the web.
+        (false, SignupMode::WebOnly) if info.reason.as_deref() == Some("signup_web_only") => {
+            "Accounts are created in the web app; the terminal only signs in.".to_string()
+        }
+        (false, _) => format!(
+            "The server is not accepting new accounts from this client right now{}. \
+             The web app is the place to check.",
+            why(&info.reason)
+        ),
+        (true, SignupMode::Native) => {
+            "The server would let a native app create an account, but the terminal does not: \
+             accounts are created in the web app."
+                .to_string()
+        }
+        (true, SignupMode::WebHandoff) => {
+            "Accounts are created in the web app; it hands you back here when you are done.".to_string()
+        }
+        (true, SignupMode::WebOnly) => "Accounts are created in the web app; the terminal only signs in.".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,5 +744,254 @@ mod tests {
     fn deletion_date_uses_the_utc_calendar_day() {
         assert_eq!(format_deletion_date(&at("2026-11-27T23:59:59Z")), "November 27, 2026");
         assert_eq!(format_deletion_date(&at("2026-01-05T00:00:00Z")), "January 5, 2026");
+    }
+    // ── onboarding document (task 1750) ──────────────────────────────────
+
+    use std::path::PathBuf;
+
+    const BASE: &str = "https://app.beebeeb.io";
+
+    fn contract_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("contracts/onboarding")
+    }
+
+    /// Every vendored fixture as (file name, parsed JSON), sorted by name.
+    fn fixtures() -> Vec<(String, Value)> {
+        let mut out: Vec<(String, Value)> = std::fs::read_dir(contract_dir().join("fixtures"))
+            .expect("vendored fixtures dir")
+            .map(|e| {
+                let e = e.unwrap();
+                let body = std::fs::read_to_string(e.path()).unwrap();
+                (
+                    e.file_name().to_string_lossy().into_owned(),
+                    serde_json::from_str(&body).unwrap(),
+                )
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    fn fixture(name: &str) -> Value {
+        fixtures()
+            .into_iter()
+            .find(|(n, _)| n == &format!("{name}.json"))
+            .unwrap_or_else(|| panic!("no fixture {name}"))
+            .1
+    }
+
+    fn summary(name: &str) -> AccountSummary {
+        OnboardingDoc::parse(&fixture(name))
+            .unwrap()
+            .account_summary(BASE)
+            .unwrap_or_else(|| panic!("{name} has no account summary"))
+    }
+
+    #[test]
+    fn every_vendored_fixture_parses_as_schema_major_one() {
+        let all = fixtures();
+        assert_eq!(all.len(), 19, "fixture count changed: re-vendor and update this count");
+        for (name, body) in &all {
+            assert!(OnboardingDoc::parse(body).is_some(), "{name} must parse");
+        }
+    }
+
+    #[test]
+    fn every_account_state_in_the_schema_has_a_summary_with_the_same_slug() {
+        let schema: Value =
+            serde_json::from_str(&std::fs::read_to_string(contract_dir().join("schema.v1.json")).unwrap()).unwrap();
+        let states: Vec<String> = schema["$defs"]["account"]["properties"]["state"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(states.len(), 12);
+        let mut covered = 0;
+        for want in &states {
+            let (name, body) = fixtures()
+                .into_iter()
+                .find(|(_, b)| b["account"]["state"] == json!(want))
+                .unwrap_or_else(|| panic!("no fixture for {want}"));
+            let sum = OnboardingDoc::parse(&body).unwrap().account_summary(BASE).unwrap();
+            assert_eq!(sum.state.slug(), want, "{name}");
+            assert!(!matches!(sum.state, DocState::Other(_)), "{want} must be a known state");
+            assert!(!sum.label.is_empty(), "{want} needs a label");
+            covered += 1;
+        }
+        assert_eq!(covered, 12);
+    }
+
+    #[test]
+    fn states_that_need_no_action_say_nothing() {
+        for name in ["account.active.web", "account.allowance.web", "account.legacy_free.web"] {
+            assert_eq!(summary(name).notice, None, "{name}");
+        }
+    }
+
+    #[test]
+    fn trial_ended_names_the_deletion_date_and_points_at_the_web() {
+        let s = summary("account.trial_ended.ios");
+        assert_eq!(s.state, DocState::TrialEnded);
+        assert_eq!(s.label, "read-only (trial ended)");
+        assert_eq!(
+            s.notice.as_deref(),
+            Some(
+                "Your trial has ended; your vault is read-only and will be deleted on November 1, 2026. \
+                 Subscribe at https://app.beebeeb.io/billing?view=change"
+            )
+        );
+        assert!(s.upload_denied());
+        // Downloads and deletes stay allowed in this state.
+        assert_eq!(
+            s.denied.iter().map(|d| d.capability.as_str()).collect::<Vec<_>>(),
+            vec!["share", "upload"]
+        );
+        assert!(s.denied.iter().all(|d| d.reason.as_deref() == Some("trial_ended")));
+    }
+
+    #[test]
+    fn no_card_trial_says_it_will_not_convert_and_when_it_ends() {
+        let n = summary("account.trialing_no_card.desktop").notice.unwrap();
+        assert!(n.contains("October 18, 2026"), "{n}");
+        assert!(n.contains("will not convert by itself"), "{n}");
+        assert!(n.contains("https://app.beebeeb.io/choose-plan"), "{n}");
+    }
+
+    #[test]
+    fn frozen_and_read_only_deny_upload_and_explain() {
+        let frozen = summary("account.frozen.desktop");
+        assert!(frozen.upload_denied());
+        assert!(frozen.notice.unwrap().contains("frozen"));
+        let ro = summary("account.read_only.web");
+        assert!(ro.upload_denied());
+        assert!(ro.notice.unwrap().starts_with("Your vault is read-only"));
+    }
+
+    #[test]
+    fn past_due_still_uploads_but_says_the_payment_failed() {
+        let s = summary("account.past_due.web");
+        assert!(!s.upload_denied());
+        assert!(s.notice.unwrap().contains("payment did not go through"));
+    }
+
+    #[test]
+    fn document_notices_follow_the_web_app_base_they_are_given() {
+        let doc = OnboardingDoc::parse(&fixture("account.needs_plan.ios")).unwrap();
+        let n = doc.account_summary("http://localhost:5173/").unwrap().notice.unwrap();
+        assert!(n.ends_with("http://localhost:5173/choose-plan"), "{n}");
+        assert!(!n.contains("beebeeb.io"), "{n}");
+    }
+
+    #[test]
+    fn unknown_state_is_only_a_label_and_capabilities_decide() {
+        let allowed = json!({"schema":1,"stage":"account","account":{"state":"some_future_state",
+            "capabilities":{"download":{"allowed":true},"upload":{"allowed":true},"share":{"allowed":true}}}});
+        let s = OnboardingDoc::parse(&allowed).unwrap().account_summary(BASE).unwrap();
+        assert_eq!(s.state, DocState::Other("some_future_state".into()));
+        assert_eq!(s.label, "some future state");
+        assert_eq!(s.notice, None);
+        assert!(!s.upload_denied());
+
+        let denied = json!({"schema":1,"stage":"account","account":{"state":"some_future_state",
+            "capabilities":{"download":{"allowed":true},"upload":{"allowed":false,"reason":"x"},"share":{"allowed":false}}}});
+        let s = OnboardingDoc::parse(&denied).unwrap().account_summary(BASE).unwrap();
+        assert!(s.upload_denied());
+        assert!(s.notice.unwrap().contains("share, upload"));
+    }
+
+    #[test]
+    fn unknown_fields_are_ignored() {
+        let mut body = fixture("account.active.web");
+        body["brand_new_top_level"] = json!({"x": 1});
+        body["account"]["brand_new"] = json!(true);
+        assert!(OnboardingDoc::parse(&body).unwrap().account_summary(BASE).is_some());
+        let fwd = fixture("forward_compat.unknown_step.ios");
+        assert!(OnboardingDoc::parse(&fwd).is_some());
+    }
+
+    #[test]
+    fn only_schema_major_one_parses() {
+        assert!(OnboardingDoc::parse(&json!({"schema": 2, "stage": "account"})).is_none());
+        assert!(OnboardingDoc::parse(&json!({"stage": "account"})).is_none());
+        assert!(OnboardingDoc::parse(&json!({"schema": "1"})).is_none());
+        assert!(OnboardingDoc::parse(&json!([1])).is_none());
+        assert!(OnboardingDoc::parse(&Value::Null).is_none());
+    }
+
+    #[test]
+    fn a_pre_account_document_has_no_account_summary() {
+        let doc = OnboardingDoc::parse(&fixture("pre_account.web")).unwrap();
+        assert_eq!(doc.stage(), Some("pre_account"));
+        assert!(doc.account_summary(BASE).is_none());
+    }
+
+    #[test]
+    fn update_required_is_reported() {
+        assert!(
+            OnboardingDoc::parse(&fixture("client.update_required.ios"))
+                .unwrap()
+                .update_required()
+        );
+        assert!(
+            !OnboardingDoc::parse(&fixture("account.active.web"))
+                .unwrap()
+                .update_required()
+        );
+    }
+
+    // ── signup.mode ──────────────────────────────────────────────────────
+
+    #[test]
+    fn signup_block_is_read_from_the_pre_account_fixtures() {
+        for name in ["pre_account.web", "pre_account.ios", "pre_account.desktop"] {
+            let info = OnboardingDoc::parse(&fixture(name)).unwrap().signup().unwrap();
+            assert_eq!(info.mode, SignupMode::Native, "{name}");
+            assert!(info.allowed, "{name}");
+            assert_eq!(info.web_url.as_deref(), Some("https://app.beebeeb.io/signup"));
+        }
+    }
+
+    #[test]
+    fn signup_mode_parsing_fails_closed() {
+        assert_eq!(SignupMode::from_wire("native"), SignupMode::Native);
+        assert_eq!(SignupMode::from_wire("web_handoff"), SignupMode::WebHandoff);
+        assert_eq!(SignupMode::from_wire("web_only"), SignupMode::WebOnly);
+        assert_eq!(SignupMode::from_wire("teleport"), SignupMode::WebOnly);
+        assert_eq!(SignupMode::from_wire(""), SignupMode::WebOnly);
+        let doc =
+            OnboardingDoc::parse(&json!({"schema":1,"stage":"pre_account","signup":{"mode":"teleport"}})).unwrap();
+        let info = doc.signup().unwrap();
+        assert_eq!(info.mode, SignupMode::WebOnly);
+        assert!(!info.allowed, "a missing `allowed` is not permission");
+    }
+
+    fn info(mode: SignupMode, allowed: bool, reason: Option<&str>) -> SignupInfo {
+        SignupInfo {
+            mode,
+            allowed,
+            reason: reason.map(str::to_string),
+            web_url: None,
+        }
+    }
+
+    #[test]
+    fn signup_explanations_never_promise_a_native_flow() {
+        let native = signup_explanation(&info(SignupMode::Native, true, None));
+        assert!(native.contains("the terminal does not"), "{native}");
+        assert!(native.contains("web app"), "{native}");
+        assert!(signup_explanation(&info(SignupMode::WebOnly, true, None)).contains("the terminal only signs in"));
+        assert!(signup_explanation(&info(SignupMode::WebHandoff, true, None)).contains("hands you back here"));
+        // The ordinary web-only policy answer is not worded as a closed door.
+        let policy = signup_explanation(&info(SignupMode::WebOnly, false, Some("signup_web_only")));
+        assert!(policy.contains("the terminal only signs in"), "{policy}");
+        assert!(!policy.contains("not accepting"), "{policy}");
+        let closed = signup_explanation(&info(SignupMode::WebOnly, false, Some("signups_paused")));
+        assert!(
+            closed.contains("not accepting new accounts from this client"),
+            "{closed}"
+        );
+        assert!(closed.contains("(signups_paused)"), "{closed}");
+        assert!(!signup_explanation(&info(SignupMode::Native, false, None)).contains("would let"));
     }
 }

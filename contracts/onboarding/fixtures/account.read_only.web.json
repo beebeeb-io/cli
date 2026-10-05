@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "stage": "account",
+  "client": {
+    "status": "ok"
+  },
+  "account": {
+    "state": "read_only",
+    "legacy_account_state": "ok",
+    "email_verified": true,
+    "capabilities": {
+      "download": {
+        "allowed": true
+      },
+      "upload": {
+        "allowed": false,
+        "reason": "billing_read_only"
+      },
+      "share": {
+        "allowed": false,
+        "reason": "billing_read_only"
+      }
+    },
+    "storage": {
+      "quota_bytes": 1000000000000,
+      "used_bytes": 120000000000
+    },
+    "lifecycle": {
+      "read_only_since": null,
+      "data_deletion_at": null,
+      "reason": "billing_read_only"
+    }
+  },
+  "purchase": {
+    "surface": "in_page",
+    "cta_allowed": true,
+    "price_visibility": "full",
+    "methods": [
+      "banktransfer",
+      "directdebit",
+      "ideal",
+      "paypal"
+    ]
+  },
+  "steps": [],
+  "blocking": false
+}

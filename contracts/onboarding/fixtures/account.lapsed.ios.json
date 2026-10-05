@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "stage": "account",
+  "client": {
+    "status": "ok"
+  },
+  "account": {
+    "state": "lapsed",
+    "legacy_account_state": "lapsed",
+    "email_verified": true,
+    "capabilities": {
+      "download": {
+        "allowed": true
+      },
+      "upload": {
+        "allowed": false,
+        "reason": "account_lapsed"
+      },
+      "share": {
+        "allowed": false,
+        "reason": "account_lapsed"
+      }
+    },
+    "storage": {
+      "quota_bytes": 0,
+      "used_bytes": 120000000000
+    },
+    "lifecycle": {
+      "read_only_since": null,
+      "data_deletion_at": "2026-12-01T09:00:00Z",
+      "reason": "account_lapsed"
+    }
+  },
+  "purchase": {
+    "surface": "none",
+    "cta_allowed": false,
+    "price_visibility": "hidden",
+    "methods": [],
+    "copy": {
+      "plans_managed_on_web": "Plans are managed from your account on the web."
+    }
+  },
+  "steps": [],
+  "blocking": false
+}

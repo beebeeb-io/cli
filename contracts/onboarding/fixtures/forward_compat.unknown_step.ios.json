@@ -1,0 +1,123 @@
+{
+  "schema": 1,
+  "generated_at": "2026-10-04T09:00:00Z",
+  "ttl_seconds": 300,
+  "client": {
+    "status": "ok",
+    "min_version": "1.4.0",
+    "recommended_version": "1.5.0"
+  },
+  "stage": "pre_account",
+  "signup": {
+    "allowed": true,
+    "mode": "native",
+    "reason": null,
+    "web_url": "https://app.beebeeb.io/signup"
+  },
+  "policy": {
+    "password": {
+      "min_length": 12,
+      "breach_check": {
+        "endpoint": "/api/v1/auth/pwned-range/{prefix}",
+        "fail_open": true
+      }
+    },
+    "recovery_phrase": {
+      "word_count": 12,
+      "verify_word_count": 3
+    },
+    "terms": {
+      "version": "2026-09-29",
+      "url": "https://beebeeb.io/terms",
+      "privacy_url": "https://beebeeb.io/privacy"
+    },
+    "email_code": {
+      "length": 8,
+      "ttl_seconds": 900,
+      "resend_after_seconds": 60,
+      "ticket_ttl_seconds": 1800
+    },
+    "pilot_key": {
+      "required": false
+    },
+    "future_policy_block": {
+      "x": 1
+    }
+  },
+  "steps": [
+    {
+      "id": "enter_email",
+      "status": "todo",
+      "required": true,
+      "ui": "action"
+    },
+    {
+      "id": "verify_email_code",
+      "status": "todo",
+      "required": true,
+      "ui": "action",
+      "params": {
+        "length": 8,
+        "ttl_seconds": 900
+      }
+    },
+    {
+      "id": "confirm_phone_number",
+      "status": "todo",
+      "required": true,
+      "ui": "action",
+      "params": {
+        "region": "NL"
+      },
+      "fallback": {
+        "kind": "use_web",
+        "url": "https://app.beebeeb.io/signup"
+      }
+    },
+    {
+      "id": "future_nice_to_have",
+      "status": "todo",
+      "required": false,
+      "ui": "info"
+    },
+    {
+      "id": "accept_terms",
+      "status": "todo",
+      "required": true,
+      "ui": "action",
+      "params": {
+        "version": "2026-09-29"
+      }
+    },
+    {
+      "id": "set_password",
+      "status": "todo",
+      "required": true,
+      "ui": "action"
+    },
+    {
+      "id": "save_recovery_phrase",
+      "status": "todo",
+      "required": true,
+      "ui": "action"
+    },
+    {
+      "id": "create_account",
+      "status": "todo",
+      "required": true,
+      "ui": "action"
+    }
+  ],
+  "blocking": true,
+  "copy": {
+    "locale": "en",
+    "region_line": "Stored in the EU."
+  },
+  "fallback": {
+    "kind": "use_web",
+    "url": "https://app.beebeeb.io/signup"
+  },
+  "future_top_level_field": {
+    "anything": true
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "stage": "account",
+  "client": {
+    "status": "ok"
+  },
+  "account": {
+    "state": "trial_ended",
+    "legacy_account_state": "lapsed",
+    "email_verified": true,
+    "capabilities": {
+      "download": {
+        "allowed": true
+      },
+      "upload": {
+        "allowed": false,
+        "reason": "trial_ended"
+      },
+      "share": {
+        "allowed": false,
+        "reason": "trial_ended"
+      },
+      "delete": {
+        "allowed": true
+      }
+    },
+    "storage": {
+      "quota_bytes": 2000000000,
+      "used_bytes": 6300000000,
+      "allowance_bytes": 2000000000,
+      "over_allowance": true
+    },
+    "trial": {
+      "kind": "no_card",
+      "started_at": "2026-10-04T09:00:00Z",
+      "ends_at": "2026-10-18T09:00:00Z",
+      "cap_bytes": 10000000000,
+      "converts_automatically": false,
+      "first_charge_at": null
+    },
+    "lifecycle": {
+      "read_only_since": "2026-10-18T09:00:00Z",
+      "data_deletion_at": "2026-11-01T09:00:00Z",
+      "reason": "trial_ended"
+    }
+  },
+  "purchase": {
+    "surface": "none",
+    "cta_allowed": false,
+    "price_visibility": "hidden",
+    "methods": [],
+    "copy": {
+      "plans_managed_on_web": "Plans are managed from your account on the web."
+    }
+  },
+  "steps": [],
+  "blocking": false,
+  "copy": {
+    "trial_ended_over_allowance": "Your trial ended. Files above 2 GB are read-only and will be deleted on 1 Nov unless you free up space."
+  }
+}

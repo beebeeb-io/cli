@@ -296,6 +296,37 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    /// `GET /api/v1/onboarding` (task 1750; server task 1739, spec 5.2): the
+    /// backend-driven onboarding document. Best-effort by design: the caller
+    /// falls back to the legacy `/billing/subscription` logic on `Ok(None)`
+    /// (a server that predates the endpoint answers 404/405, spec 5.8 rule 6)
+    /// and on `Err`.
+    ///
+    /// `with_session` sends the stored token, so the server answers
+    /// `stage: "account"`; without it the answer is `stage: "pre_account"`
+    /// (what `bb signup` reads). The extra headers are self-declared context
+    /// (spec 5.2): schema major we understand, OS, and `direct` (the CLI is
+    /// distributed outside any app store). A short timeout keeps a slow
+    /// onboarding call from delaying the command it only decorates.
+    pub async fn get_onboarding(&self, with_session: bool) -> Result<Option<Value>, String> {
+        let mut req = self
+            .client
+            .get(self.url("/api/v1/onboarding"))
+            .timeout(std::time::Duration::from_secs(5))
+            .header("X-Beebeeb-Onboarding-Schema", "1")
+            .header("X-Beebeeb-Client-OS", onboarding_os())
+            .header("X-Beebeeb-Store-Channel", "direct");
+        if with_session {
+            req = req.bearer_auth(self.require_auth()?);
+        }
+        let resp = req.send().await.map_err(format_request_error)?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::METHOD_NOT_ALLOWED {
+            return Ok(None);
+        }
+        parse_response(resp).await.map(Some)
+    }
+
     pub async fn get_me(&self) -> Result<Value, String> {
         let token = self.require_auth()?;
         let resp = self
@@ -2083,6 +2114,17 @@ impl std::fmt::Display for ApiError {
 impl From<ApiError> for String {
     fn from(e: ApiError) -> String {
         e.message
+    }
+}
+
+/// `X-Beebeeb-Client-OS` value for this build (`macos|windows|linux`). Any
+/// other OS is sent as `unknown`, which the server reads as unrecognised.
+fn onboarding_os() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "macos",
+        "windows" => "windows",
+        "linux" => "linux",
+        _ => "unknown",
     }
 }
 
