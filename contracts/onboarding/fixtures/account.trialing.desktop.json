@@ -48,6 +48,7 @@
     ],
     "checkout": {
       "open_with": "system_browser",
+      "return_kind": "app",
       "poll_seconds": 3
     }
   },

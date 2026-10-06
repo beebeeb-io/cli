@@ -43,7 +43,10 @@
       "directdebit",
       "ideal",
       "paypal"
-    ]
+    ],
+    "checkout": {
+      "return_kind": "web"
+    }
   },
   "steps": [],
   "blocking": false
