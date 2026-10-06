@@ -380,6 +380,22 @@ impl OnboardingDoc {
             None => format!("{lead}."),
         };
 
+        // Deletion is a capability like any other (contract rule 5): when the
+        // document denies it, say so and why instead of assuming it is allowed.
+        let delete_note = denied
+            .iter()
+            .find(|d| d.capability == "delete")
+            .map(|d| match d.reason.as_deref() {
+                Some(r) => format!(" Deleting files is not available right now ({}).", r.replace('_', " ")),
+                None => " Deleting files is not available right now.".to_string(),
+            })
+            .unwrap_or_default();
+        let ro_lead = if delete_note.is_empty() {
+            "Your vault is read-only: you can download and delete, not upload or share"
+        } else {
+            "Your vault is read-only: you can download, not upload, share or delete"
+        };
+
         let (label, notice): (String, Option<String>) = match &state {
             DocState::Allowance => ("free allowance".into(), None),
             DocState::LegacyFree => ("free (legacy plan)".into(), None),
@@ -413,7 +429,7 @@ impl OnboardingDoc {
             DocState::TrialEnded | DocState::Lapsed => (
                 "read-only (trial ended)".into(),
                 Some(format!(
-                    "{} Subscribe at {base}/billing?view=change",
+                    "{}{delete_note} Subscribe at {base}/billing?view=change",
                     will_be_deleted("Your trial has ended; your vault is read-only")
                 )),
             ),
@@ -426,8 +442,8 @@ impl OnboardingDoc {
             DocState::ReadOnly => (
                 "read-only".into(),
                 Some(format!(
-                    "{} Resolve it at {base}/billing",
-                    will_be_deleted("Your vault is read-only: you can download and delete, not upload or share")
+                    "{}{delete_note} Resolve it at {base}/billing",
+                    will_be_deleted(ro_lead)
                 )),
             ),
             DocState::Frozen => (
@@ -879,6 +895,21 @@ mod tests {
         let ro = summary("account.read_only.web");
         assert!(ro.upload_denied());
         assert!(ro.notice.unwrap().starts_with("Your vault is read-only"));
+    }
+
+    #[test]
+    fn read_only_says_deletion_is_unavailable_when_the_document_denies_it() {
+        let ro = summary("account.read_only.web");
+        assert!(ro.denied.iter().any(|d| d.capability == "delete"));
+        let n = ro.notice.unwrap();
+        assert!(!n.contains("download and delete"), "{n}");
+        assert!(
+            n.contains("Deleting files is not available right now (billing read only)."),
+            "{n}"
+        );
+        // Allowed -> unchanged wording.
+        let ended = summary("account.trial_ended.ios").notice.unwrap();
+        assert!(!ended.contains("Deleting files is not available"), "{ended}");
     }
 
     #[test]
