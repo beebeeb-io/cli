@@ -19,6 +19,9 @@
       "share": {
         "allowed": false,
         "reason": "account_lapsed"
+      },
+      "delete": {
+        "allowed": true
       }
     },
     "storage": {

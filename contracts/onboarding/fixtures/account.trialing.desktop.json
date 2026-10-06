@@ -18,6 +18,9 @@
       },
       "share": {
         "allowed": true
+      },
+      "delete": {
+        "allowed": true
       }
     },
     "storage": {

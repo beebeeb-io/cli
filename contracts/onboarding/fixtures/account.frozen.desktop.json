@@ -19,6 +19,10 @@
       "share": {
         "allowed": false,
         "reason": "account_frozen"
+      },
+      "delete": {
+        "allowed": false,
+        "reason": "account_frozen"
       }
     },
     "storage": {
