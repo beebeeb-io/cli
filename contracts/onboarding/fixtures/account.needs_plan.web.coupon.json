@@ -1,0 +1,70 @@
+{
+  "schema": 1,
+  "stage": "account",
+  "client": {
+    "status": "ok"
+  },
+  "account": {
+    "state": "needs_plan",
+    "legacy_account_state": "needs_plan",
+    "email_verified": true,
+    "capabilities": {
+      "download": {
+        "allowed": true
+      },
+      "upload": {
+        "allowed": false,
+        "reason": "plan_required"
+      },
+      "share": {
+        "allowed": false,
+        "reason": "plan_required"
+      }
+    },
+    "storage": {
+      "quota_bytes": 0,
+      "used_bytes": 0
+    }
+  },
+  "purchase": {
+    "surface": "in_page",
+    "cta_allowed": true,
+    "price_visibility": "full",
+    "methods": [
+      "banktransfer",
+      "directdebit",
+      "ideal",
+      "paypal"
+    ]
+  },
+  "steps": [
+    {
+      "id": "redeem_coupon",
+      "status": "todo",
+      "required": false,
+      "ui": "action",
+      "params": {
+        "plan": "pro",
+        "duration_months": 3,
+        "price_cents": 0
+      }
+    },
+    {
+      "id": "choose_plan",
+      "status": "todo",
+      "required": true,
+      "ui": "action"
+    }
+  ],
+  "blocking": true,
+  "offers": {
+    "coupon": {
+      "code_hint": "K7M2...",
+      "plan": "pro",
+      "plan_label": "Pro",
+      "duration_months": 3,
+      "price_cents": 0,
+      "redeem_endpoint": "/api/v1/billing/coupon/redeem"
+    }
+  }
+}
