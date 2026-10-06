@@ -136,7 +136,7 @@
       }
     },
     {
-      "$comment": "4b.8: blocking is false for allowance, trialing_no_card, trial_ended while no required step is outstanding (task 1740: an unaccepted accept_terms is one, and 5.3 says a required unfinished step blocks); true for needs_plan (4.5 full-screen explanation).",
+      "$comment": "4b.8: blocking is false for allowance, trialing_no_card, trial_ended while no required step is outstanding (a required unfinished step blocks, 5.3; accept_terms is no longer one for an existing account, task 1822); true for needs_plan (4.5 full-screen explanation).",
       "if": {
         "required": [
           "account",
@@ -247,6 +247,69 @@
         "properties": {
           "blocking": {
             "const": true
+          }
+        }
+      }
+    },
+    {
+      "$comment": "5.8 rule 3 / decision 1812 Q2 (task 1822): in the pre_account document accept_terms is a required consent (signup is where the Terms are enforced); in the account document it is advisory for an existing account and is never required, so it can never make the document blocking.",
+      "if": {
+        "required": [
+          "stage"
+        ],
+        "properties": {
+          "stage": {
+            "const": "pre_account"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "steps": {
+            "items": {
+              "if": {
+                "properties": {
+                  "id": {
+                    "const": "accept_terms"
+                  }
+                },
+                "required": [
+                  "id"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "required": {
+                    "const": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "steps": {
+            "items": {
+              "if": {
+                "properties": {
+                  "id": {
+                    "const": "accept_terms"
+                  }
+                },
+                "required": [
+                  "id"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "required": {
+                    "const": false
+                  }
+                }
+              }
+            }
           }
         }
       }
@@ -1180,12 +1243,11 @@
       ],
       "allOf": [
         {
-          "$comment": "5.8 rule 3: consent and security steps are never required:false.",
+          "$comment": "5.8 rule 3: security steps are never required:false. accept_terms is a consent step: required:true in the pre_account (signup) document, where the Terms are enforced, but ADVISORY (required:false) for an existing account in the account document (decision 1812 Q2, task 1822): see the stage rule in the top-level allOf.",
           "if": {
             "properties": {
               "id": {
                 "enum": [
-                  "accept_terms",
                   "verify_email_code",
                   "verify_email",
                   "create_account"

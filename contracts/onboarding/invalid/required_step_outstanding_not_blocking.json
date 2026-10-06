@@ -41,18 +41,9 @@
   },
   "steps": [
     {
-      "id": "accept_terms",
-      "status": "todo",
-      "required": true,
-      "ui": "action",
-      "params": {
-        "version": "2026-10-01"
-      }
-    },
-    {
       "id": "choose_plan",
       "status": "todo",
-      "required": false,
+      "required": true,
       "ui": "action"
     },
     {
