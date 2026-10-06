@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-10-06
+
+### Fixed
+- The account summary (used by `bb whoami` and the `bb push` upload pre-check) now reads `capabilities.delete` from the onboarding document. For a read-only or ended-trial account whose document denies deletion, the notice no longer says "you can download and delete": it says "you can download, not upload, share or delete" and adds "Deleting files is not available right now", with the server's reason when it gives one. A document that omits `delete` is treated as denied (absence is not permission), with no invented reason.
+
+### Changed
+- Vendored onboarding contract updates (schema major 1): `delete` capability in every account state, `accept_terms` required only at `pre_account`, a coupon fixture, and `purchase.checkout.return_kind`. Apart from the fix above these are schema and fixture changes that no `bb` code reads.
+
 ## [0.13.0] - 2026-10-05
 
 ### Added
