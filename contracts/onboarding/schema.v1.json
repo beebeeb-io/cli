@@ -1154,7 +1154,8 @@
               "type": "string"
             },
             "return_kind": {
-              "type": "string"
+              "type": "string",
+              "description": "The return_kind to send to POST /billing/checkout (task 1825): app = the fixed return-to-the-app page (surfaces that leave the app for a browser without a session), web = the web app's own post-checkout page (in_page surface). Open vocabulary: an unknown value is passed back as given. Absent when the server cannot honour app."
             },
             "poll_seconds": {
               "type": "integer",
