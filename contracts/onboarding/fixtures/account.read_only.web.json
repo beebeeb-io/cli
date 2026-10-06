@@ -19,6 +19,10 @@
       "share": {
         "allowed": false,
         "reason": "billing_read_only"
+      },
+      "delete": {
+        "allowed": false,
+        "reason": "billing_read_only"
       }
     },
     "storage": {

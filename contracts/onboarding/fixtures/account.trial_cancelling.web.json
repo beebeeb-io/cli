@@ -19,6 +19,9 @@
       "share": {
         "allowed": false,
         "reason": "trial_cancelled_read_only"
+      },
+      "delete": {
+        "allowed": true
       }
     },
     "storage": {

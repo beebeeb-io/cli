@@ -380,6 +380,22 @@ impl OnboardingDoc {
             None => format!("{lead}."),
         };
 
+        // Deletion is a capability like any other (contract rule 5): when the
+        // document denies it, say so and why instead of assuming it is allowed.
+        let delete_note = denied
+            .iter()
+            .find(|d| d.capability == "delete")
+            .map(|d| match d.reason.as_deref() {
+                Some(r) => format!(" Deleting files is not available right now ({}).", r.replace('_', " ")),
+                None => " Deleting files is not available right now.".to_string(),
+            })
+            .unwrap_or_default();
+        let ro_lead = if delete_note.is_empty() {
+            "Your vault is read-only: you can download and delete, not upload or share"
+        } else {
+            "Your vault is read-only: you can download, not upload, share or delete"
+        };
+
         let (label, notice): (String, Option<String>) = match &state {
             DocState::Allowance => ("free allowance".into(), None),
             DocState::LegacyFree => ("free (legacy plan)".into(), None),
@@ -413,7 +429,7 @@ impl OnboardingDoc {
             DocState::TrialEnded | DocState::Lapsed => (
                 "read-only (trial ended)".into(),
                 Some(format!(
-                    "{} Subscribe at {base}/billing?view=change",
+                    "{}{delete_note} Subscribe at {base}/billing?view=change",
                     will_be_deleted("Your trial has ended; your vault is read-only")
                 )),
             ),
@@ -426,8 +442,8 @@ impl OnboardingDoc {
             DocState::ReadOnly => (
                 "read-only".into(),
                 Some(format!(
-                    "{} Resolve it at {base}/billing",
-                    will_be_deleted("Your vault is read-only: you can download and delete, not upload or share")
+                    "{}{delete_note} Resolve it at {base}/billing",
+                    will_be_deleted(ro_lead)
                 )),
             ),
             DocState::Frozen => (
@@ -459,12 +475,12 @@ impl OnboardingDoc {
     }
 }
 
-/// Capabilities the document marks `allowed: false`. `delete` and unknown
-/// names are included as sent; ordering follows the document.
+/// Capabilities the document marks `allowed: false`, plus `delete` when the
+/// document omits it (absence is not permission). Unknown names are included
+/// as sent; ordering follows the document.
 fn denied_capabilities(acct: &Value) -> Vec<Denied> {
-    let Some(caps) = acct.get("capabilities").and_then(Value::as_object) else {
-        return Vec::new();
-    };
+    let empty = serde_json::Map::new();
+    let caps = acct.get("capabilities").and_then(Value::as_object).unwrap_or(&empty);
     let mut out: Vec<Denied> = caps
         .iter()
         .filter(|(_, v)| v.get("allowed").and_then(Value::as_bool) == Some(false))
@@ -473,6 +489,15 @@ fn denied_capabilities(acct: &Value) -> Vec<Denied> {
             reason: v.get("reason").and_then(Value::as_str).map(str::to_string),
         })
         .collect();
+    // Contract: a capability the document does not mention is not allowed. An
+    // older schema-v1 server may omit `delete`; fail closed with no reason
+    // (we do not invent one the server never gave).
+    if !caps.contains_key("delete") {
+        out.push(Denied {
+            capability: "delete".to_string(),
+            reason: None,
+        });
+    }
     out.sort_by(|a, b| a.capability.cmp(&b.capability));
     out
 }
@@ -882,6 +907,21 @@ mod tests {
     }
 
     #[test]
+    fn read_only_says_deletion_is_unavailable_when_the_document_denies_it() {
+        let ro = summary("account.read_only.web");
+        assert!(ro.denied.iter().any(|d| d.capability == "delete"));
+        let n = ro.notice.unwrap();
+        assert!(!n.contains("download and delete"), "{n}");
+        assert!(
+            n.contains("Deleting files is not available right now (billing read only)."),
+            "{n}"
+        );
+        // Allowed -> unchanged wording.
+        let ended = summary("account.trial_ended.ios").notice.unwrap();
+        assert!(!ended.contains("Deleting files is not available"), "{ended}");
+    }
+
+    #[test]
     fn past_due_still_uploads_but_says_the_payment_failed() {
         let s = summary("account.past_due.web");
         assert!(!s.upload_denied());
@@ -899,7 +939,7 @@ mod tests {
     #[test]
     fn unknown_state_is_only_a_label_and_capabilities_decide() {
         let allowed = json!({"schema":1,"stage":"account","account":{"state":"some_future_state",
-            "capabilities":{"download":{"allowed":true},"upload":{"allowed":true},"share":{"allowed":true}}}});
+            "capabilities":{"download":{"allowed":true},"upload":{"allowed":true},"share":{"allowed":true},"delete":{"allowed":true}}}});
         let s = OnboardingDoc::parse(&allowed).unwrap().account_summary(BASE).unwrap();
         assert_eq!(s.state, DocState::Other("some_future_state".into()));
         assert_eq!(s.label, "some future state");
@@ -907,10 +947,28 @@ mod tests {
         assert!(!s.upload_denied());
 
         let denied = json!({"schema":1,"stage":"account","account":{"state":"some_future_state",
-            "capabilities":{"download":{"allowed":true},"upload":{"allowed":false,"reason":"x"},"share":{"allowed":false}}}});
+            "capabilities":{"download":{"allowed":true},"upload":{"allowed":false,"reason":"x"},"share":{"allowed":false},"delete":{"allowed":true}}}});
         let s = OnboardingDoc::parse(&denied).unwrap().account_summary(BASE).unwrap();
         assert!(s.upload_denied());
         assert!(s.notice.unwrap().contains("share, upload"));
+    }
+
+    #[test]
+    fn absent_delete_capability_fails_closed_with_no_invented_reason() {
+        // An older schema-v1 server may omit `capabilities.delete`; the
+        // contract says absence is not permission.
+        let doc = json!({"schema":1,"stage":"account","account":{"state":"read_only",
+            "capabilities":{"download":{"allowed":true},"upload":{"allowed":false},"share":{"allowed":false}}}});
+        let s = OnboardingDoc::parse(&doc).unwrap().account_summary(BASE).unwrap();
+        let d = s
+            .denied
+            .iter()
+            .find(|d| d.capability == "delete")
+            .expect("delete denied");
+        assert_eq!(d.reason, None);
+        let n = s.notice.unwrap();
+        assert!(!n.contains("download and delete"), "{n}");
+        assert!(n.contains("Deleting files is not available right now."), "{n}");
     }
 
     #[test]

@@ -21,6 +21,9 @@
         "limit": {
           "active_links": 5
         }
+      },
+      "delete": {
+        "allowed": true
       }
     },
     "storage": {

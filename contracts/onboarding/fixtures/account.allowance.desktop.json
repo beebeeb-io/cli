@@ -19,6 +19,9 @@
       "share": {
         "allowed": false,
         "reason": "plan_required"
+      },
+      "delete": {
+        "allowed": true
       }
     },
     "storage": {
