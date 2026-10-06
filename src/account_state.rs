@@ -790,7 +790,20 @@ mod tests {
     #[test]
     fn every_vendored_fixture_parses_as_schema_major_one() {
         let all = fixtures();
-        assert_eq!(all.len(), 19, "fixture count changed: re-vendor and update this count");
+        // The count is derived, not pinned: `scripts/check-onboarding-contract.sh` (workspace
+        // root) diffs this directory byte-for-byte against the server's, so the file set IS the
+        // server's. A hard-coded N went stale when the contract gained a coupon fixture (task
+        // 1814). Guard the real failure instead: an empty or truncated dir (a bad vendor copy).
+        let on_disk = std::fs::read_dir(contract_dir().join("fixtures"))
+            .expect("vendored fixtures dir")
+            .filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "json"))
+            .count();
+        assert_eq!(all.len(), on_disk, "every *.json fixture on disk must be loaded");
+        assert!(
+            all.len() >= 12,
+            "fewer fixtures ({}) than account states: bad vendor copy",
+            all.len()
+        );
         for (name, body) in &all {
             assert!(OnboardingDoc::parse(body).is_some(), "{name} must parse");
         }
