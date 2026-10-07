@@ -16,7 +16,7 @@ One per `account.state` value (12), plus platform and forward-compat variants (2
 
 | Fixture | Shows |
 |---|---|
-| `pre_account.{web,ios,desktop}` | signed-out signup steps, policy block (spec 5.4 A) |
+| `pre_account.{web,ios,desktop}` | signed-out signup steps, policy block (spec 5.4 A); web = native signup, ios and desktop = `web_only` / `signup_web_only` (signup is web-only, tasks 1834/1836) |
 | `account.allowance.{ios,desktop,web}` | allowance; iOS has no `offers`, no purchase CTA; desktop/web offer the no-card trial (5.4 B, C) |
 | `account.trialing_no_card.desktop` | no-card trial running, over the allowance (5.4 D) |
 | `account.trial_ended.ios` | trial over, usage above the allowance, deletion date (5.4 E) |

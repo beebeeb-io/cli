@@ -178,8 +178,8 @@ fn json_of(out: &Output) -> Value {
 
 #[test]
 fn signup_json_carries_the_server_signup_block_and_the_old_keys() {
-    // pre_account.desktop says mode=native/allowed=true: the strongest case
-    // for "the CLI is never lifted".
+    // pre_account.desktop says web_only / signup_web_only (task 1836); the block is
+    // echoed verbatim whatever it holds.
     let doc = fixture("pre_account.desktop");
     let (api, seen) = spawn_mock(Onboarding::Doc(doc.clone()));
     let home = scratch_home();
@@ -207,7 +207,12 @@ fn signup_json_carries_the_server_signup_block_and_the_old_keys() {
 
 #[test]
 fn signup_is_never_lifted_even_when_the_document_says_native() {
-    let (api, _) = spawn_mock(Onboarding::Doc(fixture("pre_account.desktop")));
+    // The fixture says web_only since task 1836; the strongest case for "the CLI is
+    // never lifted" is a document that offers a native signup, so build one.
+    let mut doc = fixture("pre_account.desktop");
+    doc["signup"] =
+        json!({"allowed": true, "mode": "native", "reason": null, "web_url": doc["signup"]["web_url"].clone()});
+    let (api, _) = spawn_mock(Onboarding::Doc(doc));
     let home = scratch_home();
     write_config(&home, &api, None);
 

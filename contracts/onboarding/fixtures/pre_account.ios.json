@@ -9,9 +9,9 @@
   },
   "stage": "pre_account",
   "signup": {
-    "allowed": true,
-    "mode": "native",
-    "reason": null,
+    "allowed": false,
+    "mode": "web_only",
+    "reason": "signup_web_only",
     "web_url": "https://app.beebeeb.io/signup"
   },
   "policy": {

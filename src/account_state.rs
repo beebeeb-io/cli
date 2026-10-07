@@ -1015,10 +1015,21 @@ mod tests {
 
     #[test]
     fn signup_block_is_read_from_the_pre_account_fixtures() {
-        for name in ["pre_account.web", "pre_account.ios", "pre_account.desktop"] {
+        // Signup is web-only (tasks 1834/1836): only the web fixture offers a native signup.
+        for (name, mode, allowed, reason) in [
+            ("pre_account.web", SignupMode::Native, true, None),
+            ("pre_account.ios", SignupMode::WebOnly, false, Some("signup_web_only")),
+            (
+                "pre_account.desktop",
+                SignupMode::WebOnly,
+                false,
+                Some("signup_web_only"),
+            ),
+        ] {
             let info = OnboardingDoc::parse(&fixture(name)).unwrap().signup().unwrap();
-            assert_eq!(info.mode, SignupMode::Native, "{name}");
-            assert!(info.allowed, "{name}");
+            assert_eq!(info.mode, mode, "{name}");
+            assert_eq!(info.allowed, allowed, "{name}");
+            assert_eq!(info.reason.as_deref(), reason, "{name}");
             assert_eq!(info.web_url.as_deref(), Some("https://app.beebeeb.io/signup"));
         }
     }
