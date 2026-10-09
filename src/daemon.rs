@@ -374,16 +374,28 @@ pub fn disarm_launchagent_if_managed() {
             libc::signal(libc::SIGTERM, libc::SIG_IGN);
             libc::signal(libc::SIGHUP, libc::SIG_IGN);
         }
-        if let Ok(mut child) = std::process::Command::new("launchctl").args(["remove", &label]).spawn() {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while std::time::Instant::now() < deadline {
-                if !matches!(child.try_wait(), Ok(None)) {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-        }
+        let mut cmd = std::process::Command::new("launchctl");
+        cmd.args(["remove", &label]);
+        run_bounded(&mut cmd, std::time::Duration::from_secs(5));
     }
+}
+
+/// Spawn `cmd` and wait up to `limit`. On timeout the child is killed and
+/// reaped (a dropped `Child` neither kills nor waits). Returns true if it
+/// exited on its own within the bound.
+#[cfg(any(target_os = "macos", test))]
+fn run_bounded(cmd: &mut std::process::Command, limit: std::time::Duration) -> bool {
+    let Ok(mut child) = cmd.spawn() else { return false };
+    let deadline = std::time::Instant::now() + limit;
+    while std::time::Instant::now() < deadline {
+        if !matches!(child.try_wait(), Ok(None)) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    false
 }
 
 /// True when this process runs as one of our managed sync services
@@ -451,13 +463,23 @@ fn merged_env_xml(old: &str) -> String {
     };
     let inner = inner.trim_matches(|c| c == '\n' || c == '\r').trim_end();
     if let Some(m) = inner.find(MARKER_KEY) {
-        // Marker present with another value: overwrite just that value.
+        // Marker present with another value: overwrite just that value, and
+        // only the value node that immediately follows the key.
         let tail = &inner[m + MARKER_KEY.len()..];
-        if let (Some(a), Some(b)) = (tail.find("<string>"), tail.find("</string>")) {
-            if a < b {
-                let head = &inner[..m + MARKER_KEY.len() + a + "<string>".len()];
-                return format!("{head}1{}", &tail[b..]);
-            }
+        let ws = tail.len() - tail.trim_start().len();
+        let node = &tail[ws..];
+        let value_len = if node.starts_with("<string>") {
+            node.find("</string>").map(|e| e + "</string>".len())
+        } else if node.starts_with("<string/>") {
+            Some("<string/>".len())
+        } else if node.starts_with("<string />") {
+            Some("<string />".len())
+        } else {
+            None
+        };
+        if let Some(len) = value_len {
+            let head = &inner[..m + MARKER_KEY.len() + ws];
+            return format!("{head}<string>1</string>{}", &node[len..]);
         }
     }
     if inner.trim().is_empty() {
@@ -835,6 +857,37 @@ mod restart_policy_tests {
         assert!(!new.contains("<string>0</string>"), "{new}");
         assert!(new.contains("<key>FOO</key>\n        <string>bar</string>"), "{new}");
         assert_eq!(new.matches("<key>BEEBEEB_SYNC_SERVICE</key>").count(), 1, "{new}");
+    }
+
+    #[test]
+    fn plist_migration_empty_marker_value_does_not_eat_the_next_key() {
+        for empty in ["<string/>", "<string></string>", "<string />"] {
+            let old = OLD_PLIST.replace(
+                "    <key>RunAtLoad</key>",
+                &format!("    <key>EnvironmentVariables</key>\n    <dict>\n        <key>BEEBEEB_SYNC_SERVICE</key>\n        {empty}\n        <key>FOO</key>\n        <string>bar</string>\n    </dict>\n    <key>RunAtLoad</key>"),
+            );
+            let new = migrate_plist_content(&old).expect("must migrate");
+            assert!(
+                new.contains("<key>BEEBEEB_SYNC_SERVICE</key>\n        <string>1</string>"),
+                "{empty}: {new}"
+            );
+            assert!(
+                new.contains("<key>FOO</key>\n        <string>bar</string>"),
+                "{empty}: {new}"
+            );
+            assert_eq!(new.matches("<key>BEEBEEB_SYNC_SERVICE</key>").count(), 1, "{new}");
+        }
+    }
+
+    #[test]
+    fn run_bounded_kills_and_reaps_a_slow_child() {
+        let t = std::time::Instant::now();
+        let mut slow = std::process::Command::new("sleep");
+        slow.arg("30");
+        assert!(!run_bounded(&mut slow, std::time::Duration::from_millis(300)));
+        assert!(t.elapsed() < std::time::Duration::from_secs(5));
+        let mut fast = std::process::Command::new("true");
+        assert!(run_bounded(&mut fast, std::time::Duration::from_secs(5)));
     }
 
     #[test]
