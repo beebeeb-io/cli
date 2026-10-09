@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - `bb sync` now stops with exit code 77 and one clear line ("Your session has ended. Run `bb login` to sign in again.") when the server answers the startup device registration with 401, instead of carrying on and being restarted forever by launchd or systemd. Only a 401 at startup is covered; a session that ends while sync is already running is not yet turned into exit 77.
 
-- The session-ended line is written and flushed before the launchd service removes itself, so it reaches the service's log; stopping a sync service bounds the wait for the process (kill and reap).
+- The session-ended line is written and flushed before the launchd service removes itself, so it reaches the service's log; the launchd self-removal (`launchctl remove`) is bounded to 5 seconds and a `launchctl` that does not return is killed and reaped.
 
 ### Changed
 - Background sync services (`bb sync --daemon`) restart only after a failed exit and wait 30 seconds between restarts. systemd units get `RestartPreventExitStatus=77`; launchd jobs remove themselves on exit 77. Both carry a `BEEBEEB_SYNC_SERVICE=1` marker. `bb sync` and `bb login` rewrite sync services installed by an earlier version to the same policy, in place, and say so; only the restart policy and the marker change, so the service's other environment variables (for example `BB_NO_UPDATE`) and settings are kept.
