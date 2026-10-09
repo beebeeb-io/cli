@@ -296,6 +296,11 @@ pub fn render_plist(label: &str, args_xml: &str, stdout_log: &str, stderr_log: &
     </dict>
     <key>ThrottleInterval</key>
     <integer>30</integer>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>BEEBEEB_SYNC_SERVICE</key>
+        <string>1</string>
+    </dict>
     <key>StandardOutPath</key>
     <string>{}</string>
     <key>StandardErrorPath</key>
@@ -318,6 +323,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart={exe} sync {local} {remote}
+Environment=BEEBEEB_SYNC_SERVICE=1
 Restart=on-failure
 RestartSec=30
 RestartPreventExitStatus=77
@@ -353,9 +359,12 @@ pub fn disarm_launchagent_if_managed() {
 }
 
 /// True when this process runs as one of our managed sync services
-/// (launchd label `io.beebeeb.sync.*`, or a systemd unit via INVOCATION_ID).
-pub fn running_as_service(xpc_service_name: Option<&str>, invocation_id: Option<&str>) -> bool {
-    managed_launchd_label(xpc_service_name).is_some() || invocation_id.is_some_and(|v| !v.is_empty())
+/// (launchd label `io.beebeeb.sync.*`, or the `BEEBEEB_SYNC_SERVICE=1` marker
+/// our generated systemd unit and launchd plist set). `INVOCATION_ID` is NOT a
+/// signal: systemd sets it for every unit and children inherit it, so ordinary
+/// interactive terminals would be misdetected.
+pub fn running_as_service(xpc_service_name: Option<&str>, service_marker: Option<&str>) -> bool {
+    managed_launchd_label(xpc_service_name).is_some() || service_marker == Some("1")
 }
 
 fn between<'a>(s: &'a str, start: &str, end: &str) -> Option<&'a str> {
@@ -383,7 +392,9 @@ fn plist_string(plist: &str, key: &str) -> Option<String> {
 /// the content is not one of ours or already current.
 pub fn migrate_plist_content(old: &str) -> Option<String> {
     let label = plist_string(old, "Label")?;
-    if !label.starts_with("io.beebeeb.sync.") || old.contains("<key>SuccessfulExit</key>") {
+    if !label.starts_with("io.beebeeb.sync.")
+        || (old.contains("<key>SuccessfulExit</key>") && old.contains("BEEBEEB_SYNC_SERVICE"))
+    {
         return None;
     }
     let args_xml = between(old, "<array>\n", "\n    </array>")?;
@@ -393,10 +404,11 @@ pub fn migrate_plist_content(old: &str) -> Option<String> {
 }
 
 /// Rewrite a pre-1872 sync systemd unit (`Restart=on-failure` with no
-/// `RestartPreventExitStatus=77`) in place, keeping everything else.
+/// `RestartPreventExitStatus=77`, or no `BEEBEEB_SYNC_SERVICE` marker) in
+/// place, keeping everything else.
 pub fn migrate_unit_content(old: &str) -> Option<String> {
     let is_ours = old.contains("Description=Beebeeb Sync") && old.contains("ExecStart=");
-    if !is_ours || old.contains("RestartPreventExitStatus=77") {
+    if !is_ours || (old.contains("RestartPreventExitStatus=77") && old.contains("Environment=BEEBEEB_SYNC_SERVICE=1")) {
         return None;
     }
     let mut out = String::new();
@@ -404,13 +416,16 @@ pub fn migrate_unit_content(old: &str) -> Option<String> {
         if line.starts_with("Restart=")
             || line.starts_with("RestartSec=")
             || line.starts_with("RestartPreventExitStatus=")
+            || line.starts_with("Environment=BEEBEEB_SYNC_SERVICE=")
         {
             continue;
         }
         out.push_str(line);
         out.push('\n');
         if line.starts_with("ExecStart=") {
-            out.push_str("Restart=on-failure\nRestartSec=30\nRestartPreventExitStatus=77\n");
+            out.push_str(
+                "Environment=BEEBEEB_SYNC_SERVICE=1\nRestart=on-failure\nRestartSec=30\nRestartPreventExitStatus=77\n",
+            );
         }
     }
     Some(out)
@@ -524,7 +539,7 @@ pub fn install_systemd_unit(local_dir: &Path, remote_path: &str, slug: &str) -> 
     let unit_name = format!("beebeeb-sync-{slug}.service");
     let unit_path = unit_dir.join(&unit_name);
 
-    let unit_content = render_systemd_unit(&slug, &exe.to_string_lossy(), &local_dir.to_string_lossy(), remote_path);
+    let unit_content = render_systemd_unit(slug, &exe.to_string_lossy(), &local_dir.to_string_lossy(), remote_path);
 
     fs::write(&unit_path, &unit_content).map_err(|e| format!("write systemd unit: {e}"))?;
 
@@ -701,6 +716,27 @@ mod restart_policy_tests {
     }
 
     #[test]
+    fn round2_units_and_plists_without_marker_get_it() {
+        let cur_unit = render_systemd_unit("x", "/b", "/l", "/r");
+        let r2_unit = cur_unit.replace("Environment=BEEBEEB_SYNC_SERVICE=1\n", "");
+        assert!(!r2_unit.contains("BEEBEEB_SYNC_SERVICE"));
+        let new = migrate_unit_content(&r2_unit).expect("must migrate");
+        assert_eq!(new.matches("Environment=BEEBEEB_SYNC_SERVICE=1").count(), 1, "{new}");
+        assert_eq!(new.matches("Restart=on-failure").count(), 1, "{new}");
+        assert!(migrate_unit_content(&new).is_none());
+        let cur_plist = render_plist("io.beebeeb.sync.x", "        <string>a</string>", "/o", "/e");
+        assert!(cur_plist.contains("<key>BEEBEEB_SYNC_SERVICE</key>"), "{cur_plist}");
+        let r2_plist = cur_plist.replace(
+            "    <key>EnvironmentVariables</key>\n    <dict>\n        <key>BEEBEEB_SYNC_SERVICE</key>\n        <string>1</string>\n    </dict>\n",
+            "",
+        );
+        assert!(!r2_plist.contains("BEEBEEB_SYNC_SERVICE"));
+        let np = migrate_plist_content(&r2_plist).expect("must migrate");
+        assert!(np.contains("<key>BEEBEEB_SYNC_SERVICE</key>"), "{np}");
+        assert!(migrate_plist_content(&np).is_none());
+    }
+
+    #[test]
     fn current_templates_are_not_migrated() {
         let p = render_plist("io.beebeeb.sync.x", "        <string>a</string>", "/o", "/e");
         assert!(migrate_plist_content(&p).is_none());
@@ -710,7 +746,8 @@ mod restart_policy_tests {
     #[test]
     fn service_detection() {
         assert!(running_as_service(Some("io.beebeeb.sync.a"), None));
-        assert!(running_as_service(None, Some("abc123")));
+        assert!(running_as_service(None, Some("1")));
+        assert!(!running_as_service(None, Some("abc123")));
         assert!(!running_as_service(Some("com.other"), None));
         assert!(!running_as_service(None, Some("")));
         assert!(!running_as_service(None, None));

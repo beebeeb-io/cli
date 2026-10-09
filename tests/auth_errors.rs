@@ -53,12 +53,22 @@ fn write_logged_in_config(home: &Path, api_url: &str) {
 }
 
 fn bb(home: &Path, args: &[&str]) -> Output {
+    bb_env(home, args, &[])
+}
+
+/// Like [`bb`], with service-detection env vars cleared then `extra` applied,
+/// so results do not depend on the host (systemd/GNOME set INVOCATION_ID).
+fn bb_env(home: &Path, args: &[&str], extra: &[(&str, &str)]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_bb"))
         .args(args)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("BB_NO_UPDATE", "1")
         .env("NO_COLOR", "1")
+        .env_remove("INVOCATION_ID")
+        .env_remove("XPC_SERVICE_NAME")
+        .env_remove("BEEBEEB_SYNC_SERVICE")
+        .envs(extra.iter().copied())
         .output()
         .expect("run bb")
 }
@@ -228,5 +238,29 @@ fn sync_on_dead_session_exits_77_once_without_retry() {
         "{stderr}"
     );
     assert_eq!(hits.load(Ordering::SeqCst), 1, "401 must not be retried");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// systemd sets INVOCATION_ID for every unit and children inherit it (GitHub
+/// runners, GNOME terminals): it must not select the "under a service" message.
+#[test]
+fn invocation_id_alone_does_not_select_the_service_message() {
+    let api = spawn_unauthorized_mock();
+    let home = scratch_home();
+    write_logged_in_config(&home, &api);
+    let dir = home.join("vault");
+    std::fs::create_dir_all(&dir).unwrap();
+    let args = ["sync", dir.to_str().unwrap(), "/vault", "--once"];
+
+    let out = bb_env(&home, &args, &[("INVOCATION_ID", "abc123")]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(77), "stderr: {stderr}");
+    assert!(stderr.contains("Run `bb login` to sign in again."), "{stderr}");
+    assert!(!stderr.contains("--daemon"), "{stderr}");
+
+    let out = bb_env(&home, &args, &[("BEEBEEB_SYNC_SERVICE", "1")]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(77), "stderr: {stderr}");
+    assert!(stderr.contains("`bb sync --daemon`"), "{stderr}");
     let _ = std::fs::remove_dir_all(&home);
 }
