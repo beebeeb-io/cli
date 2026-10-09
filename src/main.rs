@@ -1013,6 +1013,7 @@ async fn main() {
                 rehash,
             )
             .await
+            .map_err(exit::sync_error)
         }
         Commands::Mount {
             mountpoint,

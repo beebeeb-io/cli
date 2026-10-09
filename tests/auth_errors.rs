@@ -191,3 +191,42 @@ fn unreachable_server_gets_a_friendly_message_not_a_reqwest_chain() {
         "must not dump the raw reqwest error chain: {stderr}"
     );
 }
+
+/// Mock that counts requests to /clients/devices and answers 401 to all.
+#[test]
+fn sync_on_dead_session_exits_77_once_without_retry() {
+    use std::sync::Arc;
+    let hits = Arc::new(AtomicUsize::new(0));
+    let h2 = hits.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async move {
+            let app = Router::new().fallback(move || {
+                let h = h2.clone();
+                async move {
+                    h.fetch_add(1, Ordering::SeqCst);
+                    (StatusCode::UNAUTHORIZED, Json(json!({ "error": "unauthorized" })))
+                }
+            });
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            tx.send(listener.local_addr().unwrap()).unwrap();
+            let _ = axum::serve(listener, app).await;
+        });
+    });
+    let api = format!("http://{}", rx.recv().unwrap());
+    let home = scratch_home();
+    write_logged_in_config(&home, &api);
+    let dir = home.join("vault");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let out = bb(&home, &["sync", dir.to_str().unwrap(), "/vault", "--once"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(77), "stderr: {stderr}");
+    assert!(
+        stderr.contains("Your session has ended. Run `bb login` to sign in again."),
+        "{stderr}"
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 1, "401 must not be retried");
+    let _ = std::fs::remove_dir_all(&home);
+}

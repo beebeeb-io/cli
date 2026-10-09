@@ -253,29 +253,11 @@ pub fn install_launchagent(local_dir: &Path, remote_path: &str, slug: &str) -> R
     let stdout_log = logs.join(format!("{slug}.log"));
     let stderr_log = logs.join(format!("{slug}.err"));
 
-    let plist = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>{label}</string>
-    <key>ProgramArguments</key>
-    <array>
-{args_xml}
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>{}</string>
-    <key>StandardErrorPath</key>
-    <string>{}</string>
-</dict>
-</plist>"#,
-        xml_escape(&stdout_log.to_string_lossy()),
-        xml_escape(&stderr_log.to_string_lossy()),
+    let plist = render_plist(
+        &label,
+        &args_xml,
+        &stdout_log.to_string_lossy(),
+        &stderr_log.to_string_lossy(),
     );
 
     fs::write(&plist_path, &plist).map_err(|e| format!("write plist: {e}"))?;
@@ -290,6 +272,84 @@ pub fn install_launchagent(local_dir: &Path, remote_path: &str, slug: &str) -> R
     }
 
     Ok(())
+}
+
+/// Render the sync LaunchAgent plist.
+pub fn render_plist(label: &str, args_xml: &str, stdout_log: &str, stderr_log: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{label}</string>
+    <key>ProgramArguments</key>
+    <array>
+{args_xml}
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>StandardOutPath</key>
+    <string>{}</string>
+    <key>StandardErrorPath</key>
+    <string>{}</string>
+</dict>
+</plist>"#,
+        xml_escape(stdout_log),
+        xml_escape(stderr_log),
+    )
+}
+
+/// Render the sync systemd user unit.
+pub fn render_systemd_unit(slug: &str, exe: &str, local: &str, remote: &str) -> String {
+    format!(
+        r#"[Unit]
+Description=Beebeeb Sync - {slug}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={exe} sync {local} {remote}
+Restart=on-failure
+RestartSec=30
+RestartPreventExitStatus=77
+
+[Install]
+WantedBy=default.target
+"#,
+        slug = slug,
+        exe = exe,
+        local = local,
+        remote = remote,
+    )
+}
+
+/// The launchd job label when this process was started by one of our sync
+/// LaunchAgents (`io.beebeeb.sync.*`), from `XPC_SERVICE_NAME`.
+pub fn managed_launchd_label(xpc_service_name: Option<&str>) -> Option<String> {
+    xpc_service_name
+        .filter(|l| l.starts_with("io.beebeeb.sync."))
+        .map(String::from)
+}
+
+/// launchd cannot key KeepAlive on a specific exit code, so when a sync run
+/// ends because its session is dead we take ourselves out of launchd's loaded
+/// set (`launchctl remove`; the plist stays, so the next login retries once).
+pub fn disarm_launchagent_if_managed() {
+    #[cfg(target_os = "macos")]
+    if let Some(label) = managed_launchd_label(std::env::var("XPC_SERVICE_NAME").ok().as_deref()) {
+        let _ = std::process::Command::new("launchctl")
+            .args(["remove", &label])
+            .status();
+    }
 }
 
 /// Unload and remove a macOS LaunchAgent plist for the given slug.
@@ -348,26 +408,7 @@ pub fn install_systemd_unit(local_dir: &Path, remote_path: &str, slug: &str) -> 
     let unit_name = format!("beebeeb-sync-{slug}.service");
     let unit_path = unit_dir.join(&unit_name);
 
-    let unit_content = format!(
-        r#"[Unit]
-Description=Beebeeb Sync - {slug}
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart={exe} sync {local} {remote}
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=default.target
-"#,
-        slug = slug,
-        exe = exe.to_string_lossy(),
-        local = local_dir.to_string_lossy(),
-        remote = remote_path,
-    );
+    let unit_content = render_systemd_unit(&slug, &exe.to_string_lossy(), &local_dir.to_string_lossy(), remote_path);
 
     fs::write(&unit_path, &unit_content).map_err(|e| format!("write systemd unit: {e}"))?;
 
@@ -449,4 +490,34 @@ pub fn stop_all_daemons() -> Result<u32, String> {
         }
     }
     Ok(count)
+}
+
+#[cfg(test)]
+mod restart_policy_tests {
+    use super::*;
+
+    #[test]
+    fn plist_does_not_blindly_keep_alive_and_throttles() {
+        let p = render_plist("io.beebeeb.sync.x", "<string>a</string>", "/o", "/e");
+        assert!(!p.contains("<key>KeepAlive</key>\n    <true/>"), "{p}");
+        assert!(p.contains("<key>SuccessfulExit</key>"), "{p}");
+        assert!(p.contains("<key>ThrottleInterval</key>"), "{p}");
+    }
+
+    #[test]
+    fn systemd_unit_does_not_restart_on_session_ended() {
+        let u = render_systemd_unit("x", "/bin/bb", "/l", "/r");
+        assert!(u.contains("RestartPreventExitStatus=77"), "{u}");
+        assert!(u.contains("RestartSec=30"), "{u}");
+    }
+
+    #[test]
+    fn only_our_labels_are_managed() {
+        assert_eq!(
+            managed_launchd_label(Some("io.beebeeb.sync.a")).as_deref(),
+            Some("io.beebeeb.sync.a")
+        );
+        assert!(managed_launchd_label(Some("com.other")).is_none());
+        assert!(managed_launchd_label(None).is_none());
+    }
 }

@@ -9,6 +9,10 @@
 //! - [`INCOMPLETE`] (3): the command ran, but some items did not make it
 //!   (e.g. `bb sync --once` with failed uploads or unresolved conflicts).
 //!
+//! - [`SESSION_ENDED`] (77, EX_NOPERM): the server no longer accepts the stored
+//!   session (`bb sync` only). The sync launchd/systemd units are told NOT to
+//!   restart on this code; sign in again with `bb login`.
+//!
 //! A command opts in by building its error with [`with_code`]; `main` reads
 //! [`code`] when it exits.
 
@@ -18,6 +22,21 @@ use std::sync::atomic::{AtomicI32, Ordering};
 pub const USAGE: i32 = 2;
 /// The run finished but left items failed or unresolved.
 pub const INCOMPLETE: i32 = 3;
+
+/// The stored session was rejected by the server (401). Not retryable.
+pub const SESSION_ENDED: i32 = 77;
+/// One-line message printed when a sync run finds its session dead.
+pub const SESSION_ENDED_MESSAGE: &str = "Your session has ended. Run `bb login` to sign in again.";
+
+/// Map a sync error: a dead-session 401 becomes [`SESSION_ENDED`] + one clear line.
+pub fn sync_error(msg: String) -> String {
+    if msg == crate::api::SESSION_EXPIRED_MESSAGE {
+        crate::daemon::disarm_launchagent_if_managed();
+        with_code(SESSION_ENDED, SESSION_ENDED_MESSAGE)
+    } else {
+        msg
+    }
+}
 
 static CODE: AtomicI32 = AtomicI32::new(0);
 
