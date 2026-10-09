@@ -27,12 +27,30 @@ pub const INCOMPLETE: i32 = 3;
 pub const SESSION_ENDED: i32 = 77;
 /// One-line message printed when a sync run finds its session dead.
 pub const SESSION_ENDED_MESSAGE: &str = "Your session has ended. Run `bb login` to sign in again.";
+/// Same, when sync ran as a background service (it was stopped, not just failed).
+pub const SESSION_ENDED_SERVICE_MESSAGE: &str =
+    "Your session has ended. Run `bb login`, then `bb sync --daemon` to restart background sync.";
+
+/// The session-ended line for the current process environment.
+pub fn session_ended_message(xpc_service_name: Option<&str>, invocation_id: Option<&str>) -> &'static str {
+    if crate::daemon::running_as_service(xpc_service_name, invocation_id) {
+        SESSION_ENDED_SERVICE_MESSAGE
+    } else {
+        SESSION_ENDED_MESSAGE
+    }
+}
 
 /// Map a sync error: a dead-session 401 becomes [`SESSION_ENDED`] + one clear line.
 pub fn sync_error(msg: String) -> String {
     if msg == crate::api::SESSION_EXPIRED_MESSAGE {
         crate::daemon::disarm_launchagent_if_managed();
-        with_code(SESSION_ENDED, SESSION_ENDED_MESSAGE)
+        with_code(
+            SESSION_ENDED,
+            session_ended_message(
+                std::env::var("XPC_SERVICE_NAME").ok().as_deref(),
+                std::env::var("INVOCATION_ID").ok().as_deref(),
+            ),
+        )
     } else {
         msg
     }
@@ -58,4 +76,18 @@ pub fn code() -> i32 {
 pub fn stdin_is_interactive() -> bool {
     use std::io::IsTerminal;
     std::io::stdin().is_terminal()
+}
+
+#[cfg(test)]
+mod message_tests {
+    use super::*;
+
+    #[test]
+    fn message_variants() {
+        assert_eq!(session_ended_message(None, None), SESSION_ENDED_MESSAGE);
+        assert!(!SESSION_ENDED_MESSAGE.contains("--daemon"));
+        let m = session_ended_message(Some("io.beebeeb.sync.a"), None);
+        assert!(m.contains("`bb login`") && m.contains("`bb sync --daemon`"), "{m}");
+        assert_eq!(session_ended_message(None, Some("inv")), SESSION_ENDED_SERVICE_MESSAGE);
+    }
 }
