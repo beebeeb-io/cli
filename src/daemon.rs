@@ -274,8 +274,17 @@ pub fn install_launchagent(local_dir: &Path, remote_path: &str, slug: &str) -> R
     Ok(())
 }
 
+/// The `EnvironmentVariables` entry every managed sync plist carries.
+const MARKER_ENV_XML: &str = "        <key>BEEBEEB_SYNC_SERVICE</key>\n        <string>1</string>";
+
 /// Render the sync LaunchAgent plist.
 pub fn render_plist(label: &str, args_xml: &str, stdout_log: &str, stderr_log: &str) -> String {
+    render_plist_with_env(label, args_xml, stdout_log, stderr_log, MARKER_ENV_XML)
+}
+
+/// Like [`render_plist`], with the full inner XML of the `EnvironmentVariables`
+/// dict (migration passes the user's own entries plus the marker).
+fn render_plist_with_env(label: &str, args_xml: &str, stdout_log: &str, stderr_log: &str, env_xml: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -298,17 +307,17 @@ pub fn render_plist(label: &str, args_xml: &str, stdout_log: &str, stderr_log: &
     <integer>30</integer>
     <key>EnvironmentVariables</key>
     <dict>
-        <key>BEEBEEB_SYNC_SERVICE</key>
-        <string>1</string>
+{env_xml}
     </dict>
     <key>StandardOutPath</key>
-    <string>{}</string>
+    <string>{out}</string>
     <key>StandardErrorPath</key>
-    <string>{}</string>
+    <string>{err}</string>
 </dict>
-</plist>"#,
-        xml_escape(stdout_log),
-        xml_escape(stderr_log),
+</plist>
+"#,
+        out = xml_escape(stdout_log),
+        err = xml_escape(stderr_log),
     )
 }
 
@@ -349,13 +358,44 @@ pub fn managed_launchd_label(xpc_service_name: Option<&str>) -> Option<String> {
 /// launchd cannot key KeepAlive on a specific exit code, so when a sync run
 /// ends because its session is dead we take ourselves out of launchd's loaded
 /// set (`launchctl remove`; the plist stays, so the next login retries once).
+///
+/// Call this only AFTER the session-ended message has been written and
+/// flushed: `launchctl remove` makes launchd SIGTERM this very process, which
+/// (task 1872 r3 launchd run) swallowed the message when it ran first. We
+/// ignore SIGTERM/SIGHUP for the duration, run `launchctl remove` and wait for
+/// it (bounded), and only then let the caller exit 77. Removal therefore
+/// lands before we exit, so KeepAlive never sees the failed exit and there is
+/// no restart (and no orphaned helper process to outlive the job).
 pub fn disarm_launchagent_if_managed() {
     #[cfg(target_os = "macos")]
     if let Some(label) = managed_launchd_label(std::env::var("XPC_SERVICE_NAME").ok().as_deref()) {
-        let _ = std::process::Command::new("launchctl")
-            .args(["remove", &label])
-            .status();
+        // SAFETY: SIG_IGN installs no handler code; signal() is async-signal-safe.
+        unsafe {
+            libc::signal(libc::SIGTERM, libc::SIG_IGN);
+            libc::signal(libc::SIGHUP, libc::SIG_IGN);
+        }
+        let mut cmd = std::process::Command::new("launchctl");
+        cmd.args(["remove", &label]);
+        run_bounded(&mut cmd, std::time::Duration::from_secs(5));
     }
+}
+
+/// Spawn `cmd` and wait up to `limit`. On timeout the child is killed and
+/// reaped (a dropped `Child` neither kills nor waits). Returns true if it
+/// exited on its own within the bound.
+#[cfg(any(target_os = "macos", test))]
+fn run_bounded(cmd: &mut std::process::Command, limit: std::time::Duration) -> bool {
+    let Ok(mut child) = cmd.spawn() else { return false };
+    let deadline = std::time::Instant::now() + limit;
+    while std::time::Instant::now() < deadline {
+        if !matches!(child.try_wait(), Ok(None)) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    false
 }
 
 /// True when this process runs as one of our managed sync services
@@ -400,7 +440,53 @@ pub fn migrate_plist_content(old: &str) -> Option<String> {
     let args_xml = between(old, "<array>\n", "\n    </array>")?;
     let out = plist_string(old, "StandardOutPath")?;
     let err = plist_string(old, "StandardErrorPath")?;
-    Some(render_plist(&label, args_xml, &out, &err))
+    Some(render_plist_with_env(
+        &label,
+        args_xml,
+        &out,
+        &err,
+        &merged_env_xml(old),
+    ))
+}
+
+/// Inner XML of the `EnvironmentVariables` dict for a migrated plist: every
+/// entry the old plist had (user keys such as `HOME`, `BB_NO_UPDATE`, proxy
+/// vars), with only `BEEBEEB_SYNC_SERVICE` added or set to `1`.
+fn merged_env_xml(old: &str) -> String {
+    const MARKER_KEY: &str = "<key>BEEBEEB_SYNC_SERVICE</key>";
+    let Some(k) = old.find("<key>EnvironmentVariables</key>") else {
+        return MARKER_ENV_XML.to_string();
+    };
+    let after = &old[k..];
+    let Some(inner) = between(after, "<dict>", "</dict>") else {
+        return MARKER_ENV_XML.to_string();
+    };
+    let inner = inner.trim_matches(|c| c == '\n' || c == '\r').trim_end();
+    if let Some(m) = inner.find(MARKER_KEY) {
+        // Marker present with another value: overwrite just that value, and
+        // only the value node that immediately follows the key.
+        let tail = &inner[m + MARKER_KEY.len()..];
+        let ws = tail.len() - tail.trim_start().len();
+        let node = &tail[ws..];
+        let value_len = if node.starts_with("<string>") {
+            node.find("</string>").map(|e| e + "</string>".len())
+        } else if node.starts_with("<string/>") {
+            Some("<string/>".len())
+        } else if node.starts_with("<string />") {
+            Some("<string />".len())
+        } else {
+            None
+        };
+        if let Some(len) = value_len {
+            let head = &inner[..m + MARKER_KEY.len() + ws];
+            return format!("{head}<string>1</string>{}", &node[len..]);
+        }
+    }
+    if inner.trim().is_empty() {
+        MARKER_ENV_XML.to_string()
+    } else {
+        format!("{inner}\n{MARKER_ENV_XML}")
+    }
 }
 
 /// Rewrite a pre-1872 sync systemd unit (`Restart=on-failure` with no
@@ -734,6 +820,85 @@ mod restart_policy_tests {
         let np = migrate_plist_content(&r2_plist).expect("must migrate");
         assert!(np.contains("<key>BEEBEEB_SYNC_SERVICE</key>"), "{np}");
         assert!(migrate_plist_content(&np).is_none());
+    }
+
+    #[test]
+    fn plist_migration_keeps_user_env_and_trailing_newline() {
+        let old = OLD_PLIST.replace(
+            "    <key>RunAtLoad</key>",
+            "    <key>EnvironmentVariables</key>\n    <dict>\n        <key>BB_NO_UPDATE</key>\n        <string>1</string>\n        <key>HOME</key>\n        <string>/Users/a &amp; b</string>\n    </dict>\n    <key>RunAtLoad</key>",
+        );
+        let new = migrate_plist_content(&old).expect("must migrate");
+        assert!(
+            new.contains("<key>BB_NO_UPDATE</key>\n        <string>1</string>"),
+            "{new}"
+        );
+        assert!(
+            new.contains("<key>HOME</key>\n        <string>/Users/a &amp; b</string>"),
+            "{new}"
+        );
+        assert_eq!(new.matches("<key>BEEBEEB_SYNC_SERVICE</key>").count(), 1, "{new}");
+        assert_eq!(new.matches("<key>EnvironmentVariables</key>").count(), 1, "{new}");
+        assert!(new.ends_with("</plist>\n"), "{new:?}");
+        assert!(migrate_plist_content(&new).is_none());
+    }
+
+    #[test]
+    fn plist_migration_overwrites_a_wrong_marker_value_only() {
+        let old = OLD_PLIST.replace(
+            "    <key>RunAtLoad</key>",
+            "    <key>EnvironmentVariables</key>\n    <dict>\n        <key>BEEBEEB_SYNC_SERVICE</key>\n        <string>0</string>\n        <key>FOO</key>\n        <string>bar</string>\n    </dict>\n    <key>RunAtLoad</key>",
+        );
+        let new = migrate_plist_content(&old).expect("must migrate");
+        assert!(
+            new.contains("<key>BEEBEEB_SYNC_SERVICE</key>\n        <string>1</string>"),
+            "{new}"
+        );
+        assert!(!new.contains("<string>0</string>"), "{new}");
+        assert!(new.contains("<key>FOO</key>\n        <string>bar</string>"), "{new}");
+        assert_eq!(new.matches("<key>BEEBEEB_SYNC_SERVICE</key>").count(), 1, "{new}");
+    }
+
+    #[test]
+    fn plist_migration_empty_marker_value_does_not_eat_the_next_key() {
+        for empty in ["<string/>", "<string></string>", "<string />"] {
+            let old = OLD_PLIST.replace(
+                "    <key>RunAtLoad</key>",
+                &format!("    <key>EnvironmentVariables</key>\n    <dict>\n        <key>BEEBEEB_SYNC_SERVICE</key>\n        {empty}\n        <key>FOO</key>\n        <string>bar</string>\n    </dict>\n    <key>RunAtLoad</key>"),
+            );
+            let new = migrate_plist_content(&old).expect("must migrate");
+            assert!(
+                new.contains("<key>BEEBEEB_SYNC_SERVICE</key>\n        <string>1</string>"),
+                "{empty}: {new}"
+            );
+            assert!(
+                new.contains("<key>FOO</key>\n        <string>bar</string>"),
+                "{empty}: {new}"
+            );
+            assert_eq!(new.matches("<key>BEEBEEB_SYNC_SERVICE</key>").count(), 1, "{new}");
+        }
+    }
+
+    #[test]
+    fn run_bounded_kills_and_reaps_a_slow_child() {
+        let t = std::time::Instant::now();
+        let mut slow = std::process::Command::new("sleep");
+        slow.arg("30");
+        assert!(!run_bounded(&mut slow, std::time::Duration::from_millis(300)));
+        assert!(t.elapsed() < std::time::Duration::from_secs(5));
+        let mut fast = std::process::Command::new("true");
+        assert!(run_bounded(&mut fast, std::time::Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn systemd_migration_keeps_user_environment_lines_and_adds_marker_once() {
+        let old = "[Unit]\nDescription=Beebeeb Sync - docs\n\n[Service]\nType=simple\nEnvironment=BB_NO_UPDATE=1\nExecStart=/bin/bb sync /a /b\nEnvironment=HTTPS_PROXY=http://p:3128\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n";
+        let new = migrate_unit_content(old).expect("must migrate");
+        assert!(new.contains("Environment=BB_NO_UPDATE=1\n"), "{new}");
+        assert!(new.contains("Environment=HTTPS_PROXY=http://p:3128\n"), "{new}");
+        assert_eq!(new.matches("Environment=BEEBEEB_SYNC_SERVICE=1").count(), 1, "{new}");
+        assert!(new.ends_with('\n'), "{new:?}");
+        assert!(migrate_unit_content(&new).is_none());
     }
 
     #[test]

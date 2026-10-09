@@ -1077,12 +1077,20 @@ async fn main() {
     };
 
     if let Err(e) = result {
-        eprintln!(
+        let line = format!(
             "  {} {}",
             "error:".custom_color(crate::colors::RED_ERR),
             e.custom_color(crate::colors::INK),
         );
-        std::process::exit(exit::code());
+        let code = exit::code();
+        exit::report_then_disarm(
+            &mut std::io::stderr(),
+            &mut std::io::stdout(),
+            &line,
+            code,
+            daemon::disarm_launchagent_if_managed,
+        );
+        std::process::exit(code);
     }
 }
 
