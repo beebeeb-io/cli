@@ -43,7 +43,7 @@ pub fn session_ended_message(xpc_service_name: Option<&str>, service_marker: Opt
 /// Map a sync error: a dead-session 401 becomes [`SESSION_ENDED`] + one clear line.
 pub fn sync_error(msg: String) -> String {
     if msg == crate::api::SESSION_EXPIRED_MESSAGE {
-        crate::daemon::disarm_launchagent_if_managed();
+        // The launchd disarm happens later, in `finish`, after this line is out.
         with_code(
             SESSION_ENDED,
             session_ended_message(
@@ -53,6 +53,23 @@ pub fn sync_error(msg: String) -> String {
         )
     } else {
         msg
+    }
+}
+
+/// Print the error line, flush both streams, and only then run `disarm`
+/// (the launchd self-removal, which SIGTERMs us). Order is the contract.
+pub fn report_then_disarm(
+    err: &mut impl std::io::Write,
+    out: &mut impl std::io::Write,
+    line: &str,
+    code: i32,
+    disarm: impl FnOnce(),
+) {
+    let _ = writeln!(err, "{line}");
+    let _ = err.flush();
+    let _ = out.flush();
+    if code == SESSION_ENDED {
+        disarm();
     }
 }
 
@@ -89,5 +106,42 @@ mod message_tests {
         let m = session_ended_message(Some("io.beebeeb.sync.a"), None);
         assert!(m.contains("`bb login`") && m.contains("`bb sync --daemon`"), "{m}");
         assert_eq!(session_ended_message(None, Some("1")), SESSION_ENDED_SERVICE_MESSAGE);
+    }
+
+    #[test]
+    fn message_is_written_and_flushed_before_disarm() {
+        use std::cell::RefCell;
+        use std::io::Write;
+        thread_local!(static EVENTS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) });
+        struct W(&'static str);
+        impl Write for W {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                EVENTS.with(|e| {
+                    e.borrow_mut()
+                        .push(format!("{}:write:{}", self.0, String::from_utf8_lossy(b).trim()))
+                });
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                EVENTS.with(|e| e.borrow_mut().push(format!("{}:flush", self.0)));
+                Ok(())
+            }
+        }
+        report_then_disarm(&mut W("err"), &mut W("out"), "MSG", SESSION_ENDED, || {
+            EVENTS.with(|e| e.borrow_mut().push("disarm".into()))
+        });
+        let ev = EVENTS.with(|e| e.borrow().clone());
+        let d = ev.iter().position(|x| x == "disarm").expect("disarm ran");
+        let w = ev.iter().position(|x| x == "err:write:MSG").expect("message written");
+        let fe = ev.iter().position(|x| x == "err:flush").expect("stderr flushed");
+        let fo = ev.iter().position(|x| x == "out:flush").expect("stdout flushed");
+        assert!(w < fe && fe < d && fo < d, "{ev:?}");
+    }
+
+    #[test]
+    fn other_exit_codes_do_not_disarm() {
+        let mut called = false;
+        report_then_disarm(&mut Vec::new(), &mut Vec::new(), "x", 1, || called = true);
+        assert!(!called);
     }
 }
