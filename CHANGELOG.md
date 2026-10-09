@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-10-09
+
+### Fixed
+- `bb sync` now stops with exit code 77 and one clear line ("Your session has ended. Run `bb login` to sign in again.") when the server answers the startup device registration with 401, instead of carrying on and being restarted forever by launchd or systemd. Only a 401 at startup is covered; a session that ends while sync is already running is not yet turned into exit 77.
+
+### Changed
+- Background sync services (`bb sync --daemon`) restart only after a failed exit and wait 30 seconds between restarts. systemd units get `RestartPreventExitStatus=77`; launchd jobs remove themselves on exit 77. Both carry a `BEEBEEB_SYNC_SERVICE=1` marker. `bb sync` and `bb login` rewrite sync services installed by an earlier version to the same policy, in place, and say so.
+- Vendored onboarding contract: the iOS and desktop `pre_account` fixtures say signup is web-only (test data; nothing read at run time).
+
 ## [0.13.1] - 2026-10-06
 
 ### Fixed
