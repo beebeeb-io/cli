@@ -9,6 +9,10 @@
 //! - [`INCOMPLETE`] (3): the command ran, but some items did not make it
 //!   (e.g. `bb sync --once` with failed uploads or unresolved conflicts).
 //!
+//! - [`SESSION_ENDED`] (77, EX_NOPERM): the server no longer accepts the stored
+//!   session (`bb sync` only). The sync launchd/systemd units are told NOT to
+//!   restart on this code; sign in again with `bb login`.
+//!
 //! A command opts in by building its error with [`with_code`]; `main` reads
 //! [`code`] when it exits.
 
@@ -18,6 +22,39 @@ use std::sync::atomic::{AtomicI32, Ordering};
 pub const USAGE: i32 = 2;
 /// The run finished but left items failed or unresolved.
 pub const INCOMPLETE: i32 = 3;
+
+/// The stored session was rejected by the server (401). Not retryable.
+pub const SESSION_ENDED: i32 = 77;
+/// One-line message printed when a sync run finds its session dead.
+pub const SESSION_ENDED_MESSAGE: &str = "Your session has ended. Run `bb login` to sign in again.";
+/// Same, when sync ran as a background service (it was stopped, not just failed).
+pub const SESSION_ENDED_SERVICE_MESSAGE: &str =
+    "Your session has ended. Run `bb login`, then `bb sync --daemon` to restart background sync.";
+
+/// The session-ended line for the current process environment.
+pub fn session_ended_message(xpc_service_name: Option<&str>, service_marker: Option<&str>) -> &'static str {
+    if crate::daemon::running_as_service(xpc_service_name, service_marker) {
+        SESSION_ENDED_SERVICE_MESSAGE
+    } else {
+        SESSION_ENDED_MESSAGE
+    }
+}
+
+/// Map a sync error: a dead-session 401 becomes [`SESSION_ENDED`] + one clear line.
+pub fn sync_error(msg: String) -> String {
+    if msg == crate::api::SESSION_EXPIRED_MESSAGE {
+        crate::daemon::disarm_launchagent_if_managed();
+        with_code(
+            SESSION_ENDED,
+            session_ended_message(
+                std::env::var("XPC_SERVICE_NAME").ok().as_deref(),
+                std::env::var("BEEBEEB_SYNC_SERVICE").ok().as_deref(),
+            ),
+        )
+    } else {
+        msg
+    }
+}
 
 static CODE: AtomicI32 = AtomicI32::new(0);
 
@@ -39,4 +76,18 @@ pub fn code() -> i32 {
 pub fn stdin_is_interactive() -> bool {
     use std::io::IsTerminal;
     std::io::stdin().is_terminal()
+}
+
+#[cfg(test)]
+mod message_tests {
+    use super::*;
+
+    #[test]
+    fn message_variants() {
+        assert_eq!(session_ended_message(None, None), SESSION_ENDED_MESSAGE);
+        assert!(!SESSION_ENDED_MESSAGE.contains("--daemon"));
+        let m = session_ended_message(Some("io.beebeeb.sync.a"), None);
+        assert!(m.contains("`bb login`") && m.contains("`bb sync --daemon`"), "{m}");
+        assert_eq!(session_ended_message(None, Some("1")), SESSION_ENDED_SERVICE_MESSAGE);
+    }
 }

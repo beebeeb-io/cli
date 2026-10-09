@@ -869,7 +869,10 @@ async fn main() {
     }
 
     let result = match cli.command {
-        Commands::Login { headless } => commands::login::run(headless).await,
+        Commands::Login { headless } => {
+            daemon::migrate_sync_services();
+            commands::login::run(headless).await
+        }
         Commands::Signup => commands::signup::run().await,
         Commands::Whoami => commands::whoami::run().await,
         Commands::Status => commands::status::run().await,
@@ -997,6 +1000,7 @@ async fn main() {
             // and unbounded values blow up peak memory (each in-flight file holds
             // ~chunk_size worth of buffers). (1, 8) is the supported range.
             let concurrency = concurrency.clamp(1, 8);
+            daemon::migrate_sync_services();
             commands::sync::run(
                 local_dir,
                 remote_path,
@@ -1013,6 +1017,7 @@ async fn main() {
                 rehash,
             )
             .await
+            .map_err(exit::sync_error)
         }
         Commands::Mount {
             mountpoint,

@@ -354,10 +354,16 @@ pub async fn run(
 
     // Register this device with the server (best-effort, non-fatal)
     let device_info = crate::device::load_or_create();
-    let device_resp = api
+    let device_resp = match api
         .register_device(&device_info.hostname, &device_info.platform, env!("CARGO_PKG_VERSION"))
         .await
-        .ok();
+    {
+        Ok(v) => Some(v),
+        // A 401 means the server no longer accepts our session: stop now with
+        // a distinct exit code so the service manager does not restart us.
+        Err(e) if e == crate::api::SESSION_EXPIRED_MESSAGE => return Err(crate::exit::sync_error(e)),
+        Err(_) => None,
+    };
     let server_device_id = device_resp
         .as_ref()
         .and_then(|v| v.get("id"))
