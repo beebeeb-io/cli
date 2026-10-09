@@ -27,11 +27,11 @@ manifest bump for 0.13.1 (#69), which does not touch the binary. This is a patch
     false, it was unconditional before), `ThrottleInterval` 30 seconds, and a
     `BEEBEEB_SYNC_SERVICE=1` marker in the job's environment. launchd cannot decline to restart on
     one specific exit code, so when a launchd-managed `bb sync` exits with 77 it runs
-    `launchctl remove` on its own job.
+    `launchctl remove` on its own job. That call is bounded to 5 seconds; a `launchctl` that does
+    not return in time is killed and reaped, so it cannot leave a helper process behind
+    (beebeeb-io/cli#73).
   - Linux (systemd user unit): `RestartPreventExitStatus=77`, `RestartSec=30` (it was 10) and the
-    same marker. `Restart=on-failure` is unchanged. When `bb sync` is stopped on purpose, waiting for
-  the sync process to exit is now bounded (it is killed and reaped) so a stuck process cannot hold
-  up the stop (beebeeb-io/cli#73).
+    same marker. `Restart=on-failure` is unchanged.
 - **Existing sync services are updated in place.** `bb sync` and `bb login` rewrite background
   sync services that an earlier `bb` installed (`~/Library/LaunchAgents/io.beebeeb.sync.*.plist`,
   `~/.config/systemd/user/beebeeb-sync-*.service`) to the same policy. Only the restart policy and the `BEEBEEB_SYNC_SERVICE` marker change: the
@@ -53,9 +53,9 @@ manifest bump for 0.13.1 (#69), which does not touch the binary. This is a patch
 Code under test: `774667e` (cli `main`, after #73). The release commits on top of it only change
 the version to 0.13.2, `Cargo.lock` (that one line), this file, and the changelog.
 
-This release is built and published from a maintainer's machine, not by the GitHub Actions
-release workflow, whose minutes ran out. Artifacts and checksums use the same names and layout
-`dist` produces, built with `dist` 0.31.0, the same way as 0.13.1.
+This release is built and published from a maintainer's machine, the same way as 0.13.1, not by
+the GitHub Actions release workflow. Artifacts and checksums use the same names and layout
+`dist` produces, built with `dist` 0.31.0.
 
 - `cargo test --locked`: 492 passed, 0 failed, 2 ignored across 11 test binaries: main suite
   (`bb`) 424, `auth_errors` 8, `ecdh_compat` 4, `mount_availability` 3, `move_parent` 7,
