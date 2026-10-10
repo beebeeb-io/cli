@@ -322,12 +322,16 @@ build_all() {
 finalize() { # dir
   local dir="$1"
   echo "== dist manifest (all, no local paths)"
+  rm -f "$dir/dist-manifest.json"  # a previous run's output would be merged back in
   # Write outside $dir first: dist merges every *dist-manifest.json it finds in
   # target/distrib, so a shell redirect straight into $dir/dist-manifest.json
   # hands it an empty file ("failed to parse JSON") -- found by the first real run.
   dist manifest --tag "$TAG" --artifacts=all --no-local-paths --output-format=json > "$LOG_DIR/dist-manifest.json" 2> "$LOG_DIR/dist-manifest.err" \
     || { echo "FAIL: dist manifest (see $LOG_DIR/dist-manifest.err)" >&2; exit 1; }
-  cp "$LOG_DIR/dist-manifest.json" "$dir/dist-manifest.json"
+  # The per-target manifests saved in $dir carry absolute build-host paths that
+  # `--no-local-paths` does not remove once merged; strip them (published manifests
+  # have no absolute paths; the first real build leaked 15).
+  jq 'del(.. | .path? | select(type == "string" and startswith("/")))' "$LOG_DIR/dist-manifest.json" > "$dir/dist-manifest.json"
   inject_checksums "$dir"
   patch_bb_rb "$dir"
   echo "== scoop manifest"
