@@ -16,7 +16,7 @@ jobs:
       CLI_AUTH_TEST_RECOVERY_PHRASE: ${{ secrets.CLI_AUTH_TEST_RECOVERY_PHRASE }}
       API_BASE_URL: https://api.beebeeb.io
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
