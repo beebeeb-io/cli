@@ -165,8 +165,21 @@ assert_release() { # dir
     if [[ $rb_total -eq 4 && $rb_ok -eq 4 ]]; then pass "bb.rb: 4 of 4 url+sha256 pairs match files"; else [[ $rb_total -eq 4 ]] || fail "bb.rb has $rb_total url lines, expected 4 (mac+linux x arm+intel)"; fi
   fi
 
-  # 5. installer is for this version.
+  # 5. installer is for this version, and (local builds only) embeds the archive
+  #    hashes so `curl | sh` verifies downloads instead of printing "no checksums
+  #    to verify". Releases cut before 1839 (0.13.2) lack this: a warning there.
   if grep -q "$VERSION" "$dir/beebeeb-cli-installer.sh"; then pass "installer references $VERSION"; else fail "installer does not mention $VERSION"; fi
+  local emb=0 t2
+  for t2 in $ARCHIVE_TARGETS; do
+    if [[ -s "$dir/$(archive_name "$t2").sha256" ]] && grep -q "$(awk '{print $1}' "$dir/$(archive_name "$t2").sha256")" "$dir/beebeeb-cli-installer.sh"; then emb=$((emb + 1)); fi
+  done
+  if [[ $emb -ge 4 ]]; then
+    pass "installer embeds $emb of 5 archive hashes"
+  elif [[ "${INSTALLER_STRICT:-0}" == 1 ]]; then
+    fail "installer embeds only $emb of 5 archive hashes (global build ran without the per-target manifests)"
+  else
+    echo "WARN  installer embeds only $emb of 5 archive hashes (installer prints 'no checksums to verify'; known gap in releases cut before task 1839)"
+  fi
 
   # 6. scoop manifest: version, URL and hash == the Windows zip.
   local zip
@@ -303,12 +316,18 @@ build_all() {
   echo "== dist build (global)"
   dist build --tag "$TAG" --artifacts=global --output-format=json \
     > "$LOG_DIR/dist-global.json" 2> "$LOG_DIR/dist-global.err" || { echo "FAIL: dist build global (see $LOG_DIR/dist-global.err)" >&2; exit 1; }
+  cp "$LOG_DIR/dist-global.json" "$DIST_DIR/global-dist-manifest.json"
 }
 
 finalize() { # dir
   local dir="$1"
   echo "== dist manifest (all, no local paths)"
-  dist manifest --tag "$TAG" --artifacts=all --no-local-paths --output-format=json > "$dir/dist-manifest.json" 2> "$LOG_DIR/dist-manifest.err"
+  # Write outside $dir first: dist merges every *dist-manifest.json it finds in
+  # target/distrib, so a shell redirect straight into $dir/dist-manifest.json
+  # hands it an empty file ("failed to parse JSON") -- found by the first real run.
+  dist manifest --tag "$TAG" --artifacts=all --no-local-paths --output-format=json > "$LOG_DIR/dist-manifest.json" 2> "$LOG_DIR/dist-manifest.err" \
+    || { echo "FAIL: dist manifest (see $LOG_DIR/dist-manifest.err)" >&2; exit 1; }
+  cp "$LOG_DIR/dist-manifest.json" "$dir/dist-manifest.json"
   inject_checksums "$dir"
   patch_bb_rb "$dir"
   echo "== scoop manifest"
@@ -331,7 +350,7 @@ case "$MODE" in
     preflight
     build_all
     finalize "$DIST_DIR"
-    assert_release "$DIST_DIR"
+    INSTALLER_STRICT=1 assert_release "$DIST_DIR"
     ;;
 esac
 
