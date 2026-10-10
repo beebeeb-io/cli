@@ -58,7 +58,13 @@ jobs:
       val: ${{ steps.plan.outputs.manifest }}
       tag: ${{ !github.event.pull_request && github.ref_name || '' }}
       tag-flag: ${{ !github.event.pull_request && format('--tag={0}', github.ref_name) || '' }}
-      publishing: ${{ !github.event.pull_request }}
+      # Task 1839: a tag push whose GitHub release already exists WITH assets is a
+      # locally built release being published (RELEASING.md "Local release").
+      # `skip` is set by the "Detect an already-published release" step below;
+      # when true, `publishing` is false, so every build/host/upload/tap/scoop job
+      # downstream is skipped and the run cannot rebuild or overwrite anything.
+      skip: ${{ steps.existing.outputs.skip }}
+      publishing: ${{ !github.event.pull_request && steps.existing.outputs.skip != 'true' }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -74,8 +80,28 @@ jobs:
       # step of `plan`, on tag pushes, stops `dist host --steps=create` below
       # (and every build job downstream) from ever running. No-op on
       # pull_request runs — PRs never publish, so there is nothing to gate.
-      - name: Validate release notes (fail-closed, before build/publish)
+      # No-op guard (task 1839). Publishing a draft release that was built and
+      # uploaded from a maintainer machine creates the tag, which fires this
+      # workflow on the tag push; with Actions minutes available it would rebuild
+      # everything and `gh release create` / re-upload over the real assets. If a
+      # release for this tag already exists with assets, do nothing. A 404 means
+      # no release yet: the normal CI-driven path. Any OTHER failure to ask
+      # fails the job closed rather than guessing.
+      - name: Detect an already-published release (no-op guard)
+        id: existing
         if: ${{ !github.event.pull_request }}
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          bash scripts/release-exists.sh "$REPO" "$TAG" >> "$GITHUB_OUTPUT"
+          if grep -q '^skip=true$' "$GITHUB_OUTPUT"; then
+            echo "::notice::Release $TAG already exists with assets (locally built); this tag-push run is a no-op: nothing is built, uploaded or published."
+          fi
+      - name: Validate release notes (fail-closed, before build/publish)
+        if: ${{ !github.event.pull_request && steps.existing.outputs.skip != 'true' }}
         shell: bash
         env:
           TAG: ${{ github.ref_name }}
@@ -131,7 +157,7 @@ jobs:
     # Let the initial task tell us to not run (currently very blunt)
     needs:
       - plan
-    if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') }}
+    if: ${{ needs.plan.outputs.skip != 'true' && fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') }}
     permissions:
       contents: read
     strategy:
