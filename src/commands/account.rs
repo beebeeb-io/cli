@@ -22,7 +22,7 @@
 
 use serde_json::{Value, json};
 
-use crate::api::ApiClient;
+use crate::api::{ApiClient, ConfirmMethod};
 
 /// Build the canonical `bb account show --json` payload from the raw API responses.
 /// Each input is `Result<Value, String>` so the caller can pass the join! tuple
@@ -301,15 +301,22 @@ pub async fn update_email(new_email: String) -> Result<(), String> {
     let new_email = normalize_update_email(&new_email)?;
     let confirmed = crate::commands::confirm::acquire_confirmed_password(&api).await?;
 
-    match api
-        .account_email_change_legacy(&new_email, &confirmed.password, &confirmed.token)
-        .await
-    {
-        Ok(_) => print_email_change_success("legacy", &new_email),
-        Err(e) if e.contains("OPAQUE accounts must re-register") => {
-            opaque_email_change(&api, &new_email, &confirmed.password, &confirmed.token).await
+    // Decide the account type from the step-up itself, BEFORE anything that
+    // carries the password is sent (task 1907): an OPAQUE account's password
+    // must never reach `PUT /auth/account/email`, which takes it in the body.
+    // `confirmed.password` is a `Zeroizing<String>` and is wiped on drop on
+    // every path out of this function.
+    match confirmed.method {
+        ConfirmMethod::Opaque => opaque_email_change(&api, &new_email, &confirmed.token).await,
+        ConfirmMethod::LegacyPlaintext => {
+            match api
+                .account_email_change_legacy(&new_email, &confirmed.password, &confirmed.token)
+                .await
+            {
+                Ok(_) => print_email_change_success("legacy", &new_email),
+                Err(e) => Err(map_email_change_error(e)),
+            }
         }
-        Err(e) => Err(map_email_change_error(e)),
     }
 }
 
@@ -329,16 +336,14 @@ fn map_email_change_error(e: String) -> String {
     }
 }
 
-async fn opaque_email_change(
-    api: &ApiClient,
-    new_email: &str,
-    password: &str,
-    confirm_token: &str,
-) -> Result<(), String> {
-    let _ = (api, new_email, password, confirm_token);
+/// OPAQUE accounts: the email lives in the OPAQUE record, so a change means
+/// re-registering, which needs key material the CLI cannot get yet. Reached
+/// without any request carrying the password having been sent.
+async fn opaque_email_change(api: &ApiClient, new_email: &str, confirm_token: &str) -> Result<(), String> {
+    let _ = (api, new_email, confirm_token);
 
     // TODO(0473-followup): source existing recovery_check + x25519_public_key for OPAQUE re-registration (local keystore vs a new server endpoint) before enabling this path.
-    Err("Changing the email on an OPAQUE account is not yet supported from the CLI (the server does not expose the key material the re-registration needs). Use the web app for now.".to_string())
+    Err("Changing the email on an OPAQUE account is not yet supported from the CLI (the server does not expose the key material the re-registration needs). Use the web app for now. Your email was not changed.".to_string())
 }
 
 fn print_email_change_success(method: &str, new_email: &str) -> Result<(), String> {

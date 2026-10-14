@@ -60,6 +60,18 @@ async fn pace_if_needed() {
 /// which on the step-up endpoints means a dead session (task 0856 r2).
 pub(crate) const OPAQUE_PASSWORD_MISMATCH: &str = "opaque_password_mismatch";
 
+/// Which step-up method minted a confirmation token (task 1907). Learned from
+/// the step-up itself so a caller can tell an OPAQUE account from a legacy one
+/// without sending the password to an endpoint that would have to guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmMethod {
+    /// `confirm-opaque-start` succeeded: the account has an OPAQUE credential.
+    Opaque,
+    /// `confirm-opaque-start` answered `409 opaque_unavailable`; the token came
+    /// from the legacy plaintext `POST /auth/confirm`.
+    LegacyPlaintext,
+}
+
 pub(crate) const SESSION_EXPIRED_MESSAGE: &str =
     "Your session expired or was revoked. Run `bb login` to sign in again.";
 
@@ -1132,7 +1144,11 @@ impl ApiClient {
     /// server answers step 1 with `409 { "opaque_unavailable": true }` and we
     /// fall back to the legacy `POST /auth/confirm`. Any other failure, including
     /// any other 409, is surfaced, never retried in plaintext.
-    pub async fn confirm_password(&self, password: &str) -> Result<String, ApiError> {
+    ///
+    /// The returned [`ConfirmMethod`] says which of the two paths minted the
+    /// token, so a caller can tell an OPAQUE account from a legacy one without
+    /// sending the password anywhere (task 1907).
+    pub async fn confirm_password(&self, password: &str) -> Result<(String, ConfirmMethod), ApiError> {
         use base64::Engine;
         use beebeeb_core::opaque_protocol as opaque;
         use zeroize::Zeroizing;
@@ -1169,7 +1185,8 @@ impl ApiClient {
                 .and_then(Value::as_bool)
                 == Some(true)
             {
-                return self.confirm_password_plaintext(password).await;
+                let token = self.confirm_password_plaintext(password).await?;
+                return Ok((token, ConfirmMethod::LegacyPlaintext));
             }
             let field = |k: &str| {
                 parsed
@@ -1228,7 +1245,8 @@ impl ApiClient {
             .send()
             .await
             .map_err(format_request_error)?;
-        confirmation_token_from(parse_response_typed(resp).await?)
+        let token = confirmation_token_from(parse_response_typed(resp).await?)?;
+        Ok((token, ConfirmMethod::Opaque))
     }
 
     /// Legacy step-up: `POST /api/v1/auth/confirm` with the plaintext password.
