@@ -55,6 +55,11 @@ async fn pace_if_needed() {
 /// (no human `message` of its own): the stored session token is expired or was
 /// revoked, and the only fix is signing in again. Replaces the bare
 /// `error: unauthorized` the CLI used to print (flow "CLI end to end", issue 6).
+/// Stable code for the LOCALLY detected wrong step-up password (OPAQUE
+/// `client_login_finish` failed). Distinct from the server's `unauthorized`,
+/// which on the step-up endpoints means a dead session (task 0856 r2).
+pub(crate) const OPAQUE_PASSWORD_MISMATCH: &str = "opaque_password_mismatch";
+
 pub(crate) const SESSION_EXPIRED_MESSAGE: &str =
     "Your session expired or was revoked. Run `bb login` to sign in again.";
 
@@ -1103,10 +1108,135 @@ impl ApiClient {
         parse_response_typed(resp).await
     }
 
-    /// Step-up re-auth: POST /api/v1/auth/confirm.
-    /// Returns the raw confirmation token. Caller is responsible for attaching
-    /// it as `X-Confirm-Token` on the protected call within 5 minutes.
+    /// Step-up re-auth (task 0856). Returns the raw confirmation token; the
+    /// caller attaches it as `X-Confirm-Token` on the protected call within 5
+    /// minutes.
+    ///
+    /// The plaintext password never leaves the process for an OPAQUE account.
+    /// The sequence mirrors web's `confirmAction` and uses the same
+    /// `beebeeb_core::opaque_protocol` client half as the web/mobile login:
+    ///
+    /// 1. `client_login_start` locally, then `POST /auth/confirm-opaque-start`
+    ///    `{ client_message }` -> `{ server_message, server_state, ksf_version }`.
+    /// 2. `client_login_finish` locally with the account's `ksf_version`. A
+    ///    wrong password fails HERE (the server MAC does not verify), so no
+    ///    finish request is sent: reported as the LOCAL code
+    ///    `opaque_password_mismatch`, which `commands::confirm::map_confirm_error`
+    ///    renders as "incorrect password". It is deliberately not `unauthorized`:
+    ///    a server 401 on start/finish means the SESSION is dead (the password
+    ///    is only ever checked locally), and must keep its session-expired text.
+    /// 3. `POST /auth/confirm-opaque-finish` `{ client_message, server_state }`
+    ///    -> `{ confirmation_token, expires_at }`.
+    ///
+    /// The ONLY plaintext path is the account that has no OPAQUE credential: the
+    /// server answers step 1 with `409 { "opaque_unavailable": true }` and we
+    /// fall back to the legacy `POST /auth/confirm`. Any other failure, including
+    /// any other 409, is surfaced, never retried in plaintext.
     pub async fn confirm_password(&self, password: &str) -> Result<String, ApiError> {
+        use base64::Engine;
+        use beebeeb_core::opaque_protocol as opaque;
+        use zeroize::Zeroizing;
+
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let token = self.require_auth()?;
+
+        let started = opaque::client_login_start(password.as_bytes()).map_err(|e| e.to_string())?;
+        // The client state is derived from the password: wipe it when done.
+        let client_state = Zeroizing::new(started.state);
+
+        let resp = self
+            .client
+            .post(self.url("/api/v1/auth/confirm-opaque-start"))
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "client_message": b64.encode(&started.message) }))
+            .send()
+            .await
+            .map_err(format_request_error)?;
+
+        let start = if resp.status() == reqwest::StatusCode::CONFLICT {
+            // `{ "opaque_unavailable": true }` carries no `error` code, so read
+            // the body here rather than through `parse_response_typed`.
+            let status = resp.status().as_u16();
+            let text = resp.text().await.map_err(|e| ApiError {
+                code: None,
+                message: format!("failed to read response: {e}"),
+                status,
+            })?;
+            let parsed = serde_json::from_str::<Value>(&text).ok();
+            if parsed
+                .as_ref()
+                .and_then(|v| v.get("opaque_unavailable"))
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                return self.confirm_password_plaintext(password).await;
+            }
+            let field = |k: &str| {
+                parsed
+                    .as_ref()
+                    .and_then(|v| v.get(k))
+                    .and_then(Value::as_str)
+                    .map(String::from)
+            };
+            let code = field("error");
+            return Err(ApiError {
+                message: field("message")
+                    .or_else(|| code.clone())
+                    .unwrap_or_else(|| format!("{status}: {text}")),
+                code,
+                status,
+            });
+        } else {
+            parse_response_typed(resp).await?
+        };
+
+        let missing = |what: &str| ApiError::from(format!("server confirm-opaque-start response had no {what}"));
+        let server_message = b64
+            .decode(
+                start
+                    .get("server_message")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| missing("server_message"))?,
+            )
+            .map_err(|e| format!("invalid server_message: {e}"))?;
+        let server_state = start
+            .get("server_state")
+            .and_then(Value::as_str)
+            .ok_or_else(|| missing("server_state"))?;
+        // 0 = legacy Identity KSF, 1 = Argon2id. Default to the current suite
+        // when the field is absent (same as mobile).
+        let ksf_version = start.get("ksf_version").and_then(Value::as_u64).unwrap_or(1) as u32;
+
+        let finished = opaque::client_login_finish(&client_state, password.as_bytes(), &server_message, ksf_version)
+            .map_err(|_| ApiError {
+                code: Some(OPAQUE_PASSWORD_MISMATCH.to_string()),
+                message: "incorrect password".to_string(),
+                status: 0,
+            })?;
+        // Session/export keys are not used by step-up: wipe them.
+        let _session_key = Zeroizing::new(finished.session_key);
+        let _export_key = Zeroizing::new(finished.export_key);
+
+        let resp = self
+            .client
+            .post(self.url("/api/v1/auth/confirm-opaque-finish"))
+            .bearer_auth(token)
+            .json(&serde_json::json!({
+                "client_message": b64.encode(&finished.message),
+                "server_state": server_state,
+            }))
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        confirmation_token_from(parse_response_typed(resp).await?)
+    }
+
+    /// Legacy step-up: `POST /api/v1/auth/confirm` with the plaintext password.
+    /// Reached ONLY from [`Self::confirm_password`], for an account whose
+    /// `confirm-opaque-start` answered `409 opaque_unavailable` (no OPAQUE
+    /// credential). It is also where the server's session-freshness fallback
+    /// (`session_too_old_for_confirmation`) lives.
+    async fn confirm_password_plaintext(&self, password: &str) -> Result<String, ApiError> {
         let token = self.require_auth()?;
         let resp = self
             .client
@@ -1116,11 +1246,22 @@ impl ApiClient {
             .send()
             .await
             .map_err(format_request_error)?;
-        let body = parse_response_typed(resp).await?;
-        body.get("confirmation_token")
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .ok_or_else(|| "server did not return a confirmation_token".to_string().into())
+        // `confirm-opaque-start` just accepted this bearer (it answered 409,
+        // not 401), so a 401 here is the legacy endpoint rejecting the
+        // PASSWORD, not a dead session. Re-label it so `map_confirm_error`
+        // does not show the session-expired text for a typo.
+        let body = parse_response_typed(resp).await.map_err(|e| {
+            if e.status == 401 && e.is_code("unauthorized") {
+                ApiError {
+                    code: Some(OPAQUE_PASSWORD_MISMATCH.to_string()),
+                    message: "incorrect password".to_string(),
+                    status: e.status,
+                }
+            } else {
+                e
+            }
+        })?;
+        confirmation_token_from(body)
     }
 
     /// POST /api/v1/auth/account/export — queue or resume a GDPR export job.
@@ -2130,6 +2271,14 @@ fn onboarding_os() -> &'static str {
 
 async fn parse_response(resp: reqwest::Response) -> Result<Value, String> {
     parse_response_typed(resp).await.map_err(|e| e.message)
+}
+
+/// `{ "confirmation_token": ".." }` -> the token (both step-up endpoints answer this).
+fn confirmation_token_from(body: Value) -> Result<String, ApiError> {
+    body.get("confirmation_token")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .ok_or_else(|| "server did not return a confirmation_token".to_string().into())
 }
 
 /// Same wire parsing as `parse_response`, but keeps the server's stable
