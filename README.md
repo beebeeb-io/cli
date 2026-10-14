@@ -67,11 +67,15 @@ bb sync ~/vault /Documents  # Two-way sync, then watch for live changes
 | `bb shares` / `bb unshare` | List or revoke share links |
 | `bb request <create\|list\|send\|rm>` | Account-less links that let anyone upload *into* your vault |
 | `bb sync <local> [remote]` | Bidirectional folder sync; continuous by default (`--once`, `--daemon`, `--delete`) |
-| `bb webdav` | Serve the vault over local WebDAV (Finder, Explorer, rclone, Cyberduck) |
+| `bb webdav` | Serve the vault over local WebDAV (Finder, rclone, Cyberduck, WinSCP; not Windows Explorer, see below). Read-only by default (`--read-write` to allow changes); prints a random per-run password that every client must send |
 | `bb mount <point>` | FUSE mount (macFUSE / libfuse3). Source builds with `--features fuse` only; release binaries do not include it, so use `bb webdav` |
 | `bb billing <show\|usage\|invoices\|portal\|addons>` | Plan and renewal info, per-region usage, invoices (`bb billing invoices --open <id>` downloads one as PDF), the billing portal, and add-ons |
 | `bb speedtest` | Benchmark network throughput and crypto speed |
 | `bb completions <shell>` | Print a completion script for bash, zsh, fish, or powershell |
+
+### `bb webdav` and Windows
+
+`bb webdav` listens on `127.0.0.1` over plain HTTP and protects the vault with a random per-run password (HTTP Basic). Windows Explorer ("Map network drive") refuses Basic authentication over plain HTTP by default, so **Windows Explorer is not supported by `bb webdav`**. On Windows, use the Beebeeb desktop app, or connect with rclone, Cyberduck or WinSCP, which send the password over HTTP on loopback. On macOS, Finder's Go, Connect to Server accepts the printed URL and asks for the password.
 
 Command overview: `bb --help`. Every flag of a command: `bb <command> --help` (for example `bb push --help`).
 

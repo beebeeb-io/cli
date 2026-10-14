@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 - Step-up confirmation (`bb trash empty`, `bb rm --permanent`, `bb account update`) now proves the password over OPAQUE, so the plaintext password is no longer sent to the server. Only an account that has no OPAQUE credential still uses the old plaintext confirm. `bb account update` still sends the password to the email-change endpoint itself; that is unchanged.
+- `bb webdav` now requires a password and no longer lets web pages or other local programs read or change your vault. It prints a random per-run password and a ready-to-use mount URL (`http://bb:<password>@localhost:<port>/`) once at startup; every client must send it (HTTP Basic, any user name). Requests whose `Host` is not `127.0.0.1:<port>` or `localhost:<port>`, and any request carrying an `Origin` header (what a browser sends from a web page), are refused with 403. Before this, anything that could reach the port, including a web page through DNS rebinding and any other account on the machine, could list, read, overwrite and delete the decrypted vault. (task 1790, M31)
+
+### Changed
+- **`bb webdav` is read-only by default.** Uploads, deletes, renames, copies and property changes (PUT, DELETE, MKCOL, MOVE, COPY, PROPPATCH) are refused with 403 unless you start it with `--read-write`. If you mount your vault through `bb webdav` and save files to it, add `--read-write` and enter the printed password when your client asks. `--read-only` is still accepted and does nothing now (it is the default); using it together with `--read-write` is an error.
+- `bb webdav` listens on 127.0.0.1 only and fails with a clear message when the port is already taken.
+- Windows Explorer is not supported by `bb webdav`: it refuses password login over plain HTTP by default. `bb webdav --help`, the README and a one-line startup hint on Windows now say so and point to the Beebeeb desktop app, rclone, Cyberduck or WinSCP.
 
 ## [0.13.2] - 2026-10-09
 
