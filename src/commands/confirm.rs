@@ -15,13 +15,17 @@
 use colored::Colorize;
 use zeroize::Zeroizing;
 
-use crate::api::{ApiClient, ApiError};
+use crate::api::{ApiClient, ApiError, ConfirmMethod};
 use crate::colors;
 
 pub struct ConfirmedPassword {
     /// Wiped on drop.
     pub password: Zeroizing<String>,
     pub token: String,
+    /// How the step-up was satisfied. `Opaque` identifies an OPAQUE account
+    /// (task 1907): such an account's password must not be sent to any
+    /// endpoint that takes it in a body.
+    pub method: ConfirmMethod,
 }
 
 /// Prompt for the user's password on the same line and exchange it for a
@@ -38,8 +42,12 @@ pub async fn acquire_confirmed_password(api: &ApiClient) -> Result<ConfirmedPass
     let password =
         Zeroizing::new(rpassword::prompt_password(prompt).map_err(|e| format!("could not read password: {e}"))?);
 
-    let token = api.confirm_password(&password).await.map_err(map_confirm_error)?;
-    Ok(ConfirmedPassword { password, token })
+    let (token, method) = api.confirm_password(&password).await.map_err(map_confirm_error)?;
+    Ok(ConfirmedPassword {
+        password,
+        token,
+        method,
+    })
 }
 
 /// Classify a step-up confirm error (OPAQUE or the legacy fallback).
@@ -344,9 +352,10 @@ mod tests {
     async fn step_up_uses_opaque_and_never_sends_the_password() {
         let (api, m) = spawn(Mode::Opaque).await;
 
-        let token = api.confirm_password(PASSWORD).await.expect("opaque step-up");
+        let (token, method) = api.confirm_password(PASSWORD).await.expect("opaque step-up");
 
         assert_eq!(token, "opaque-token");
+        assert_eq!(method, crate::api::ConfirmMethod::Opaque);
         assert_eq!(
             paths(&m),
             [
@@ -370,9 +379,10 @@ mod tests {
     async fn step_up_falls_back_to_plaintext_only_on_409_opaque_unavailable() {
         let (api, m) = spawn(Mode::Legacy).await;
 
-        let token = api.confirm_password(PASSWORD).await.expect("legacy fallback");
+        let (token, method) = api.confirm_password(PASSWORD).await.expect("legacy fallback");
 
         assert_eq!(token, "legacy-token");
+        assert_eq!(method, crate::api::ConfirmMethod::LegacyPlaintext);
         assert_eq!(
             paths(&m),
             ["/api/v1/auth/confirm-opaque-start", "/api/v1/auth/confirm"],
