@@ -50,12 +50,20 @@ pub async fn acquire_confirmed_password(api: &ApiClient) -> Result<ConfirmedPass
 /// out and log back in before performing this action." — does NOT contain
 /// the code, so this must match `code` exactly
 /// (`session_too_old_for_confirmation`, `beebeeb-api/src/error.rs`), not a
-/// substring of the display text. `Unauthorized` (wrong password) IS a
-/// stable short code too (`{"error": "unauthorized"}`) — matched by
-/// `is_code` first, falling back to message-substring matching for
-/// local/transport errors that never carry a code.
+/// substring of the display text. A wrong password is the LOCAL code
+/// `opaque_password_mismatch` (or a legacy-endpoint 401 re-labelled to it); a
+/// server `unauthorized` carrying the session-expired text passes through
+/// untouched (task 0856 r2, Codex P2). Other `unauthorized` shapes and
+/// local/transport errors without a code fall back to message matching.
 fn map_confirm_error(e: ApiError) -> String {
-    if e.is_code("session_too_old_for_confirmation") || e.message.to_lowercase().contains("session_too_old") {
+    if e.is_code(crate::api::OPAQUE_PASSWORD_MISMATCH) {
+        // Local OPAQUE verification failed: the password is wrong.
+        "incorrect password".to_string()
+    } else if e.is_code("unauthorized") && e.message == crate::api::SESSION_EXPIRED_MESSAGE {
+        // The server 401'd start/finish: the password is only ever checked
+        // locally, so this is the session (expired or revoked), never a typo.
+        e.message
+    } else if e.is_code("session_too_old_for_confirmation") || e.message.to_lowercase().contains("session_too_old") {
         "this account has no password (OPAQUE) and your session is older than 15 minutes — \
          run `bb login` again to refresh, then retry the destructive action"
             .to_string()
@@ -198,6 +206,11 @@ mod tests {
         OtherConflict,
         /// OPAQUE account whose finish endpoint answers 401.
         FinishRejects,
+        /// Expired/revoked session: confirm-opaque-start answers a bare 401.
+        ExpiredAtStart,
+        /// Legacy account (start -> 409 opaque_unavailable) whose plaintext
+        /// `/auth/confirm` answers 401 `unauthorized` (wrong password).
+        LegacyWrongPassword,
     }
 
     struct Mock {
@@ -235,7 +248,10 @@ mod tests {
     async fn h_start(State(m): State<Arc<Mock>>, headers: HeaderMap, body: String) -> Response {
         record(&m, "/api/v1/auth/confirm-opaque-start", &headers, &body);
         match m.mode {
-            Mode::Legacy => (
+            Mode::ExpiredAtStart => {
+                (StatusCode::UNAUTHORIZED, axum::Json(json!({ "error": "unauthorized" }))).into_response()
+            }
+            Mode::Legacy | Mode::LegacyWrongPassword => (
                 StatusCode::CONFLICT,
                 axum::Json(json!({ "opaque_unavailable": true, "message": "account has no OPAQUE credential; use /auth/confirm" })),
             )
@@ -276,6 +292,9 @@ mod tests {
 
     async fn h_legacy(State(m): State<Arc<Mock>>, headers: HeaderMap, body: String) -> Response {
         record(&m, "/api/v1/auth/confirm", &headers, &body);
+        if m.mode == Mode::LegacyWrongPassword {
+            return (StatusCode::UNAUTHORIZED, axum::Json(json!({ "error": "unauthorized" }))).into_response();
+        }
         axum::Json(json!({ "confirmation_token": "legacy-token", "expires_at": "2099-01-01T00:00:00Z" }))
             .into_response()
     }
@@ -402,12 +421,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finish_401_maps_to_incorrect_password() {
+    async fn finish_401_maps_to_session_expired_not_incorrect_password() {
+        // The client already verified the server MAC locally, so the password
+        // is right by the time finish is sent: a 401 here is the session.
         let (api, m) = spawn(Mode::FinishRejects).await;
 
         let err = api.confirm_password(PASSWORD).await.expect_err("finish answers 401");
 
-        assert_eq!(map_confirm_error(err), "incorrect password");
+        assert_eq!(map_confirm_error(err), crate::api::SESSION_EXPIRED_MESSAGE);
         assert_eq!(
             paths(&m),
             [
@@ -416,5 +437,44 @@ mod tests {
             ]
         );
         assert_password_absent(&m, PASSWORD);
+    }
+
+    #[tokio::test]
+    async fn expired_session_at_start_maps_to_session_expired_not_incorrect_password() {
+        let (api, m) = spawn(Mode::ExpiredAtStart).await;
+
+        let err = api.confirm_password(PASSWORD).await.expect_err("start answers 401");
+
+        assert_eq!(map_confirm_error(err), crate::api::SESSION_EXPIRED_MESSAGE);
+        assert_eq!(paths(&m), ["/api/v1/auth/confirm-opaque-start"]);
+        assert_password_absent(&m, PASSWORD);
+    }
+
+    #[tokio::test]
+    async fn legacy_401_after_a_live_start_is_a_wrong_password() {
+        // `confirm-opaque-start` just accepted the bearer (409, not 401), so
+        // the session is alive and the legacy 401 can only be the password.
+        let (api, m) = spawn(Mode::LegacyWrongPassword).await;
+
+        let err = api.confirm_password("not the password").await.expect_err("legacy 401");
+
+        assert_eq!(map_confirm_error(err), "incorrect password");
+        assert_eq!(paths(&m), ["/api/v1/auth/confirm-opaque-start", "/api/v1/auth/confirm"]);
+    }
+
+    #[test]
+    fn server_session_expired_error_is_not_rewritten_but_local_mismatch_is_incorrect_password() {
+        let expired = ApiError {
+            code: Some("unauthorized".to_string()),
+            message: crate::api::SESSION_EXPIRED_MESSAGE.to_string(),
+            status: 401,
+        };
+        assert_eq!(map_confirm_error(expired), crate::api::SESSION_EXPIRED_MESSAGE);
+        let mismatch = ApiError {
+            code: Some("opaque_password_mismatch".to_string()),
+            message: "incorrect password".to_string(),
+            status: 0,
+        };
+        assert_eq!(map_confirm_error(mismatch), "incorrect password");
     }
 }

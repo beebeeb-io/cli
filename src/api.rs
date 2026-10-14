@@ -55,6 +55,11 @@ async fn pace_if_needed() {
 /// (no human `message` of its own): the stored session token is expired or was
 /// revoked, and the only fix is signing in again. Replaces the bare
 /// `error: unauthorized` the CLI used to print (flow "CLI end to end", issue 6).
+/// Stable code for the LOCALLY detected wrong step-up password (OPAQUE
+/// `client_login_finish` failed). Distinct from the server's `unauthorized`,
+/// which on the step-up endpoints means a dead session (task 0856 r2).
+pub(crate) const OPAQUE_PASSWORD_MISMATCH: &str = "opaque_password_mismatch";
+
 pub(crate) const SESSION_EXPIRED_MESSAGE: &str =
     "Your session expired or was revoked. Run `bb login` to sign in again.";
 
@@ -1115,8 +1120,11 @@ impl ApiClient {
     ///    `{ client_message }` -> `{ server_message, server_state, ksf_version }`.
     /// 2. `client_login_finish` locally with the account's `ksf_version`. A
     ///    wrong password fails HERE (the server MAC does not verify), so no
-    ///    finish request is sent: reported as `unauthorized`, which
-    ///    `commands::confirm::map_confirm_error` renders as "incorrect password".
+    ///    finish request is sent: reported as the LOCAL code
+    ///    `opaque_password_mismatch`, which `commands::confirm::map_confirm_error`
+    ///    renders as "incorrect password". It is deliberately not `unauthorized`:
+    ///    a server 401 on start/finish means the SESSION is dead (the password
+    ///    is only ever checked locally), and must keep its session-expired text.
     /// 3. `POST /auth/confirm-opaque-finish` `{ client_message, server_state }`
     ///    -> `{ confirmation_token, expires_at }`.
     ///
@@ -1201,7 +1209,7 @@ impl ApiClient {
 
         let finished = opaque::client_login_finish(&client_state, password.as_bytes(), &server_message, ksf_version)
             .map_err(|_| ApiError {
-                code: Some("unauthorized".to_string()),
+                code: Some(OPAQUE_PASSWORD_MISMATCH.to_string()),
                 message: "incorrect password".to_string(),
                 status: 0,
             })?;
@@ -1238,7 +1246,22 @@ impl ApiClient {
             .send()
             .await
             .map_err(format_request_error)?;
-        confirmation_token_from(parse_response_typed(resp).await?)
+        // `confirm-opaque-start` just accepted this bearer (it answered 409,
+        // not 401), so a 401 here is the legacy endpoint rejecting the
+        // PASSWORD, not a dead session. Re-label it so `map_confirm_error`
+        // does not show the session-expired text for a typo.
+        let body = parse_response_typed(resp).await.map_err(|e| {
+            if e.status == 401 && e.is_code("unauthorized") {
+                ApiError {
+                    code: Some(OPAQUE_PASSWORD_MISMATCH.to_string()),
+                    message: "incorrect password".to_string(),
+                    status: e.status,
+                }
+            } else {
+                e
+            }
+        })?;
+        confirmation_token_from(body)
     }
 
     /// POST /api/v1/auth/account/export — queue or resume a GDPR export job.

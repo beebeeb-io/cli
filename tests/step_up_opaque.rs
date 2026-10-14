@@ -46,6 +46,8 @@ enum Mode {
     Opaque,
     /// `confirm-opaque-start` answers 409 `opaque_unavailable` (legacy account).
     Legacy,
+    /// Expired/revoked session: `confirm-opaque-start` answers a bare 401.
+    ExpiredAtStart,
 }
 
 struct Captured {
@@ -104,6 +106,9 @@ async fn handle(State(m): State<Arc<Mock>>, req: Request<Body>) -> Response {
             "next_cursor": null,
         })),
         ("POST", "/api/v1/auth/confirm-opaque-start") => match m.mode {
+            Mode::ExpiredAtStart => {
+                (StatusCode::UNAUTHORIZED, axum::Json(json!({ "error": "unauthorized" }))).into_response()
+            }
             Mode::Legacy => (
                 StatusCode::CONFLICT,
                 axum::Json(json!({ "opaque_unavailable": true, "message": "account has no OPAQUE credential; use /auth/confirm" })),
@@ -136,6 +141,7 @@ async fn handle(State(m): State<Arc<Mock>>, req: Request<Body>) -> Response {
             let want = match m.mode {
                 Mode::Opaque => "opaque-token",
                 Mode::Legacy => "legacy-token",
+                Mode::ExpiredAtStart => "unused",
             };
             if confirm_token.as_deref() == Some(want) {
                 ok(json!({ "deleted": ["t-1", "t-2"], "skipped_not_trashed": [], "missing": [] }))
@@ -384,4 +390,30 @@ fn trash_empty_wrong_password_says_incorrect_password_and_deletes_nothing() {
         "no finish POST, no plaintext fallback, no delete"
     );
     assert_secret_in_no_request(&mock, "definitely-not-it", None);
+}
+
+#[test]
+fn trash_empty_with_expired_session_at_confirm_start_says_run_bb_login_not_incorrect_password() {
+    let (api, mock) = spawn_mock(Mode::ExpiredAtStart);
+    let home = scratch_home();
+    write_logged_in_config(&home, &api);
+
+    let run = bb_with_typed_password(&home, &["trash", "empty"], PASSWORD);
+
+    assert_eq!(run.code, Some(1), "stdout: {}\nstderr: {}", run.stdout, run.stderr);
+    assert!(
+        run.stderr.contains("bb login"),
+        "an expired session must tell the user to sign in again, got stderr: {}",
+        run.stderr
+    );
+    assert!(
+        !run.stderr.contains("incorrect password"),
+        "an expired session must not be reported as a wrong password, got stderr: {}",
+        run.stderr
+    );
+    assert_eq!(
+        sequence(&mock),
+        ["GET /api/v1/files", "POST /api/v1/auth/confirm-opaque-start"]
+    );
+    assert_secret_in_no_request(&mock, PASSWORD, None);
 }
