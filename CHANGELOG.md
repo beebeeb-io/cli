@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Step-up confirmation (`bb trash empty`, `bb rm --permanent`, `bb account update`) now proves the password over OPAQUE, so the plaintext password is no longer sent to the server. Only an account that has no OPAQUE credential still uses the old plaintext confirm. `bb account update` still sends the password to the email-change endpoint itself; that is unchanged.
+
 ## [0.13.2] - 2026-10-09
 
 ### Fixed
