@@ -9,11 +9,10 @@
 //! proven to have done nothing, not merely to have returned 403.
 
 use std::io::{BufRead, BufReader};
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use axum::Router;
@@ -62,10 +61,6 @@ async fn spawn_mock_api() -> (String, Hits) {
         axum::serve(listener, app).await.unwrap();
     });
     (url, hits)
-}
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
 
 fn scratch(name: &str) -> PathBuf {
@@ -134,18 +129,34 @@ fn spawn_bb(home: &Path, args: &[&str]) -> Child {
         .expect("spawn bb")
 }
 
-/// Start `bb webdav --port <p> <extra...>` and wait until it prints its "Ctrl+C" line
+/// Start `bb webdav --port 0 <extra...>` and wait until it prints its "Ctrl+C" line
 /// (the last startup line), collecting what it said.
+///
+/// The gateway binds the port itself (`--port 0` = OS-assigned, never reused while the child
+/// holds it) and the test reads the port it actually got from the `url` banner line. Picking
+/// a free port in the test and handing it over is a race: the port is free only until another
+/// parallel test (or the mock API's own `bind(:0)`) is given it, and the child then dies at
+/// bind with its error on stderr and nothing on stdout.
 fn start_gateway(name: &str, api_url: &str, extra: &[&str]) -> Gateway {
     let home = scratch(name);
     write_fake_session(&home, api_url);
-    let port = free_port();
-    let port_s = port.to_string();
-    let mut args = vec!["webdav", "--port", port_s.as_str()];
+    let mut args = vec!["webdav", "--port", "0"];
     args.extend_from_slice(extra);
     let mut child = spawn_bb(&home, &args);
 
     let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    // stderr is drained continuously (a full pipe would block the child) and kept so a
+    // failed start can say WHY.
+    let err_text = Arc::new(Mutex::new(String::new()));
+    let err_sink = err_text.clone();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            let mut t = err_sink.lock().unwrap();
+            t.push_str(&line);
+            t.push('\n');
+        }
+    });
     let (tx, rx) = mpsc::channel::<String>();
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
@@ -166,9 +177,24 @@ fn start_gateway(name: &str, api_url: &str, extra: &[&str]) -> Gateway {
                     break;
                 }
             }
-            Err(_) => panic!("bb webdav never became ready; output so far:\n{startup_output}"),
+            Err(why) => {
+                // Give the stderr reader a moment to flush a dying child's last words.
+                std::thread::sleep(Duration::from_millis(200));
+                let status = child.try_wait();
+                let stderr_so_far = strip_ansi(&err_text.lock().unwrap());
+                panic!(
+                    "bb webdav never became ready ({why:?}); exit status: {status:?}\n\
+                     stdout so far:\n{startup_output}\nstderr:\n{stderr_so_far}"
+                );
+            }
         }
     }
+    let port = startup_output
+        .lines()
+        .find(|l| l.trim_start().starts_with("url"))
+        .and_then(|l| l.rsplit(':').next())
+        .and_then(|p| p.trim().parse::<u16>().ok())
+        .unwrap_or_else(|| panic!("no `url ... :<port>` banner line in:\n{startup_output}"));
     // Keep draining so the child never blocks on a full pipe.
     std::thread::spawn(move || while rx.recv().is_ok() {});
 
@@ -540,4 +566,28 @@ fn webdav_help_says_read_only_is_the_default() {
         text.to_lowercase().contains("read-only by default"),
         "help must say the default:\n{text}"
     );
+}
+
+#[test]
+fn webdav_help_says_windows_explorer_is_unsupported_and_names_alternatives() {
+    let home = scratch("help-windows");
+    let out = spawn_bb(&home, &["webdav", "--help"]).wait_with_output().unwrap();
+    let text = strip_ansi(&String::from_utf8_lossy(&out.stdout));
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let at = flat
+        .find("Windows Explorer")
+        .unwrap_or_else(|| panic!("help must mention Windows Explorer:\n{text}"));
+    // The statement and the alternatives must sit together, after the Explorer mention
+    // (the one-line summary above it also names rclone and friends).
+    let tail = &flat[at..];
+    assert!(
+        tail.contains("is not supported"),
+        "help must say Explorer is unsupported:\n{text}"
+    );
+    for alt in ["Beebeeb desktop app", "rclone", "Cyberduck", "WinSCP"] {
+        assert!(
+            tail.contains(alt),
+            "help must name {alt} next to the Explorer note:\n{text}"
+        );
+    }
 }

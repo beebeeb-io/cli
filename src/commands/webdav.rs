@@ -211,6 +211,9 @@ pub async fn run(port: u16, read_write: bool, cache_ttl: u64, no_cache: bool, ve
         "  {}",
         "# rclone / Cyberduck: use the url, user and password above".custom_color(crate::colors::INK_SAGE),
     );
+    if let Some(hint) = windows_explorer_hint() {
+        println!("  {}", hint.custom_color(crate::colors::AMBER));
+    }
     println!("  {}", "# press Ctrl+C to stop".custom_color(crate::colors::INK_SAGE),);
     println!();
 
@@ -218,6 +221,20 @@ pub async fn run(port: u16, read_write: bool, cache_ttl: u64, no_cache: bool, ve
         .await
         .map_err(|e| format!("server error: {e}"))
 }
+
+/// One startup line for Windows only. Explorer's WebDAV redirector refuses HTTP Basic over
+/// plain HTTP by default (the `BasicAuthLevel` policy), and the gateway deliberately keeps
+/// its per-run password and serves plain HTTP on loopback, so Explorer cannot connect.
+/// Compiled everywhere (so it is tested on every platform); returns `None` off Windows.
+fn windows_explorer_hint() -> Option<&'static str> {
+    if cfg!(windows) {
+        Some(WINDOWS_EXPLORER_HINT)
+    } else {
+        None
+    }
+}
+
+const WINDOWS_EXPLORER_HINT: &str = "Windows Explorer is not supported by `bb webdav` (it refuses password login over plain HTTP). Use the Beebeeb desktop app, rclone, Cyberduck or WinSCP.";
 
 /// Bind `127.0.0.1:<port>` and nothing else. There is deliberately no way to pick another
 /// address; the post-bind check makes that a property of the code, not of the literal.
@@ -1531,5 +1548,25 @@ mod parent_target_tests {
                 "invalid WebDAV parent must send no PATCH"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod windows_hint_tests {
+    use super::*;
+
+    #[test]
+    fn hint_names_every_alternative_and_only_shows_on_windows() {
+        for needle in [
+            "Explorer",
+            "not supported",
+            "desktop app",
+            "rclone",
+            "Cyberduck",
+            "WinSCP",
+        ] {
+            assert!(WINDOWS_EXPLORER_HINT.contains(needle), "hint lacks {needle:?}");
+        }
+        assert_eq!(windows_explorer_hint().is_some(), cfg!(windows));
     }
 }

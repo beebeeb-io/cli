@@ -407,11 +407,14 @@ enum Commands {
         mountpoint: PathBuf,
     },
 
-    /// Serve vault as a local WebDAV server (mounts in Finder, rclone, Cyberduck)
+    /// Serve vault as a local WebDAV server (mounts in Finder, rclone, Cyberduck, WinSCP)
     ///
     /// Read-only by default; pass --read-write to allow uploads, deletes and renames. Listens on
     /// 127.0.0.1 only and prints a random per-run password at startup that every client must send
     /// (HTTP Basic, any user name). Requests with a foreign Host or any Origin header are refused.
+    ///
+    /// Windows Explorer ("Map network drive") is not supported: it refuses HTTP Basic over plain
+    /// HTTP by default. On Windows use the Beebeeb desktop app, rclone, Cyberduck or WinSCP.
     Webdav {
         /// TCP port to listen on (default: 7878)
         #[arg(long, default_value_t = 7878)]
@@ -685,7 +688,7 @@ const HELP_MAIN_COMMANDS: &[(&str, &str, &str)] = &[
     ("pull", "<id|path>", "download and decrypt"),
     ("share", "<path|id>", "create encrypted link (expiry, passphrase)"),
     ("sync", "<dir> [remote]", "sync + watch · continuous by default"),
-    ("webdav", "", "mount vault in Finder / Explorer"),
+    ("webdav", "", "serve vault over WebDAV (Finder, rclone, Cyberduck)"),
     ("whoami", "", "user · plan · region · quota · session"),
     ("speedtest", "", "benchmark network + crypto speed"),
     ("repair", "", "fix cross-client encryption"),

@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **`bb webdav` is read-only by default.** Uploads, deletes, renames, copies and property changes (PUT, DELETE, MKCOL, MOVE, COPY, PROPPATCH) are refused with 403 unless you start it with `--read-write`. If you mount your vault through `bb webdav` and save files to it, add `--read-write` and enter the printed password when your client asks. `--read-only` is still accepted and does nothing now (it is the default); using it together with `--read-write` is an error.
 - `bb webdav` listens on 127.0.0.1 only and fails with a clear message when the port is already taken.
+- Windows Explorer is not supported by `bb webdav`: it refuses password login over plain HTTP by default. `bb webdav --help`, the README and a one-line startup hint on Windows now say so and point to the Beebeeb desktop app, rclone, Cyberduck or WinSCP.
 
 ## [0.13.2] - 2026-10-09
 
