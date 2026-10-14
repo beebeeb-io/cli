@@ -8,11 +8,15 @@
 //! - `GET /[path]` → download + decrypt → plaintext; handles If-None-Match, If-Modified-Since
 //! - `HEAD /[path]` → Content-Length + ETag + Last-Modified
 //!
-//! Write (disabled by `--read-only`):
+//! Write (refused unless `--read-write` is passed; read-only is the default):
 //! - `PUT /[path]` → encrypt + upload; handles If-Match optimistic lock
 //! - `MKCOL /[path]` → create encrypted folder
 //! - `DELETE /[path]` → soft-delete (trash); handles If-Match
 //! - `MOVE /[src]` + `Destination:` header → rename or reparent
+//!
+//! Access control (task 1790, M31) — see `webdav_guard`: Host must be this gateway, no
+//! `Origin` header, HTTP Basic with a per-run random password printed at startup, and
+//! writes (PUT/DELETE/MKCOL/MOVE/COPY/PROPPATCH) refused unless `--read-write`.
 //!
 //! Performance:
 //! - `DirCache` — in-memory TTL cache (default 30s) keyed by parent path
@@ -40,6 +44,7 @@ use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
+use super::webdav_guard::{self, Guard};
 use crate::api::ApiClient;
 use crate::config::load_config;
 
@@ -82,7 +87,8 @@ type LockStore = Mutex<HashMap<String, LockEntry>>;
 
 // ─── CLI entry point ─────────────────────────────────────────────────────────
 
-pub async fn run(port: u16, read_only: bool, cache_ttl: u64, no_cache: bool, verbose: bool) -> Result<(), String> {
+pub async fn run(port: u16, read_write: bool, cache_ttl: u64, no_cache: bool, verbose: bool) -> Result<(), String> {
+    let read_only = !read_write;
     let config = load_config();
 
     if config.session_token.is_none() {
@@ -120,15 +126,13 @@ pub async fn run(port: u16, read_only: bool, cache_ttl: u64, no_cache: bool, ver
         verbose,
     });
 
-    let router = Router::new()
-        .route("/", any(handle_webdav))
-        .route("/*path", any(handle_webdav))
-        .with_state(state);
-
-    let addr = format!("127.0.0.1:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .map_err(|e| format!("failed to bind {addr}: {e}"))?;
+    // Bind first (once; a taken port fails here, clearly), then derive the guard from the
+    // port actually bound so `--port 0` works too.
+    let listener = bind_loopback(port).await?;
+    let port = listener.local_addr().map_err(|e| format!("local_addr: {e}"))?.port();
+    let secret = webdav_guard::generate_secret();
+    let guard = Arc::new(Guard::new(port, &secret, read_only, verbose));
+    let router = build_router(state, guard);
 
     let ro_label = if read_only { "read-only" } else { "read-write" };
     let cache_label = if no_cache || cache_ttl == 0 {
@@ -144,31 +148,68 @@ pub async fn run(port: u16, read_only: bool, cache_ttl: u64, no_cache: bool, ver
         ro_label.custom_color(crate::colors::INK_DIM),
     );
     println!(
-        "  {}    {}",
-        "url  ".custom_color(crate::colors::INK_DIM),
+        "  {}  {}",
+        "url     ".custom_color(crate::colors::INK_DIM),
         format!("http://localhost:{port}").custom_color(crate::colors::AMBER),
     );
     println!(
-        "  {}    {}",
-        "mode ".custom_color(crate::colors::INK_DIM),
+        "  {}  {}",
+        "user    ".custom_color(crate::colors::INK_DIM),
+        "bb (any name works)".custom_color(crate::colors::INK_DIM),
+    );
+    // The one place the credential is printed. It is random for this run only and is
+    // never written to disk or logged.
+    println!(
+        "  {}  {}",
+        "password".custom_color(crate::colors::INK_DIM),
+        secret.custom_color(crate::colors::AMBER),
+    );
+    println!(
+        "  {}  {}",
+        "mount   ".custom_color(crate::colors::INK_DIM),
+        format!("http://bb:{secret}@localhost:{port}/").custom_color(crate::colors::AMBER),
+    );
+    println!(
+        "  {}  {}",
+        "mode    ".custom_color(crate::colors::INK_DIM),
         ro_label.custom_color(crate::colors::INK),
     );
     println!(
-        "  {}    {}",
-        "cache".custom_color(crate::colors::INK_DIM),
+        "  {}  {}",
+        "cache   ".custom_color(crate::colors::INK_DIM),
         cache_label.custom_color(crate::colors::INK_DIM),
     );
     if !verbose {
         println!(
             "  {}  {}",
-            "logging".custom_color(crate::colors::INK_DIM),
+            "logging ".custom_color(crate::colors::INK_DIM),
             "compact (use --verbose for full request log)".custom_color(crate::colors::INK_DIM),
+        );
+    }
+    if read_only {
+        println!(
+            "  {}",
+            "Read-only: uploads, deletes and renames are refused. Restart with --read-write to allow them."
+                .custom_color(crate::colors::INK_DIM),
+        );
+    } else {
+        println!(
+            "  {}",
+            "Read-write: anything holding the password can change or delete files in your vault."
+                .custom_color(crate::colors::AMBER),
         );
     }
     println!();
     println!(
         "  {}",
-        "# Finder: Go \u{2192} Connect to Server \u{2192} http://localhost:7878".custom_color(crate::colors::INK_SAGE),
+        format!(
+            "# Finder: Go \u{2192} Connect to Server \u{2192} http://localhost:{port} (it asks for the password above)"
+        )
+        .custom_color(crate::colors::INK_SAGE),
+    );
+    println!(
+        "  {}",
+        "# rclone / Cyberduck: use the url, user and password above".custom_color(crate::colors::INK_SAGE),
     );
     println!("  {}", "# press Ctrl+C to stop".custom_color(crate::colors::INK_SAGE),);
     println!();
@@ -176,6 +217,33 @@ pub async fn run(port: u16, read_only: bool, cache_ttl: u64, no_cache: bool, ver
     axum::serve(listener, router)
         .await
         .map_err(|e| format!("server error: {e}"))
+}
+
+/// Bind `127.0.0.1:<port>` and nothing else. There is deliberately no way to pick another
+/// address; the post-bind check makes that a property of the code, not of the literal.
+async fn bind_loopback(port: u16) -> Result<tokio::net::TcpListener, String> {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AddrInUse {
+            format!("failed to bind {addr}: port {port} is already in use. Stop the other program (an earlier `bb webdav`?) or pick another port with --port.")
+        } else {
+            format!("failed to bind {addr}: {e}")
+        }
+    })?;
+    let bound = listener.local_addr().map_err(|e| format!("local_addr: {e}"))?;
+    if !bound.ip().is_loopback() {
+        return Err(format!("refusing to serve the vault on non-loopback address {bound}"));
+    }
+    Ok(listener)
+}
+
+/// The gateway's router: every route, behind the guard.
+fn build_router(state: Arc<DavState>, guard: Arc<Guard>) -> Router {
+    Router::new()
+        .route("/", any(handle_webdav))
+        .route("/*path", any(handle_webdav))
+        .with_state(state)
+        .layer(axum::middleware::from_fn_with_state(guard, webdav_guard::enforce))
 }
 
 // ─── Shared state ─────────────────────────────────────────────────────────────
@@ -234,13 +302,11 @@ async fn handle_webdav(State(state): State<Arc<DavState>>, req: Request) -> Resp
         return (StatusCode::FORBIDDEN, "OS metadata files are not stored").into_response();
     }
 
-    // Guard write operations when --read-only is set
-    let is_write =
-        matches!(method, Method::PUT | Method::DELETE) || method.as_str() == "MKCOL" || method.as_str() == "MOVE";
-    if is_write && state.read_only {
+    // Defence in depth: the guard middleware already refuses writes in read-only mode.
+    if webdav_guard::is_write_method(&method) && state.read_only {
         return (
-            StatusCode::METHOD_NOT_ALLOWED,
-            "read-only mode — use bb webdav without --read-only",
+            StatusCode::FORBIDDEN,
+            "bb webdav is read-only; restart it with --read-write to allow changes",
         )
             .into_response();
     }

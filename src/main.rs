@@ -408,13 +408,21 @@ enum Commands {
     },
 
     /// Serve vault as a local WebDAV server (mounts in Finder, rclone, Cyberduck)
+    ///
+    /// Read-only by default; pass --read-write to allow uploads, deletes and renames. Listens on
+    /// 127.0.0.1 only and prints a random per-run password at startup that every client must send
+    /// (HTTP Basic, any user name). Requests with a foreign Host or any Origin header are refused.
     Webdav {
         /// TCP port to listen on (default: 7878)
         #[arg(long, default_value_t = 7878)]
         port: u16,
 
-        /// Block all write operations (PUT, DELETE, MKCOL, MOVE)
+        /// Allow writes (PUT, DELETE, MKCOL, MOVE). Without this flag the gateway is read-only
         #[arg(long, default_value_t = false)]
+        read_write: bool,
+
+        /// Accepted for compatibility: read-only is now the default
+        #[arg(long, default_value_t = false, hide = true, conflicts_with = "read_write")]
         read_only: bool,
 
         /// Directory listing cache TTL in seconds (0 = disabled)
@@ -1027,11 +1035,12 @@ async fn main() {
         Commands::Unmount { mountpoint } => commands::mount::unmount(mountpoint).await,
         Commands::Webdav {
             port,
-            read_only,
+            read_write,
+            read_only: _,
             cache_ttl,
             no_cache,
             verbose,
-        } => commands::webdav::run(port, read_only, cache_ttl, no_cache, verbose).await,
+        } => commands::webdav::run(port, read_write, cache_ttl, no_cache, verbose).await,
         Commands::Speedtest => commands::speedtest::run().await,
         Commands::Repair { dry_run } => commands::repair::run(dry_run).await,
         Commands::Billing { action } => match action {

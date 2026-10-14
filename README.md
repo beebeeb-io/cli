@@ -67,7 +67,7 @@ bb sync ~/vault /Documents  # Two-way sync, then watch for live changes
 | `bb shares` / `bb unshare` | List or revoke share links |
 | `bb request <create\|list\|send\|rm>` | Account-less links that let anyone upload *into* your vault |
 | `bb sync <local> [remote]` | Bidirectional folder sync; continuous by default (`--once`, `--daemon`, `--delete`) |
-| `bb webdav` | Serve the vault over local WebDAV (Finder, Explorer, rclone, Cyberduck) |
+| `bb webdav` | Serve the vault over local WebDAV (Finder, Explorer, rclone, Cyberduck). Read-only by default (`--read-write` to allow changes); prints a random per-run password that every client must send |
 | `bb mount <point>` | FUSE mount (macFUSE / libfuse3). Source builds with `--features fuse` only; release binaries do not include it, so use `bb webdav` |
 | `bb billing <show\|usage\|invoices\|portal\|addons>` | Plan and renewal info, per-region usage, invoices (`bb billing invoices --open <id>` downloads one as PDF), the billing portal, and add-ons |
 | `bb speedtest` | Benchmark network throughput and crypto speed |
