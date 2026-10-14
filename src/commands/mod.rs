@@ -28,4 +28,5 @@ pub mod sync;
 pub mod trash;
 pub mod twofa;
 pub mod webdav;
+mod webdav_guard;
 pub mod whoami;
