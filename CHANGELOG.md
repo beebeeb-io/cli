@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.4] - 2026-10-15
+
 ### Security
 - `bb account update --email` no longer sends your password to the server for an account that uses OPAQUE (the normal case). It now stops after the password check, which stays on your computer, and tells you to change the email in the web app, instead of first posting the plaintext password to the old email endpoint. Accounts without an OPAQUE credential behave as before. (task 1907)
 
