@@ -394,10 +394,10 @@ async fn push_single_file(
         Some(existing_id) => {
             let existing = existing_id.to_string();
             let meta = api.get_file(&existing).await?;
-            // version_number is the file's current version; default 1 if the
-            // server omits it (older rows) — the v2 init still proceeds and only
-            // a genuine mismatch 409s.
-            let version = meta.get("version_number").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
+            // The file's current version (task 1951: it sits in
+            // `download_version`); default 1 if the server reports none — the v2
+            // init still proceeds and only a genuine mismatch 409s.
+            let version = crate::api::current_version_number(&meta).unwrap_or(1) as i32;
             let name_encrypted = meta
                 .get("name_encrypted")
                 .and_then(|v| v.as_str())
