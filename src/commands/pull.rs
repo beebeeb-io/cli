@@ -1005,6 +1005,7 @@ impl ZipWalk<'_> {
                         file_id: item_id.to_string(),
                         chunk_count,
                         size_bytes,
+                        chunk_format: beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
                     },
                     content_key,
                 });

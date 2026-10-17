@@ -36,7 +36,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use beebeeb_core::chunk_stream::{ChunkDecryptor, MAX_CHUNK_SIZE};
+use beebeeb_core::chunk_stream::{ChunkDecryptor, ExpectedChunkFormat, MAX_CHUNK_SIZE};
 use beebeeb_core::kdf::MasterKey;
 
 use crate::api::ApiClient;
@@ -274,7 +274,7 @@ async fn stream_raw(
     };
 
     let mut writer = AtomicFile::create(out_path)?;
-    let mut decryptor = ChunkDecryptor::for_push(master_key, file_id);
+    let mut decryptor = ChunkDecryptor::for_push(master_key, file_id, ExpectedChunkFormat::Unrecorded);
     let mut plaintext_bytes: u64 = 0;
     let mut encrypted_bytes: u64 = 0;
 

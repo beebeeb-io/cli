@@ -732,7 +732,7 @@ mod tests {
         let fk = derive_file_key(&m, FID.as_bytes());
         let pt = b"streaming equals buffered";
         let frame = encrypt_chunk_raw(&fk, pt).unwrap();
-        let mut dec = ChunkDecryptor::for_push(&m, FID);
+        let mut dec = ChunkDecryptor::for_push(&m, FID, beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded);
         let streamed = dec.push_frame(&frame).unwrap().data;
         let buffered = decrypt_file_chunks(&m, FID, &frame, 1).unwrap();
         assert_eq!(streamed, buffered);
@@ -774,5 +774,66 @@ mod tests {
         assert_eq!(batch[0].as_deref(), Some("report.pdf"));
         assert_eq!(batch[1].as_deref(), Some("Documents"));
         assert_eq!(batch[2], None);
+    }
+
+    // ── Task 1943: cross-client vectors for the 1908 core read path ────────
+
+    /// Regenerates `tests/fixtures/core_1908_vectors.json`'s `v2_file` with
+    /// core's PUBLIC v2 writer path (a replace of a v2-pinned file:
+    /// `with_recorded_pin(V2)` + `encrypt_name_with_chunk_format(V2)`). Run
+    /// only on purpose (`cargo test regenerate_core_1908_v2_fixture -- --ignored`)
+    /// and commit the output: the vector tests read the PINNED bytes, so a later
+    /// core or CLI that drifts from them fails instead of round-tripping with
+    /// itself. Core publishes no v2 content vector in `test-vectors/vectors.json`
+    /// yet (v4 has only the v1 `chunk_encrypt_decrypt`).
+    #[test]
+    #[ignore]
+    fn regenerate_core_1908_v2_fixture() {
+        use beebeeb_core::chunk_stream::{ChunkEncryptor, ExpectedChunkFormat};
+        let master = [0x42u8; 32];
+        let m = MasterKey::from_bytes(master);
+        let file_id = "1908c0de-0000-4000-8000-000000000943";
+        // 3 chunks of 64 B plaintext + a 10 B tail: frame splitting, the last
+        // flag and the version id all matter.
+        let plaintext: Vec<u8> = (0..202u32).map(|i| (i * 7 + 3) as u8).collect();
+        let chunk_size = 64u64;
+        let mut enc = ChunkEncryptor::for_push_with_chunk_size(&m, file_id, plaintext.len() as u64, chunk_size)
+            .unwrap()
+            .with_recorded_pin(ExpectedChunkFormat::V2)
+            .unwrap();
+        let mut wire = Vec::new();
+        for part in plaintext.chunks(chunk_size as usize) {
+            wire.extend(enc.push_chunk(part).unwrap().data);
+        }
+        let summary = enc.finish().unwrap();
+        let name_encrypted = beebeeb_core::encrypt::encrypt_name_with_chunk_format(
+            &m,
+            file_id,
+            "core-1908-v2.txt",
+            Some("text/plain"),
+            ExpectedChunkFormat::V2,
+        )
+        .unwrap();
+        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        let v2 = serde_json::json!({
+            "master_key_hex": hex(&master),
+            "file_id": file_id,
+            "name": "core-1908-v2.txt",
+            "mime_type": "text/plain",
+            "name_encrypted": name_encrypted,
+            "chunk_size": chunk_size,
+            "chunk_count": summary.chunk_count,
+            "wire_hex": hex(&wire),
+            "plaintext_hex": hex(&plaintext),
+        });
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/core_1908_vectors.json");
+        let mut doc: serde_json::Value = std::fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        doc["v2_file"] = v2;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap() + "\n").unwrap();
+        println!("wrote {}", path.display());
     }
 }
