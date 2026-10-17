@@ -85,9 +85,18 @@ fn db_path() -> PathBuf {
         .join("pending-uploads.json")
 }
 
+/// The directory holding the resume state (and the upload locks of
+/// `upload_lock`, which follow the same test seam).
+pub(crate) fn state_dir() -> PathBuf {
+    db_path()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 /// Canonical-path key. Falls back to the raw path if the file can't be
 /// canonicalised (e.g. it was removed) so the key stays stable.
-fn key(path: &Path) -> String {
+pub(crate) fn key(path: &Path) -> String {
     std::fs::canonicalize(path)
         .unwrap_or_else(|_| path.to_path_buf())
         .to_string_lossy()
@@ -129,6 +138,19 @@ pub fn resumable_upload(path: &Path, size: u64, mtime_ns: u128) -> Option<Pendin
                 chunk_format: e.chunk_format.and_then(|c| ChunkFormat::from_u8(c).ok()),
             })
         })
+}
+
+/// [`resumable_upload`] for `path` as it is on disk right now (same size and
+/// mtime derivation as the upload driver). `None` if it cannot be stat'ed.
+pub fn resumable_upload_now(path: &Path) -> Option<PendingUpload> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime_ns = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    resumable_upload(path, meta.len(), mtime_ns)
 }
 
 /// Record an in-progress upload so an interrupted run can resume it. Called

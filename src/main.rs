@@ -20,6 +20,7 @@ mod tui;
 mod ui;
 mod update;
 mod upload;
+mod upload_lock;
 mod web_url;
 
 #[cfg(test)]

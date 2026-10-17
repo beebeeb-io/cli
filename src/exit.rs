@@ -9,6 +9,8 @@
 //! - [`INCOMPLETE`] (3): the command ran, but some items did not make it
 //!   (e.g. `bb sync --once` with failed uploads or unresolved conflicts).
 //!
+//! - [`BUSY`] (75, EX_TEMPFAIL): another `bb push` of the same file is still
+//!   running; run it again once that one has finished (or was stopped).
 //! - [`SESSION_ENDED`] (77, EX_NOPERM): the server no longer accepts the stored
 //!   session (`bb sync` only). The sync launchd/systemd units are told NOT to
 //!   restart on this code; sign in again with `bb login`.
@@ -22,6 +24,9 @@ use std::sync::atomic::{AtomicI32, Ordering};
 pub const USAGE: i32 = 2;
 /// The run finished but left items failed or unresolved.
 pub const INCOMPLETE: i32 = 3;
+
+/// Another process is uploading the same file; retry later.
+pub const BUSY: i32 = 75;
 
 /// The stored session was rejected by the server (401). Not retryable.
 pub const SESSION_ENDED: i32 = 77;
