@@ -59,6 +59,7 @@ bb sync ~/vault /Documents  # Two-way sync, then watch for live changes
 | `bb login` / `bb logout` | Start or end a session via browser device authorization |
 | `bb whoami` / `bb status` | Show email, device, region, quota, and account state (no plan yet, or trial ended and read-only) |
 | `bb quota` | Storage usage with a color-coded bar |
+| `bb region <list\|get\|set>` | Where new uploads are stored: Europe (the default, any of our European datacenters) or one datacenter. The list comes from the server, with coming-soon datacenters shown but not selectable. `bb region set helsinki` (or `europe`) chooses; files already uploaded stay where they are |
 | `bb config` | Print configuration with secrets masked |
 | `bb push <path>` | Encrypt and upload a file or folder (alias `bb upload`) |
 | `bb pull <path-or-id>` | Download and decrypt by vault path or UUID (alias `bb download`) |
