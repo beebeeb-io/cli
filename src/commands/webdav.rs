@@ -743,7 +743,8 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
     // versions by file_id (stale-version → 409).
     let base_version_number: Option<i32> = if let Some(eid) = existing_file_id {
         match state.api.get_file(&eid.to_string()).await {
-            Ok(meta) => Some(meta.get("version_number").and_then(|v| v.as_i64()).unwrap_or(1) as i32),
+            // Task 1951: the current version sits in `download_version`.
+            Ok(meta) => Some(crate::api::current_version_number(&meta).unwrap_or(1) as i32),
             Err(_) => None,
         }
     } else {

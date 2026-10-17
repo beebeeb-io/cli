@@ -2471,6 +2471,43 @@ async fn parse_response_typed(resp: reqwest::Response) -> Result<Value, ApiError
     })
 }
 
+/// A file's CURRENT version number, from a `GET /api/v1/files/{id}` row. The
+/// server reports it inside `download_version` (the version a download gets);
+/// a top-level `version_number` is only a fallback for older servers. Task
+/// 1951: reading only the top level made every `--replace` after the first send
+/// base version 1 and fail as stale.
+pub fn current_version_number(file: &Value) -> Option<i64> {
+    file.get("download_version")
+        .and_then(|d| d.get("version_number"))
+        .and_then(Value::as_i64)
+        .or_else(|| file.get("version_number").and_then(Value::as_i64))
+}
+
+#[cfg(test)]
+mod current_version_number_tests {
+    use super::current_version_number;
+    use serde_json::json;
+
+    #[test]
+    fn reads_download_version_first_then_the_top_level() {
+        // Today's server: only inside download_version.
+        assert_eq!(
+            current_version_number(&json!({"download_version": {"version_number": 3}})),
+            Some(3)
+        );
+        // Both present: download_version wins.
+        assert_eq!(
+            current_version_number(&json!({"version_number": 1, "download_version": {"version_number": 7}})),
+            Some(7)
+        );
+        // Older shape: top level only.
+        assert_eq!(current_version_number(&json!({"version_number": 2})), Some(2));
+        // A file with no completed version reports none.
+        assert_eq!(current_version_number(&json!({"download_version": null})), None);
+        assert_eq!(current_version_number(&json!({})), None);
+    }
+}
+
 #[cfg(test)]
 mod list_pagination_tests {
     //! Cursor-walk coverage for the `GET /api/v1/files` 200-cap fix (task 0755).
