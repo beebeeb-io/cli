@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **[P0]** `bb sync` and the background sync daemon no longer delete a local file just because it is missing from the remote listing. A local file is now removed only when the server itself reports that exact file as trashed, from a listing that is complete (not empty, no unreadable names, not cut short, same remote folder as last time), and it is moved into `.bb-trash/` inside the sync folder instead of being deleted. If one pass would remove more than 50 files or 10% of the synced files, nothing is removed and `bb sync --once` exits 3; `bb sync --once --allow-mass-delete` confirms it. Files that are missing remotely without a deletion record (renamed or moved on the web, or a different account) are kept and reported. (task 1915)
+- **[P0]** A `bb sync` download that fails to decrypt no longer moves the remote copy to the vault Trash. The remote file is left untouched, the error names the file, a one-shot run exits 3, and the next run tries again. (task 1916)
+
 ## [0.13.4] - 2026-10-15
 
 ### Security

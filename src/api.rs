@@ -520,11 +520,16 @@ impl ApiClient {
         const FILE_LIST_HARD_CAP: usize = 50_000;
         let mut all: Vec<Value> = Vec::new();
         let mut cursor: Option<String> = None;
+        // Set when the cap cut the listing short. Callers that conclude
+        // "deleted" from absence (bb sync) must treat such a listing as
+        // incomplete (task 1915).
+        let mut truncated = false;
         loop {
             let (mut page, next) = self.list_files_page(parent_id, trashed, cursor.as_deref()).await?;
             all.append(&mut page);
             if all.len() >= FILE_LIST_HARD_CAP {
                 all.truncate(FILE_LIST_HARD_CAP);
+                truncated = true;
                 eprintln!(
                     "warning: file listing reached the {FILE_LIST_HARD_CAP}-entry safety cap; some entries may be omitted"
                 );
@@ -535,7 +540,7 @@ impl ApiClient {
                 None => break,
             }
         }
-        Ok(serde_json::json!({ "files": all }))
+        Ok(serde_json::json!({ "files": all, "truncated": truncated }))
     }
 
     /// List a folder's (or the root's) active files. Follows the server's
