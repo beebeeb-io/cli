@@ -61,10 +61,15 @@ impl Mock {
     }
 }
 
+/// A remote file row. Its name is sealed under the scratch account's master
+/// key (all zero bytes): a FILE's `name_encrypted` must be an encrypted envelope,
+/// because the 1908 read path takes the chunk-format pin from it (task 1943).
 fn remote_file(id: &str, name: &str) -> Value {
+    let mk = beebeeb_core::kdf::MasterKey::from_bytes([0u8; 32]);
+    let name_encrypted = beebeeb_core::encrypt::encrypt_name(&mk, id, name, None).unwrap();
     json!({
         "id": id,
-        "name_encrypted": name,
+        "name_encrypted": name_encrypted,
         "is_folder": false,
         "size_bytes": 5,
         "chunk_count": 1,
@@ -723,6 +728,37 @@ async fn newer_remote_after_root_change_is_not_downloaded_over_local() {
     assert!(
         text(&out).contains("exists both sides"),
         "f1.txt must be reported as a conflict, got: {}",
+        text(&out)
+    );
+}
+
+// ───────────────────────────── 1943 ─────────────────────────────
+
+/// A remote file whose `name_encrypted` is a bare plaintext string has no
+/// authenticated metadata, so no chunk-format pin: its content is never read
+/// (nothing downloaded, nothing written), it is reported, the remote copy is
+/// left alone, and the pass exits 3 like any unreadable download.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_remote_file_without_authenticated_metadata_is_not_downloaded() {
+    let mock = Mock::default();
+    let api = start_mock(mock.clone()).await;
+    let home = scratch_home(&api);
+    let dir = home.join("syncdir");
+    std::fs::create_dir_all(&dir).unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    let mut row = remote_file(&id, "no-pin.txt");
+    row["name_encrypted"] = json!("no-pin.txt");
+    mock.set_listing(vec![row]);
+
+    let out = sync_once(&home, &api, &dir, &[]).await;
+
+    assert!(mock.downloads.lock().unwrap().is_empty(), "content read without a pin");
+    assert!(!dir.join("no-pin.txt").exists());
+    assert!(mock.trashed().is_empty(), "the remote copy must be left alone");
+    assert_eq!(out.status.code(), Some(3), "the unreadable file must be reported");
+    assert!(
+        text(&out).contains("no-pin.txt") && text(&out).contains("refusing to guess"),
+        "got: {}",
         text(&out)
     );
 }

@@ -85,6 +85,10 @@ pub async fn run(file_id: String, output: Option<PathBuf>, zip: bool, force: boo
     // checked before any bytes are downloaded, for both decrypt paths below.
     guard_existing_output(&out_path, force)?;
 
+    // The chunk format comes from the file's authenticated metadata, never a
+    // server field (task 1943): core's reader opens a v2-pinned file only as v2.
+    let pin = crate::crypto::file_row_pin(&master_key, &file_id, name_encrypted_str, request_content_key.as_ref())?;
+
     // File-request uploads are sealed under a per-file content key C, not the
     // master-derived key the streaming path assumes. Decrypt them via the
     // buffered request-key path (download whole blob → decrypt with C → write).
@@ -94,7 +98,7 @@ pub async fn run(file_id: String, output: Option<PathBuf>, zip: bool, force: boo
         let dl_elapsed = dl_start.elapsed();
 
         let dec_start = std::time::Instant::now();
-        let plaintext = crate::crypto::try_decrypt_all_chunks(c, &encrypted_bytes, chunk_count)?;
+        let plaintext = crate::crypto::try_decrypt_all_chunks(c, &file_id, pin, &encrypted_bytes, chunk_count)?;
         let dec_elapsed = dec_start.elapsed();
 
         std::fs::write(&out_path, &plaintext).map_err(|e| format!("failed to write file: {e}"))?;
@@ -159,6 +163,7 @@ pub async fn run(file_id: String, output: Option<PathBuf>, zip: bool, force: boo
         &api,
         &master_key,
         &file_id,
+        pin,
         chunk_count,
         &out_path,
         progress.as_ref(),
@@ -403,6 +408,13 @@ async fn pull_folder_inner(
                     continue;
                 }
             }
+            // No read pin (task 1943: plaintext or unreadable metadata), no
+            // read: skipped like an unsafe name, and the rest still pulls.
+            if let Err(e) = crate::crypto::file_row_pin(&master_key, item_id, name_enc, content_key.as_ref()) {
+                warn_skipped(&format!("{}: {e}", target.display()));
+                skipped += 1;
+                continue;
+            }
             pull_single_file(api, item_id, &target, content_key).await?;
         }
     }
@@ -448,6 +460,12 @@ async fn pull_single_file(
 
     let file_meta = api.get_file(file_id).await?;
     let chunk_count = file_meta.get("chunk_count").and_then(|v| v.as_i64()).unwrap_or(1) as u32;
+    let name_encrypted = file_meta
+        .get("name_encrypted")
+        .and_then(|v| v.as_str())
+        .ok_or("server response missing name_encrypted")?;
+    // Read pin from the file's authenticated metadata (task 1943).
+    let pin = crate::crypto::file_row_pin(&master_key, file_id, name_encrypted, request_content_key.as_ref())?;
 
     let name = out_path
         .file_name()
@@ -462,7 +480,7 @@ async fn pull_single_file(
         let dl_start = std::time::Instant::now();
         let encrypted_bytes = api.download_file(file_id).await?;
         let dl_elapsed = dl_start.elapsed();
-        let plaintext = crate::crypto::try_decrypt_all_chunks(c, &encrypted_bytes, chunk_count)?;
+        let plaintext = crate::crypto::try_decrypt_all_chunks(c, file_id, pin, &encrypted_bytes, chunk_count)?;
 
         if let Some(parent) = out_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("failed to create dir: {e}"))?;
@@ -499,6 +517,7 @@ async fn pull_single_file(
         api,
         &master_key,
         file_id,
+        pin,
         chunk_count,
         out_path,
         &crate::upload::NoopProgress,
@@ -761,11 +780,23 @@ fn decrypt_zip_item(
     let e = &item.entry;
     let plaintext = match &item.content_key {
         // File-request upload: the per-file content key opens it.
-        Some(c) => crate::crypto::try_decrypt_all_chunks_with_chunk_size(c, blob, e.chunk_count, chunk_size),
+        Some(c) => crate::crypto::try_decrypt_all_chunks_with_chunk_size(
+            c,
+            &e.file_id,
+            e.chunk_format,
+            blob,
+            e.chunk_count,
+            chunk_size,
+        ),
         // Everything else goes through the master-key path every other `bb pull` uses.
-        None => {
-            crate::crypto::decrypt_file_chunks_with_chunk_size(master_key, &e.file_id, blob, e.chunk_count, chunk_size)
-        }
+        None => crate::crypto::decrypt_file_chunks_with_chunk_size(
+            master_key,
+            &e.file_id,
+            e.chunk_format,
+            blob,
+            e.chunk_count,
+            chunk_size,
+        ),
     }
     .map_err(|err| format!("could not be decrypted ({err})"))?;
     Ok(zeroize::Zeroizing::new(plaintext))
@@ -999,12 +1030,23 @@ impl ZipWalk<'_> {
                 // Recurse into subfolders
                 Box::pin(self.collect(item_id, &path)).await?;
             } else {
+                // Read pin from the file's authenticated metadata (task 1943).
+                let chunk_format =
+                    match crate::crypto::file_row_pin(self.master_key, item_id, name_enc, content_key.as_ref()) {
+                        Ok(pin) => pin,
+                        Err(e) => {
+                            warn_skipped(&format!("{path:?}: {e}"));
+                            self.skipped += 1;
+                            continue;
+                        }
+                    };
                 self.items.push(ZipItem {
                     entry: beebeeb_core::zip::ZipEntry {
                         path,
                         file_id: item_id.to_string(),
                         chunk_count,
                         size_bytes,
+                        chunk_format,
                     },
                     content_key,
                 });

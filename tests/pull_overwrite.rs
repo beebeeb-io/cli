@@ -87,20 +87,29 @@ fn remote_ciphertext() -> Vec<u8> {
     chunk.data
 }
 
-/// Mock API serving a single file `note.txt` (plaintext-name fast path).
+/// The file's encrypted name metadata. A FILE's `name_encrypted` must be an
+/// encrypted envelope: the 1908 read path takes the chunk-format pin from it and
+/// refuses a plaintext name (task 1943), as every real server row is encrypted.
+fn remote_name_encrypted() -> String {
+    let mk = beebeeb_core::kdf::MasterKey::from_bytes([0u8; 32]);
+    beebeeb_core::encrypt::encrypt_name(&mk, FILE_ID, "note.txt", None).unwrap()
+}
+
+/// Mock API serving a single file `note.txt`.
 fn spawn_mock() -> String {
     let ciphertext = remote_ciphertext();
+    let name_encrypted = remote_name_encrypted();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
-            let meta = |AxPath(id): AxPath<String>| async move {
+            let meta = move |AxPath(id): AxPath<String>| async move {
                 if id != FILE_ID {
                     return (StatusCode::NOT_FOUND, Json(json!({ "error": "not found" }))).into_response();
                 }
                 Json(json!({
                     "id": FILE_ID,
-                    "name_encrypted": "note.txt",
+                    "name_encrypted": name_encrypted,
                     "is_folder": false,
                     "chunk_count": 1,
                     "size_bytes": REMOTE.len(),

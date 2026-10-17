@@ -857,6 +857,30 @@ impl ApiClient {
         Err("rate limited after 3 retries".to_string().into())
     }
 
+    /// Abandon a file's in-flight upload session (`POST
+    /// /api/v1/files/{id}/upload/abandon`, server task 1571): a replace reverts
+    /// to the previous version, a never-completed first upload is deleted. Core's
+    /// resume rule (task 1908) needs it before it re-inits a file whose old
+    /// session it may not continue. A 404 means there is nothing to abandon.
+    pub async fn upload_abandon(&self, file_id: &str) -> Result<Value, ApiError> {
+        let token = self.require_auth()?;
+        for _ in 0..3 {
+            pace_if_needed().await;
+            let resp = self
+                .client
+                .post(self.url(&format!("/api/v1/files/{file_id}/upload/abandon")))
+                .bearer_auth(token)
+                .send()
+                .await
+                .map_err(format_request_error)?;
+            match parse_response_typed(resp).await {
+                Err(e) if e.message == "__rate_limited__" => continue,
+                other => return other,
+            }
+        }
+        Err("rate limited after 3 retries".to_string().into())
+    }
+
     /// Create a share link for a file.
     ///
     /// `wrapped_file_key` — if provided, enables double-encrypted mode where

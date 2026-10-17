@@ -878,7 +878,14 @@ mod tests {
         for (_idx, c) in &chunks {
             all.extend_from_slice(c);
         }
-        let plaintext = crate::crypto::try_decrypt_all_chunks(&file_key, &all, chunks.len() as u32).expect("decrypts");
+        let plaintext = crate::crypto::try_decrypt_all_chunks(
+            &file_key,
+            "00000000-0000-0000-0000-000000000000",
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+            &all,
+            chunks.len() as u32,
+        )
+        .expect("decrypts");
         assert_eq!(plaintext, body);
     }
 
@@ -939,7 +946,14 @@ mod tests {
         for (_idx, c) in &chunks {
             all.extend_from_slice(c);
         }
-        let plaintext = crate::crypto::try_decrypt_all_chunks(&content_key, &all, chunks.len() as u32).unwrap();
+        let plaintext = crate::crypto::try_decrypt_all_chunks(
+            &content_key,
+            "00000000-0000-0000-0000-000000000000",
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+            &all,
+            chunks.len() as u32,
+        )
+        .unwrap();
         assert_eq!(plaintext, body);
 
         // R_priv is cached after the first resolve.

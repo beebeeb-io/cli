@@ -534,6 +534,13 @@ async fn get_response(state: &Arc<DavState>, path: &str, req_headers: &HeaderMap
         }
     }
 
+    // The read pin from the file's authenticated metadata (task 1943): refuse
+    // before downloading anything if it could not be read.
+    let pin = match &resolved.pin {
+        Ok(pin) => *pin,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.clone()).into_response(),
+    };
+
     // Download encrypted bytes
     let encrypted_bytes = match state.api.download_file(&file_id).await {
         Ok(b) => b,
@@ -543,11 +550,16 @@ async fn get_response(state: &Arc<DavState>, path: &str, req_headers: &HeaderMap
     // Decrypt all chunks using the shared helper that handles both
     // CLI-format (JSON) and web-app-format (raw binary) chunks, and
     // both UUID key derivation methods (binary and string).
-    let plaintext =
-        match crate::crypto::decrypt_file_chunks(&state.master_key, &file_id, &encrypted_bytes, resolved.chunk_count) {
-            Ok(p) => p,
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-        };
+    let plaintext = match crate::crypto::decrypt_file_chunks(
+        &state.master_key,
+        &file_id,
+        pin,
+        &encrypted_bytes,
+        resolved.chunk_count,
+    ) {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
 
     let mut headers = HeaderMap::new();
     let mime = resolve_mime(&resolved.display_name);
@@ -1237,6 +1249,15 @@ struct ResolvedEntry {
     size_bytes: Option<u64>,
     chunk_count: u32,
     modified: Option<String>,
+    /// The content's read pin from the file's authenticated metadata
+    /// (`crypto::content_pin`, task 1943). `Err` for a collection, or for a file
+    /// whose metadata cannot be read (its content is then refused, never guessed).
+    pin: Result<beebeeb_core::chunk_stream::ExpectedChunkFormat, String>,
+}
+
+/// What a collection carries in [`ResolvedEntry::pin`].
+fn no_content() -> Result<beebeeb_core::chunk_stream::ExpectedChunkFormat, String> {
+    Err("a collection has no content".to_string())
 }
 
 /// Decode a single API file object into a `ResolvedEntry`.
@@ -1255,6 +1276,11 @@ fn decode_file_entry(
     let name_encrypted = file.get("name_encrypted").and_then(|v| v.as_str())?;
     let display_name =
         decrypt_name(master_key, &file_id, name_encrypted).unwrap_or_else(|| format!("[{}]", &file_id[..8]));
+    let pin = if is_folder {
+        no_content()
+    } else {
+        crate::crypto::content_pin(master_key, &file_id, name_encrypted)
+    };
 
     Some(ResolvedEntry {
         file_id: Some(file_id),
@@ -1263,6 +1289,7 @@ fn decode_file_entry(
         size_bytes,
         chunk_count,
         modified,
+        pin,
     })
 }
 
@@ -1283,6 +1310,7 @@ async fn resolve_path(state: &Arc<DavState>, path: &str) -> Result<ResolvedEntry
             size_bytes: None,
             chunk_count: 0,
             modified: None,
+            pin: no_content(),
         });
     }
 
@@ -1437,6 +1465,7 @@ mod parent_target_tests {
             size_bytes: None,
             chunk_count: 0,
             modified: None,
+            pin: no_content(),
         }
     }
 

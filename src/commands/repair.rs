@@ -95,7 +95,13 @@ fn decrypt_chunks_with_binary_key(
     let file_uuid: uuid::Uuid = file_id_str.parse().map_err(|e| format!("invalid file ID: {e}"))?;
     let key_from_binary = beebeeb_core::kdf::derive_file_key(master_key, file_uuid.as_bytes());
 
-    crate::crypto::try_decrypt_all_chunks(&key_from_binary, encrypted_bytes, chunk_count)
+    crate::crypto::try_decrypt_all_chunks(
+        &key_from_binary,
+        file_id_str,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+        encrypted_bytes,
+        chunk_count,
+    )
 }
 
 /// Encrypt all chunks with the string-UUID key, returning serialized blobs.
@@ -418,6 +424,19 @@ async fn repair_file(
         .get("parent_id")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+
+    // Step 0: the read pin from the file's authenticated metadata (task 1943).
+    // Repair rewrites a legacy file as v1, so a v2-pinned file is never touched:
+    // that would silently downgrade it (and core never writes v2 under the
+    // binary-UUID key anyway).
+    let name_encrypted = file_meta
+        .get("name_encrypted")
+        .and_then(|v| v.as_str())
+        .ok_or("server response missing name_encrypted")?;
+    let pin = crate::crypto::content_pin(master_key, file_id, name_encrypted)?;
+    if pin != beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded {
+        return Err("its metadata records chunk format v2; a v2 file is never rewritten by repair".to_string());
+    }
 
     // Step 1: Download encrypted content
     let encrypted_bytes = api.download_file(file_id).await?;

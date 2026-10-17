@@ -36,7 +36,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use beebeeb_core::chunk_stream::{ChunkDecryptor, MAX_CHUNK_SIZE};
+use beebeeb_core::chunk_stream::{ChunkDecryptor, ExpectedChunkFormat, MAX_CHUNK_SIZE};
 use beebeeb_core::kdf::MasterKey;
 
 use crate::api::ApiClient;
@@ -148,10 +148,16 @@ pub async fn download_buffered(api: &ApiClient, file_id: &str) -> Result<(Vec<u8
 /// Stream-download `file_id`, decrypt to `out_path` with constant memory, and
 /// report progress. Falls back to the buffered legacy decrypt for JSON-blob /
 /// binary-UUID / unknown-frame-size files (see module docs).
+///
+/// `pin` is the file's read pin from its authenticated metadata
+/// ([`crate::crypto::content_pin`], task 1943): core's reader opens a
+/// v2-pinned file only as v2, and rejects one that ends before its last chunk.
+#[allow(clippy::too_many_arguments)]
 pub async fn stream_download_decrypt(
     api: &ApiClient,
     master_key: &MasterKey,
     file_id: &str,
+    pin: ExpectedChunkFormat,
     chunk_count: u32,
     out_path: &Path,
     progress: &dyn ChunkProgress,
@@ -161,6 +167,7 @@ pub async fn stream_download_decrypt(
         api,
         master_key,
         file_id,
+        pin,
         chunk_count,
         out_path,
         progress,
@@ -177,6 +184,7 @@ async fn stream_download_decrypt_with(
     api: &ApiClient,
     master_key: &MasterKey,
     file_id: &str,
+    pin: ExpectedChunkFormat,
     chunk_count: u32,
     out_path: &Path,
     progress: &dyn ChunkProgress,
@@ -222,6 +230,7 @@ async fn stream_download_decrypt_with(
         &mut resp,
         master_key,
         file_id,
+        pin,
         count,
         total,
         chunk_size,
@@ -246,6 +255,7 @@ async fn stream_raw(
     resp: &mut reqwest::Response,
     master_key: &MasterKey,
     file_id: &str,
+    pin: ExpectedChunkFormat,
     count: u32,
     total: u64,
     chunk_size: Option<u64>,
@@ -274,7 +284,7 @@ async fn stream_raw(
     };
 
     let mut writer = AtomicFile::create(out_path)?;
-    let mut decryptor = ChunkDecryptor::for_push(master_key, file_id);
+    let mut decryptor = ChunkDecryptor::for_push(master_key, file_id, pin);
     let mut plaintext_bytes: u64 = 0;
     let mut encrypted_bytes: u64 = 0;
 
@@ -292,7 +302,7 @@ async fn stream_raw(
                 writer.abort();
                 let mut full = std::mem::take(&mut carry);
                 drain_rest(resp, &mut full, fb_cap).await?;
-                return buffered_fallback(master_key, file_id, &full, count, chunk_size, out_path, prog);
+                return buffered_fallback(master_key, file_id, pin, &full, count, chunk_size, out_path, prog);
             }
             if carry.len() < frame_size {
                 return Err(format!(
@@ -321,7 +331,7 @@ async fn stream_raw(
                 // then drain the remainder under the fallback cap.
                 full.append(&mut carry);
                 drain_rest(resp, &mut full, fb_cap).await?;
-                return buffered_fallback(master_key, file_id, &full, count, chunk_size, out_path, prog);
+                return buffered_fallback(master_key, file_id, pin, &full, count, chunk_size, out_path, prog);
             }
             Err(e) => {
                 writer.abort();
@@ -330,6 +340,12 @@ async fn stream_raw(
         }
     }
 
+    // v2: the stream must have ended with the frame that authenticated as last
+    // (truncation detection, task 1908). v1 has no last marker.
+    if let Err(e) = decryptor.finish() {
+        writer.abort();
+        return Err(format!("download incomplete: {e}"));
+    }
     writer.commit()?;
     Ok(DownloadStats {
         plaintext_bytes,
@@ -340,9 +356,11 @@ async fn stream_raw(
 /// Buffered legacy decrypt via `crypto::decrypt_file_chunks_with_chunk_size`
 /// (handles JSON-blob, binary/string dual-key and unknown frame sizes). Writes
 /// atomically.
+#[allow(clippy::too_many_arguments)]
 fn buffered_fallback(
     master_key: &MasterKey,
     file_id: &str,
+    pin: ExpectedChunkFormat,
     encrypted: &[u8],
     count: u32,
     chunk_size: Option<u64>,
@@ -350,7 +368,7 @@ fn buffered_fallback(
     prog: &dyn crate::upload::FileProgress,
 ) -> Result<DownloadStats, String> {
     let plaintext =
-        crate::crypto::decrypt_file_chunks_with_chunk_size(master_key, file_id, encrypted, count, chunk_size)?;
+        crate::crypto::decrypt_file_chunks_with_chunk_size(master_key, file_id, pin, encrypted, count, chunk_size)?;
     let mut writer = AtomicFile::create(out_path)?;
     writer.write_all(&plaintext)?;
     writer.commit()?;
@@ -534,6 +552,30 @@ mod tests {
         m: &MasterKey,
         ceiling: u64,
     ) -> (Vec<u8>, usize) {
+        let (got, confirmed) = download_inner(
+            body,
+            chunk_size,
+            chunk_count,
+            m,
+            FID,
+            ExpectedChunkFormat::Unrecorded,
+            ceiling,
+        )
+        .await;
+        (got.expect("download + decrypt succeeds"), confirmed)
+    }
+
+    /// The real streaming path for any file id and read pin; returns the
+    /// decrypted file (or the error) and the number of progress confirmations.
+    async fn download_inner(
+        body: Vec<u8>,
+        chunk_size: Option<u64>,
+        chunk_count: u32,
+        m: &MasterKey,
+        file_id: &str,
+        pin: ExpectedChunkFormat,
+        ceiling: u64,
+    ) -> (Result<Vec<u8>, String>, usize) {
         let app = Router::new()
             .route("/api/v1/files/:id/download", get(serve))
             .with_state(Served {
@@ -550,21 +592,114 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("bb-dl-1759-{}-{}", std::process::id(), rand::random::<u32>()));
         let out = dir.join("out.bin");
         let confirmed = Arc::new(AtomicUsize::new(0));
-        stream_download_decrypt_with(
+        let r = stream_download_decrypt_with(
             &api,
             m,
-            FID,
+            file_id,
+            pin,
             chunk_count,
             &out,
             &Counting(confirmed.clone()),
             "out.bin",
             ceiling,
         )
-        .await
-        .expect("download + decrypt succeeds");
-        let got = std::fs::read(&out).unwrap();
+        .await;
+        let got = r.and_then(|_| std::fs::read(&out).map_err(|e| e.to_string()));
         let _ = std::fs::remove_dir_all(&dir);
         (got, confirmed.load(Ordering::SeqCst))
+    }
+
+    // ── Task 1943: the pinned streaming path ─────────────────────────────────
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// The fixture's core-written v2 file: (master key, file id, wire, chunk
+    /// count, chunk size, plaintext).
+    fn v2_file() -> (MasterKey, String, Vec<u8>, u32, u64, Vec<u8>) {
+        let doc: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/core_1908_vectors.json")).unwrap();
+        let v = &doc["v2_file"];
+        let mut mk = [0u8; 32];
+        mk.copy_from_slice(&unhex(v["master_key_hex"].as_str().unwrap()));
+        (
+            MasterKey::from_bytes(mk),
+            v["file_id"].as_str().unwrap().to_string(),
+            unhex(v["wire_hex"].as_str().unwrap()),
+            v["chunk_count"].as_u64().unwrap() as u32,
+            v["chunk_size"].as_u64().unwrap(),
+            unhex(v["plaintext_hex"].as_str().unwrap()),
+        )
+    }
+
+    /// The core-written v2 fixture streams through `bb pull`'s real path under
+    /// its V2 pin, one confirmation per frame; cut before its last frame it is
+    /// rejected and nothing is left at the output path.
+    #[tokio::test]
+    async fn v2_fixture_streams_under_its_pin_and_truncation_is_rejected() {
+        let (m, fid, wire, count, cs, plaintext) = v2_file();
+        let (got, confirmed) = download_inner(
+            wire.clone(),
+            Some(cs),
+            count,
+            &m,
+            &fid,
+            ExpectedChunkFormat::V2,
+            FALLBACK_HARD_CEILING,
+        )
+        .await;
+        assert_eq!(got.unwrap(), plaintext);
+        assert_eq!(confirmed, count as usize, "streamed frame by frame");
+
+        let cut = (count as usize - 1) * (cs as usize + 28);
+        let (got, _) = download_inner(
+            wire[..cut].to_vec(),
+            Some(cs),
+            count - 1,
+            &m,
+            &fid,
+            ExpectedChunkFormat::V2,
+            FALLBACK_HARD_CEILING,
+        )
+        .await;
+        assert!(
+            got.is_err(),
+            "a v2 file missing its last frame must not download: {got:?}"
+        );
+    }
+
+    /// Under a V2 pin the streaming path (and its buffered fallback) refuses v1
+    /// frames of the same file key; the same bytes open as a legacy file.
+    #[tokio::test]
+    async fn v2_pin_refuses_v1_frames_on_the_streaming_path() {
+        let (m, fid, _, _, _, plaintext) = v2_file();
+        let v1 = encrypt_chunk_raw(&derive_file_key(&m, fid.as_bytes()), &plaintext).unwrap();
+        let (got, _) = download_inner(
+            v1.clone(),
+            None,
+            1,
+            &m,
+            &fid,
+            ExpectedChunkFormat::V2,
+            FALLBACK_HARD_CEILING,
+        )
+        .await;
+        assert!(got.is_err(), "v1 frame opened under a v2 pin");
+        let (got, _) = download_inner(
+            v1,
+            None,
+            1,
+            &m,
+            &fid,
+            ExpectedChunkFormat::Unrecorded,
+            FALLBACK_HARD_CEILING,
+        )
+        .await;
+        assert_eq!(got.unwrap(), plaintext, "control");
     }
 
     fn mk() -> MasterKey {
@@ -693,6 +828,7 @@ mod tests {
             &api,
             m,
             FID,
+            ExpectedChunkFormat::Unrecorded,
             chunk_count,
             &out,
             &Counting(confirmed),
