@@ -85,9 +85,18 @@ fn db_path() -> PathBuf {
         .join("pending-uploads.json")
 }
 
+/// The directory holding the resume state (and the upload locks of
+/// `upload_lock`, which follow the same test seam).
+pub(crate) fn state_dir() -> PathBuf {
+    db_path()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 /// Canonical-path key. Falls back to the raw path if the file can't be
 /// canonicalised (e.g. it was removed) so the key stays stable.
-fn key(path: &Path) -> String {
+pub(crate) fn key(path: &Path) -> String {
     std::fs::canonicalize(path)
         .unwrap_or_else(|_| path.to_path_buf())
         .to_string_lossy()

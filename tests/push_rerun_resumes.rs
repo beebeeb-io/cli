@@ -327,9 +327,10 @@ async fn bb(home: &Path, args: &[&str]) -> Output {
     out
 }
 
-/// Start `bb <args>` with chunk PUTs stalled, wait until the server holds chunk
-/// 0 of a session that needs more, then SIGKILL it: an interrupted push.
-async fn push_and_kill(vault: &Shared, home: &Path, args: &[&str]) {
+/// Start `bb <args>` with chunk PUTs stalled and wait until the server holds
+/// chunk 0 of a session that needs more: the push is now mid-upload, parked on
+/// chunk 1 for as long as the stall lasts.
+async fn push_stalled_mid_upload(vault: &Shared, home: &Path, args: &[&str]) -> std::process::Child {
     vault.lock().unwrap().stall = true;
     let mut child = bb_command(home, &owned(args))
         .stdout(Stdio::null())
@@ -345,7 +346,7 @@ async fn push_and_kill(vault: &Shared, home: &Path, args: &[&str]) {
             .values()
             .any(|s| s.chunk_count >= 2 && s.frames.contains_key(&0));
         if started {
-            break;
+            return child;
         }
         if let Some(status) = child.try_wait().unwrap() {
             panic!(
@@ -356,10 +357,20 @@ async fn push_and_kill(vault: &Shared, home: &Path, args: &[&str]) {
         assert!(Instant::now() < deadline, "the upload never got chunk 0 to the server");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+/// SIGKILL a push and lift the stall.
+fn kill(vault: &Shared, mut child: std::process::Child) {
     child.kill().expect("SIGKILL bb");
     let status = child.wait().unwrap();
     assert!(!status.success(), "the killed push must not report success");
     vault.lock().unwrap().stall = false;
+}
+
+/// An interrupted push: stalled mid-upload, then SIGKILLed.
+async fn push_and_kill(vault: &Shared, home: &Path, args: &[&str]) {
+    let child = push_stalled_mid_upload(vault, home, args).await;
+    kill(vault, child);
 }
 
 /// Two chunks at the 4 MiB minimum chunk size; `k` varies the bytes.
@@ -489,4 +500,81 @@ async fn an_interrupted_replace_is_not_resumed_by_a_plain_push() {
         v.inits, 2,
         "push + the killed replace; the refused re-run inits nothing"
     );
+}
+
+/// A second `bb push` of the same file while the first is STILL uploading must
+/// not touch the first one's upload (it matches the same resume record): it
+/// refuses with exit 75 naming the running push, and inits, skips and abandons
+/// nothing. Once the first is SIGKILLed the kernel drops its lock, so the
+/// identical command then resumes the upload and completes it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_push_while_the_first_still_uploads_is_refused() {
+    let vault: Shared = Arc::default();
+    let api = start_mock(vault.clone()).await;
+    let home = scratch_home(&api);
+    std::fs::write(home.join("big.bin"), content(1)).unwrap();
+
+    let first = push_stalled_mid_upload(&vault, &home, &["--api", &api, "push", "big.bin"]).await;
+    let first_pid = first.id();
+    let before = {
+        let v = vault.lock().unwrap();
+        (v.inits, v.skipped, v.abandons)
+    };
+
+    // The second run, bounded: a push that "resumes" the live upload instead
+    // would park on the stalled chunk 1 too.
+    let mut second = bb_command(&home, &owned(&["--api", &api, "push", "big.bin"]))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the second bb");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while second.try_wait().unwrap().is_none() {
+        if Instant::now() > deadline {
+            let _ = second.kill();
+            let _ = second.wait();
+            let v = vault.lock().unwrap();
+            panic!(
+                "the second push did not refuse: it is uploading into the first push's session \
+                 (inits {} -> {}, skipped {} -> {}, abandons {} -> {})",
+                before.0, v.inits, before.1, v.skipped, before.2, v.abandons
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let out = second.wait_with_output().unwrap();
+    let err = stderr(&out);
+    eprintln!("[second push -> {:?}]\n{err}", out.status.code());
+    {
+        let v = vault.lock().unwrap();
+        assert_eq!(
+            (v.inits, v.skipped, v.abandons),
+            before,
+            "the second push must not init, PUT to or abandon the running upload"
+        );
+    }
+    assert_eq!(out.status.code(), Some(75), "busy, try again later: {err}");
+    assert!(
+        err.contains("another bb push of big.bin is still running"),
+        "names the running push: {err}"
+    );
+    assert!(err.contains(&format!("pid {first_pid}")), "and its pid: {err}");
+
+    kill(&vault, first);
+    let out = bb(&home, &["--api", &api, "push", "big.bin"]).await;
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a SIGKILLed push leaves no lock behind: the re-run resumes: {}",
+        stderr(&out)
+    );
+    let id = {
+        let v = vault.lock().unwrap();
+        let f = v.file.as_ref().expect("completed");
+        assert_eq!(f.version, 1);
+        f.id.clone()
+    };
+    let out = bb(&home, &["--api", &api, "pull", &id, "-o", "pulled.bin"]).await;
+    assert!(out.status.success(), "pull failed: {}", stderr(&out));
+    assert!(std::fs::read(home.join("pulled.bin")).unwrap() == content(1));
 }

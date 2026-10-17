@@ -331,6 +331,24 @@ async fn push_single_file(
 
     let parent_uuid: Option<uuid::Uuid> = parent_id.as_deref().and_then(|s| s.parse().ok());
 
+    // One push per local file across processes, held until this function
+    // returns (task 1950 review): a second `bb push` of a file whose first push
+    // is still uploading would otherwise "resume" the live upload below.
+    let _upload_lock = match crate::upload_lock::try_acquire(path) {
+        Ok(lock) => lock,
+        Err(crate::upload_lock::LockError::Held { pid }) => {
+            let holder = pid.map(|p| format!(" (pid {p})")).unwrap_or_default();
+            return Err(crate::exit::with_code(
+                crate::exit::BUSY,
+                format!(
+                    "another bb push of {file_name} is still running{holder}; \
+                     wait for it to finish, or stop it and run this again to resume"
+                ),
+            ));
+        }
+        Err(crate::upload_lock::LockError::Io(e)) => return Err(format!("{file_name}: upload lock: {e}")),
+    };
+
     // ── Conflict detection ────────────────────────────────────────────────────
     // Decrypt existing filenames in the folder and check for a match.
     // If found, ask the user (or apply the strategy flag) how to proceed.
