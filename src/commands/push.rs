@@ -82,6 +82,33 @@ pub(crate) async fn find_conflict(
     None
 }
 
+/// Is the same-named file `existing_id` this machine's own INTERRUPTED first
+/// upload of `path` (task 1950)? Both sides must say so: the local resume record
+/// for this exact file (same size and mtime) names that file id, and the server
+/// reports the file still uploading with no completed version. Then re-running
+/// the same `bb push` resumes it (the upload driver applies core's resume rule)
+/// instead of refusing the name. A completed file, or the interrupted replace of
+/// one, is a real name conflict and keeps the usual refusal.
+async fn own_unfinished_upload(api: &ApiClient, path: &std::path::Path, existing_id: uuid::Uuid) -> bool {
+    let Some(pending) = crate::resume::resumable_upload_now(path) else {
+        return false;
+    };
+    if pending.file_id != existing_id {
+        return false;
+    }
+    match api.get_file(&existing_id.to_string()).await {
+        Ok(row) => is_unfinished_first_upload(&row),
+        Err(_) => false,
+    }
+}
+
+/// A `GET /api/v1/files/{id}` row of an upload that never completed: still
+/// uploading, and no completed version to download.
+fn is_unfinished_first_upload(row: &serde_json::Value) -> bool {
+    row.get("is_uploading").and_then(serde_json::Value::as_bool) == Some(true)
+        && row.get("download_version").is_none_or(serde_json::Value::is_null)
+}
+
 /// Prompt the user interactively for conflict resolution.
 /// Returns Ok(resolution) or Err if stdin is not interactive.
 fn prompt_conflict(filename: &str) -> ConflictResolution {
@@ -309,9 +336,27 @@ async fn push_single_file(
     // If found, ask the user (or apply the strategy flag) how to proceed.
     let (file_id, upload_name, replace_file_id) = {
         let existing = find_conflict(api, &master_key, &file_name, parent_uuid).await;
+        // Task 1950: with no explicit --replace / --keep-both, our own
+        // interrupted upload of this very file is not a conflict: resume it.
+        let resumes = match existing {
+            Some(id) if matches!(strategy, ConflictStrategy::Prompt) => own_unfinished_upload(api, path, id).await,
+            _ => false,
+        };
 
         match existing {
             None => (uuid::Uuid::new_v4(), file_name.clone(), None),
+            Some(existing_id) if resumes => {
+                if !suppress_output && !ui::is_quiet() && !ui::is_json() {
+                    println!(
+                        "  {} {}",
+                        "resuming".custom_color(crate::colors::INK_DIM),
+                        format!("{file_name} (the interrupted upload)").custom_color(crate::colors::INK),
+                    );
+                }
+                // The same id as a new file: the driver finds the resume record
+                // and continues (or, under core's rule, restarts) that upload.
+                (existing_id, file_name.clone(), None)
+            }
             Some(existing_id) => {
                 // Determine resolution
                 let resolution = match strategy {
@@ -891,5 +936,30 @@ mod check_quota_tests {
         let ended = doc("account.trial_ended.ios");
         let err = check_quota_against(&sub, 0, 10, APP, Some(&ended)).unwrap_err();
         assert!(err.starts_with("Your trial has ended"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod rerun_resume_tests {
+    use super::is_unfinished_first_upload;
+    use serde_json::json;
+
+    /// Only a row that is still uploading AND has no completed version is our
+    /// interrupted first upload; anything with a downloadable version is a
+    /// real name conflict (task 1950).
+    #[test]
+    fn only_an_uploading_row_without_a_version_is_unfinished() {
+        assert!(is_unfinished_first_upload(
+            &json!({ "is_uploading": true, "download_version": null })
+        ));
+        assert!(is_unfinished_first_upload(&json!({ "is_uploading": true })));
+        assert!(!is_unfinished_first_upload(
+            &json!({ "is_uploading": true, "download_version": { "version_number": 1 } })
+        ));
+        assert!(!is_unfinished_first_upload(
+            &json!({ "is_uploading": false, "download_version": null })
+        ));
+        assert!(!is_unfinished_first_upload(&json!({ "download_version": null })));
+        assert!(!is_unfinished_first_upload(&json!({})));
     }
 }

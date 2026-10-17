@@ -131,6 +131,19 @@ pub fn resumable_upload(path: &Path, size: u64, mtime_ns: u128) -> Option<Pendin
         })
 }
 
+/// [`resumable_upload`] for `path` as it is on disk right now (same size and
+/// mtime derivation as the upload driver). `None` if it cannot be stat'ed.
+pub fn resumable_upload_now(path: &Path) -> Option<PendingUpload> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime_ns = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    resumable_upload(path, meta.len(), mtime_ns)
+}
+
 /// Record an in-progress upload so an interrupted run can resume it. Called
 /// once the v2 session is open, before the chunk pipeline starts; idempotent
 /// (overwrites any prior entry). `chunk_format` is the session encryptor's
