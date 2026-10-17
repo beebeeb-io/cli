@@ -388,6 +388,14 @@ enum Commands {
         /// Not available to the background daemon.
         #[arg(long)]
         allow_mass_delete: bool,
+
+        /// Accept the remote folder the path resolves to now as this directory's
+        /// sync root, after it changed (the old folder was trashed and re-created,
+        /// or the remote path changed). Until then a changed root pauses every
+        /// local removal. Drops the old folder's sync record, so nothing is
+        /// removed on its account; local files then sync in as new files.
+        #[arg(long, conflicts_with = "daemon")]
+        rebind: bool,
     },
 
     /// Mount vault as a FUSE filesystem (source builds with `--features fuse` only;
@@ -998,6 +1006,7 @@ async fn main() {
                 4,
                 false,
                 false,
+                false,
             )
             .await
         }
@@ -1016,6 +1025,7 @@ async fn main() {
             concurrency,
             rehash,
             allow_mass_delete,
+            rebind,
         } => {
             // Clamp parallel uploads to a sane window: 0 would stall the pipeline,
             // and unbounded values blow up peak memory (each in-flight file holds
@@ -1037,6 +1047,7 @@ async fn main() {
                 concurrency,
                 rehash,
                 allow_mass_delete,
+                rebind,
             )
             .await
             .map_err(exit::sync_error)

@@ -216,6 +216,14 @@ fn classify_remote_absent(local: Option<&LocalFile>, prior: Option<&FileEntry>, 
     }
 }
 
+/// Is this directory bound to a different remote folder than the one resolved
+/// now? Then its manifest describes another tree and no pass may remove local
+/// files on its account until `bb sync --rebind`. One-shot and both watch loops
+/// ask this, so a root change blocks removals everywhere.
+fn root_unreconciled(state: &SyncState, resolved: Uuid) -> bool {
+    state.remote_folder_id.is_some_and(|bound| bound != resolved)
+}
+
 /// Everything one pass knows about whether remote absence may mean "deleted":
 /// the ids the server positively reports trashed, and - if the listing itself
 /// is not fit to conclude anything from - why.
@@ -493,6 +501,7 @@ pub async fn run(
     concurrency: usize,
     rehash: bool,
     allow_mass_delete: bool,
+    rebind: bool,
 ) -> Result<(), String> {
     // ── --status: show all active sync sessions ────────────────────────────
     if status || stop_session.is_some() || stop_all {
@@ -637,12 +646,24 @@ pub async fn run(
     let mut total_bytes: u64 = 0;
 
     let remote_folder_id = resolve_remote_folder(&api, &master_key, &remote_path, dry_run).await?;
+    // `--rebind`: the user accepts the folder resolved now as this directory's
+    // remote root. The old manifest describes the other tree, so it is dropped:
+    // nothing that belonged there can be removed on this folder's account, and
+    // the local files sync into the new folder as new files.
+    if rebind && root_unreconciled(&state, remote_folder_id) {
+        state.files.clear();
+        state.remote_folder_id = Some(remote_folder_id);
+        print_notice("rebound to the new remote folder; the old folder's sync record was dropped");
+    }
     // If this directory last synced against a DIFFERENT remote folder (the old
     // one was trashed and re-created, or the remote path changed), the manifest
     // describes files of another tree: nothing may be removed on its account.
-    let root_changed = state.remote_folder_id.is_some_and(|prev| prev != remote_folder_id);
+    // The old binding is KEPT, so every later pass and the watch loops stay
+    // blocked too, until `--rebind` (#83 review: adopting the new folder here
+    // made the next pass trust it).
+    let root_changed = root_unreconciled(&state, remote_folder_id);
     state.remote_path = Some(remote_path.clone());
-    state.remote_folder_id = Some(remote_folder_id);
+    state.remote_folder_id.get_or_insert(remote_folder_id);
 
     // Create or reuse a client session for this sync pair
     let session_id: Option<String> = if let Some(ref device_id) = server_device_id {
@@ -1644,13 +1665,14 @@ async fn run_plain_watch(
                     // is not re-uploaded (resurrected) by the change scan below.
                     // The watch loop never mass-deletes: the breaker has no
                     // confirmation channel here, so `allow_mass_delete` is false.
+                    // A root change the first pass saw is still unreconciled here.
                     let absence = plan_absence(
                         &resync_api,
                         state,
                         &resync_local,
                         &resync_remote_files,
                         &resync_health,
-                        false,
+                        root_unreconciled(state, remote_folder_id),
                         false,
                     )
                     .await;
@@ -1957,7 +1979,7 @@ async fn run_tui_watch(
                 &resync_local,
                 &resync_remote_files,
                 &resync_health,
-                false,
+                root_unreconciled(&sync_state, remote_folder_id),
                 false,
             )
             .await;
@@ -3694,6 +3716,22 @@ mod tests {
         )));
         assert!(is_ignored_path(Path::new("/home/u/Docs/.bb-trash")));
         assert!(!is_ignored_path(Path::new("/home/u/Docs/a.txt")));
+    }
+
+    #[test]
+    fn root_is_unreconciled_only_when_bound_to_another_folder() {
+        let bound = Uuid::new_v4();
+        let mut state = SyncState::default();
+        assert!(
+            !root_unreconciled(&state, bound),
+            "an unbound directory binds on its first sync"
+        );
+        state.remote_folder_id = Some(bound);
+        assert!(!root_unreconciled(&state, bound));
+        assert!(
+            root_unreconciled(&state, Uuid::new_v4()),
+            "bound to another folder: removals stay blocked"
+        );
     }
 
     #[test]

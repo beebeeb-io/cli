@@ -28,6 +28,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 const SYNC_FOLDER_ID: &str = "22222222-2222-4222-8222-222222222222";
+/// A root folder the manifest may claim, that is NOT the one `/SyncUp` resolves to.
+const OLD_ROOT_ID: &str = "99999999-9999-4999-8999-999999999999";
 const LONG_AGO: &str = "2020-01-01T00:00:00+00:00";
 
 #[derive(Clone, Default)]
@@ -189,6 +191,27 @@ fn synced_dir(home: &Path, mock: &Mock, n: usize, trashed: impl Fn(usize) -> Opt
     });
     std::fs::write(dir.join(".bb-sync.json"), state.to_string()).unwrap();
     (dir, files)
+}
+
+/// Make the manifest claim it last synced against `OLD_ROOT_ID` (the old remote
+/// folder was trashed and re-created, or the remote path changed).
+fn point_manifest_at_old_root(dir: &Path) {
+    let mut state: Value = serde_json::from_slice(&std::fs::read(dir.join(".bb-sync.json")).unwrap()).unwrap();
+    state["remote_folder_id"] = json!(OLD_ROOT_ID);
+    std::fs::write(dir.join(".bb-sync.json"), state.to_string()).unwrap();
+}
+
+/// The new root holds one unrelated file that also exists locally. It was never
+/// synced, so the pass reports it as a both-sides conflict instead of
+/// downloading it: the listing is not empty, and the pass finishes cleanly.
+fn new_root_with_unrelated_file(dir: &Path, mock: &Mock) {
+    std::fs::write(dir.join("other.txt"), b"unrelated local file").unwrap();
+    mock.set_listing(vec![remote_file(&uuid::Uuid::new_v4().to_string(), "other.txt")]);
+}
+
+fn state_root(dir: &Path) -> Value {
+    let v: Value = serde_json::from_slice(&std::fs::read(dir.join(".bb-sync.json")).unwrap()).unwrap();
+    v["remote_folder_id"].clone()
 }
 
 fn manifest_keys(dir: &Path) -> Vec<String> {
@@ -427,9 +450,7 @@ async fn changed_remote_root_deletes_nothing() {
     let home = scratch_home(&api);
     let (dir, files) = synced_dir(&home, &mock, 3, |_| Some(true));
     // The manifest says these files lived under some OTHER root folder.
-    let mut state: Value = serde_json::from_slice(&std::fs::read(dir.join(".bb-sync.json")).unwrap()).unwrap();
-    state["remote_folder_id"] = json!("99999999-9999-4999-8999-999999999999");
-    std::fs::write(dir.join(".bb-sync.json"), state.to_string()).unwrap();
+    point_manifest_at_old_root(&dir);
     // The (new) root has an unrelated file, so the listing is not empty.
     mock.set_listing(vec![remote_file(&uuid::Uuid::new_v4().to_string(), "other.txt")]);
 
@@ -442,6 +463,137 @@ async fn changed_remote_root_deletes_nothing() {
         "must say why, got: {}",
         text(&out)
     );
+}
+
+/// The first pass after a root change must not quietly adopt the new folder as
+/// trusted: if it did, the NEXT pass would treat the old tree's tombstones as
+/// deletions in a folder those files never belonged to (#83 review, P1).
+#[tokio::test(flavor = "multi_thread")]
+async fn changed_remote_root_stays_blocked_on_later_passes() {
+    let mock = Mock::default();
+    let api = start_mock(mock.clone()).await;
+    let home = scratch_home(&api);
+    let (dir, files) = synced_dir(&home, &mock, 3, |_| Some(true));
+    point_manifest_at_old_root(&dir);
+    new_root_with_unrelated_file(&dir, &mock);
+
+    let mut last = None;
+    for pass in 1..=2 {
+        let out = sync_once(&home, &api, &dir, &[]).await;
+        assert_all_present(&dir, &files, &format!("pass {pass} after a root change"));
+        assert!(recovered(&dir).is_empty(), "pass {pass} moved files to .bb-trash");
+        last = Some(out);
+    }
+    assert_eq!(
+        state_root(&dir),
+        json!(OLD_ROOT_ID),
+        "the old binding is kept until --rebind"
+    );
+    assert_eq!(manifest_keys(&dir), vec!["f0.txt", "f1.txt", "f2.txt"]);
+    assert!(mock.trashed().is_empty());
+    let last = last.unwrap();
+    assert!(
+        text(&last).contains("--rebind"),
+        "the notice must name the way out, got: {}",
+        text(&last)
+    );
+}
+
+/// `--rebind` is the explicit way out of a root change: it adopts the new
+/// folder and forgets the old tree's manifest, so nothing that belonged there
+/// can be removed on a later pass either.
+#[tokio::test(flavor = "multi_thread")]
+async fn rebind_adopts_the_new_root_and_removes_nothing() {
+    let mock = Mock::default();
+    let api = start_mock(mock.clone()).await;
+    let home = scratch_home(&api);
+    let (dir, files) = synced_dir(&home, &mock, 3, |_| Some(true));
+    point_manifest_at_old_root(&dir);
+    new_root_with_unrelated_file(&dir, &mock);
+
+    // The mock has no upload routes, so re-uploading f0..f2 into the new folder
+    // fails and the exit code says nothing here; the state on disk does.
+    let _ = sync_once(&home, &api, &dir, &["--rebind"]).await;
+    assert_all_present(&dir, &files, "--rebind");
+    assert!(recovered(&dir).is_empty());
+    assert_eq!(
+        state_root(&dir),
+        json!(SYNC_FOLDER_ID),
+        "--rebind adopts the new folder"
+    );
+    let old_ids: Vec<&str> = files.iter().map(|f| f.id.as_str()).collect();
+    let state: Value = serde_json::from_slice(&std::fs::read(dir.join(".bb-sync.json")).unwrap()).unwrap();
+    for (rel, entry) in state["files"].as_object().unwrap() {
+        assert!(
+            !old_ids.contains(&entry["remote_id"].as_str().unwrap()),
+            "{rel} still points at the old tree after --rebind"
+        );
+    }
+
+    // A plain pass afterwards: no root complaint, and still nothing removed.
+    let out = sync_once(&home, &api, &dir, &[]).await;
+    assert_all_present(&dir, &files, "the pass after --rebind");
+    assert!(recovered(&dir).is_empty());
+    assert!(
+        !text(&out).contains("last synced with"),
+        "the root is reconciled, got: {}",
+        text(&out)
+    );
+}
+
+/// The continuous watch loop resyncs in the SAME process right after the first
+/// pass, so it is the first place a freshly adopted root would be trusted. Its
+/// resync after a root change must remove nothing either (#83 review, P1).
+#[tokio::test(flavor = "multi_thread")]
+async fn watch_resync_after_root_change_removes_nothing() {
+    let mock = Mock::default();
+    let api = start_mock(mock.clone()).await;
+    let home = scratch_home(&api);
+    let (dir, files) = synced_dir(&home, &mock, 3, |_| Some(true));
+    point_manifest_at_old_root(&dir);
+    new_root_with_unrelated_file(&dir, &mock);
+
+    let log_path = home.join("watch.log");
+    let log = std::fs::File::create(&log_path).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_bb"))
+        .args(["--api", &api, "sync", dir.to_str().unwrap(), "/SyncUp"])
+        .current_dir(&home)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("BB_NO_UPDATE", "1")
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log.try_clone().unwrap()))
+        .stderr(Stdio::from(log))
+        .spawn()
+        .expect("spawn bb sync");
+    let read_log = || std::fs::read_to_string(&log_path).unwrap_or_default();
+    let any_gone = || files.iter().any(|f| !dir.join(&f.rel).exists());
+    let wait = |done: &dyn Fn() -> bool| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            if done() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        false
+    };
+
+    let watching = wait(&|| read_log().contains("watching for changes"));
+    // A new local file wakes the watcher; its resync re-plans every absence.
+    std::fs::write(dir.join("trigger.txt"), b"wake the watcher").unwrap();
+    // Decided: the resync printed its own "kept ... missing" verdict (the first
+    // came from the initial pass), or it removed something.
+    let decided =
+        watching && wait(&|| read_log().matches("missing from the remote listing").count() >= 2 || any_gone());
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(watching, "bb sync never reached watch mode:\n{}", read_log());
+    assert!(decided, "the watch resync never ran:\n{}", read_log());
+    assert_all_present(&dir, &files, "watch-loop resync after a root change");
+    assert!(recovered(&dir).is_empty(), "the watch loop moved files to .bb-trash");
 }
 
 // ───────────────────────────── 1916 ─────────────────────────────

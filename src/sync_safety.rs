@@ -31,8 +31,10 @@ pub const RECOVERY_DIR: &str = ".bb-trash";
 pub const BREAKER_FLOOR: usize = 50;
 
 /// The most local removals one pass may perform without explicit confirmation.
+/// The 10 % share is rounded DOWN: for whole removal counts, `removals > tracked / 10`
+/// (integer division) is exactly `removals * 10 > tracked`, so 51 of 501 trips.
 pub fn breaker_limit(tracked: usize) -> usize {
-    BREAKER_FLOOR.max(tracked.div_ceil(10))
+    BREAKER_FLOOR.max(tracked / 10)
 }
 
 /// Would `removals` local deletions out of `tracked` synced files trip the breaker?
@@ -66,7 +68,11 @@ pub fn untrusted_reason(
     root_changed: bool,
 ) -> Option<String> {
     if root_changed {
-        return Some("the remote folder is not the one this directory last synced with".to_string());
+        return Some(
+            "the remote folder is not the one this directory last synced with \
+             (run `bb sync --rebind` once to accept the new folder)"
+                .to_string(),
+        );
     }
     if health.truncated {
         return Some("the remote listing hit the client's entry cap, so entries may be missing".to_string());
@@ -152,8 +158,21 @@ mod tests {
         assert_eq!(breaker_limit(0), 50);
         assert_eq!(breaker_limit(10), 50);
         assert_eq!(breaker_limit(500), 50);
-        assert_eq!(breaker_limit(501), 51); // ceil(10 %)
+        assert_eq!(breaker_limit(501), 50); // floor(10 %): 51 of 501 is over 10 %
+        assert_eq!(breaker_limit(519), 51);
         assert_eq!(breaker_limit(5_000), 500);
+    }
+
+    #[test]
+    fn breaker_enforces_the_real_ten_percent() {
+        // #83 review, P2: more than 10 % must trip even when the tracked count
+        // is not divisible by ten.
+        assert!(!breaker_trips(50, 500), "500 tracked / 50 removals is exactly 10 %");
+        assert!(breaker_trips(51, 500), "500 tracked / 51 removals is over 10 %");
+        assert!(
+            breaker_trips(51, 501),
+            "501 tracked / 51 removals is over 10 % (51 > 50.1)"
+        );
     }
 
     #[test]
