@@ -112,6 +112,11 @@ impl Fixture {
         format!("00000000-0000-4000-8000-{:012}", self.next)
     }
 
+    /// The id the next [`Self::fresh_id`] call returns.
+    fn next_id(&self) -> String {
+        format!("00000000-0000-4000-8000-{:012}", self.next + 1)
+    }
+
     /// A file or folder uploaded through the file request: the name is sealed
     /// under a per-item content key C that the uploader chose.
     fn add_request_item(&mut self, parent: &str, name: &str, is_folder: bool, body: &[u8]) -> String {
@@ -220,8 +225,9 @@ impl Fixture {
     /// A file row the server lists but cannot serve (download answers 404).
     fn add_plain_row(&mut self, parent: &str, name: &str) -> String {
         let id = self.fresh_id();
+        let name_encrypted = beebeeb_core::encrypt::encrypt_name(&self.mk, &id, name, None).unwrap();
         let row = json!({
-            "id": id, "name_encrypted": name, "is_folder": false, "chunk_count": 1, "size_bytes": 68,
+            "id": id, "name_encrypted": name_encrypted, "is_folder": false, "chunk_count": 1, "size_bytes": 68,
         });
         self.served.rows.insert(id.clone(), row);
         self.served
@@ -265,13 +271,27 @@ impl Fixture {
         id
     }
 
-    /// An ordinary (non-request) file whose `name_encrypted` is a plaintext
-    /// string — the server controls it completely (the plaintext fast path).
+    /// An ordinary (non-request) file, its name sealed under the account's
+    /// master key. A FILE's `name_encrypted` must be an encrypted envelope (the
+    /// 1908 read path takes the chunk-format pin from it, task 1943); the tests
+    /// still choose any name they like to exercise the client's path guards.
     fn add_plain_file(&mut self, parent: &str, name: &str, body: &[u8]) -> String {
+        let name_encrypted = beebeeb_core::encrypt::encrypt_name(&self.mk, &self.next_id(), name, None).unwrap();
+        self.add_file_row(parent, name_encrypted, body)
+    }
+
+    /// A file whose `name_encrypted` is a bare PLAINTEXT string: there is no
+    /// authenticated metadata, so no read pin, and its content is never read
+    /// (task 1943, core round 3 P1-B).
+    fn add_plaintext_named_file(&mut self, parent: &str, name: &str, body: &[u8]) -> String {
+        self.add_file_row(parent, name.to_string(), body)
+    }
+
+    fn add_file_row(&mut self, parent: &str, name_encrypted: String, body: &[u8]) -> String {
         let id = self.fresh_id();
         let row = json!({
             "id": id,
-            "name_encrypted": name,
+            "name_encrypted": name_encrypted,
             "is_folder": false,
             "chunk_count": 1,
             "size_bytes": body.len(),
@@ -539,6 +559,31 @@ fn folder_pull_happy_path_still_works() {
     );
     assert_eq!(std::fs::read(s.out_dir().join("sub/inner.txt")).unwrap(), b"nested\n");
     assert_eq!(std::fs::read(s.out_dir().join("plain.txt")).unwrap(), b"plain body\n");
+}
+
+/// Task 1943: a file whose `name_encrypted` is plaintext carries no
+/// authenticated chunk-format pin, so its content is never read. In a folder
+/// pull it is skipped with a warning (like an unsafe name), nothing is written
+/// for it, and its sibling still pulls; the run exits 3 (skipped items).
+#[test]
+fn folder_pull_skips_a_file_without_authenticated_metadata() {
+    let mut fx = Fixture::new();
+    fx.add_plaintext_named_file(ROOT_ID, "no-pin.txt", b"never read\n");
+    fx.add_plain_file(ROOT_ID, "ok.txt", BENIGN);
+    let url = fx.serve();
+    let s = Scratch::new("no-pin", &url);
+
+    let out = s.bb(&["pull", ROOT_ID, "-o", "out"]);
+
+    assert_eq!(out.status.code(), Some(3), "{}", describe(&out));
+    assert!(!s.out_dir().join("no-pin.txt").exists(), "{}", describe(&out));
+    assert_eq!(std::fs::read(s.out_dir().join("ok.txt")).unwrap(), BENIGN);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("no-pin.txt") && err.contains("refusing to guess"),
+        "{}",
+        describe(&out)
+    );
 }
 
 /// Malicious FILE names, from a request upload (attacker-chosen content key)

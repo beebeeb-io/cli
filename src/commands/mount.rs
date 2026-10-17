@@ -188,6 +188,15 @@ mod fuse_impl {
         chunk_count: u32,
         modified: SystemTime,
         parent_ino: u64,
+        /// The content's read pin from the file's authenticated metadata
+        /// (`crypto::content_pin`, task 1943). `Err` for a directory, or for a
+        /// file whose metadata cannot be read (its content is then refused).
+        pin: Result<beebeeb_core::chunk_stream::ExpectedChunkFormat, String>,
+    }
+
+    /// What a directory carries in [`InodeEntry::pin`].
+    fn no_content() -> Result<beebeeb_core::chunk_stream::ExpectedChunkFormat, String> {
+        Err("a directory has no content".to_string())
     }
 
     impl InodeEntry {
@@ -282,6 +291,7 @@ mod fuse_impl {
                     chunk_count: 0,
                     modified: SystemTime::now(),
                     parent_ino: ROOT_INO,
+                    pin: no_content(),
                 },
             );
             fs
@@ -334,9 +344,15 @@ mod fuse_impl {
                     .map(|dt| UNIX_EPOCH + Duration::from_secs(dt.timestamp().max(0) as u64))
                     .unwrap_or(SystemTime::now());
 
-                let name = match file.get("name_encrypted").and_then(|v| v.as_str()) {
+                let name_encrypted = file.get("name_encrypted").and_then(|v| v.as_str());
+                let name = match name_encrypted {
                     Some(enc) => decrypt_name(&self.master_key, &file_id, enc),
                     None => format!("[{}]", &file_id[..8.min(file_id.len())]),
+                };
+                let pin = match (is_folder, name_encrypted) {
+                    (true, _) => no_content(),
+                    (false, Some(enc)) => crate::crypto::content_pin(&self.master_key, &file_id, enc),
+                    (false, None) => Err(format!("file {file_id} has no encrypted metadata")),
                 };
 
                 let ino = if let Some(&existing) = self.id_to_ino.get(&file_id) {
@@ -344,6 +360,7 @@ mod fuse_impl {
                         entry.name = name;
                         entry.size = size_bytes;
                         entry.modified = modified;
+                        entry.pin = pin;
                     }
                     existing
                 } else {
@@ -362,6 +379,7 @@ mod fuse_impl {
                             chunk_count,
                             modified,
                             parent_ino: dir_ino,
+                            pin,
                         },
                     );
                     ino
@@ -399,12 +417,14 @@ mod fuse_impl {
             let entry = self.inodes.get(&ino).ok_or("inode not found")?;
             let file_id = entry.file_id.as_ref().ok_or("no file_id")?.clone();
             let chunk_count = entry.chunk_count;
+            let pin = entry.pin.clone()?;
 
             let encrypted = self.rt.block_on(self.api.download_file(&file_id))?;
             // Use the shared helper that handles both CLI-format (JSON) and
             // web-app-format (raw binary) chunks, and both UUID key derivation
             // methods (binary and string).
-            let plaintext = crate::crypto::decrypt_file_chunks(&self.master_key, &file_id, &encrypted, chunk_count)?;
+            let plaintext =
+                crate::crypto::decrypt_file_chunks(&self.master_key, &file_id, pin, &encrypted, chunk_count)?;
 
             if let Some(e) = self.inodes.get_mut(&ino) {
                 e.size = plaintext.len() as u64;
@@ -675,6 +695,9 @@ mod fuse_impl {
                     chunk_count: 0,
                     modified: now,
                     parent_ino: parent,
+                    // This mount uploads it as a NEW file, which never records a
+                    // pin (task 1943: the new-file writer pin is Unrecorded).
+                    pin: Ok(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded),
                 },
             );
             self.pending_creates.insert(
@@ -921,6 +944,7 @@ mod fuse_impl {
                     chunk_count: 0,
                     modified: now,
                     parent_ino: parent,
+                    pin: no_content(),
                 },
             );
             self.dir_cache.remove(&parent);

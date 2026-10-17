@@ -28,8 +28,18 @@
 //! [`decrypt_file_chunks`] handles all combinations transparently. The format is
 //! never trusted from the first byte alone (a raw nonce starts with `{` 1 time
 //! in 256): both parsers are tried, and AEAD authentication is the arbiter.
+//!
+//! **Chunk format pin (tasks 1908 / 1943).** Every file-content frame is opened
+//! by core's pin-aware reader ([`ChunkDecryptor`], [`open_chunk`]) under the
+//! [`ExpectedChunkFormat`] the file's AUTHENTICATED metadata records
+//! ([`content_pin`]), never a server field and never the generic
+//! `decrypt_chunk(file_key, blob)`. A v2-pinned file opens only as v2: one
+//! key (core's string-UUID derivation), raw frames, no JSON parser and no v1
+//! fallback. The legacy combinations above apply only to `Unrecorded` files.
 
 use base64::Engine as _;
+use beebeeb_core::chunk_stream::{ChunkDecryptor, ChunkFormat, ExpectedChunkFormat, open_chunk};
+use beebeeb_core::kdf::FileKey;
 use beebeeb_types::EncryptedBlob;
 
 /// Intermediate struct for deserializing the web-app blob format where nonce
@@ -53,6 +63,13 @@ pub fn decrypt_name(
     // Format 3 (fast path): Plaintext — not JSON at all.
     if !name_encrypted_str.starts_with('{') {
         return Some(name_encrypted_str.to_string());
+    }
+
+    // Core first (task 1943): it also opens envelopes sealed under the 1908
+    // name subkey, which every v2 file's metadata is. The paths below stay for
+    // the legacy blobs core does not parse.
+    if let Ok(meta) = beebeeb_core::encrypt::decrypt_name_metadata(master_key, file_id_str, name_encrypted_str) {
+        return Some(meta.name);
     }
 
     let file_uuid: uuid::Uuid = file_id_str.parse().ok()?;
@@ -108,6 +125,11 @@ pub fn decrypt_name_with_key(file_key: &beebeeb_core::kdf::FileKey, name_encrypt
         return Some(name_encrypted_str.to_string());
     }
 
+    // Core first: name-subkey envelopes (task 1943), then the legacy formats.
+    if let Ok(meta) = beebeeb_core::encrypt::decrypt_name_metadata_with_key(file_key, name_encrypted_str) {
+        return Some(meta.name);
+    }
+
     // Format 1: Rust-native EncryptedBlob (cipher_suite + byte-array fields).
     if let Ok(blob) = serde_json::from_str::<EncryptedBlob>(name_encrypted_str) {
         if let Ok(name) = beebeeb_core::encrypt::decrypt_metadata(file_key, &blob) {
@@ -151,16 +173,71 @@ const NONCE_LEN: usize = 12;
 /// AES-256-GCM authentication tag length in bytes.
 const TAG_LEN: usize = 16;
 
-/// Decrypt all chunks of a downloaded file, handling both CLI-format (JSON
-/// `EncryptedBlob`) and web-app-format (raw `nonce|ciphertext` binary) chunk
-/// storage, and both UUID key derivation methods (binary vs string).
+/// The chunk format a file's content must be read with: what its AUTHENTICATED
+/// (encrypted) metadata records, via core's `decrypt_file_metadata` (task
+/// 1908). Never taken from a server field. A plaintext or undecryptable name is
+/// an error, not a guess: it carries no pin, and reading it as `Unrecorded`
+/// would let a server re-enable frame-0 detection for a v2 file (core round 3,
+/// P1-B).
+pub fn content_pin(
+    master_key: &beebeeb_core::kdf::MasterKey,
+    file_id_str: &str,
+    name_encrypted_str: &str,
+) -> Result<ExpectedChunkFormat, String> {
+    beebeeb_core::encrypt::decrypt_file_metadata(master_key, file_id_str, name_encrypted_str)
+        .map(|m| m.chunk_format)
+        .map_err(|e| pin_error(file_id_str, e))
+}
+
+/// [`content_pin`] under a known file key (file-request content keys).
+pub fn content_pin_with_key(
+    file_key: &FileKey,
+    file_id_str: &str,
+    name_encrypted_str: &str,
+) -> Result<ExpectedChunkFormat, String> {
+    beebeeb_core::encrypt::decrypt_file_metadata_with_key(file_key, name_encrypted_str)
+        .map(|m| m.chunk_format)
+        .map_err(|e| pin_error(file_id_str, e))
+}
+
+/// The read pin of a file row: under the request content key for a
+/// file-request upload, the master-derived key otherwise.
+pub fn file_row_pin(
+    master_key: &beebeeb_core::kdf::MasterKey,
+    file_id_str: &str,
+    name_encrypted_str: &str,
+    content_key: Option<&FileKey>,
+) -> Result<ExpectedChunkFormat, String> {
+    match content_key {
+        Some(c) => content_pin_with_key(c, file_id_str, name_encrypted_str),
+        None => content_pin(master_key, file_id_str, name_encrypted_str),
+    }
+}
+
+fn pin_error(file_id: &str, e: impl std::fmt::Display) -> String {
+    format!(
+        "cannot read the encrypted metadata of file {file_id} ({e}), so its chunk format is unknown; refusing to guess"
+    )
+}
+
+/// A second owned handle on a file key, for the decryptor that takes one by value.
+fn key_copy(file_key: &FileKey) -> FileKey {
+    FileKey::from_bytes(*file_key.as_bytes())
+}
+
+/// Decrypt all chunks of a downloaded file under its read `pin`
+/// ([`content_pin`]).
 ///
-/// The server streams chunk blobs back-to-back. For CLI uploads each chunk is
-/// a JSON object; for web uploads each chunk is raw `nonce (12) | ciphertext`.
-/// The format is never trusted from the bytes alone (a random raw nonce starts
-/// with `{` about 1 time in 256): the first byte only picks which parser is
-/// tried first, and the other is the fallback. Every chunk is AEAD-authenticated,
-/// so a wrong parse fails and can never yield wrong plaintext.
+/// `Unrecorded` (a legacy file): handles both CLI-format (JSON `EncryptedBlob`)
+/// and web-app-format (raw `nonce|ciphertext` binary) chunk storage, and both
+/// UUID key derivations (binary vs string). The server streams chunk blobs
+/// back-to-back. The format is never trusted from the bytes alone (a random raw
+/// nonce starts with `{` about 1 time in 256): the first byte only picks which
+/// parser is tried first, and the other is the fallback. Every chunk is
+/// AEAD-authenticated, so a wrong parse fails and can never yield wrong
+/// plaintext.
+///
+/// `V2`: only core's string-UUID key and raw frames, opened as v2.
 ///
 /// Returns the reassembled plaintext on success. Callers that know the file's
 /// plaintext chunk size (the `X-Chunk-Size` download header) should use
@@ -168,10 +245,11 @@ const TAG_LEN: usize = 16;
 pub fn decrypt_file_chunks(
     master_key: &beebeeb_core::kdf::MasterKey,
     file_id_str: &str,
+    pin: ExpectedChunkFormat,
     encrypted_bytes: &[u8],
     chunk_count: u32,
 ) -> Result<Vec<u8>, String> {
-    decrypt_file_chunks_with_chunk_size(master_key, file_id_str, encrypted_bytes, chunk_count, None)
+    decrypt_file_chunks_with_chunk_size(master_key, file_id_str, pin, encrypted_bytes, chunk_count, None)
 }
 
 /// [`decrypt_file_chunks`] with the file's uniform plaintext chunk size, when
@@ -181,44 +259,63 @@ pub fn decrypt_file_chunks(
 pub fn decrypt_file_chunks_with_chunk_size(
     master_key: &beebeeb_core::kdf::MasterKey,
     file_id_str: &str,
+    pin: ExpectedChunkFormat,
     encrypted_bytes: &[u8],
     chunk_count: u32,
     chunk_size: Option<u64>,
 ) -> Result<Vec<u8>, String> {
     let file_uuid: uuid::Uuid = file_id_str.parse().map_err(|e| format!("invalid file ID: {e}"))?;
 
-    // Try binary-UUID key first (CLI origin), then string-UUID key (web origin).
-    let key_from_binary = beebeeb_core::kdf::derive_file_key(master_key, file_uuid.as_bytes());
-    let key_from_string = beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes());
+    // A v2 file is written by core, which derives its key from the UUID STRING:
+    // that key only. A legacy file may be under either derivation: binary-UUID
+    // first (CLI origin), then string-UUID (web origin).
+    let keys = match pin {
+        ExpectedChunkFormat::V2 => vec![beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes())],
+        ExpectedChunkFormat::Unrecorded => vec![
+            beebeeb_core::kdf::derive_file_key(master_key, file_uuid.as_bytes()),
+            beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes()),
+        ],
+    };
 
     // Attempt decryption with each key. The first successful full decryption wins.
-    for file_key in [&key_from_binary, &key_from_string] {
-        match try_decrypt_all_chunks_with_chunk_size(file_key, encrypted_bytes, chunk_count, chunk_size) {
-            Ok(plaintext) => return Ok(plaintext),
-            Err(_) => continue,
+    for file_key in &keys {
+        if let Ok(plaintext) =
+            try_decrypt_all_chunks_with_chunk_size(file_key, file_id_str, pin, encrypted_bytes, chunk_count, chunk_size)
+        {
+            return Ok(plaintext);
         }
     }
 
-    Err(format!(
-        "failed to decrypt file {file_id_str}: neither binary-UUID nor string-UUID key derivation succeeded"
-    ))
+    Err(match pin {
+        ExpectedChunkFormat::V2 => format!(
+            "failed to decrypt file {file_id_str}: its metadata records chunk format v2 and the content does not open as v2"
+        ),
+        ExpectedChunkFormat::Unrecorded => format!(
+            "failed to decrypt file {file_id_str}: neither binary-UUID nor string-UUID key derivation succeeded"
+        ),
+    })
 }
 
-/// Try to decrypt all chunks with a given file key. The chunk format is NOT
-/// detected from the bytes: the first byte only orders the two parsers (JSON
-/// blob vs raw `nonce|ciphertext`), and the other one is the fallback.
+/// Try to decrypt all chunks with a given file key under `pin`. For a legacy
+/// (`Unrecorded`) file the chunk format is NOT detected from the bytes: the
+/// first byte only orders the two parsers (JSON blob vs raw `nonce|ciphertext`),
+/// and the other one is the fallback. A `V2` file has raw frames only.
 pub fn try_decrypt_all_chunks(
-    file_key: &beebeeb_core::kdf::FileKey,
+    file_key: &FileKey,
+    file_id_str: &str,
+    pin: ExpectedChunkFormat,
     encrypted_bytes: &[u8],
     chunk_count: u32,
 ) -> Result<Vec<u8>, String> {
-    try_decrypt_all_chunks_with_chunk_size(file_key, encrypted_bytes, chunk_count, None)
+    try_decrypt_all_chunks_with_chunk_size(file_key, file_id_str, pin, encrypted_bytes, chunk_count, None)
 }
 
 /// [`try_decrypt_all_chunks`] with the file's uniform plaintext chunk size, when
 /// known (`X-Chunk-Size`). Only the raw parser uses it.
 pub fn try_decrypt_all_chunks_with_chunk_size(
-    file_key: &beebeeb_core::kdf::FileKey,
+    file_key: &FileKey,
+    file_id_str: &str,
+    pin: ExpectedChunkFormat,
     encrypted_bytes: &[u8],
     chunk_count: u32,
     chunk_size: Option<u64>,
@@ -229,14 +326,18 @@ pub fn try_decrypt_all_chunks_with_chunk_size(
     if encrypted_bytes.is_empty() {
         return Err("no data but chunk_count > 0".to_string());
     }
+    if pin == ExpectedChunkFormat::V2 {
+        // v2 frames are raw, always: no JSON parser to fall back to.
+        return decrypt_raw_chunks(file_key, file_id_str, pin, encrypted_bytes, chunk_count, chunk_size);
+    }
 
     // The first byte is only a HINT (task 1759): a raw chunk starts with a
     // random nonce, so ~1 in 256 raw files begin with 0x7b ('{') and would be
     // misrouted to the JSON parser. Try the hinted format first, then the
     // other. A false success is impossible: every chunk is AEAD-authenticated,
     // so a wrong parse can only fail, never yield wrong plaintext.
-    let raw = |k: &beebeeb_core::kdf::FileKey| decrypt_raw_chunks(k, encrypted_bytes, chunk_count, chunk_size);
-    let json = |k: &beebeeb_core::kdf::FileKey| decrypt_json_chunks(k, encrypted_bytes, chunk_count);
+    let raw = |k: &FileKey| decrypt_raw_chunks(k, file_id_str, pin, encrypted_bytes, chunk_count, chunk_size);
+    let json = |k: &FileKey| decrypt_json_chunks(k, file_id_str, encrypted_bytes, chunk_count);
     let raw_first = encrypted_bytes[0] != b'{';
     let attempt = |as_raw: bool| {
         if as_raw { raw(file_key) } else { json(file_key) }
@@ -250,12 +351,17 @@ pub fn try_decrypt_all_chunks_with_chunk_size(
     }
 }
 
-/// Parse and decrypt CLI-format chunks: concatenated JSON `EncryptedBlob` objects.
+/// Parse and decrypt CLI-format chunks: concatenated JSON `EncryptedBlob`
+/// objects (legacy, `Unrecorded` files only). Each blob is the frame
+/// `nonce || ciphertext`, opened by core's pin-aware reader as one stream.
 fn decrypt_json_chunks(
-    file_key: &beebeeb_core::kdf::FileKey,
+    file_key: &FileKey,
+    file_id_str: &str,
     encrypted_bytes: &[u8],
     chunk_count: u32,
 ) -> Result<Vec<u8>, String> {
+    let mut decryptor =
+        ChunkDecryptor::for_push_with_file_key(key_copy(file_key), file_id_str, ExpectedChunkFormat::Unrecorded);
     let mut plaintext = Vec::new();
     let mut offset = 0;
 
@@ -276,12 +382,18 @@ fn decrypt_json_chunks(
         };
         offset += de.byte_offset();
 
+        let mut frame = blob.nonce;
+        frame.extend_from_slice(&blob.ciphertext);
         // Wiped on drop: only the copy appended to `plaintext` (which the caller owns) survives.
-        let decrypted = zeroize::Zeroizing::new(
-            beebeeb_core::encrypt::decrypt_chunk(file_key, &blob).map_err(|e| format!("decrypt chunk {i}: {e}"))?,
+        let opened = zeroize::Zeroizing::new(
+            decryptor
+                .push_frame(&frame)
+                .map_err(|e| format!("decrypt chunk {i}: {e}"))?
+                .data,
         );
-        plaintext.extend_from_slice(&decrypted);
+        plaintext.extend_from_slice(&opened);
     }
+    decryptor.finish().map_err(|e| format!("incomplete file: {e}"))?;
 
     Ok(plaintext)
 }
@@ -302,10 +414,20 @@ fn ladder_frame_sizes() -> impl Iterator<Item = u64> {
 /// Per-frame AEAD overhead: `nonce (12) + tag (16)`.
 const FRAME_OVERHEAD: u64 = (NONCE_LEN + TAG_LEN) as u64;
 
-fn decrypt_raw_frame(file_key: &beebeeb_core::kdf::FileKey, frame: &[u8], index: usize) -> Result<Vec<u8>, String> {
-    // Core's raw decrypt takes the frame as-is (no to_vec copies) and rejects
-    // frames shorter than nonce + tag instead of panicking on the slice.
-    beebeeb_core::encrypt::decrypt_chunk_raw(file_key, frame).map_err(|e| format!("decrypt raw chunk {index}: {e}"))
+/// Does `frame` authenticate as frame 0 (not last) of a multi-chunk file under a
+/// format `pin` allows? Core's random-access opener; only the verdict is kept.
+/// A v2 frame 0's own nonce is the upload's version id.
+fn opens_as_first_frame(file_key: &FileKey, file_id_str: &str, pin: ExpectedChunkFormat, frame: &[u8]) -> bool {
+    let formats: &[ChunkFormat] = match pin {
+        ExpectedChunkFormat::V2 => &[ChunkFormat::V2],
+        ExpectedChunkFormat::Unrecorded => &[ChunkFormat::V2, ChunkFormat::V1Legacy],
+    };
+    let version_id = frame.get(..NONCE_LEN).unwrap_or_default();
+    formats.iter().any(|&format| {
+        open_chunk(file_key, file_id_str, version_id, 0, false, format, frame)
+            .map(zeroize::Zeroizing::new) // wiped on drop; only the verdict is kept
+            .is_ok()
+    })
 }
 
 /// Work out the wire frame size of the first `count - 1` frames of a raw
@@ -320,9 +442,12 @@ fn decrypt_raw_frame(file_key: &beebeeb_core::kdf::FileKey, frame: &[u8], index:
 ///    [`FRAME_PROBE_BUDGET`] (ciphertext bytes authenticated) is spent.
 ///
 /// A candidate is accepted only if the first frame AUTHENTICATES under the file
-/// key, so a wrong guess costs time and can never produce wrong plaintext.
+/// key (in a format the pin allows), so a wrong guess costs time and can never
+/// produce wrong plaintext.
 fn raw_frame_size(
-    file_key: &beebeeb_core::kdf::FileKey,
+    file_key: &FileKey,
+    file_id_str: &str,
+    pin: ExpectedChunkFormat,
     data: &[u8],
     count: usize,
     chunk_size: Option<u64>,
@@ -340,6 +465,8 @@ fn raw_frame_size(
 
     let mut probe = FrameProbe {
         file_key,
+        file_id_str,
+        pin,
         data,
         lo,
         hi,
@@ -376,7 +503,9 @@ fn raw_frame_size(
 
 /// Candidate-frame-size prober for [`raw_frame_size`].
 struct FrameProbe<'a> {
-    file_key: &'a beebeeb_core::kdf::FileKey,
+    file_key: &'a FileKey,
+    file_id_str: &'a str,
+    pin: ExpectedChunkFormat,
     data: &'a [u8],
     lo: u64,
     hi: u64,
@@ -394,9 +523,7 @@ impl FrameProbe<'_> {
         }
         self.tried.push(f);
         self.spent = self.spent.saturating_add(f);
-        decrypt_raw_frame(self.file_key, &self.data[..f as usize], 0)
-            .map(zeroize::Zeroizing::new) // wiped on drop; only the verdict is kept
-            .is_ok()
+        opens_as_first_frame(self.file_key, self.file_id_str, self.pin, &self.data[..f as usize])
     }
 }
 
@@ -407,9 +534,13 @@ impl FrameProbe<'_> {
 /// is the remainder and is normally SHORTER, so the frame size cannot be
 /// derived as `total / count` (task 1759 round 2). It is taken from `chunk_size`
 /// when the caller knows it, otherwise recovered by AEAD-validated probing
-/// (see [`raw_frame_size`]).
+/// (see [`raw_frame_size`]). The frames are then opened in order by core's
+/// pin-aware reader as ONE stream, which also rejects a v2 file that is
+/// reordered, mixes uploads, or ends before its last chunk.
 fn decrypt_raw_chunks(
-    file_key: &beebeeb_core::kdf::FileKey,
+    file_key: &FileKey,
+    file_id_str: &str,
+    pin: ExpectedChunkFormat,
     encrypted_bytes: &[u8],
     chunk_count: u32,
     chunk_size: Option<u64>,
@@ -436,9 +567,10 @@ fn decrypt_raw_chunks(
     let frame_size = if count == 1 {
         total
     } else {
-        raw_frame_size(file_key, encrypted_bytes, count, chunk_size)?
+        raw_frame_size(file_key, file_id_str, pin, encrypted_bytes, count, chunk_size)?
     };
 
+    let mut decryptor = ChunkDecryptor::for_push_with_file_key(key_copy(file_key), file_id_str, pin);
     let mut plaintext = Vec::with_capacity(total);
     let mut offset = 0;
 
@@ -453,15 +585,17 @@ fn decrypt_raw_chunks(
             ));
         }
 
-        let decrypted = zeroize::Zeroizing::new(decrypt_raw_frame(
-            file_key,
-            &encrypted_bytes[offset..offset + this_chunk_size],
-            i,
-        )?);
-        plaintext.extend_from_slice(&decrypted);
+        let opened = zeroize::Zeroizing::new(
+            decryptor
+                .push_frame(&encrypted_bytes[offset..offset + this_chunk_size])
+                .map_err(|e| format!("decrypt raw chunk {i}: {e}"))?
+                .data,
+        );
+        plaintext.extend_from_slice(&opened);
 
         offset += this_chunk_size;
     }
+    decryptor.finish().map_err(|e| format!("incomplete file: {e}"))?;
 
     Ok(plaintext)
 }
@@ -485,7 +619,17 @@ mod tests {
             .find(|f| f[0] == b'{')
             .expect("a nonce starting with 0x7b within 100k tries");
         assert_eq!(frame[0], 0x7b);
-        assert_eq!(try_decrypt_all_chunks(&fk, &frame, 1).unwrap(), pt);
+        assert_eq!(
+            try_decrypt_all_chunks(
+                &fk,
+                FID,
+                beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+                &frame,
+                1
+            )
+            .unwrap(),
+            pt
+        );
     }
 
     /// Multi-chunk variant: only the first chunk's nonce byte matters.
@@ -499,7 +643,17 @@ mod tests {
             .unwrap();
         let mut all = first;
         all.extend(encrypt_chunk_raw(&fk, b"BBBBBBBB").unwrap());
-        assert_eq!(try_decrypt_all_chunks(&fk, &all, 2).unwrap(), b"AAAAAAAABBBBBBBB");
+        assert_eq!(
+            try_decrypt_all_chunks(
+                &fk,
+                FID,
+                beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+                &all,
+                2
+            )
+            .unwrap(),
+            b"AAAAAAAABBBBBBBB"
+        );
     }
 
     /// Encrypt `plaintext` as the platform's raw multi-chunk wire format:
@@ -532,8 +686,28 @@ mod tests {
         let fk = derive_file_key(&m, FID.as_bytes());
         let pt: Vec<u8> = (0..(3 * 64 + 10)).map(|i| (i % 251) as u8).collect();
         let wire = raw_file(&fk, &pt, 64, false);
-        assert_eq!(try_decrypt_all_chunks(&fk, &wire, 4).unwrap(), pt);
-        assert_eq!(decrypt_file_chunks(&m, FID, &wire, 4).unwrap(), pt);
+        assert_eq!(
+            try_decrypt_all_chunks(
+                &fk,
+                FID,
+                beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+                &wire,
+                4
+            )
+            .unwrap(),
+            pt
+        );
+        assert_eq!(
+            decrypt_file_chunks(
+                &m,
+                FID,
+                beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+                &wire,
+                4
+            )
+            .unwrap(),
+            pt
+        );
     }
 
     /// Same, with a '{' first nonce byte on frame 0: both defects at once.
@@ -544,8 +718,28 @@ mod tests {
         let pt: Vec<u8> = (0..(3 * 64 + 10)).map(|i| (i % 251) as u8).collect();
         let wire = raw_file(&fk, &pt, 64, true);
         assert_eq!(wire[0], b'{');
-        assert_eq!(try_decrypt_all_chunks(&fk, &wire, 4).unwrap(), pt);
-        assert_eq!(decrypt_file_chunks(&m, FID, &wire, 4).unwrap(), pt);
+        assert_eq!(
+            try_decrypt_all_chunks(
+                &fk,
+                FID,
+                beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+                &wire,
+                4
+            )
+            .unwrap(),
+            pt
+        );
+        assert_eq!(
+            decrypt_file_chunks(
+                &m,
+                FID,
+                beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+                &wire,
+                4
+            )
+            .unwrap(),
+            pt
+        );
     }
 
     /// Frame size recovered from the power-of-two ladder: a pre-V2 1 MiB chunk
@@ -557,7 +751,18 @@ mod tests {
         for cs in [1usize << 20, 4usize << 20] {
             let pt: Vec<u8> = (0..(2 * cs + 12_345)).map(|i| (i % 253) as u8).collect();
             let wire = raw_file(&fk, &pt, cs, false);
-            assert_eq!(try_decrypt_all_chunks(&fk, &wire, 3).unwrap(), pt, "chunk size {cs}");
+            assert_eq!(
+                try_decrypt_all_chunks(
+                    &fk,
+                    FID,
+                    beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+                    &wire,
+                    3
+                )
+                .unwrap(),
+                pt,
+                "chunk size {cs}"
+            );
         }
     }
 
@@ -569,7 +774,17 @@ mod tests {
         let fk = derive_file_key(&m, FID.as_bytes());
         let pt = vec![7u8; 1000 + 1];
         let wire = raw_file(&fk, &pt, 1000, true);
-        assert_eq!(try_decrypt_all_chunks(&fk, &wire, 2).unwrap(), pt);
+        assert_eq!(
+            try_decrypt_all_chunks(
+                &fk,
+                FID,
+                beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+                &wire,
+                2
+            )
+            .unwrap(),
+            pt
+        );
     }
 
     /// With the caller-supplied chunk size the frame is exact (no probing), and
@@ -581,15 +796,39 @@ mod tests {
         let pt: Vec<u8> = (0..(5 * 100 + 3)).map(|i| (i % 249) as u8).collect();
         let wire = raw_file(&fk, &pt, 100, true);
         assert_eq!(
-            try_decrypt_all_chunks_with_chunk_size(&fk, &wire, 6, Some(100)).unwrap(),
+            try_decrypt_all_chunks_with_chunk_size(
+                &fk,
+                FID,
+                beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+                &wire,
+                6,
+                Some(100)
+            )
+            .unwrap(),
             pt
         );
         assert_eq!(
-            try_decrypt_all_chunks_with_chunk_size(&fk, &wire, 6, Some(4096)).unwrap(),
+            try_decrypt_all_chunks_with_chunk_size(
+                &fk,
+                FID,
+                beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+                &wire,
+                6,
+                Some(4096)
+            )
+            .unwrap(),
             pt
         );
         assert_eq!(
-            decrypt_file_chunks_with_chunk_size(&m, FID, &wire, 6, Some(100)).unwrap(),
+            decrypt_file_chunks_with_chunk_size(
+                &m,
+                FID,
+                beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+                &wire,
+                6,
+                Some(100)
+            )
+            .unwrap(),
             pt
         );
     }
@@ -602,10 +841,28 @@ mod tests {
         let fk = derive_file_key(&m, FID.as_bytes());
         let pt = vec![9u8; 3 * 64 + 10];
         let mut wire = raw_file(&fk, &pt, 64, false);
-        assert!(try_decrypt_all_chunks(&derive_file_key(&m, b"other"), &wire, 4).is_err());
+        assert!(
+            try_decrypt_all_chunks(
+                &derive_file_key(&m, b"other"),
+                FID,
+                beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+                &wire,
+                4
+            )
+            .is_err()
+        );
         let mid = 64 + 28 + 20;
         wire[mid] ^= 0xff;
-        assert!(try_decrypt_all_chunks(&fk, &wire, 4).is_err());
+        assert!(
+            try_decrypt_all_chunks(
+                &fk,
+                FID,
+                beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+                &wire,
+                4
+            )
+            .is_err()
+        );
     }
 
     /// P2-c: when neither parser works, the error names BOTH reasons.
@@ -614,7 +871,14 @@ mod tests {
         let m = mk();
         let fk = derive_file_key(&m, FID.as_bytes());
         let junk = vec![0x41u8; 200];
-        let err = try_decrypt_all_chunks(&fk, &junk, 2).unwrap_err();
+        let err = try_decrypt_all_chunks(
+            &fk,
+            FID,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+            &junk,
+            2,
+        )
+        .unwrap_err();
         assert!(err.contains("raw parser:") && err.contains("json parser:"), "{err}");
     }
 
@@ -628,7 +892,16 @@ mod tests {
             .map(|_| encrypt_chunk_raw(&fk, b"x").unwrap())
             .find(|f| f[0] == b'{')
             .unwrap();
-        assert!(try_decrypt_all_chunks(&other, &frame, 1).is_err());
+        assert!(
+            try_decrypt_all_chunks(
+                &other,
+                FID,
+                beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+                &frame,
+                1
+            )
+            .is_err()
+        );
     }
 
     // A fixed file id used across the legacy/dual-key tests.
@@ -646,7 +919,14 @@ mod tests {
         let fk = derive_file_key(&m, FID.as_bytes());
         let pt = b"hello raw world";
         let frame = encrypt_chunk_raw(&fk, pt).unwrap();
-        let out = decrypt_file_chunks(&m, FID, &frame, 1).unwrap();
+        let out = decrypt_file_chunks(
+            &m,
+            FID,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+            &frame,
+            1,
+        )
+        .unwrap();
         assert_eq!(out, pt);
     }
 
@@ -660,7 +940,14 @@ mod tests {
         let fk = derive_file_key(&m, uuid.as_bytes());
         let pt = b"legacy binary-uuid file body";
         let frame = encrypt_chunk_raw(&fk, pt).unwrap();
-        let out = decrypt_file_chunks(&m, FID, &frame, 1).unwrap();
+        let out = decrypt_file_chunks(
+            &m,
+            FID,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+            &frame,
+            1,
+        )
+        .unwrap();
         assert_eq!(out, pt);
     }
 
@@ -675,7 +962,14 @@ mod tests {
         let blob = encrypt_chunk(&fk, pt).unwrap();
         let json = serde_json::to_vec(&blob).unwrap();
         assert_eq!(json[0], b'{', "JSON-blob detection relies on a leading brace");
-        let out = decrypt_file_chunks(&m, FID, &json, 1).unwrap();
+        let out = decrypt_file_chunks(
+            &m,
+            FID,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+            &json,
+            1,
+        )
+        .unwrap();
         assert_eq!(out, pt);
     }
 
@@ -689,7 +983,14 @@ mod tests {
         let pt = b"json + binary uuid";
         let blob = encrypt_chunk(&fk, pt).unwrap();
         let json = serde_json::to_vec(&blob).unwrap();
-        let out = decrypt_file_chunks(&m, FID, &json, 1).unwrap();
+        let out = decrypt_file_chunks(
+            &m,
+            FID,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+            &json,
+            1,
+        )
+        .unwrap();
         assert_eq!(out, pt);
     }
 
@@ -704,7 +1005,14 @@ mod tests {
         for _ in 0..3 {
             payload.extend_from_slice(&encrypt_chunk_raw(&fk, &chunk).unwrap());
         }
-        let out = decrypt_file_chunks(&m, FID, &payload, 3).unwrap();
+        let out = decrypt_file_chunks(
+            &m,
+            FID,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+            &payload,
+            3,
+        )
+        .unwrap();
         let mut expected = Vec::new();
         for _ in 0..3 {
             expected.extend_from_slice(&chunk);
@@ -720,7 +1028,16 @@ mod tests {
         let fk = derive_file_key(&m, FID.as_bytes());
         let frame = encrypt_chunk_raw(&fk, b"data").unwrap();
         let wrong = derive_master_key("other-password", b"other-salt-16byte").unwrap();
-        assert!(decrypt_file_chunks(&wrong, FID, &frame, 1).is_err());
+        assert!(
+            decrypt_file_chunks(
+                &wrong,
+                FID,
+                beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+                &frame,
+                1
+            )
+            .is_err()
+        );
     }
 
     /// The streaming download decryptor (`ChunkDecryptor::for_push`, string-UUID
@@ -734,7 +1051,14 @@ mod tests {
         let frame = encrypt_chunk_raw(&fk, pt).unwrap();
         let mut dec = ChunkDecryptor::for_push(&m, FID, beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded);
         let streamed = dec.push_frame(&frame).unwrap().data;
-        let buffered = decrypt_file_chunks(&m, FID, &frame, 1).unwrap();
+        let buffered = decrypt_file_chunks(
+            &m,
+            FID,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+            &frame,
+            1,
+        )
+        .unwrap();
         assert_eq!(streamed, buffered);
         assert_eq!(streamed, pt);
     }
@@ -835,5 +1159,121 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap() + "\n").unwrap();
         println!("wrote {}", path.display());
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// `tests/fixtures/core_1908_vectors.json` (see its `_provenance`).
+    fn vectors() -> serde_json::Value {
+        serde_json::from_str(include_str!("../tests/fixtures/core_1908_vectors.json")).unwrap()
+    }
+
+    /// The v2 file of the fixture: (master key, file id, name_encrypted, wire,
+    /// chunk count, chunk size, plaintext).
+    fn v2_file() -> (MasterKey, String, String, Vec<u8>, u32, u64, Vec<u8>) {
+        let v = &vectors()["v2_file"];
+        let mut mk = [0u8; 32];
+        mk.copy_from_slice(&unhex(v["master_key_hex"].as_str().unwrap()));
+        (
+            MasterKey::from_bytes(mk),
+            v["file_id"].as_str().unwrap().to_string(),
+            v["name_encrypted"].as_str().unwrap().to_string(),
+            unhex(v["wire_hex"].as_str().unwrap()),
+            v["chunk_count"].as_u64().unwrap() as u32,
+            v["chunk_size"].as_u64().unwrap(),
+            unhex(v["plaintext_hex"].as_str().unwrap()),
+        )
+    }
+
+    /// Cross-client vector (task 1943): a file written by core's v2 writer opens
+    /// through the CLI read path: its pin reads as V2, its name decrypts (name
+    /// subkey), and its content decrypts with and without the chunk size.
+    #[test]
+    fn core_1908_v2_fixture_opens_through_the_pin_aware_reader() {
+        let (m, fid, name_enc, wire, count, cs, plaintext) = v2_file();
+        let pin = content_pin(&m, &fid, &name_enc).expect("the metadata authenticates");
+        assert_eq!(pin, ExpectedChunkFormat::V2);
+        assert_eq!(decrypt_name(&m, &fid, &name_enc).as_deref(), Some("core-1908-v2.txt"));
+        assert_eq!(
+            decrypt_file_chunks_with_chunk_size(&m, &fid, pin, &wire, count, Some(cs)).unwrap(),
+            plaintext
+        );
+        // No X-Chunk-Size: the frame size is probed with core's v2 opener.
+        assert_eq!(decrypt_file_chunks(&m, &fid, pin, &wire, count).unwrap(), plaintext);
+    }
+
+    /// Cross-client vector: core's v1 chunk vector (verbatim from core's
+    /// `test-vectors/vectors.json`) still opens, as a legacy (`Unrecorded`)
+    /// file. v1 binds no file id, so any id reads it.
+    #[test]
+    fn core_v1_chunk_vector_still_opens() {
+        let v = &vectors()["v1_chunk_vector"];
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&unhex(v["file_key_hex"].as_str().unwrap()));
+        let mut frame = unhex(v["nonce_hex"].as_str().unwrap());
+        frame.extend(unhex(v["ciphertext_hex"].as_str().unwrap()));
+        let got = try_decrypt_all_chunks(
+            &FileKey::from_bytes(key),
+            FID,
+            ExpectedChunkFormat::Unrecorded,
+            &frame,
+            1,
+        );
+        assert_eq!(got.unwrap(), unhex(v["plaintext_hex"].as_str().unwrap()));
+    }
+
+    /// Downgrade guard: under a V2 pin, v1 frames of the very same file key and
+    /// plaintext do not open (no detection, no v1 fallback, no JSON parser),
+    /// while the same bytes open as a legacy file.
+    #[test]
+    fn a_v2_pinned_file_refuses_v1_frames() {
+        let (m, fid, _, _, _, _, plaintext) = v2_file();
+        let fk = derive_file_key(&m, fid.as_bytes());
+        let raw_v1 = encrypt_chunk_raw(&fk, &plaintext).unwrap();
+        let json_v1 = serde_json::to_vec(&encrypt_chunk(&fk, &plaintext).unwrap()).unwrap();
+        for (what, wire) in [("raw", &raw_v1), ("json", &json_v1)] {
+            assert!(
+                decrypt_file_chunks(&m, &fid, ExpectedChunkFormat::V2, wire, 1).is_err(),
+                "{what} v1 frame opened under a v2 pin"
+            );
+            assert_eq!(
+                decrypt_file_chunks(&m, &fid, ExpectedChunkFormat::Unrecorded, wire, 1).unwrap(),
+                plaintext,
+                "{what} control"
+            );
+        }
+    }
+
+    /// v2 truncation: the fixture without its last frame is rejected, though
+    /// every frame that is there authenticates (core's `finish`).
+    #[test]
+    fn a_truncated_v2_file_is_rejected() {
+        let (m, fid, _, wire, count, cs, _) = v2_file();
+        // The first count-1 frames, all full: everything but the last frame.
+        let cut = (count as usize - 1) * (cs as usize + 28);
+        let err =
+            decrypt_file_chunks_with_chunk_size(&m, &fid, ExpectedChunkFormat::V2, &wire[..cut], count - 1, Some(cs))
+                .unwrap_err();
+        assert!(err.contains("v2"), "{err}");
+    }
+
+    /// The pin comes only from authenticated metadata: v2 envelope → V2, a
+    /// legacy envelope → Unrecorded, a plaintext name → refused (never guessed).
+    #[test]
+    fn content_pin_reads_authenticated_metadata_only() {
+        let (m, fid, name_enc, ..) = v2_file();
+        assert_eq!(content_pin(&m, &fid, &name_enc), Ok(ExpectedChunkFormat::V2));
+        let legacy = beebeeb_core::encrypt::encrypt_name(&m, &fid, "old.txt", None).unwrap();
+        assert_eq!(content_pin(&m, &fid, &legacy), Ok(ExpectedChunkFormat::Unrecorded));
+        let err = content_pin(&m, &fid, "plain-name.txt").unwrap_err();
+        assert!(err.contains("refusing to guess"), "{err}");
+        // A key that does not open the envelope is no pin either.
+        let other = MasterKey::from_bytes([0x24u8; 32]);
+        assert!(content_pin(&other, &fid, &name_enc).is_err());
     }
 }

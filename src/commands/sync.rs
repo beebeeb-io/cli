@@ -496,6 +496,10 @@ struct RemoteFile {
     id: Uuid,
     chunk_count: u32,
     updated_at: DateTime<Utc>,
+    /// The content's read pin from the file's authenticated metadata
+    /// (`crypto::content_pin`, task 1943). `Err` when that metadata cannot be
+    /// read: the file is still listed, but its content is refused, never guessed.
+    pin: Result<beebeeb_core::chunk_stream::ExpectedChunkFormat, String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1181,6 +1185,7 @@ pub async fn run(
                         // Sync trashes the old file (above) and uploads a fresh
                         // id, so this is always a new file — no version replace.
                         base_version_number: None,
+                        replace_pin: None,
                         parent_id,
                         concurrency: concurrency as u32,
                         shutdown,
@@ -2811,6 +2816,7 @@ async fn walk_remote(
                     id,
                     chunk_count,
                     updated_at,
+                    pin: crate::crypto::content_pin(master_key, id_str, name_enc),
                 },
             );
         }
@@ -2913,6 +2919,18 @@ async fn do_download(
         return Ok(DownloadOutcome::Downloaded);
     }
 
+    // Task 1943: no read pin, no read. The file's metadata could not be read, so
+    // its chunk format is unknown. Like a download that fails to decrypt (1916)
+    // it is reported, the remote copy is left alone, and a later pass retries.
+    if let Err(e) = &remote.pin {
+        eprintln!(
+            "  {} {} \u{2014} {e}. The remote copy is untouched; will retry next pass.",
+            "!".custom_color(crate::colors::RED_ERR),
+            rel.custom_color(crate::colors::INK),
+        );
+        return Ok(DownloadOutcome::Unreadable);
+    }
+
     // Resolve the destination through the containment check: a symlinked
     // subdirectory inside the sync root must not redirect a download elsewhere.
     let out_path = match crate::safe_path::safe_rel_join(local_dir, rel, crate::safe_path::Rules::Host) {
@@ -2925,7 +2943,7 @@ async fn do_download(
             return Ok(DownloadOutcome::Deferred);
         }
     };
-    match download_to(api, master_key, remote.id, remote.chunk_count, &out_path).await {
+    match download_to(api, master_key, remote.id, &remote.pin, remote.chunk_count, &out_path).await {
         Ok(()) => {}
         Err(e) if e.contains("still in progress") || e.contains("409") => {
             // A partially-uploaded remote (this or another device still pushing).
@@ -3000,6 +3018,7 @@ async fn upload_file_to(
         file_id: Uuid::new_v4(),
         // Watch-loop uploads are always new files (fresh id) → no replace.
         base_version_number: None,
+        replace_pin: None,
         parent_id,
         // Single in-flight file in this watch-loop wrapper → full Cli cap.
         concurrency: 1,
@@ -3013,9 +3032,11 @@ async fn download_to(
     api: &ApiClient,
     master_key: &beebeeb_core::kdf::MasterKey,
     file_id: Uuid,
+    pin: &Result<beebeeb_core::chunk_stream::ExpectedChunkFormat, String>,
     chunk_count: u32,
     out_path: &Path,
 ) -> Result<(), String> {
+    let pin = pin.clone()?;
     let file_id_str = file_id.to_string();
     let name = out_path
         .file_name()
@@ -3028,6 +3049,7 @@ async fn download_to(
         api,
         master_key,
         &file_id_str,
+        pin,
         chunk_count,
         out_path,
         &crate::upload::NoopProgress,
@@ -3206,6 +3228,7 @@ mod tests {
             id: Uuid::new_v4(),
             chunk_count: 1,
             updated_at: Utc::now(),
+            pin: Ok(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded),
         }
     }
 

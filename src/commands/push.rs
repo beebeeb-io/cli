@@ -386,17 +386,28 @@ async fn push_single_file(
     // it as the optimistic-concurrency base (the server returns a stale-version
     // 409 if it no longer matches). On a fresh push, `base_version_number` stays
     // `None` and the absent-`file_id`/new-`file_id` decides "new file".
-    let master_key = std::sync::Arc::new(master_key);
-    let base_version_number: Option<i32> = match replace_file_id {
+    //
+    // A replace also carries the existing file's read pin (task 1943), so a
+    // v2-pinned file is written as v2 again: the server keeps its v2 metadata,
+    // and a v1 replace would complete and never open.
+    let (base_version_number, replace_pin) = match replace_file_id {
         Some(existing_id) => {
-            let meta = api.get_file(&existing_id.to_string()).await?;
+            let existing = existing_id.to_string();
+            let meta = api.get_file(&existing).await?;
             // version_number is the file's current version; default 1 if the
             // server omits it (older rows) — the v2 init still proceeds and only
             // a genuine mismatch 409s.
-            Some(meta.get("version_number").and_then(|v| v.as_i64()).unwrap_or(1) as i32)
+            let version = meta.get("version_number").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
+            let name_encrypted = meta
+                .get("name_encrypted")
+                .and_then(|v| v.as_str())
+                .ok_or("server response missing name_encrypted")?;
+            let pin = crate::crypto::content_pin(&master_key, &existing, name_encrypted)?;
+            (Some(version), Some(pin))
         }
-        None => None,
+        None => (None, None),
     };
+    let master_key = std::sync::Arc::new(master_key);
     let display_name = upload_name.clone();
 
     let parent_uuid: Option<uuid::Uuid> = match &parent_id {
@@ -410,6 +421,7 @@ async fn push_single_file(
         file_name: upload_name,
         file_id,
         base_version_number,
+        replace_pin,
         parent_id: parent_uuid,
         // bb push uploads one file at a time → full Cli cap (128 MiB).
         concurrency: 1,
