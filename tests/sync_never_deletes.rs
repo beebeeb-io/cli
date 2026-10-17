@@ -634,8 +634,8 @@ async fn delete_after_root_change_trashes_nothing_until_rebind() {
     assert!(recovered(&dir).is_empty());
     assert_eq!(out.status.code(), Some(3), "a refused --delete must not exit 0");
     assert!(
-        text(&out).contains("--rebind"),
-        "must name the way out, got: {}",
+        text(&out).contains("--delete held back") && text(&out).contains("bb sync --rebind"),
+        "must say --delete was refused and name the way out, got: {}",
         text(&out)
     );
 
@@ -659,6 +659,71 @@ async fn delete_after_root_change_trashes_nothing_until_rebind() {
         mock.trashed(),
         vec![new_f1],
         "after --rebind, --delete trashes the file deleted locally, as before"
+    );
+}
+
+/// After a root change, a locally EDITED file whose name also exists in the new
+/// folder is a both-sides conflict: the old manifest entry describes a file of
+/// the old tree, so it must not drive a trash-then-upload replace of the new
+/// folder's unrelated file (#83 review).
+#[tokio::test(flavor = "multi_thread")]
+async fn local_edit_after_root_change_is_a_conflict_not_a_replace() {
+    let mock = Mock::default();
+    let api = start_mock(mock.clone()).await;
+    let home = scratch_home(&api);
+    let (dir, _files) = synced_dir(&home, &mock, 3, |_| Some(true));
+    point_manifest_at_old_root(&dir);
+    let new_f1 = uuid::Uuid::new_v4().to_string();
+    mock.set_listing(vec![remote_file(&new_f1, "f1.txt")]);
+    let edit = b"edited locally after the last sync".to_vec();
+    std::fs::write(dir.join("f1.txt"), &edit).unwrap();
+
+    let out = sync_once(&home, &api, &dir, &[]).await;
+
+    assert!(
+        mock.trashed().is_empty(),
+        "the new folder's f1.txt was trashed for an old-tree edit: {:?}",
+        mock.trashed()
+    );
+    assert_eq!(
+        std::fs::read(dir.join("f1.txt")).unwrap(),
+        edit,
+        "the local edit stays local"
+    );
+    assert!(
+        text(&out).contains("f1.txt") && text(&out).contains("exists both sides"),
+        "f1.txt must be reported as a conflict, got: {}",
+        text(&out)
+    );
+    assert_eq!(out.status.code(), Some(3), "an unresolved conflict is not a clean pass");
+}
+
+/// After a root change, a NEWER same-named file in the new folder is not
+/// downloaded over the local file the old manifest vouches for (#83 review).
+#[tokio::test(flavor = "multi_thread")]
+async fn newer_remote_after_root_change_is_not_downloaded_over_local() {
+    let mock = Mock::default();
+    let api = start_mock(mock.clone()).await;
+    let home = scratch_home(&api);
+    let (dir, files) = synced_dir(&home, &mock, 3, |_| Some(true));
+    point_manifest_at_old_root(&dir);
+    let new_f1 = uuid::Uuid::new_v4().to_string();
+    let mut newer = remote_file(&new_f1, "f1.txt");
+    newer["updated_at"] = json!("2026-10-10T00:00:00+00:00"); // after the manifest's last_sync
+    mock.set_listing(vec![newer]);
+
+    let out = sync_once(&home, &api, &dir, &[]).await;
+
+    assert!(
+        mock.downloads.lock().unwrap().is_empty(),
+        "the new folder's f1.txt was downloaded over the local copy: {:?}",
+        mock.downloads.lock().unwrap()
+    );
+    assert_all_present(&dir, &files, "a newer same-named remote file after a root change");
+    assert!(
+        text(&out).contains("exists both sides"),
+        "f1.txt must be reported as a conflict, got: {}",
+        text(&out)
     );
 }
 

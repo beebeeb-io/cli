@@ -224,6 +224,19 @@ fn root_unreconciled(state: &SyncState, resolved: Uuid) -> bool {
     state.remote_folder_id.is_some_and(|bound| bound != resolved)
 }
 
+/// The manifest entry this pass may trust for `rel`. While the root is
+/// unreconciled, an entry for a file that ALSO exists in the current remote
+/// folder describes a different file of the old tree, so it counts as absent:
+/// the two copies become a both-sides conflict (skipped unless `--force`),
+/// never a trash, replace-upload or download-over-local on the old entry's
+/// account (#83 review).
+fn trusted_prior(state: &SyncState, rel: &str, remote_present: bool, root_changed: bool) -> Option<FileEntry> {
+    if root_changed && remote_present {
+        return None;
+    }
+    state.files.get(rel).cloned()
+}
+
 /// Everything one pass knows about whether remote absence may mean "deleted":
 /// the ids the server positively reports trashed, and - if the listing itself
 /// is not fit to conclude anything from - why.
@@ -888,7 +901,7 @@ pub async fn run(
     for rel in &sorted_files {
         let local = local_files.get(rel).cloned();
         let remote = remote_files.get(rel).cloned();
-        let prior = state.files.get(rel).cloned();
+        let prior = trusted_prior(&state, rel, remote.is_some(), root_changed);
 
         match (local, remote, prior) {
             (Some(l), Some(r), Some(p)) => {
@@ -1083,14 +1096,13 @@ pub async fn run(
     // fail the pass until `bb sync --rebind`.
     let delete_refused = delete_remote && root_changed;
     if delete_refused {
-        let n = pending_deletes.len();
-        print_notice(&format!(
-            "--delete held back: the remote folder is not the one this directory last synced with, so \
-             {n} remote file{} {} not trashed. Run `bb sync --rebind` once to accept the new folder, then re-run.",
-            if n == 1 { "" } else { "s" },
-            if n == 1 { "was" } else { "were" },
-        ));
-        held_back += n as u32;
+        print_notice(
+            "--delete held back: the remote folder is not the one this directory last synced with, so nothing \
+             is trashed. Run `bb sync --rebind` once to accept the new folder, then re-run.",
+        );
+        // `trusted_prior` already keeps old-tree entries from queuing a Delete;
+        // this is the backstop.
+        held_back += pending_deletes.len() as u32;
         pending_deletes.clear();
     }
 
@@ -1739,7 +1751,8 @@ async fn run_plain_watch(
                     for rel in &resync_keys {
                         let local = resync_local.get(rel).cloned();
                         let remote = resync_remote_files.get(rel).cloned();
-                        let prior = state.files.get(rel).cloned();
+                        let prior =
+                            trusted_prior(state, rel, remote.is_some(), root_unreconciled(state, remote_folder_id));
 
                         if let Some(l) = local {
                             // Use the SAME content-hash-aware change detection as
@@ -2043,7 +2056,12 @@ async fn run_tui_watch(
             for rel in &resync_keys {
                 let local = resync_local.get(rel).cloned();
                 let remote = resync_remote_files.get(rel).cloned();
-                let prior = sync_state.files.get(rel).cloned();
+                let prior = trusted_prior(
+                    &sync_state,
+                    rel,
+                    remote.is_some(),
+                    root_unreconciled(&sync_state, remote_folder_id),
+                );
 
                 if let Some(l) = local {
                     // Same content-hash-aware detection as the one-shot + plain-
