@@ -190,13 +190,13 @@ pub async fn show() -> Result<(), String> {
             ui::relative_time(period_end).custom_color(colors::INK_DIM)
         );
     }
-    let city = payload["region"]["city"].as_str().unwrap_or("");
-    let provider = payload["region"]["provider"].as_str().unwrap_or("");
-    if !city.is_empty() {
+    // Task 1919: the region row comes from the API's own list (`choices` on
+    // /me/region), so it names the user's real choice and no provider. It was
+    // `europe · <city> · <provider>` read from keys the server never sent.
+    if payload["region"].get("unavailable").is_none() && !payload["region"].is_null() {
         println!(
-            "  region   europe \u{00b7} {} \u{00b7} {}",
-            city.to_lowercase().custom_color(colors::INK_DIM),
-            provider.to_lowercase().custom_color(colors::INK_DIM)
+            "  region   {}",
+            crate::region::current_label(&payload["region"]).custom_color(colors::INK_DIM)
         );
     }
     if billing_state == "active" {
@@ -390,7 +390,12 @@ mod tests {
             "used_bytes": 3_200_000_000_000i64, "quota_bytes": 5_000_000_000_000i64
         }));
         let region = Ok(json!({
-            "preferred_region": "europe", "city": "Falkenstein", "provider": "Hetzner"
+            "preferred_region": "hel1",
+            "choices": [
+                {"id":"europe","kind":"region","name":"Europe","status":"live","selectable":true,"is_default":true},
+                {"id":"hel1","kind":"datacenter","name":"Helsinki","city":"Helsinki","country":"Finland",
+                 "status":"live","selectable":true,"is_default":false}
+            ]
         }));
         let score = Ok(json!({ "score": 4, "max": 5, "label": "Strong", "factors": [] }));
         let sessions = Ok(json!({ "sessions": [{"id": "s1"}, {"id": "s2"}, {"id": "s3"}] }));
@@ -399,7 +404,8 @@ mod tests {
         let out = build_show_payload(&me, &sub, &region, &score, &sessions, &passkeys);
         assert_eq!(out["user"]["email"], "a@b.com");
         assert_eq!(out["plan"]["id"], "pro");
-        assert_eq!(out["region"]["city"], "Falkenstein");
+        assert_eq!(out["region"]["preferred_region"], "hel1");
+        assert_eq!(crate::region::current_label(&out["region"]), "Helsinki, Finland");
         assert_eq!(out["storage"]["used_bytes"], 3_200_000_000_000i64);
         assert_eq!(out["session_count"], 3);
         assert_eq!(out["passkey_count"], 2);

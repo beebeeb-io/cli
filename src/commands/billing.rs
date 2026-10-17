@@ -872,7 +872,10 @@ fn region_human(slug: &str) -> String {
         // row branch, returned for every fresh free-tier account — the exact
         // account this command's manual verification rung uses) — not just
         // "europe"/"eu" from an actual subscriptions row.
-        "europe" | "eu" | "falkenstein" => "europe (Falkenstein, Germany)".into(),
+        // Task 1919: this is the subscription's billing region, not where the
+        // files are. Users can now choose a datacenter (`bb region`), so naming
+        // one city here would be a claim the data does not back.
+        "europe" | "eu" | "falkenstein" => "Europe".into(),
         other => other.to_string(),
     }
 }
@@ -1295,9 +1298,9 @@ mod tests {
         // (beebeeb-api/src/routes/billing.rs::subscription) returns the
         // literal string "falkenstein" — exactly what a fresh free-tier
         // account (this command's manual verification rung) sees.
-        assert_eq!(region_human("falkenstein"), "europe (Falkenstein, Germany)");
-        assert_eq!(region_human("europe"), "europe (Falkenstein, Germany)");
-        assert_eq!(region_human("eu"), "europe (Falkenstein, Germany)");
+        assert_eq!(region_human("falkenstein"), "Europe");
+        assert_eq!(region_human("europe"), "Europe");
+        assert_eq!(region_human("eu"), "Europe");
     }
 
     // ── plan_line_decision (task 1547 finding 1) ────────────────────────────

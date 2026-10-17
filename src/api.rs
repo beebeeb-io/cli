@@ -433,6 +433,37 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    /// `GET /api/v1/storage-regions` — the public list of places files can be
+    /// stored (task 1919): the default "Europe" row, live datacenters, and
+    /// coming-soon ones. No auth. The CLI keeps no list of its own.
+    pub async fn get_storage_regions(&self) -> Result<Value, String> {
+        let resp = self
+            .client
+            .get(self.url("/api/v1/storage-regions"))
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(resp).await
+    }
+
+    /// `PUT /api/v1/me/region` — store the region choice. `Some("europe")` =
+    /// default/any datacenter, `Some("<datacenter id>")` = that datacenter,
+    /// `None` clears the choice (also the default). The id is sent exactly as
+    /// the list gave it. A coming-soon or unknown id is a 400
+    /// `region_unavailable`; the stored value then stays unchanged.
+    pub async fn set_my_region(&self, region: Option<&str>) -> Result<Value, ApiError> {
+        let token = self.require_auth()?;
+        let resp = self
+            .client
+            .put(self.url("/api/v1/me/region"))
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "preferred_region": region }))
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response_typed(resp).await
+    }
+
     pub async fn get_my_region(&self) -> Result<Value, String> {
         let token = self.require_auth()?;
         let resp = self

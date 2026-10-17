@@ -14,6 +14,7 @@ pub mod pull;
 pub mod push;
 pub mod qr;
 pub mod quota;
+pub mod region;
 pub mod repair;
 pub mod request;
 pub mod restore;

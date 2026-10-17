@@ -35,7 +35,9 @@ pub async fn run() -> Result<(), String> {
     let me = me_res?;
     let sub = sub_res?;
     let usage = usage_res?;
-    let my_region = my_region_res.unwrap_or_default();
+    // `None` = the read failed; the row then says so instead of claiming a
+    // region it did not read.
+    let my_region = my_region_res.ok();
     let sessions = sessions_res.unwrap_or_default();
     let count = count_res.unwrap_or_default();
 
@@ -86,11 +88,18 @@ pub async fn run() -> Result<(), String> {
         build_plan_label(plan, extra_tb, total_bytes)
     };
 
-    let region_label = my_region
-        .get("preferred_region")
-        .and_then(|v| v.as_str())
-        .map(capitalise)
-        .unwrap_or_else(|| "Europe".to_string());
+    // Task 1919: resolved against the API's own list (`choices`), never a
+    // client-side name map. `region_label` is the rich row, `region_name` the
+    // short machine value, `region_id` the stored preference (null = default).
+    let region_label = match &my_region {
+        Some(r) => crate::region::current_label(r),
+        None => "unknown (could not be read)".to_string(),
+    };
+    let region_name = my_region.as_ref().map(crate::region::current_name);
+    let region_id = my_region
+        .as_ref()
+        .and_then(|r| r.get("preferred_region").cloned())
+        .unwrap_or(serde_json::Value::Null);
 
     let used_bytes = usage.get("used_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
     let percentage = if total_bytes > 0 {
@@ -160,7 +169,8 @@ pub async fn run() -> Result<(), String> {
                 "storage_total": total_bytes,
                 "files": file_count,
                 "upload_limit": upload_limit_for_plan(plan),
-                "region": region_label,
+                "region": region_name,
+                "region_id": region_id,
                 "session_expires": expires_str,
                 "account_state": account_state.slug(),
                 "data_deletion_at": account_state.data_deletion_at_rfc3339(),

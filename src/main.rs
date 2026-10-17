@@ -11,6 +11,7 @@ mod env_detect;
 mod exit;
 mod loopback;
 mod path;
+mod region;
 mod resume;
 mod safe_path;
 mod thumbnail;
@@ -472,6 +473,16 @@ enum Commands {
     #[command(subcommand)]
     Sessions(SessionsCmd),
 
+    /// Where new uploads are stored: Europe (default, any datacenter) or one datacenter
+    ///
+    /// With no subcommand, lists the options (fetched from the API, so new
+    /// datacenters appear without a new `bb`). Datacenters that are not live
+    /// yet are shown as coming soon and cannot be chosen.
+    Region {
+        #[command(subcommand)]
+        action: Option<RegionCmd>,
+    },
+
     /// Manage passkeys (WebAuthn credentials)
     #[command(subcommand)]
     Passkey(PasskeyCmd),
@@ -620,6 +631,20 @@ enum SessionsCmd {
 }
 
 #[derive(Subcommand)]
+enum RegionCmd {
+    /// List the storage regions, with your current choice marked (default)
+    List,
+    /// Show your current choice
+    Get,
+    /// Choose where new uploads are stored
+    Set {
+        /// `europe` (default: any of our European datacenters), or a datacenter
+        /// id or city from `bb region list`
+        target: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum PasskeyCmd {
     /// List your registered passkeys
     List,
@@ -702,6 +727,7 @@ const HELP_ACCOUNT_COMMANDS: &[(&str, &str, &str)] = &[
     ("2fa", "<action>", "two-factor auth (TOTP) · setup, enable, disable"),
     ("sessions", "<action>", "active sessions across devices · list, revoke"),
     ("passkey", "<action>", "WebAuthn passkeys · list, add, remove"),
+    ("region", "[action]", "where new uploads are stored · list, get, set"),
 ];
 
 /// Links printed at the foot of every help surface (the custom `bb --help`
@@ -1075,6 +1101,11 @@ async fn main() {
             SessionsCmd::List => commands::sessions::list().await,
             SessionsCmd::Revoke { id } => commands::sessions::revoke(id).await,
             SessionsCmd::RevokeAllOthers { yes } => commands::sessions::revoke_all_others(yes).await,
+        },
+        Commands::Region { action } => match action {
+            None | Some(RegionCmd::List) => commands::region::list().await,
+            Some(RegionCmd::Get) => commands::region::get().await,
+            Some(RegionCmd::Set { target }) => commands::region::set(target).await,
         },
         Commands::Passkey(cmd) => match cmd {
             PasskeyCmd::List => commands::passkey::list().await,

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `bb region` shows where new uploads are stored and lets you choose. The default is Europe: no specific country, Beebeeb places your files in any of its European datacenters. `bb region set <europe|id|city>` picks one datacenter instead (for example `bb region set helsinki`); `bb region get` shows your choice. The list is fetched from the server, so a datacenter that goes live appears without a new `bb`; datacenters that are not live yet are listed as coming soon and cannot be chosen. Files you already uploaded stay where they are. (task 1919)
+
+### Changed
+- `bb whoami` and `bb account show` name your actual storage choice (for example "Helsinki, Finland", or "Europe · default, any datacenter"). `bb account show` no longer prints a provider name, and `bb billing show` no longer names one city for the billing region. (task 1919)
+- `bb whoami --json` has a new `region_id` key (your stored choice, `null` for the default); `region` is now the name of your choice ("Europe", "Helsinki"). (task 1919)
+
 ## [0.13.4] - 2026-10-15
 
 ### Security
