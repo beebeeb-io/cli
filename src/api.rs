@@ -193,6 +193,24 @@ impl UploadInit {
     }
 }
 
+/// Hard outer bound on one listing walk, so a pathological/hostile listing can't
+/// loop unbounded or exhaust memory. Mirrors web `FILE_LIST_HARD_CAP`.
+const FILE_LIST_HARD_CAP: usize = 50_000;
+
+/// After a page is appended: has the walk reached `cap`? `Some(truncated)` ends
+/// the walk; `None` keeps following the cursor. A truncated listing is not fit
+/// to conclude deletions from (task 1915), so it is truncated only when entries
+/// were discarded or a cursor remains: exactly `cap` entries on an exhausted
+/// cursor is the complete folder.
+fn listing_cap_reached(all: &mut Vec<Value>, cap: usize, more_pages: bool) -> Option<bool> {
+    if all.len() < cap {
+        return None;
+    }
+    let truncated = all.len() > cap || more_pages;
+    all.truncate(cap);
+    Some(truncated)
+}
+
 /// Writer-provenance headers sent on every request: `X-Beebeeb-Client` names
 /// this client (`cli`), `X-Beebeeb-Client-Version` carries the exact string
 /// `bb --version` prints (`CARGO_PKG_VERSION`, via clap's `#[command(version)]`
@@ -515,19 +533,22 @@ impl ApiClient {
     /// now see the whole folder. Bounded by `FILE_LIST_HARD_CAP` as a safety
     /// valve (mirrors the web client's `FILE_LIST_HARD_CAP`, task 0755).
     async fn list_all_files(&self, parent_id: Option<&str>, trashed: bool) -> Result<Value, String> {
-        // Hard outer bound so a pathological/hostile listing can't loop
-        // unbounded or exhaust memory. Mirrors web `FILE_LIST_HARD_CAP`.
-        const FILE_LIST_HARD_CAP: usize = 50_000;
         let mut all: Vec<Value> = Vec::new();
         let mut cursor: Option<String> = None;
+        // Set when the cap cut the listing short. Callers that conclude
+        // "deleted" from absence (bb sync) must treat such a listing as
+        // incomplete (task 1915).
+        let mut truncated = false;
         loop {
             let (mut page, next) = self.list_files_page(parent_id, trashed, cursor.as_deref()).await?;
             all.append(&mut page);
-            if all.len() >= FILE_LIST_HARD_CAP {
-                all.truncate(FILE_LIST_HARD_CAP);
-                eprintln!(
-                    "warning: file listing reached the {FILE_LIST_HARD_CAP}-entry safety cap; some entries may be omitted"
-                );
+            if let Some(cut) = listing_cap_reached(&mut all, FILE_LIST_HARD_CAP, next.is_some()) {
+                truncated = cut;
+                if cut {
+                    eprintln!(
+                        "warning: file listing reached the {FILE_LIST_HARD_CAP}-entry safety cap; some entries may be omitted"
+                    );
+                }
                 break;
             }
             match next {
@@ -535,7 +556,7 @@ impl ApiClient {
                 None => break,
             }
         }
-        Ok(serde_json::json!({ "files": all }))
+        Ok(serde_json::json!({ "files": all, "truncated": truncated }))
     }
 
     /// List a folder's (or the root's) active files. Follows the server's
@@ -2512,6 +2533,49 @@ mod list_pagination_tests {
         // by confirming exactly ACTIVE_TOTAL (terminated cleanly, no hang/loop).
         let got = ids(&api.list_files(None).await.unwrap());
         assert_eq!(got.len(), ACTIVE_TOTAL);
+    }
+
+    // The safety cap (#83 review, P2): a listing is truncated only when entries
+    // were discarded or a cursor remains, never just for reaching the cap.
+    use super::{FILE_LIST_HARD_CAP, listing_cap_reached};
+
+    fn entries(n: usize) -> Vec<serde_json::Value> {
+        vec![serde_json::Value::Null; n]
+    }
+
+    #[test]
+    fn below_the_cap_keeps_walking() {
+        let mut all = entries(FILE_LIST_HARD_CAP - 1);
+        assert_eq!(listing_cap_reached(&mut all, FILE_LIST_HARD_CAP, true), None);
+    }
+
+    #[test]
+    fn exactly_the_cap_with_no_cursor_is_complete() {
+        let mut all = entries(FILE_LIST_HARD_CAP);
+        assert_eq!(
+            listing_cap_reached(&mut all, FILE_LIST_HARD_CAP, false),
+            Some(false),
+            "50,000 entries and no next_cursor is the whole folder"
+        );
+        assert_eq!(all.len(), FILE_LIST_HARD_CAP);
+    }
+
+    #[test]
+    fn exactly_the_cap_with_a_cursor_is_truncated() {
+        let mut all = entries(FILE_LIST_HARD_CAP);
+        assert_eq!(
+            listing_cap_reached(&mut all, FILE_LIST_HARD_CAP, true),
+            Some(true),
+            "a cursor remains: entries may be missing"
+        );
+        assert_eq!(all.len(), FILE_LIST_HARD_CAP);
+    }
+
+    #[test]
+    fn past_the_cap_discards_entries_and_is_truncated() {
+        let mut all = entries(FILE_LIST_HARD_CAP + 7);
+        assert_eq!(listing_cap_reached(&mut all, FILE_LIST_HARD_CAP, false), Some(true));
+        assert_eq!(all.len(), FILE_LIST_HARD_CAP, "the overshoot is cut off");
     }
 }
 

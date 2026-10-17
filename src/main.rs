@@ -13,6 +13,7 @@ mod loopback;
 mod path;
 mod resume;
 mod safe_path;
+mod sync_safety;
 mod thumbnail;
 mod tui;
 mod ui;
@@ -380,6 +381,21 @@ enum Commands {
         /// entries from the last sync — slower, but catches same-size edits
         #[arg(long)]
         rehash: bool,
+
+        /// Let ONE pass remove more than max(50, 10%) local files that the server
+        /// reports trashed. Without it the pass removes nothing and exits 3. The
+        /// files go to .bb-trash/ inside the sync folder, never a plain delete.
+        /// Not available to the background daemon.
+        #[arg(long)]
+        allow_mass_delete: bool,
+
+        /// Accept the remote folder the path resolves to now as this directory's
+        /// sync root, after it changed (the old folder was trashed and re-created,
+        /// or the remote path changed). Until then a changed root pauses every
+        /// local removal. Drops the old folder's sync record, so nothing is
+        /// removed on its account; local files then sync in as new files.
+        #[arg(long, conflicts_with = "daemon")]
+        rebind: bool,
     },
 
     /// Mount vault as a FUSE filesystem (source builds with `--features fuse` only;
@@ -989,6 +1005,8 @@ async fn main() {
                 false,
                 4,
                 false,
+                false,
+                false,
             )
             .await
         }
@@ -1006,6 +1024,8 @@ async fn main() {
             stop_all,
             concurrency,
             rehash,
+            allow_mass_delete,
+            rebind,
         } => {
             // Clamp parallel uploads to a sane window: 0 would stall the pipeline,
             // and unbounded values blow up peak memory (each in-flight file holds
@@ -1026,6 +1046,8 @@ async fn main() {
                 stop_all,
                 concurrency,
                 rehash,
+                allow_mass_delete,
+                rebind,
             )
             .await
             .map_err(exit::sync_error)

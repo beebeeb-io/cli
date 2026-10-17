@@ -79,6 +79,13 @@ fn print_dashboard(dash: &SyncDashboard) {
 }
 
 fn is_ignored_path(path: &Path) -> bool {
+    // Files `bb sync` moved aside (task 1915) are not sync input.
+    if path
+        .components()
+        .any(|c| c.as_os_str() == crate::sync_safety::RECOVERY_DIR)
+    {
+        return true;
+    }
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     name == ".DS_Store"
         || name.starts_with("._")
@@ -153,48 +160,242 @@ fn local_changed_vs_manifest(local: &LocalFile, entry: &FileEntry) -> bool {
     !local_matches_entry(local, entry)
 }
 
-/// What to do with a prior-synced manifest key whose remote counterpart has
-/// disappeared (trashed or permanently deleted on the server).
+/// What to do with a prior-synced manifest key whose remote counterpart is
+/// missing from the current remote listing.
+///
+/// Absence is NOT deletion (deletion-safety spec R5, task 1915): a file is only
+/// removed locally when the server positively reports that exact file trashed.
 #[derive(Debug, PartialEq, Eq)]
 enum RemoteAbsent {
-    /// Manifest entry exists and the local file is byte-identical to it: this is
-    /// a genuine REMOTE DELETE. The server is authoritative and the file is
-    /// recoverable from server trash, so the safe default is to remove the
-    /// local mirror file and drop the manifest entry. Removing local is
-    /// deliberately NOT gated behind a flag (deletions propagate by default).
+    /// Manifest entry exists, the local file is byte-identical to it AND the
+    /// server's own record for that id says it is trashed (a tombstone): a
+    /// genuine remote delete. The local file is moved to the recoverable folder
+    /// (never unlinked) and the manifest entry dropped.
     DeleteLocal,
     /// Manifest entry exists but the local file DIFFERS (the user edited it
     /// offline while it was deleted remotely). Never destroy unsynced local
-    /// edits — surface it and re-upload the local copy as a new file.
+    /// edits - surface it and re-upload the local copy as a new file.
     ReAddLocal,
+    /// Manifest entry exists, local file untouched, but the server gave NO
+    /// deletion record (still alive elsewhere - moved or renamed - or unknown to
+    /// it, or the listing is not trustworthy). The listing alone proves nothing:
+    /// keep the file and the manifest entry, delete and upload nothing.
+    KeepUnconfirmed,
+    /// Manifest entry exists but the local file is already gone: nothing on disk
+    /// to touch, just drop the stale entry.
+    ForgetStale,
     /// No manifest entry: the local file is genuinely new (never synced), so
-    /// this is not a remote delete at all — upload it as new (caller's default).
+    /// this is not a remote delete at all - upload it as new (caller's default).
     NotADelete,
 }
 
 /// Classify a manifest key that is absent from the current remote listing.
 ///
 /// `local` is the on-disk file (if it still exists), `prior` the manifest entry
-/// from `SyncState.files`. This is the ONE place the remote-delete vs offline-edit
-/// decision lives; the one-shot classifier and both continuous-watch resync loops
-/// call it so they stay byte-for-byte consistent.
-fn classify_remote_absent(local: Option<&LocalFile>, prior: Option<&FileEntry>) -> RemoteAbsent {
+/// from `SyncState.files`, `tombstoned` whether the server positively reported
+/// that entry's remote id trashed. This is the ONE place the remote-delete vs
+/// offline-edit vs unconfirmed decision lives; the one-shot classifier and both
+/// continuous-watch resync loops call it so they stay consistent.
+fn classify_remote_absent(local: Option<&LocalFile>, prior: Option<&FileEntry>, tombstoned: bool) -> RemoteAbsent {
     match (local, prior) {
-        // Synced before + still on disk → compare against the manifest.
+        // Synced before + still on disk -> compare against the manifest.
         (Some(l), Some(p)) => {
-            if local_matches_entry(l, p) {
+            if !local_matches_entry(l, p) {
+                RemoteAbsent::ReAddLocal
+            } else if tombstoned {
                 RemoteAbsent::DeleteLocal
             } else {
-                RemoteAbsent::ReAddLocal
+                RemoteAbsent::KeepUnconfirmed
             }
         }
-        // Synced before, already gone locally too → nothing to delete, just a
-        // stale manifest entry to drop (treat as a completed remote delete).
-        (None, Some(_)) => RemoteAbsent::DeleteLocal,
-        // No prior manifest entry → genuinely new local file, not a delete.
+        // Synced before, already gone locally: nothing to delete, drop the entry.
+        (None, Some(_)) => RemoteAbsent::ForgetStale,
+        // No prior manifest entry -> genuinely new local file, not a delete.
         (Some(_), None) => RemoteAbsent::NotADelete,
         (None, None) => RemoteAbsent::NotADelete,
     }
+}
+
+/// Is this directory bound to a different remote folder than the one resolved
+/// now? Then its manifest describes another tree and no pass may remove local
+/// files on its account until `bb sync --rebind`. One-shot and both watch loops
+/// ask this, so a root change blocks removals everywhere.
+fn root_unreconciled(state: &SyncState, resolved: Uuid) -> bool {
+    state.remote_folder_id.is_some_and(|bound| bound != resolved)
+}
+
+/// The manifest entry this pass may trust for `rel`. While the root is
+/// unreconciled, an entry for a file that ALSO exists in the current remote
+/// folder describes a different file of the old tree, so it counts as absent:
+/// the two copies become a both-sides conflict (skipped unless `--force`),
+/// never a trash, replace-upload or download-over-local on the old entry's
+/// account (#83 review).
+fn trusted_prior(state: &SyncState, rel: &str, remote_present: bool, root_changed: bool) -> Option<FileEntry> {
+    if root_changed && remote_present {
+        return None;
+    }
+    state.files.get(rel).cloned()
+}
+
+/// Everything one pass knows about whether remote absence may mean "deleted":
+/// the ids the server positively reports trashed, and - if the listing itself
+/// is not fit to conclude anything from - why.
+struct AbsencePlan {
+    tombstones: HashSet<Uuid>,
+    /// `Some(reason)`: the remote listing is empty / partial / unreadable / from
+    /// another folder, so NO local file may be removed on its account.
+    untrusted: Option<String>,
+}
+
+impl AbsencePlan {
+    fn tombstoned(&self, entry: &FileEntry) -> bool {
+        self.tombstones.contains(&entry.remote_id)
+    }
+}
+
+/// Decide whether this pass may remove anything, and ask the server about the
+/// only files it could remove (manifest entries whose local copy is untouched
+/// and which are absent remotely). Skipped entirely for an untrusted listing.
+async fn plan_absence(
+    api: &ApiClient,
+    state: &SyncState,
+    local_files: &HashMap<String, LocalFile>,
+    remote_files: &HashMap<String, RemoteFile>,
+    health: &crate::sync_safety::ListingHealth,
+    root_changed: bool,
+    allow_mass_delete: bool,
+) -> AbsencePlan {
+    use crate::sync_safety::{breaker_limit, confirm_tombstones, untrusted_reason};
+    let untrusted = untrusted_reason(health, remote_files.len(), state.files.len(), root_changed);
+    if untrusted.is_some() {
+        return AbsencePlan {
+            tombstones: HashSet::new(),
+            untrusted,
+        };
+    }
+    let candidates: Vec<Uuid> = state
+        .files
+        .iter()
+        .filter(|(rel, _)| !remote_files.contains_key(*rel))
+        .filter(|(rel, entry)| local_files.get(*rel).is_some_and(|l| local_matches_entry(l, entry)))
+        .map(|(_, entry)| entry.remote_id)
+        .collect();
+    // Once the breaker is certain to trip there is no point asking about the rest.
+    let stop_after = if allow_mass_delete {
+        None
+    } else {
+        Some(breaker_limit(state.files.len()))
+    };
+    AbsencePlan {
+        tombstones: confirm_tombstones(api, &candidates, stop_after).await,
+        untrusted: None,
+    }
+}
+
+/// Why files that are missing remotely were left alone, when the listing is
+/// not fit to conclude deletions from - and only if something was missing.
+fn untrusted_notice(
+    plan: &AbsencePlan,
+    state: &SyncState,
+    remote_files: &HashMap<String, RemoteFile>,
+) -> Option<String> {
+    let why = plan.untrusted.as_ref()?;
+    let missing = state.files.keys().filter(|k| !remote_files.contains_key(*k)).count();
+    (missing > 0).then(|| {
+        format!(
+            "kept {missing} local file{} missing from the remote listing: {why}. Nothing was deleted.",
+            if missing == 1 { "" } else { "s" },
+        )
+    })
+}
+
+/// One line for the files that are missing remotely, untouched locally, with no
+/// server deletion record.
+fn kept_unconfirmed_notice(rels: &[String]) -> Option<String> {
+    if rels.is_empty() {
+        return None;
+    }
+    let mut sorted: Vec<&str> = rels.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    let shown: Vec<&str> = sorted.iter().copied().take(3).collect();
+    let more = sorted.len() - shown.len();
+    Some(format!(
+        "kept {} local file{} missing remotely: the server has no deletion record for {} (moved or renamed remotely?): {}{}",
+        sorted.len(),
+        if sorted.len() == 1 { "" } else { "s" },
+        if sorted.len() == 1 { "it" } else { "them" },
+        shown.join(", "),
+        if more > 0 {
+            format!(" (+{more} more)")
+        } else {
+            String::new()
+        },
+    ))
+}
+
+fn breaker_notice(count: usize, tracked: usize) -> String {
+    format!(
+        "mass delete held back: {count} local file(s) reported deleted remotely in one pass - more than the limit of {} \
+         (max of {} and 10% of {tracked} tracked). Nothing was removed. Check the Trash in the web app; if this is intended, \
+         re-run once with --allow-mass-delete (files then move to {}/ inside the sync folder, not a plain delete).",
+        crate::sync_safety::breaker_limit(tracked),
+        crate::sync_safety::BREAKER_FLOOR,
+        crate::sync_safety::RECOVERY_DIR,
+    )
+}
+
+/// Print one of the notices above (one-shot path; the TUI routes them as events).
+fn print_notice(msg: &str) {
+    if !ui::is_quiet() {
+        eprintln!("  {} {msg}", "!".custom_color(crate::colors::AMBER));
+    }
+}
+
+/// Stat + hash a file right now (not from the scan taken at the start of the
+/// pass). Used to re-check a file immediately before it is moved aside.
+fn fresh_local_file(path: &Path) -> Result<LocalFile, String> {
+    let meta = std::fs::metadata(path).map_err(|e| format!("stat {}: {e}", path.display()))?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|m| m.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    Ok(LocalFile {
+        mtime,
+        size: meta.len(),
+        content_hash: compute_file_hash(path)?,
+    })
+}
+
+/// Move one local file aside because the server reports it deleted. Returns
+/// `Ok(true)` if it was moved (or was already gone), `Ok(false)` if it was left
+/// in place on purpose (it changed since the scan), `Err` if the move failed.
+fn remove_local_recoverably(local_dir: &Path, rel: &str, entry: &FileEntry) -> Result<bool, String> {
+    // Same containment rule as downloads: never touch anything outside the sync root.
+    let path = crate::safe_path::safe_rel_join(local_dir, rel, crate::safe_path::Rules::Host)
+        .map_err(|e| format!("could not remove {rel:?}: {e}"))?;
+    if std::fs::symlink_metadata(&path).is_err() {
+        return Ok(true); // already gone
+    }
+    // The scan may be hours old (large upload phase): re-check the file now.
+    let fresh = fresh_local_file(&path)?;
+    if !local_matches_entry(&fresh, entry) {
+        return Ok(false);
+    }
+    crate::sync_safety::move_to_recovery(local_dir, &path, rel)?;
+    Ok(true)
+}
+
+/// What a reconcile pass did.
+struct Reconciled {
+    /// Rels whose local copy was moved aside (or was already gone): drop them
+    /// from the pre-reconcile snapshot.
+    removed: Vec<String>,
+    /// Lines for the user about what was left alone and why. The caller shows
+    /// them (stderr for the plain loop, an event for the TUI) so nothing here
+    /// scribbles over a raw-mode screen.
+    notices: Vec<String>,
 }
 
 /// Apply remote-delete reconciliation for every manifest key that is absent
@@ -202,58 +403,38 @@ fn classify_remote_absent(local: Option<&LocalFile>, prior: Option<&FileEntry>) 
 /// path threads the same decision through its classifier instead).
 ///
 /// For each prior-synced key no longer present remotely:
-/// - byte-identical local → delete the local mirror file + drop the manifest
-///   entry (the safe, default direction: server is authoritative + recoverable);
-/// - locally modified offline → leave the file, keep the manifest entry, and the
+/// - local byte-identical AND the server reports the id trashed (tombstone) ->
+///   move the local file to `.bb-trash/` + drop the manifest entry;
+/// - local byte-identical, no tombstone -> keep everything (absence is not deletion);
+/// - locally modified offline -> leave the file, keep the manifest entry, and the
 ///   caller's normal upload pass re-adds it (never silently destroy local edits).
 ///
-/// Returns the rels whose local file was removed (for dashboard/notification).
+/// More removals than the breaker allows in one pass remove nothing.
 fn reconcile_remote_deletions(
     local_dir: &Path,
     state: &mut SyncState,
     local_files: &HashMap<String, LocalFile>,
     remote_files: &HashMap<String, RemoteFile>,
+    plan: &AbsencePlan,
+    allow_mass_delete: bool,
     dry_run: bool,
-) -> Vec<String> {
-    let mut removed = Vec::new();
-    // Snapshot the keys up front — we mutate state.files inside the loop.
+) -> Reconciled {
+    let mut to_remove: Vec<String> = Vec::new();
+    let mut to_forget: Vec<String> = Vec::new();
+    let mut kept_unconfirmed: Vec<String> = Vec::new();
+    let mut notices: Vec<String> = Vec::new();
+    // Snapshot the keys up front - we mutate state.files below.
     let manifest_keys: Vec<String> = state.files.keys().cloned().collect();
     for rel in manifest_keys {
         if remote_files.contains_key(&rel) {
-            continue; // still present remotely — not a delete
+            continue; // still present remotely - not a delete
         }
         let prior = state.files.get(&rel).cloned();
-        match classify_remote_absent(local_files.get(&rel), prior.as_ref()) {
-            RemoteAbsent::DeleteLocal => {
-                if !dry_run {
-                    // Same containment rule as downloads: never unlink outside the sync root.
-                    let path = match crate::safe_path::safe_rel_join(local_dir, &rel, crate::safe_path::Rules::Host) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            eprintln!(
-                                "  {} could not remove {rel:?}: {e}",
-                                "!".custom_color(crate::colors::AMBER)
-                            );
-                            continue;
-                        }
-                    };
-                    // Best-effort unlink: a NotFound means the user already
-                    // deleted it locally, which is fine.
-                    if let Err(e) = std::fs::remove_file(&path) {
-                        if e.kind() != std::io::ErrorKind::NotFound {
-                            eprintln!(
-                                "  {} could not remove {}: {e}",
-                                "!".custom_color(crate::colors::AMBER),
-                                rel,
-                            );
-                            // Leave the manifest entry so we retry next pass.
-                            continue;
-                        }
-                    }
-                    state.files.remove(&rel);
-                }
-                removed.push(rel);
-            }
+        let tombstoned = prior.as_ref().is_some_and(|p| plan.tombstoned(p));
+        match classify_remote_absent(local_files.get(&rel), prior.as_ref(), tombstoned) {
+            RemoteAbsent::DeleteLocal => to_remove.push(rel),
+            RemoteAbsent::ForgetStale => to_forget.push(rel),
+            RemoteAbsent::KeepUnconfirmed => kept_unconfirmed.push(rel),
             RemoteAbsent::ReAddLocal => {
                 // Local diverged from the manifest while the remote was deleted.
                 // Do NOT delete. Surface it; the normal upload pass re-adds it as
@@ -271,7 +452,43 @@ fn reconcile_remote_deletions(
             RemoteAbsent::NotADelete => {}
         }
     }
-    removed
+
+    if !allow_mass_delete && crate::sync_safety::breaker_trips(to_remove.len(), state.files.len()) {
+        notices.push(breaker_notice(to_remove.len(), state.files.len()));
+        to_remove.clear();
+    }
+    notices.extend(kept_unconfirmed_notice(&kept_unconfirmed));
+
+    let mut removed = Vec::new();
+    for rel in to_remove {
+        if !dry_run {
+            let Some(entry) = state.files.get(&rel).cloned() else {
+                continue;
+            };
+            match remove_local_recoverably(local_dir, &rel, &entry) {
+                Ok(true) => {
+                    state.files.remove(&rel);
+                }
+                Ok(false) => {
+                    notices.push(format!("{rel} changed since the scan, kept"));
+                    continue;
+                }
+                Err(e) => {
+                    // Keep the manifest entry so we retry next pass.
+                    notices.push(e);
+                    continue;
+                }
+            }
+        }
+        removed.push(rel);
+    }
+    for rel in to_forget {
+        if !dry_run {
+            state.files.remove(&rel);
+        }
+        removed.push(rel);
+    }
+    Reconciled { removed, notices }
 }
 
 #[derive(Clone)]
@@ -296,6 +513,8 @@ pub async fn run(
     stop_all: bool,
     concurrency: usize,
     rehash: bool,
+    allow_mass_delete: bool,
+    rebind: bool,
 ) -> Result<(), String> {
     // ── --status: show all active sync sessions ────────────────────────────
     if status || stop_session.is_some() || stop_all {
@@ -440,8 +659,24 @@ pub async fn run(
     let mut total_bytes: u64 = 0;
 
     let remote_folder_id = resolve_remote_folder(&api, &master_key, &remote_path, dry_run).await?;
+    // `--rebind`: the user accepts the folder resolved now as this directory's
+    // remote root. The old manifest describes the other tree, so it is dropped:
+    // nothing that belonged there can be removed on this folder's account, and
+    // the local files sync into the new folder as new files.
+    if rebind && root_unreconciled(&state, remote_folder_id) {
+        state.files.clear();
+        state.remote_folder_id = Some(remote_folder_id);
+        print_notice("rebound to the new remote folder; the old folder's sync record was dropped");
+    }
+    // If this directory last synced against a DIFFERENT remote folder (the old
+    // one was trashed and re-created, or the remote path changed), the manifest
+    // describes files of another tree: nothing may be removed on its account.
+    // The old binding is KEPT, so every later pass and the watch loops stay
+    // blocked too, until `--rebind` (#83 review: adopting the new folder here
+    // made the next pass trust it).
+    let root_changed = root_unreconciled(&state, remote_folder_id);
     state.remote_path = Some(remote_path.clone());
-    state.remote_folder_id = Some(remote_folder_id);
+    state.remote_folder_id.get_or_insert(remote_folder_id);
 
     // Create or reuse a client session for this sync pair
     let session_id: Option<String> = if let Some(ref device_id) = server_device_id {
@@ -518,6 +753,7 @@ pub async fn run(
     let remote_spinner = make_scan_spinner(scan_active, "scanning remote", "entries");
     let mut remote_files: HashMap<String, RemoteFile> = HashMap::new();
     let mut remote_folders: HashMap<String, Uuid> = HashMap::new();
+    let mut listing_health = crate::sync_safety::ListingHealth::default();
     walk_remote(
         &api,
         &master_key,
@@ -525,11 +761,28 @@ pub async fn run(
         "",
         &mut remote_files,
         &mut remote_folders,
+        &mut listing_health,
         remote_spinner.as_ref(),
     )
     .await?;
     if let Some(pb) = &remote_spinner {
         pb.finish_and_clear();
+    }
+
+    // Which absent files may be treated as deleted? Only those the server itself
+    // reports trashed, from a listing that is not empty/partial/unreadable.
+    let absence = plan_absence(
+        &api,
+        &state,
+        &local_files,
+        &remote_files,
+        &listing_health,
+        root_changed,
+        allow_mass_delete,
+    )
+    .await;
+    if let Some(msg) = untrusted_notice(&absence, &state, &remote_files) {
+        print_notice(&msg);
     }
 
     let mut all_folders: HashSet<String> = HashSet::new();
@@ -626,10 +879,18 @@ pub async fn run(
         MissingLocal {
             rel: String,
         },
-        /// A prior-synced file that disappeared from the remote (trashed or
-        /// permanently deleted). The local mirror is byte-identical to the
-        /// manifest, so it is safe to remove locally + drop the manifest entry.
+        /// A prior-synced file the server reports TRASHED (tombstone). The local
+        /// mirror is byte-identical to the manifest, so it is moved to the
+        /// recoverable folder + the manifest entry dropped.
         RemoteDelete {
+            rel: String,
+        },
+        /// A prior-synced file gone from BOTH sides: just drop the stale entry.
+        ForgetStale {
+            rel: String,
+        },
+        /// Missing remotely, untouched locally, no deletion record: keep it.
+        KeepUnconfirmed {
             rel: String,
         },
         Skip,
@@ -640,7 +901,7 @@ pub async fn run(
     for rel in &sorted_files {
         let local = local_files.get(rel).cloned();
         let remote = remote_files.get(rel).cloned();
-        let prior = state.files.get(rel).cloned();
+        let prior = trusted_prior(&state, rel, remote.is_some(), root_changed);
 
         match (local, remote, prior) {
             (Some(l), Some(r), Some(p)) => {
@@ -695,11 +956,18 @@ pub async fn run(
                 // Local file present, remote absent. The prior manifest entry
                 // distinguishes "user just created this" from "this was synced
                 // before and has since been deleted on the server".
-                match classify_remote_absent(Some(&l), prior.as_ref()) {
+                let tombstoned = prior.as_ref().is_some_and(|p| absence.tombstoned(p));
+                match classify_remote_absent(Some(&l), prior.as_ref(), tombstoned) {
                     RemoteAbsent::DeleteLocal => {
-                        // Synced before + byte-identical to the manifest →
-                        // genuine remote delete. Remove the local mirror.
+                        // Synced before + byte-identical to the manifest + the
+                        // server reports it trashed: a genuine remote delete.
                         actions.push(SyncAction::RemoteDelete { rel: rel.clone() });
+                    }
+                    RemoteAbsent::KeepUnconfirmed => {
+                        actions.push(SyncAction::KeepUnconfirmed { rel: rel.clone() });
+                    }
+                    RemoteAbsent::ForgetStale => {
+                        actions.push(SyncAction::ForgetStale { rel: rel.clone() });
                     }
                     RemoteAbsent::ReAddLocal => {
                         // Synced before but edited offline → never destroy the
@@ -741,9 +1009,9 @@ pub async fn run(
                 if prior.is_some() {
                     // Synced before, now gone from BOTH sides (user deleted it
                     // locally and it's also gone remotely). The local file is
-                    // already absent — nothing to unlink — but the stale
+                    // already absent - nothing to touch - but the stale
                     // manifest entry must be dropped so it isn't resurrected.
-                    actions.push(SyncAction::RemoteDelete { rel: rel.clone() });
+                    actions.push(SyncAction::ForgetStale { rel: rel.clone() });
                 } else {
                     actions.push(SyncAction::Skip);
                 }
@@ -756,8 +1024,11 @@ pub async fn run(
     let mut pending_uploads: Vec<(String, LocalFile, Option<Uuid>)> = Vec::new();
     let mut pending_downloads: Vec<(String, RemoteFile)> = Vec::new();
     let mut pending_deletes: Vec<(String, RemoteFile)> = Vec::new();
-    // Prior-synced files deleted on the server: remove the local mirror.
+    // Prior-synced files the server reports trashed: move the local mirror aside.
     let mut pending_remote_deletes: Vec<String> = Vec::new();
+    // Prior-synced files gone from both sides: drop the stale manifest entry.
+    let mut pending_forget: Vec<String> = Vec::new();
+    let mut kept_unconfirmed: Vec<String> = Vec::new();
 
     for action in actions {
         match action {
@@ -797,7 +1068,42 @@ pub async fn run(
             SyncAction::RemoteDelete { rel } => {
                 pending_remote_deletes.push(rel);
             }
+            SyncAction::ForgetStale { rel } => {
+                pending_forget.push(rel);
+            }
+            SyncAction::KeepUnconfirmed { rel } => {
+                kept_unconfirmed.push(rel);
+                skipped += 1;
+            }
         }
+    }
+    if let Some(msg) = kept_unconfirmed_notice(&kept_unconfirmed) {
+        print_notice(&msg);
+    }
+
+    // Mass-delete breaker (spec R4): more than max(50, 10 %) removals in one
+    // pass is a stop-and-ask, not a sync.
+    let mut held_back = 0u32;
+    if !allow_mass_delete && crate::sync_safety::breaker_trips(pending_remote_deletes.len(), state.files.len()) {
+        print_notice(&breaker_notice(pending_remote_deletes.len(), state.files.len()));
+        held_back = pending_remote_deletes.len() as u32;
+        pending_remote_deletes.clear();
+    }
+
+    // `--delete` against an unreconciled root (#83 review): the manifest's
+    // "synced before, now missing locally" entries belong to the other tree, so
+    // they say nothing about this folder's same-named files. Trash nothing and
+    // fail the pass until `bb sync --rebind`.
+    let delete_refused = delete_remote && root_changed;
+    if delete_refused {
+        print_notice(
+            "--delete held back: the remote folder is not the one this directory last synced with, so nothing \
+             is trashed. Run `bb sync --rebind` once to accept the new folder, then re-run.",
+        );
+        // `trusted_prior` already keeps old-tree entries from queuing a Delete;
+        // this is the backstop.
+        held_back += pending_deletes.len() as u32;
+        pending_deletes.clear();
     }
 
     // ── Phase 3: parallel streaming uploads ────────────────────────────────
@@ -959,8 +1265,13 @@ pub async fn run(
 
     // ── Phase 4: sequential downloads ──────────────────────────────────────
     for (rel, remote) in &pending_downloads {
-        do_download(&api, &master_key, &local_dir, rel, remote, &mut state, dry_run).await?;
-        down_count += 1;
+        match do_download(&api, &master_key, &local_dir, rel, remote, &mut state, dry_run).await? {
+            DownloadOutcome::Downloaded => down_count += 1,
+            // Still uploading elsewhere (or unsafe destination); nothing written.
+            DownloadOutcome::Deferred => skipped += 1,
+            // The remote copy is untouched; the next pass tries again (task 1916).
+            DownloadOutcome::Unreadable => failed += 1,
+        }
     }
 
     // ── Phase 5: sequential deletes ────────────────────────────────────────
@@ -981,50 +1292,48 @@ pub async fn run(
     }
 
     // ── Phase 6: remote-delete reconciliation ──────────────────────────────
-    // A file that was synced before but is now gone from the remote listing
-    // (trashed or permanently deleted on the web app) must have its local
-    // mirror removed — otherwise the next scan re-uploads it and resurrects the
-    // deleted file. The byte-identical guard (inside the helper, already applied
-    // by the classifier) means an offline-edited file is never destroyed here;
-    // those were routed to an upload instead. Safe-by-default direction: the
-    // server is authoritative and the file is recoverable from server trash.
+    // Absence is not deletion (task 1915). A local mirror is removed only when
+    // the server itself reports that file's id trashed (a tombstone, checked in
+    // `plan_absence`), the file is still byte-identical to the manifest (re-checked
+    // right now, not from the scan), and the breaker above did not trip. The
+    // file is MOVED to `.bb-trash/` inside the sync folder - never unlinked - so
+    // the only live copy can always be put back.
     for rel in &pending_remote_deletes {
         if !dry_run {
-            let path = match crate::safe_path::safe_rel_join(&local_dir, rel, crate::safe_path::Rules::Host) {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!(
-                        "  {} could not remove {rel:?}: {e}",
-                        "!".custom_color(crate::colors::AMBER)
-                    );
+            let Some(entry) = state.files.get(rel).cloned() else {
+                continue;
+            };
+            match remove_local_recoverably(&local_dir, rel, &entry) {
+                Ok(true) => {
+                    state.files.remove(rel);
+                }
+                Ok(false) => {
+                    print_notice(&format!("{rel} changed since the scan, kept"));
                     continue;
                 }
-            };
-            match std::fs::remove_file(&path) {
-                Ok(()) => {}
-                // Already gone locally (e.g. user deleted both sides): fine.
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => {
-                    eprintln!(
-                        "  {} could not remove {}: {e}",
-                        "!".custom_color(crate::colors::AMBER),
-                        rel,
-                    );
+                    print_notice(&e);
                     // Keep the manifest entry so we retry on the next pass.
                     continue;
                 }
             }
-            state.files.remove(rel);
         }
         if !ui::is_json() && !ui::is_quiet() {
             println!(
                 "  {} {} {}",
                 "\u{2717}".custom_color(crate::colors::RED_ERR),
-                "removed (deleted remotely)".custom_color(crate::colors::INK_DIM),
+                format!("moved to {}/ (deleted remotely)", crate::sync_safety::RECOVERY_DIR)
+                    .custom_color(crate::colors::INK_DIM),
                 rel.custom_color(crate::colors::INK),
             );
         }
         deletes += 1;
+    }
+    // Gone from both sides: nothing on disk to touch, just drop the stale entry.
+    for rel in &pending_forget {
+        if !dry_run {
+            state.files.remove(rel);
+        }
     }
 
     state.last_sync = Some(Utc::now());
@@ -1063,14 +1372,21 @@ pub async fn run(
     // A one-shot run (`--once`, json/quiet, …) exits 3 so scripts and cron jobs
     // notice (flow-6: it used to print "✓ synced" and exit 0). A dry run only
     // previews, and the watch loop keeps retrying, so neither fails here.
-    let incomplete = failed > 0 || conflicts > 0;
+    let incomplete = failed > 0 || conflicts > 0 || held_back > 0 || delete_refused;
     let incomplete_err = || {
         crate::exit::with_code(
             crate::exit::INCOMPLETE,
             format!(
                 "sync incomplete: {} \u{2014} fix the cause and re-run{}",
-                incomplete_summary(failed, conflicts),
-                if conflicts > 0 {
+                match incomplete_summary(failed, conflicts, held_back) {
+                    s if s.is_empty() && delete_refused => "--delete refused on a changed remote folder".to_string(),
+                    s => s,
+                },
+                if delete_refused {
+                    " (`bb sync --rebind` accepts the new remote folder before --delete may trash anything)"
+                } else if held_back > 0 {
+                    " (`--allow-mass-delete` confirms the held-back removals)"
+                } else if conflicts > 0 {
                     " (`--force` overwrites conflicts with the local copy)"
                 } else {
                     ""
@@ -1088,6 +1404,7 @@ pub async fn run(
             "failed": failed,
             "conflicts": conflicts,
             "deleted": deletes,
+            "held_back": held_back,
             "skipped": skipped,
             "bytes": total_bytes,
             "elapsed_secs": elapsed_secs,
@@ -1147,6 +1464,12 @@ pub async fn run(
         parts.push(format!(
             "{}",
             format!("{failed} failed").custom_color(crate::colors::RED_ERR)
+        ));
+    }
+    if held_back > 0 {
+        parts.push(format!(
+            "{}",
+            format!("{held_back} held back").custom_color(crate::colors::AMBER)
         ));
     }
     if deletes > 0 {
@@ -1341,6 +1664,7 @@ async fn run_plain_watch(
                     let resync_folders = walk_local_folders(local_dir)?;
                     let mut resync_remote_files: HashMap<String, RemoteFile> = HashMap::new();
                     let mut resync_remote_folders: HashMap<String, Uuid> = HashMap::new();
+                    let mut resync_health = crate::sync_safety::ListingHealth::default();
                     walk_remote(
                         &resync_api,
                         &resync_master,
@@ -1348,6 +1672,7 @@ async fn run_plain_watch(
                         "",
                         &mut resync_remote_files,
                         &mut resync_remote_folders,
+                        &mut resync_health,
                         None,
                     )
                     .await?;
@@ -1372,8 +1697,35 @@ async fn run_plain_watch(
                     // (shared helper — same decision as the one-shot path). This
                     // must run before the upload loop so a remotely-deleted file
                     // is not re-uploaded (resurrected) by the change scan below.
-                    let removed =
-                        reconcile_remote_deletions(local_dir, state, &resync_local, &resync_remote_files, false);
+                    // The watch loop never mass-deletes: the breaker has no
+                    // confirmation channel here, so `allow_mass_delete` is false.
+                    // A root change the first pass saw is still unreconciled here.
+                    let absence = plan_absence(
+                        &resync_api,
+                        state,
+                        &resync_local,
+                        &resync_remote_files,
+                        &resync_health,
+                        root_unreconciled(state, remote_folder_id),
+                        false,
+                    )
+                    .await;
+                    if let Some(msg) = untrusted_notice(&absence, state, &resync_remote_files) {
+                        print_notice(&msg);
+                    }
+                    let reconciled = reconcile_remote_deletions(
+                        local_dir,
+                        state,
+                        &resync_local,
+                        &resync_remote_files,
+                        &absence,
+                        false,
+                        false,
+                    );
+                    for msg in &reconciled.notices {
+                        print_notice(msg);
+                    }
+                    let removed = reconciled.removed;
                     let now_del = chrono::Local::now().format("%H:%M:%S");
                     for rel in &removed {
                         eprintln!(
@@ -1399,7 +1751,8 @@ async fn run_plain_watch(
                     for rel in &resync_keys {
                         let local = resync_local.get(rel).cloned();
                         let remote = resync_remote_files.get(rel).cloned();
-                        let prior = state.files.get(rel).cloned();
+                        let prior =
+                            trusted_prior(state, rel, remote.is_some(), root_unreconciled(state, remote_folder_id));
 
                         if let Some(l) = local {
                             // Use the SAME content-hash-aware change detection as
@@ -1609,6 +1962,7 @@ async fn run_tui_watch(
 
             let mut resync_remote_files: HashMap<String, RemoteFile> = HashMap::new();
             let mut resync_remote_folders: HashMap<String, Uuid> = HashMap::new();
+            let mut resync_health = crate::sync_safety::ListingHealth::default();
             if let Err(e) = walk_remote(
                 &resync_api,
                 &resync_master,
@@ -1616,6 +1970,7 @@ async fn run_tui_watch(
                 "",
                 &mut resync_remote_files,
                 &mut resync_remote_folders,
+                &mut resync_health,
                 None,
             )
             .await
@@ -1653,13 +2008,32 @@ async fn run_tui_watch(
             // prior-synced file gone from the remote + byte-identical locally is
             // removed, so the upload loop below cannot resurrect it. Offline-
             // edited files are left for the upload pass to re-add.
-            let removed = reconcile_remote_deletions(
+            let absence = plan_absence(
+                &resync_api,
+                &sync_state,
+                &resync_local,
+                &resync_remote_files,
+                &resync_health,
+                root_unreconciled(&sync_state, remote_folder_id),
+                false,
+            )
+            .await;
+            if let Some(msg) = untrusted_notice(&absence, &sync_state, &resync_remote_files) {
+                let _ = sync_tx.send(TuiEvent::SyncError(msg));
+            }
+            let reconciled = reconcile_remote_deletions(
                 &sync_local_dir,
                 &mut sync_state,
                 &resync_local,
                 &resync_remote_files,
+                &absence,
+                false,
                 false,
             );
+            for msg in &reconciled.notices {
+                let _ = sync_tx.send(TuiEvent::SyncError(msg.clone()));
+            }
+            let removed = reconciled.removed;
             for rel in &removed {
                 let file_name = rel.rsplit('/').next().unwrap_or(rel).to_string();
                 let _ = sync_tx.send(TuiEvent::SyncUpdate(SyncFileEvent {
@@ -1682,7 +2056,12 @@ async fn run_tui_watch(
             for rel in &resync_keys {
                 let local = resync_local.get(rel).cloned();
                 let remote = resync_remote_files.get(rel).cloned();
-                let prior = sync_state.files.get(rel).cloned();
+                let prior = trusted_prior(
+                    &sync_state,
+                    rel,
+                    remote.is_some(),
+                    root_unreconciled(&sync_state, remote_folder_id),
+                );
 
                 if let Some(l) = local {
                     // Same content-hash-aware detection as the one-shot + plain-
@@ -2260,10 +2639,16 @@ fn parent_remote_id(rel: &str, folders: &HashMap<String, Uuid>, root_id: Uuid) -
 }
 
 /// "1 failed · 2 conflicts" — the counts a non-clean sync pass reports.
-fn incomplete_summary(failed: u32, conflicts: u32) -> String {
+fn incomplete_summary(failed: u32, conflicts: u32, held_back: u32) -> String {
     let mut parts = Vec::new();
     if failed > 0 {
         parts.push(format!("{failed} failed"));
+    }
+    if held_back > 0 {
+        parts.push(format!(
+            "{held_back} deletion{} held back",
+            if held_back == 1 { "" } else { "s" }
+        ));
     }
     if conflicts > 0 {
         let s = if conflicts == 1 { "" } else { "s" };
@@ -2357,9 +2742,13 @@ async fn walk_remote(
     prefix: &str,
     files: &mut HashMap<String, RemoteFile>,
     folders: &mut HashMap<String, Uuid>,
+    health: &mut crate::sync_safety::ListingHealth,
     scan: Option<&indicatif::ProgressBar>,
 ) -> Result<(), String> {
     let listing = api.list_files(Some(&folder_id.to_string())).await?;
+    if crate::sync_safety::listing_truncated(&listing) {
+        health.truncated = true;
+    }
     let items = listing
         .get("files")
         .and_then(|v| v.as_array())
@@ -2376,7 +2765,12 @@ async fn walk_remote(
         // UUID key derivations (binary and string).
         let name = match crate::crypto::decrypt_name(master_key, id_str, name_enc) {
             Some(n) => n,
-            None => continue,
+            None => {
+                // An entry we cannot read might be exactly a file we think is
+                // gone (wrong key, damaged blob): the listing is not complete.
+                health.unreadable += 1;
+                continue;
+            }
         };
 
         // A remote name becomes a local path segment (and part of every `rel`
@@ -2388,6 +2782,7 @@ async fn walk_remote(
                 "!".custom_color(crate::colors::AMBER),
                 if is_folder { "folder" } else { "file" },
             );
+            health.unreadable += 1;
             continue;
         }
 
@@ -2403,7 +2798,7 @@ async fn walk_remote(
 
         if is_folder {
             folders.insert(rel.clone(), id);
-            Box::pin(walk_remote(api, master_key, id, &rel, files, folders, scan)).await?;
+            Box::pin(walk_remote(api, master_key, id, &rel, files, folders, health, scan)).await?;
         } else {
             let updated_at_str = item.get("updated_at").and_then(|v| v.as_str()).unwrap_or("");
             let updated_at = DateTime::parse_from_rfc3339(updated_at_str)
@@ -2479,6 +2874,24 @@ async fn do_upload(
     Ok(())
 }
 
+/// How one sync download ended.
+#[derive(Debug, PartialEq, Eq)]
+enum DownloadOutcome {
+    Downloaded,
+    /// Not downloaded this pass and nothing written: another device is still
+    /// uploading it, or the destination failed the containment check.
+    Deferred,
+    /// The bytes could not be decrypted. The remote copy was NOT touched and no
+    /// local file or manifest entry was written; the next pass tries again.
+    Unreadable,
+}
+
+/// Does this download error mean "could not decrypt" (as opposed to a network
+/// or server failure)? Both are reported and retried; neither trashes anything.
+fn is_decrypt_failure(e: &str) -> bool {
+    e.contains("key derivation") || e.contains("decrypt")
+}
+
 async fn do_download(
     api: &ApiClient,
     master_key: &beebeeb_core::kdf::MasterKey,
@@ -2487,7 +2900,7 @@ async fn do_download(
     remote: &RemoteFile,
     state: &mut SyncState,
     dry_run: bool,
-) -> Result<(), String> {
+) -> Result<DownloadOutcome, String> {
     if !ui::is_json() && !ui::is_quiet() {
         println!(
             "  {} {}",
@@ -2497,7 +2910,7 @@ async fn do_download(
     }
 
     if dry_run {
-        return Ok(());
+        return Ok(DownloadOutcome::Downloaded);
     }
 
     // Resolve the destination through the containment check: a symlinked
@@ -2509,38 +2922,39 @@ async fn do_download(
                 "  {} skipped download of {rel:?}: {e}",
                 "!".custom_color(crate::colors::AMBER)
             );
-            return Ok(());
+            return Ok(DownloadOutcome::Deferred);
         }
     };
     match download_to(api, master_key, remote.id, remote.chunk_count, &out_path).await {
         Ok(()) => {}
         Err(e) if e.contains("still in progress") || e.contains("409") => {
             // A partially-uploaded remote (this or another device still pushing).
-            // Do NOT trash it — that throws away resumable progress and forces a
+            // Do NOT trash it - that throws away resumable progress and forces a
             // restart from byte 0. Leave the partial: the upload side resumes via
             // /upload/status (skipping present chunks), and a later sync sees the
             // completed file.
             if !ui::is_quiet() {
                 use colored::Colorize;
                 eprintln!(
-                    "  {} {} — still uploading, leaving partial to resume",
+                    "  {} {} \u{2014} still uploading, leaving partial to resume",
                     "!".custom_color(crate::colors::AMBER),
                     rel.custom_color(crate::colors::INK_DIM),
                 );
             }
-            return Ok(());
+            return Ok(DownloadOutcome::Deferred);
         }
-        Err(e) if e.contains("key derivation") || e.contains("decrypt") => {
-            if !ui::is_quiet() {
-                use colored::Colorize;
-                eprintln!(
-                    "  {} {} — corrupt remote copy, trashing to re-upload from local",
-                    "!".custom_color(crate::colors::AMBER),
-                    rel.custom_color(crate::colors::INK_DIM),
-                );
-            }
-            let _ = api.trash_file(&remote.id.to_string()).await;
-            return Ok(());
+        Err(e) if is_decrypt_failure(&e) => {
+            // Task 1916 (deletion-safety spec C3): a download that fails to
+            // decrypt says something about THIS client (an older bb meeting a
+            // newer chunk format, a wrong key), not about the file. The remote
+            // copy may be the only copy there is: leave it alone, report it, and
+            // try again on a later pass.
+            eprintln!(
+                "  {} {} \u{2014} could not decrypt ({e}). The remote copy is untouched; will retry next pass.",
+                "!".custom_color(crate::colors::RED_ERR),
+                rel.custom_color(crate::colors::INK),
+            );
+            return Ok(DownloadOutcome::Unreadable);
         }
         Err(e) => return Err(e),
     }
@@ -2565,7 +2979,7 @@ async fn do_download(
         },
     );
 
-    Ok(())
+    Ok(DownloadOutcome::Downloaded)
 }
 
 /// Streaming, constant-memory upload of a single file. Thin wrapper over
@@ -2795,17 +3209,63 @@ mod tests {
         }
     }
 
+    /// Listing trusted, and the server reports EVERY manifest entry trashed.
+    fn plan_all(state: &SyncState) -> AbsencePlan {
+        AbsencePlan {
+            tombstones: state.files.values().map(|e| e.remote_id).collect(),
+            untrusted: None,
+        }
+    }
+
+    /// Listing trusted, but the server reports nothing trashed.
+    fn plan_none() -> AbsencePlan {
+        AbsencePlan {
+            tombstones: HashSet::new(),
+            untrusted: None,
+        }
+    }
+
+    /// `n` previously-synced files `f0.txt`.. on disk and in the manifest.
+    fn synced_files(dir: &Path, n: usize) -> (SyncState, HashMap<String, LocalFile>) {
+        let mut state = SyncState::default();
+        let mut local_files = HashMap::new();
+        for i in 0..n {
+            let rel = format!("f{i}.txt");
+            let local = write_file(dir, &rel, format!("content {i}").as_bytes());
+            state.files.insert(rel.clone(), entry_for(&local));
+            local_files.insert(rel, local);
+        }
+        (state, local_files)
+    }
+
+    fn recovered_names(dir: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.join(crate::sync_safety::RECOVERY_DIR)];
+        while let Some(p) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&p) else { continue };
+            for e in rd.flatten() {
+                if e.path().is_dir() {
+                    stack.push(e.path());
+                } else {
+                    out.push(e.file_name().to_string_lossy().into_owned());
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
     // ── pure decision function ─────────────────────────────────────────────
 
     #[test]
-    fn classify_prior_synced_unchanged_is_remote_delete() {
+    fn classify_prior_synced_unchanged_with_tombstone_is_remote_delete() {
         let dir = scratch_dir("classify-del");
         let local = write_file(&dir, "a.txt", b"hello");
         let entry = entry_for(&local);
         assert_eq!(
-            classify_remote_absent(Some(&local), Some(&entry)),
+            classify_remote_absent(Some(&local), Some(&entry), true),
             RemoteAbsent::DeleteLocal,
-            "a prior-synced, byte-identical local file gone from remote is a remote delete"
+            "a prior-synced, byte-identical local file the server reports trashed is a remote delete"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2819,7 +3279,7 @@ mod tests {
         let edited = write_file(&dir, "a.txt", b"hello, edited offline");
         assert_ne!(edited.content_hash, entry.content_hash.clone().unwrap());
         assert_eq!(
-            classify_remote_absent(Some(&edited), Some(&entry)),
+            classify_remote_absent(Some(&edited), Some(&entry), true),
             RemoteAbsent::ReAddLocal,
             "a locally-modified file must NOT be deleted on remote-absence"
         );
@@ -2831,7 +3291,7 @@ mod tests {
         let dir = scratch_dir("classify-new");
         let local = write_file(&dir, "fresh.txt", b"brand new");
         assert_eq!(
-            classify_remote_absent(Some(&local), None),
+            classify_remote_absent(Some(&local), None, true),
             RemoteAbsent::NotADelete,
             "a genuinely-new local file (no manifest entry) is an upload, not a delete"
         );
@@ -2870,10 +3330,13 @@ mod tests {
         local_files.insert("a.txt".to_string(), local);
         let remote_files: HashMap<String, RemoteFile> = HashMap::new(); // remote gone
 
-        let removed = reconcile_remote_deletions(&dir, &mut state, &local_files, &remote_files, false);
+        let plan = plan_all(&state);
+        let removed =
+            reconcile_remote_deletions(&dir, &mut state, &local_files, &remote_files, &plan, false, false).removed;
 
         assert_eq!(removed, vec!["a.txt".to_string()]);
-        assert!(!dir.join("a.txt").exists(), "local mirror must be deleted");
+        assert!(!dir.join("a.txt").exists(), "local mirror must leave the sync folder");
+        assert_eq!(recovered_names(&dir), vec!["a.txt".to_string()], "and be recoverable");
         assert!(!state.files.contains_key("a.txt"), "manifest entry must be dropped");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2895,7 +3358,9 @@ mod tests {
         local_files.insert("a.txt".to_string(), edited);
         let remote_files: HashMap<String, RemoteFile> = HashMap::new();
 
-        let removed = reconcile_remote_deletions(&dir, &mut state, &local_files, &remote_files, false);
+        let plan = plan_all(&state);
+        let removed =
+            reconcile_remote_deletions(&dir, &mut state, &local_files, &remote_files, &plan, false, false).removed;
 
         assert!(removed.is_empty(), "an offline-edited file must NOT be removed");
         assert!(dir.join("a.txt").exists(), "local edit must survive reconciliation");
@@ -2918,7 +3383,9 @@ mod tests {
         local_files.insert("new.txt".to_string(), local);
         let remote_files: HashMap<String, RemoteFile> = HashMap::new();
 
-        let removed = reconcile_remote_deletions(&dir, &mut state, &local_files, &remote_files, false);
+        let plan = plan_all(&state);
+        let removed =
+            reconcile_remote_deletions(&dir, &mut state, &local_files, &remote_files, &plan, false, false).removed;
 
         assert!(removed.is_empty(), "a new local file is never a remote delete");
         assert!(dir.join("new.txt").exists(), "new local file must remain on disk");
@@ -2938,7 +3405,9 @@ mod tests {
         let mut remote_files = HashMap::new();
         remote_files.insert("a.txt".to_string(), remote_file()); // still on server
 
-        let removed = reconcile_remote_deletions(&dir, &mut state, &local_files, &remote_files, false);
+        let plan = plan_all(&state);
+        let removed =
+            reconcile_remote_deletions(&dir, &mut state, &local_files, &remote_files, &plan, false, false).removed;
 
         assert!(removed.is_empty());
         assert!(dir.join("a.txt").exists());
@@ -2963,7 +3432,9 @@ mod tests {
         let local_files: HashMap<String, LocalFile> = HashMap::new(); // not on disk
         let remote_files: HashMap<String, RemoteFile> = HashMap::new(); // not on server
 
-        let removed = reconcile_remote_deletions(&dir, &mut state, &local_files, &remote_files, false);
+        let plan = plan_all(&state);
+        let removed =
+            reconcile_remote_deletions(&dir, &mut state, &local_files, &remote_files, &plan, false, false).removed;
 
         assert_eq!(removed, vec!["gone.txt".to_string()]);
         assert!(!state.files.contains_key("gone.txt"), "stale manifest entry dropped");
@@ -2982,7 +3453,9 @@ mod tests {
         local_files.insert("a.txt".to_string(), local);
         let remote_files: HashMap<String, RemoteFile> = HashMap::new();
 
-        let removed = reconcile_remote_deletions(&dir, &mut state, &local_files, &remote_files, true);
+        let plan = plan_all(&state);
+        let removed =
+            reconcile_remote_deletions(&dir, &mut state, &local_files, &remote_files, &plan, false, true).removed;
 
         // It still reports the rel, but touches nothing.
         assert_eq!(removed, vec!["a.txt".to_string()]);
@@ -3012,7 +3485,9 @@ mod tests {
         resync_local.insert("a.txt".to_string(), local);
         let remote_files: HashMap<String, RemoteFile> = HashMap::new(); // remote gone
 
-        let removed = reconcile_remote_deletions(&dir, &mut state, &resync_local, &remote_files, false);
+        let plan = plan_all(&state);
+        let removed =
+            reconcile_remote_deletions(&dir, &mut state, &resync_local, &remote_files, &plan, false, false).removed;
         assert_eq!(removed, vec!["a.txt".to_string()]);
         // Local mirror + manifest entry are gone after reconcile.
         assert!(!dir.join("a.txt").exists());
@@ -3075,7 +3550,9 @@ mod tests {
         resync_local.insert("a.txt".to_string(), edited.clone());
         let remote_files: HashMap<String, RemoteFile> = HashMap::new(); // remote gone
 
-        let removed = reconcile_remote_deletions(&dir, &mut state, &resync_local, &remote_files, false);
+        let plan = plan_all(&state);
+        let removed =
+            reconcile_remote_deletions(&dir, &mut state, &resync_local, &remote_files, &plan, false, false).removed;
         assert!(removed.is_empty(), "an offline edit must never be deleted");
         assert!(dir.join("a.txt").exists(), "the local edit must survive on disk");
         assert!(state.files.contains_key("a.txt"), "manifest entry retained for re-add");
@@ -3099,5 +3576,294 @@ mod tests {
             "the old (mtime,size)-only watch compare misses this edit — that was the bug"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── tasks 1915/1916: absence is not deletion ───────────────────────────
+
+    #[test]
+    fn classify_identical_without_tombstone_is_kept_not_deleted() {
+        let dir = scratch_dir("classify-unconfirmed");
+        let local = write_file(&dir, "a.txt", b"hello");
+        let entry = entry_for(&local);
+        assert_eq!(
+            classify_remote_absent(Some(&local), Some(&entry), false),
+            RemoteAbsent::KeepUnconfirmed,
+            "absent from the listing but no deletion record: keep"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn classify_edited_file_is_readded_whether_or_not_tombstoned() {
+        let dir = scratch_dir("classify-edit-both");
+        let original = write_file(&dir, "a.txt", b"hello");
+        let entry = entry_for(&original);
+        let edited = write_file(&dir, "a.txt", b"hello again, different");
+        for tomb in [true, false] {
+            assert_eq!(
+                classify_remote_absent(Some(&edited), Some(&entry), tomb),
+                RemoteAbsent::ReAddLocal
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn classify_missing_local_only_forgets_the_manifest_entry() {
+        let dir = scratch_dir("classify-forget");
+        let phantom = write_file(&dir, "p.txt", b"x");
+        let entry = entry_for(&phantom);
+        for tomb in [true, false] {
+            assert_eq!(
+                classify_remote_absent(None, Some(&entry), tomb),
+                RemoteAbsent::ForgetStale
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// No tombstone => nothing is touched, however absent the file looks.
+    #[test]
+    fn reconcile_keeps_a_file_without_a_tombstone() {
+        let dir = scratch_dir("reconcile-no-tomb");
+        let (mut state, local_files) = synced_files(&dir, 3);
+        let remote_files: HashMap<String, RemoteFile> = HashMap::new();
+
+        let r = reconcile_remote_deletions(
+            &dir,
+            &mut state,
+            &local_files,
+            &remote_files,
+            &plan_none(),
+            false,
+            false,
+        );
+
+        assert!(r.removed.is_empty());
+        assert_eq!(state.files.len(), 3, "manifest untouched");
+        for i in 0..3 {
+            assert!(dir.join(format!("f{i}.txt")).exists());
+        }
+        assert!(recovered_names(&dir).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A tombstone removes THAT file only, and into the recoverable folder.
+    #[test]
+    fn reconcile_moves_only_the_tombstoned_file_to_recovery() {
+        let dir = scratch_dir("reconcile-one-tomb");
+        let (mut state, local_files) = synced_files(&dir, 3);
+        let plan = AbsencePlan {
+            tombstones: [state.files["f1.txt"].remote_id].into_iter().collect(),
+            untrusted: None,
+        };
+        let remote_files: HashMap<String, RemoteFile> = HashMap::new();
+
+        let r = reconcile_remote_deletions(&dir, &mut state, &local_files, &remote_files, &plan, false, false);
+
+        assert_eq!(r.removed, vec!["f1.txt".to_string()]);
+        assert!(!dir.join("f1.txt").exists());
+        assert!(dir.join("f0.txt").exists() && dir.join("f2.txt").exists());
+        assert!(!state.files.contains_key("f1.txt") && state.files.len() == 2);
+        assert_eq!(
+            recovered_names(&dir),
+            vec!["f1.txt".to_string()],
+            "moved aside, not unlinked"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 60 tombstones of 60 tracked is over max(50, 10 %): remove nothing.
+    #[test]
+    fn reconcile_breaker_holds_back_a_mass_delete() {
+        let dir = scratch_dir("reconcile-breaker");
+        let (mut state, local_files) = synced_files(&dir, 60);
+        let plan = plan_all(&state);
+        let remote_files: HashMap<String, RemoteFile> = HashMap::new();
+
+        let r = reconcile_remote_deletions(&dir, &mut state, &local_files, &remote_files, &plan, false, false);
+
+        assert!(
+            r.notices
+                .iter()
+                .any(|n| n.contains("mass delete held back") && n.contains("--allow-mass-delete")),
+            "the trip must be explained: {:?}",
+            r.notices
+        );
+        assert!(r.removed.is_empty());
+        assert_eq!(state.files.len(), 60);
+        for i in 0..60 {
+            assert!(dir.join(format!("f{i}.txt")).exists(), "f{i}.txt must survive");
+        }
+
+        // Explicit confirmation lets it through - still recoverably.
+        let r = reconcile_remote_deletions(&dir, &mut state, &local_files, &remote_files, &plan, true, false);
+        assert_eq!(r.removed.len(), 60);
+        assert!(!r.notices.iter().any(|n| n.contains("mass delete held back")));
+        assert_eq!(recovered_names(&dir).len(), 60);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Exactly the limit (50) is allowed; the breaker trips strictly above it.
+    #[test]
+    fn reconcile_breaker_allows_exactly_the_limit() {
+        let dir = scratch_dir("reconcile-breaker-edge");
+        let (mut state, local_files) = synced_files(&dir, 60);
+        let plan = AbsencePlan {
+            tombstones: (0..50).map(|i| state.files[&format!("f{i}.txt")].remote_id).collect(),
+            untrusted: None,
+        };
+        let remote_files: HashMap<String, RemoteFile> = HashMap::new();
+
+        let r = reconcile_remote_deletions(&dir, &mut state, &local_files, &remote_files, &plan, false, false);
+
+        assert_eq!(
+            r.removed.len(),
+            50,
+            "50 tombstones of 60 tracked is within max(50, 10%)"
+        );
+        assert!(!r.notices.iter().any(|n| n.contains("mass delete held back")));
+        assert_eq!(state.files.len(), 10);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The scan can be hours old: a file edited since must be kept, not moved.
+    #[test]
+    fn reconcile_keeps_a_file_edited_after_the_scan() {
+        let dir = scratch_dir("reconcile-edited-since");
+        let (mut state, local_files) = synced_files(&dir, 1);
+        // `local_files` (the scan) still says identical; the disk has moved on.
+        std::fs::write(dir.join("f0.txt"), b"typed after the scan began").unwrap();
+        let plan = plan_all(&state);
+        let remote_files: HashMap<String, RemoteFile> = HashMap::new();
+
+        let r = reconcile_remote_deletions(&dir, &mut state, &local_files, &remote_files, &plan, false, false);
+
+        assert!(r.removed.is_empty());
+        assert_eq!(
+            std::fs::read(dir.join("f0.txt")).unwrap(),
+            b"typed after the scan began"
+        );
+        assert!(state.files.contains_key("f0.txt"));
+        assert!(recovered_names(&dir).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn recovery_folder_is_never_sync_input() {
+        assert!(is_ignored_path(Path::new(
+            "/home/u/Docs/.bb-trash/20261017-120000/a.txt"
+        )));
+        assert!(is_ignored_path(Path::new("/home/u/Docs/.bb-trash")));
+        assert!(!is_ignored_path(Path::new("/home/u/Docs/a.txt")));
+    }
+
+    #[test]
+    fn root_is_unreconciled_only_when_bound_to_another_folder() {
+        let bound = Uuid::new_v4();
+        let mut state = SyncState::default();
+        assert!(
+            !root_unreconciled(&state, bound),
+            "an unbound directory binds on its first sync"
+        );
+        state.remote_folder_id = Some(bound);
+        assert!(!root_unreconciled(&state, bound));
+        assert!(
+            root_unreconciled(&state, Uuid::new_v4()),
+            "bound to another folder: removals stay blocked"
+        );
+    }
+
+    #[test]
+    fn decrypt_failures_are_told_apart_from_other_errors() {
+        assert!(is_decrypt_failure("decrypt chunk 0: aead error"));
+        assert!(is_decrypt_failure("key derivation failed"));
+        assert!(!is_decrypt_failure("download failed (500): oops"));
+        assert!(!is_decrypt_failure("download truncated: chunk 1/3"));
+    }
+
+    // ── walk_remote: what the listing could not show us ────────────────────
+
+    /// In-process `GET /api/v1/files` that answers every request with `entries`.
+    async fn mock_listing(entries: Vec<serde_json::Value>) -> ApiClient {
+        use axum::routing::get;
+        let app = axum::Router::new().route(
+            "/api/v1/files",
+            get(move || {
+                let entries = entries.clone();
+                async move { axum::Json(serde_json::json!({ "files": entries })) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        ApiClient::new_for_test(format!("http://{addr}"))
+    }
+
+    fn entry(name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": Uuid::new_v4().to_string(),
+            "name_encrypted": name,
+            "is_folder": false,
+            "chunk_count": 1,
+            "updated_at": "2020-01-01T00:00:00+00:00",
+        })
+    }
+
+    async fn walk(api: &ApiClient) -> (HashMap<String, RemoteFile>, crate::sync_safety::ListingHealth) {
+        let mk = beebeeb_core::kdf::MasterKey::from_bytes([7u8; 32]);
+        let mut files = HashMap::new();
+        let mut folders = HashMap::new();
+        let mut health = crate::sync_safety::ListingHealth::default();
+        walk_remote(
+            api,
+            &mk,
+            Uuid::new_v4(),
+            "",
+            &mut files,
+            &mut folders,
+            &mut health,
+            None,
+        )
+        .await
+        .unwrap();
+        (files, health)
+    }
+
+    #[tokio::test]
+    async fn walk_remote_reports_a_complete_listing_as_healthy() {
+        let api = mock_listing(vec![entry("a.txt"), entry("b.txt")]).await;
+        let (files, health) = walk(&api).await;
+        assert_eq!(files.len(), 2);
+        assert_eq!(health, crate::sync_safety::ListingHealth::default());
+    }
+
+    #[tokio::test]
+    async fn walk_remote_counts_names_it_cannot_read() {
+        // `{...` is not a plaintext name and not a valid blob: undecryptable.
+        // `../x` and `a/b` are unsafe as local path segments.
+        let api = mock_listing(vec![
+            entry("ok.txt"),
+            entry("{not-a-blob"),
+            entry("../escape.txt"),
+            entry("a/b.txt"),
+        ])
+        .await;
+        let (files, health) = walk(&api).await;
+        assert_eq!(files.keys().cloned().collect::<Vec<_>>(), vec!["ok.txt".to_string()]);
+        assert_eq!(health.unreadable, 3, "three entries were skipped");
+        assert!(!health.truncated);
+    }
+
+    #[tokio::test]
+    async fn walk_remote_flags_a_listing_cut_short_by_the_cap() {
+        // 50,001 entries in one page: the client's 50,000 safety cap cuts it.
+        let entries: Vec<_> = (0..50_001).map(|i| entry(&format!("f{i}.txt"))).collect();
+        let api = mock_listing(entries).await;
+        let (files, health) = walk(&api).await;
+        assert_eq!(files.len(), 50_000);
+        assert!(health.truncated, "a capped listing must be marked incomplete");
     }
 }
