@@ -7,12 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.6] - 2026-10-17
+
 ### Added
 - `bb region` shows where new uploads are stored and lets you choose. The default is Europe: no specific country, Beebeeb places your files in any of its European datacenters. `bb region set <europe|id|city>` picks one datacenter instead (for example `bb region set helsinki`); `bb region get` shows your choice. The list is fetched from the server, so a datacenter that goes live appears without a new `bb`; datacenters that are not live yet are listed as coming soon and cannot be chosen. Files you already uploaded stay where they are. (task 1919)
 
 ### Changed
 - `bb whoami` and `bb account show` name your actual storage choice (for example "Helsinki, Finland", or "Europe · default, any datacenter"). `bb account show` no longer prints a provider name, and `bb billing show` no longer names one city for the billing region. (task 1919)
 - `bb whoami --json` has a new `region_id` key (your stored choice, `null` for the default); `region` is now the name of your choice ("Europe", "Helsinki"). (task 1919)
+- File contents are now read only through beebeeb-core's chunk-format-aware reader (core 337436a). Every download (`bb pull` single, folder and `--zip`, `bb sync`, `bb webdav`, `bb mount`, `bb repair`) first takes the file's chunk-format pin from its encrypted metadata, never from a server field, and opens each chunk under that pin; a truncated file in the new format is rejected. Uploads still write the current format. An interrupted upload resumes only when its recorded format allows it; otherwise (including a resume record written by an earlier `bb`) the partial upload is abandoned and the file is uploaded again from the first chunk. (task 1943)
+- A file whose stored name is not encrypted, or does not decrypt, is now refused instead of downloaded: `bb pull` of that file fails with the reason, folder and `--zip` pulls skip it with a warning and exit 3, and `bb sync` reports it, leaves the remote copy alone and exits 3. We know of no such files in real accounts (Beebeeb clients encrypt file names); if you see this error, please report it. Folders with plain names are not affected. (task 1943)
+
+### Fixed
+- A second `bb push --replace` of the same file failed with "stale base version for replacement upload" (since 2026-06-08): `bb` read the file's version from a field the server does not send and always sent version 1. Every replace now sends the current version and creates the next one. The same fix applies to `bb webdav` saving over an existing file. (task 1951)
 
 ## [0.13.5] - 2026-10-17
 

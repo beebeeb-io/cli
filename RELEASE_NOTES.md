@@ -1,95 +1,100 @@
-# Beebeeb CLI 0.13.5 — `bb sync` no longer deletes a local file because it is missing remotely
+# Beebeeb CLI 0.13.6 — choose where your files are stored, and a stricter download path
 
-This is a safety release for `bb sync`, with two fixes. In 0.13.4 and earlier, `bb sync` and the
-background sync daemon deleted any synced local file that was missing from the remote listing, and a
-download that failed to decrypt moved the remote copy to the vault Trash. A listing that came back
-empty or incomplete, or a sync folder that now pointed at a different remote folder, could therefore
-remove local files that nobody had deleted. 0.13.5 removes a local file only when the server reports
-that exact file as trashed, and even then moves it into a recovery folder instead of deleting it. A
-decrypt failure never touches the remote copy. Since v0.13.4 two pull requests landed on `main`:
-beebeeb-io/cli#83 (both fixes, tasks 1915 and 1916) and #82 (the Scoop manifest bump for 0.13.4,
-which does not touch the binary).
+This release adds `bb region`, so you can choose where new uploads are stored: Europe (the default,
+any of our European datacenters) or one specific datacenter. It also moves every download onto
+beebeeb-core's chunk-format-aware reader, which checks each file's format against its encrypted
+metadata before it decrypts anything, and fixes `bb push --replace`, which failed the second time
+you replaced the same file. Since v0.13.5 three pull requests landed on `main`: beebeeb-io/cli#84
+(`bb region`, task 1919), #87 (the new read path, task 1943) and #88 (the `--replace` fix, task
+1951). #86, the Scoop manifest bump for 0.13.5, does not touch the binary.
 
 ### What's New
 
-- **`.bb-trash/` inside your sync folder.** When `bb sync` removes a local file because it was deleted
-  remotely, the file is moved to `.bb-trash/<UTC time>/<path>` inside the sync folder, not deleted.
-  The folder starts with a dot, so `bb sync` never scans, uploads or watches it. `bb` does not empty it:
-  look there if a file disappeared, and delete the folder yourself when you no longer need it.
-- **`bb sync --allow-mass-delete`.** If one pass would remove more than 50 files, or more than 10% of
-  the files the folder tracks (whichever is larger: 51 of 501 trips it), it removes nothing and says
-  so. Check the Trash in the web app first; if the deletions are intended, run
-  `bb sync --once --allow-mass-delete` once to let them through (into `.bb-trash/`). The background
-  daemon never gets this flag, and the continuous watch loop never removes over the limit.
-- **`bb sync --rebind`.** If the remote folder a sync folder points at changed (the old one was trashed
-  and re-created, or you now sync against a different remote path), every pass keeps local removals
-  paused, and a file that exists on both sides is reported as a conflict instead of replacing or
-  overwriting either copy. `bb sync --rebind` accepts the new remote folder: it drops the old folder's
-  sync record, so nothing is removed on its account, and your local files then sync in as new files.
-  It cannot be combined with `--daemon`.
-- **Exit code 3 from `bb sync --once` in more cases.** A one-shot pass (`--once`, `--json`, `--quiet`)
-  now exits 3 when the mass-delete limit held removals back, when a download could not be decrypted,
-  and when `--delete` is used while the remote folder is unreconciled. Exit 3 already meant "the run
-  finished but left items failed or unresolved"; scripts that treat any non-zero exit as a failure will
-  now see these cases.
+- **`bb region list | get | set`.** `bb region` (or `bb region list`) lists where new uploads can
+  be stored, with your current choice marked. Today that is Europe (the default: no specific
+  country, Beebeeb places the file in any of its European datacenters) or one datacenter:
+  Falkenstein (Germany), Helsinki (Finland) or Nuremberg (Germany). Ede (Netherlands) is listed as
+  coming soon and cannot be chosen yet. `bb region set helsinki` (a datacenter id or city, or
+  `europe`) changes the choice; `bb region get` shows it. The list comes from the server, so a
+  datacenter that goes live appears without a new `bb`. Your choice applies to new uploads only:
+  files you already uploaded stay where they are.
+- **`bb whoami` and `bb account show` name your storage choice** (for example "Helsinki, Finland",
+  or "Europe · default, any datacenter"). `bb whoami --json` has a new `region_id` key (`null` for
+  the default), and `region` is now the name of your choice. `bb account show` no longer prints a
+  provider name, and `bb billing show` no longer names one city for the billing region.
 
 ### Bug Fixes / Hardening
 
-- **A file missing from the remote listing is no longer deleted locally.** (task 1915) A local file is
-  removed only when all of these hold:
-  - the server's own record for that file (`GET /files/{id}`) says it is trashed. A file that is gone
-    without such a record (renamed or moved in the web app, permanently purged, or another account) is
-    kept, and `bb sync` reports it on each pass;
-  - the local file is still byte-identical to what was last synced, checked again right before the
-    move, not only at the start of the pass;
-  - the listing can be trusted: it is not empty while the folder tracks files, every remote name
-    decrypted and was safe to use, it was not cut short by the 50,000-entry limit (a folder of exactly
-    50,000 entries is no longer treated as cut short), and the remote folder is the one this folder last
-    synced against;
-  - the pass stays under the mass-delete limit above.
-- **A download that fails to decrypt no longer moves the remote copy to the Trash.** (task 1916) In
-  0.13.4 and earlier, `bb sync` treated a file it could not decrypt as a corrupt remote copy and trashed
-  it. Now the remote file is left untouched, no local file or sync record is written, the error names
-  the file, a one-shot pass exits 3, and the next full pass tries again.
-- **`bb sync --delete` on a changed remote folder trashes nothing.** Its "synced before, missing
-  locally" entries belong to the old folder, so it prints a notice naming `bb sync --rebind` and exits 3.
-  After `--rebind` it behaves as before.
-- **What is not changed.** `--delete` on a folder whose remote root is unchanged still trashes remote
-  files that you deleted locally, as before. `--force` keeps its meaning for a conflict: the local copy
-  replaces the same-named remote file, and the remote copy goes to the web Trash first; on a changed
-  remote folder that applies to every same-named file, so run `bb sync --rebind` first if that is not
-  what you want. Moves and renames made in the web app are not reconciled: the old local copy stays next
-  to the new download. A permanently purged file (no record on the server) is kept locally, because it
-  cannot be told apart from a file in another account.
+- **A second `bb push --replace` of the same file no longer fails.** (task 1951) In every release
+  since 0.10.0 (the upload change of 2026-06-08), replacing a file that had already been replaced once failed with "stale base version
+  for replacement upload": `bb` read the file's version from a field the server does not send, so
+  it always claimed version 1. Every replace now sends the file's current version and creates the
+  next one. The same fix applies to `bb webdav` saving over an existing file (a PUT with
+  `--read-write`).
+- **Every download now goes through core's format-aware reader.** (task 1943, beebeeb-core
+  `337436a`, task 1908) `bb pull` (single file, folder, `--zip`), `bb sync`, `bb webdav`,
+  `bb mount` and `bb repair` first read the file's chunk-format pin from its encrypted, authenticated
+  metadata (never from a field the server could change) and open every chunk under that pin. A file
+  in the newer chunk format opens only as that format, and a truncated one is rejected. This is the
+  read side of a format change that no client writes yet: uploads from 0.13.6 still use the current
+  format and are readable by 0.13.5 and earlier.
+- **Interrupted uploads resume only when the format allows it.** A resumed upload continues only
+  when both the interrupted session and this `bb` use the current format. Otherwise the partial
+  upload is abandoned on the server and the file is uploaded again from the first chunk. A resume
+  record written by 0.13.5 or earlier has no recorded format, so the first resume after updating
+  starts that file again from the beginning, with the notice "the interrupted upload cannot be
+  continued in this chunk format; starting it again". As before, you resume an interrupted `bb push` with
+  `bb push --replace`.
+- **Behaviour change: a file whose stored name is not encrypted is refused.** Without encrypted
+  metadata there is no format pin to check, so `bb` no longer guesses. `bb pull` of such a file fails
+  with the reason; a folder pull or `--zip` skips it with a warning and exits 3; `bb sync` reports it,
+  leaves the remote copy alone and exits 3, and tries again on the next pass. We know of no such
+  files in real accounts (Beebeeb clients encrypt file names); if you see this error, please report
+  it. Folders with plain names are not affected.
 
 ### Verification
 
-Code under test: `cab3c86` (cli `main`, after #83). The release commit on top of it only changes the
-version to 0.13.5, `Cargo.lock` (that one line), this file, and the changelog.
+Code under test: `f7cfd95` (cli `main`, after #88). The release commit on top of it only changes the
+version to 0.13.6, `Cargo.lock` (that one line), this file, and the changelog.
 
-This release is built and published from a maintainer's machine, the same way as 0.13.4, not by the
+This release is built and published from a maintainer's machine, the same way as 0.13.5, not by the
 GitHub Actions release workflow. Artifacts and checksums use the same names and layout `dist`
 produces, built with `dist` 0.31.0.
 
-- `cargo test` on Linux, rustc 1.96.0: 573 passed, 0 failed, 2 ignored across 15 test binaries: main
-  suite (`bb`) 472, `sync_never_deletes` 13, `account_email_change` 2, `auth_errors` 8, `ecdh_compat` 4,
-  `mount_availability` 3, `move_parent` 7, `non_interactive` 6, `onboarding_state` 9, `pull_overwrite`
-  5, `pull_path_traversal` 21, `share_resolves_like_pull` 1, `step_up_opaque` 4, `webdav_auth` 14,
-  `zero_byte_files` 4. 0.13.4 had 532.
-- `cargo clippy --all-targets -- -D warnings` clean. `cargo fmt -- --check` clean. The GitHub CI
-  `Tests` job passed on the merged pull request (6m02s).
-- `sync_never_deletes` runs the real `bb` binary against an in-process mock API with a scratch `HOME`.
-  Every new behaviour test was seen to fail on the code before its fix, and each guard was
-  mutation-checked: deliberately breaking it (ignoring the trashed flag, allowing an empty listing,
-  turning the limit off, unlinking instead of moving, restoring the decrypt-failure trash, ignoring a
-  changed remote folder, skipping the re-check before the move, and others) turned the intended tests
-  red.
-- Not verified: none of this was run against production or a real account. The 50,000-entry limit is
-  tested by feeding 50,001 entries through the listing code, not against a live vault. The plain watch
-  loop has one end-to-end test (a changed remote folder removes nothing); the interactive (TUI) watch
-  loop has none and shares the same checks. Windows: the `bb.exe` is cross-compiled and is not executed on a Windows
-  machine by this release process. The Linux binaries are cross-compiled and not executed here either.
-  Please report a problem if you see one.
+- `cargo test` on macOS (Apple Silicon, rustc 1.96.0) on the release commit, scratch `HOME`:
+  619 passed, 0 failed, 3 ignored across 17 test binaries: main suite (`bb`) 501 (3 ignored),
+  `account_email_change` 2, `auth_errors` 8, `ecdh_compat` 4, `mount_availability` 3, `move_parent` 7,
+  `non_interactive` 6, `onboarding_state` 9, `pull_overwrite` 5, `pull_path_traversal` 22,
+  `push_replace_versions` 1, `region_choice` 14, `share_resolves_like_pull` 1, `step_up_opaque` 4,
+  `sync_never_deletes` 14, `webdav_auth` 14, `zero_byte_files` 4.
+- `cargo test` on Linux, rustc 1.96.0, from the gated pull requests: 617 passed, 0 failed, 3 ignored
+  over 16 test binaries for #87, and 619 passed, 0 failed, 3 ignored over 17 binaries for #88 (the new
+  `push_replace_versions` binary). 0.13.5 had 573. `cargo clippy --all-targets -- -D warnings` and
+  `cargo fmt -- --check` were clean on both, and the GitHub CI `Tests` job passed on #84, #87 and #88.
+- New tests were seen to fail first. The #87 format tests were red against the previous core, and
+  each guard was mutation-checked: ignoring the metadata pin, not enforcing the newer format, skipping
+  the truncation check (buffered and streaming), names not going through core, the wrong writer pin,
+  resuming unconditionally, not recording the format, not skipping a pin-less file in a folder pull,
+  and syncing without the pin check each turned the intended tests red. The #88 test was red on the
+  previous `main` ("replace #2 ... stale base version") and under a mutation that reads the old field.
+- **Compatibility against a real server (not mocks).** The server's `main` ran locally with a scratch
+  database and blob pool. Files uploaded with the released `bb` 0.13.5 (a 1 KiB file, a 20 MiB
+  five-chunk file, a folder with a subfolder, a replaced file) were read back with the #87 build by
+  `bb pull`, `bb pull --zip` and `bb sync --once`, and two 400 MiB uploads (one interrupted under
+  0.13.5, one under the #87 build, both resumed by the #87 build) were read back by both builds:
+  15 of 15 sha256 matches, 0 mismatches. A resume with a 0.13.5 resume record
+  restarted from chunk 0 and completed; a resume with a new record continued the same session. For
+  #88, a 6 MiB file pushed and then replaced three times ended at version 4 and pulled back
+  byte-identical, while the previous build failed every replace against that file. `bb region`
+  (#84) was run against a local server with the region API: Helsinki, Nuremberg and Europe uploads
+  landed in the matching storage pools.
+- Not verified: none of this was run against production or a real account. Those end-to-end runs
+  were made on Linux (#87, #88) and macOS (#84), not on every platform. `bb webdav` content reads,
+  `bb mount` content reads, the interactive (TUI) sync watch loop and `bb repair`'s refusal of a
+  newer-format file have no dedicated tests yet. `bb push` does not print which datacenter a file
+  landed in. Windows: the `bb.exe` is cross-compiled and is not executed on a Windows machine by
+  this release process. The Linux binaries are cross-compiled and not executed here either. Please
+  report a problem if you see one.
 
 ### Install / Update
 
@@ -100,11 +105,9 @@ scoop update bb                                  # Windows, Scoop
 ```
 
 macOS and Linux installs (shell installer or Homebrew) self-update on next run via the built-in OTA
-updater. The updater checks when `bb` starts, so a background sync daemon that is already running keeps
-running the old version (and the old deletion behaviour) until it is restarted: restart it after
-updating. Windows installs do
-not self-update yet: run `scoop update bb` to get 0.13.5. The Scoop manifest (`scoop/bb.json`) is
-bumped by a follow-up pull request; until that pull request is merged, `scoop update bb` still installs
-0.13.4.
+updater. The updater checks when `bb` starts, so a running `bb sync` daemon keeps the old version
+until it restarts: restart it after updating. Windows installs do not self-update yet: run
+`scoop update bb` to get 0.13.6. The Scoop manifest (`scoop/bb.json`) is bumped by a follow-up pull
+request; until that pull request is merged, `scoop update bb` still installs 0.13.5.
 
-Full changelog: https://github.com/beebeeb-io/cli/compare/v0.13.4...v0.13.5
+Full changelog: https://github.com/beebeeb-io/cli/compare/v0.13.5...v0.13.6
