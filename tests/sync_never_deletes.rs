@@ -596,6 +596,72 @@ async fn watch_resync_after_root_change_removes_nothing() {
     assert!(recovered(&dir).is_empty(), "the watch loop moved files to .bb-trash");
 }
 
+/// An explicit `--delete` after a root change trashes nothing: the manifest's
+/// "synced before, now missing locally" entries describe the OLD tree, so a
+/// same-named file in the new folder is not the file the user deleted. The pass
+/// exits 3 naming `--rebind`; after `--rebind`, `--delete` works as before.
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_after_root_change_trashes_nothing_until_rebind() {
+    let mock = Mock::default();
+    let api = start_mock(mock.clone()).await;
+    let home = scratch_home(&api);
+    let (dir, files) = synced_dir(&home, &mock, 3, |_| Some(true));
+    point_manifest_at_old_root(&dir);
+    // The new folder has a DIFFERENT file named f1.txt, and f1.txt is missing
+    // locally: exactly what `--delete` would trash on a trusted root.
+    let new_f1 = uuid::Uuid::new_v4().to_string();
+    mock.set_listing(vec![remote_file(&new_f1, "f1.txt")]);
+    std::fs::remove_file(dir.join("f1.txt")).unwrap();
+    // The --rebind pass downloads the new f1.txt: serve undecryptable bytes so
+    // that is a reported failure (the pass still saves its state), not the
+    // hard "empty body" error that aborts before the rebind is written.
+    *mock.download_body.lock().unwrap() = vec![0x42; 64];
+
+    let out = sync_once(&home, &api, &dir, &["--delete"]).await;
+    assert!(
+        mock.trashed().is_empty(),
+        "--delete on a changed root trashed {:?}",
+        mock.trashed()
+    );
+    for f in [&files[0], &files[2]] {
+        assert_eq!(
+            std::fs::read(dir.join(&f.rel)).ok(),
+            Some(f.bytes.clone()),
+            "{} was removed or changed by --delete after a root change",
+            f.rel
+        );
+    }
+    assert!(recovered(&dir).is_empty());
+    assert_eq!(out.status.code(), Some(3), "a refused --delete must not exit 0");
+    assert!(
+        text(&out).contains("--rebind"),
+        "must name the way out, got: {}",
+        text(&out)
+    );
+
+    // Reconcile, then let the new folder's f1.txt be a file this directory synced.
+    let _ = sync_once(&home, &api, &dir, &["--rebind"]).await;
+    // Keep the last pass about f1 alone (the mock has no upload routes for f0/f2).
+    for rel in ["f0.txt", "f1.txt", "f2.txt"] {
+        let _ = std::fs::remove_file(dir.join(rel));
+    }
+    let mut state: Value = serde_json::from_slice(&std::fs::read(dir.join(".bb-sync.json")).unwrap()).unwrap();
+    state["files"]["f1.txt"] = json!({
+        "remote_id": new_f1,
+        "last_mtime": 0,
+        "last_size": 5,
+        "last_sync": "2026-10-01T00:00:00Z",
+    });
+    std::fs::write(dir.join(".bb-sync.json"), state.to_string()).unwrap();
+
+    let _ = sync_once(&home, &api, &dir, &["--delete"]).await;
+    assert_eq!(
+        mock.trashed(),
+        vec![new_f1],
+        "after --rebind, --delete trashes the file deleted locally, as before"
+    );
+}
+
 // ───────────────────────────── 1916 ─────────────────────────────
 
 /// A download that cannot be decrypted leaves the remote copy alone, reports

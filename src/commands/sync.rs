@@ -1077,6 +1077,23 @@ pub async fn run(
         pending_remote_deletes.clear();
     }
 
+    // `--delete` against an unreconciled root (#83 review): the manifest's
+    // "synced before, now missing locally" entries belong to the other tree, so
+    // they say nothing about this folder's same-named files. Trash nothing and
+    // fail the pass until `bb sync --rebind`.
+    let delete_refused = delete_remote && root_changed;
+    if delete_refused {
+        let n = pending_deletes.len();
+        print_notice(&format!(
+            "--delete held back: the remote folder is not the one this directory last synced with, so \
+             {n} remote file{} {} not trashed. Run `bb sync --rebind` once to accept the new folder, then re-run.",
+            if n == 1 { "" } else { "s" },
+            if n == 1 { "was" } else { "were" },
+        ));
+        held_back += n as u32;
+        pending_deletes.clear();
+    }
+
     // ── Phase 3: parallel streaming uploads ────────────────────────────────
     let pending_count = pending_uploads.len();
     let mut interrupted_count = 0u32;
@@ -1343,14 +1360,19 @@ pub async fn run(
     // A one-shot run (`--once`, json/quiet, …) exits 3 so scripts and cron jobs
     // notice (flow-6: it used to print "✓ synced" and exit 0). A dry run only
     // previews, and the watch loop keeps retrying, so neither fails here.
-    let incomplete = failed > 0 || conflicts > 0 || held_back > 0;
+    let incomplete = failed > 0 || conflicts > 0 || held_back > 0 || delete_refused;
     let incomplete_err = || {
         crate::exit::with_code(
             crate::exit::INCOMPLETE,
             format!(
                 "sync incomplete: {} \u{2014} fix the cause and re-run{}",
-                incomplete_summary(failed, conflicts, held_back),
-                if held_back > 0 {
+                match incomplete_summary(failed, conflicts, held_back) {
+                    s if s.is_empty() && delete_refused => "--delete refused on a changed remote folder".to_string(),
+                    s => s,
+                },
+                if delete_refused {
+                    " (`bb sync --rebind` accepts the new remote folder before --delete may trash anything)"
+                } else if held_back > 0 {
                     " (`--allow-mass-delete` confirms the held-back removals)"
                 } else if conflicts > 0 {
                     " (`--force` overwrites conflicts with the local copy)"
