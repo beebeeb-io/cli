@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `bb whoami` and `bb account show` name your actual storage choice (for example "Helsinki, Finland", or "Europe · default, any datacenter"). `bb account show` no longer prints a provider name, and `bb billing show` no longer names one city for the billing region. (task 1919)
 - `bb whoami --json` has a new `region_id` key (your stored choice, `null` for the default); `region` is now the name of your choice ("Europe", "Helsinki"). (task 1919)
 
+## [0.13.5] - 2026-10-17
+
+### Security
+- **[P0]** `bb sync` and the background sync daemon no longer delete a local file just because it is missing from the remote listing. A local file is now removed only when the server itself reports that exact file as trashed, from a listing that is complete (not empty, no unreadable names, not cut short, same remote folder as last time), and it is moved into `.bb-trash/` inside the sync folder instead of being deleted. If one pass would remove more than 50 files or 10% of the synced files, nothing is removed and `bb sync --once` exits 3; `bb sync --once --allow-mass-delete` confirms it. If the remote folder itself changed (trashed and re-created, or a new remote path), every pass keeps removals paused, and `bb sync --delete` trashes nothing and exits 3, until `bb sync --rebind` accepts the new folder (meanwhile a file that exists in both places is reported as a conflict instead of replacing or overwriting either copy); the 10% limit is enforced exactly (51 of 501 files trips it), and a folder of exactly 50,000 entries is no longer treated as cut short. Files that are missing remotely without a deletion record (renamed or moved on the web, or a different account) are kept and reported. (task 1915)
+- **[P0]** A `bb sync` download that fails to decrypt no longer moves the remote copy to the vault Trash. The remote file is left untouched, the error names the file, a one-shot run exits 3, and the next run tries again. (task 1916)
+
 ## [0.13.4] - 2026-10-15
 
 ### Security
