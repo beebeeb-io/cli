@@ -50,6 +50,25 @@ struct Mock {
     /// When set, PUT answers 400 `region_unavailable` regardless of the id
     /// (a datacenter that went away between the list and the choice).
     reject_all_puts: Arc<Mutex<bool>>,
+    /// The wire shape of every 400 `region_unavailable` the mock sends.
+    reject_shape: Arc<Mutex<RejectShape>>,
+}
+
+/// The shapes a `region_unavailable` refusal can arrive in. `bb` must explain
+/// all of them the same way (cli#84 Codex thread on `region.rs:142`).
+#[derive(Clone, Copy)]
+enum RejectShape {
+    /// What server#211 sends today (`ApiError::BadRequest(..)` →
+    /// `{"error": "region_unavailable: '<id>' is not available"}`, no
+    /// `message`): the code lands in `ApiError.code` with the detail glued on.
+    ServerToday,
+    /// The typed two-field contract (`{"error":"region_unavailable",
+    /// "message": <human text>}`): the code is ONLY in `ApiError.code`, the
+    /// message does not mention it.
+    Typed,
+    /// A generic code with the detail in `message` (the shape this mock used
+    /// to send).
+    MessageOnly,
 }
 
 impl Mock {
@@ -59,6 +78,7 @@ impl Mock {
             preferred: Arc::new(Mutex::new(Value::Null)),
             puts: Arc::new(Mutex::new(Vec::new())),
             reject_all_puts: Arc::new(Mutex::new(false)),
+            reject_shape: Arc::new(Mutex::new(RejectShape::ServerToday)),
         }
     }
 }
@@ -90,12 +110,16 @@ fn spawn(mock: Mock) -> String {
                                 .and_then(|v| v.to_str().ok())
                                 .is_some_and(|v| v.starts_with("Bearer "));
                             m.puts.lock().unwrap().push((body.clone(), bearer));
+                            let shape = *m.reject_shape.lock().unwrap();
                             let reject = |id: &str| {
-                                (
-                                    StatusCode::BAD_REQUEST,
-                                    Json(json!({"error":"bad_request",
-                                        "message": format!("region_unavailable: '{id}' is not available")})),
-                                )
+                                let detail = format!("region_unavailable: '{id}' is not available");
+                                let body = match shape {
+                                    RejectShape::ServerToday => json!({"error": detail}),
+                                    RejectShape::Typed => json!({"error": "region_unavailable",
+                                        "message": "That datacenter can't take new uploads right now."}),
+                                    RejectShape::MessageOnly => json!({"error": "bad_request", "message": detail}),
+                                };
+                                (StatusCode::BAD_REQUEST, Json(body))
                             };
                             if *m.reject_all_puts.lock().unwrap() {
                                 return reject("any");
@@ -356,10 +380,13 @@ fn unknown_name_fails_without_a_request_and_lists_the_real_options() {
     assert!(puts.lock().unwrap().is_empty());
 }
 
-#[test]
-fn a_server_rejection_is_explained_and_leaves_the_choice_unchanged() {
+/// A PUT refused with `region_unavailable` (the choice lost a race with the
+/// list) is explained in `bb`'s words and leaves the stored choice unchanged,
+/// whichever wire shape the refusal arrives in.
+fn assert_rejection_explained(shape: RejectShape) {
     let mock = Mock::new();
     *mock.reject_all_puts.lock().unwrap() = true;
+    *mock.reject_shape.lock().unwrap() = shape;
     let preferred = mock.preferred.clone();
     let api = spawn(mock);
     let home = scratch_home(&api, true);
@@ -368,11 +395,26 @@ fn a_server_rejection_is_explained_and_leaves_the_choice_unchanged() {
     assert_eq!(o.status.code(), Some(1));
     let e = err(&o);
     assert!(
-        e.contains("isn't available right now") && e.contains("unchanged"),
+        e.contains("Helsinki") && e.contains("isn't available right now") && e.contains("unchanged"),
         "{e}"
     );
     assert!(!e.contains("region_unavailable"), "raw server code leaked: {e}");
     assert_eq!(*preferred.lock().unwrap(), Value::Null);
+}
+
+#[test]
+fn a_server_rejection_is_explained_and_leaves_the_choice_unchanged() {
+    assert_rejection_explained(RejectShape::ServerToday);
+}
+
+#[test]
+fn a_typed_region_unavailable_rejection_is_explained_by_its_code() {
+    assert_rejection_explained(RejectShape::Typed);
+}
+
+#[test]
+fn a_region_unavailable_rejection_carried_in_the_message_is_explained() {
+    assert_rejection_explained(RejectShape::MessageOnly);
 }
 
 #[test]

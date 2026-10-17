@@ -468,7 +468,9 @@ impl ApiClient {
     /// default/any datacenter, `Some("<datacenter id>")` = that datacenter,
     /// `None` clears the choice (also the default). The id is sent exactly as
     /// the list gave it. A coming-soon or unknown id is a 400
-    /// `region_unavailable`; the stored value then stays unchanged.
+    /// `region_unavailable` (the wire shapes are in
+    /// `commands::region::is_region_unavailable`); the stored value then
+    /// stays unchanged.
     pub async fn set_my_region(&self, region: Option<&str>) -> Result<Value, ApiError> {
         let token = self.require_auth()?;
         let resp = self

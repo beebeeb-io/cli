@@ -17,7 +17,7 @@
 use colored::Colorize;
 use serde_json::{Value, json};
 
-use crate::api::ApiClient;
+use crate::api::{ApiClient, ApiError};
 use crate::colors;
 use crate::region::{Choice, Resolution, current_id, current_label, parse_choices, resolve};
 use crate::ui;
@@ -103,6 +103,26 @@ pub async fn get() -> Result<(), String> {
     Ok(())
 }
 
+/// The server's code for "that region can't be chosen right now".
+const REGION_UNAVAILABLE: &str = "region_unavailable";
+
+/// True when a `PUT /api/v1/me/region` refusal means the region is not
+/// choosable right now (cli#84 Codex thread). Matched on the stable code
+/// first: the typed two-field contract puts `region_unavailable` in `error`
+/// alone and a human `message` that need not mention it. The server today
+/// sends `{"error": "region_unavailable: '<id>' is not available"}` (a plain
+/// `BadRequest`, no `message`), so the code also counts when it carries that
+/// detail after a colon; a `message` with the same prefix is the last resort.
+/// Prefix, not substring: an unrelated error that merely mentions the word is
+/// shown as the server wrote it.
+fn is_region_unavailable(e: &ApiError) -> bool {
+    let prefixed = |s: &str| {
+        s.strip_prefix(REGION_UNAVAILABLE)
+            .is_some_and(|rest| rest.starts_with(':'))
+    };
+    e.is_code(REGION_UNAVAILABLE) || e.code.as_deref().is_some_and(prefixed) || prefixed(&e.message)
+}
+
 pub async fn set(target: String) -> Result<(), String> {
     let api = ApiClient::from_config();
     api.require_auth()?;
@@ -139,7 +159,7 @@ pub async fn set(target: String) -> Result<(), String> {
 
     // The id goes out exactly as the list gave it.
     let resp = api.set_my_region(Some(&chosen.id)).await.map_err(|e| {
-        if e.message.contains("region_unavailable") {
+        if is_region_unavailable(&e) {
             // Lost a race with the list (a datacenter went away between the
             // two calls). The stored value did not change.
             format!(
@@ -285,6 +305,42 @@ pub(crate) fn render_list(choices: &[Choice], current: Option<&str>, signed_in: 
 mod tests {
     use super::*;
     use crate::region::parse_choices;
+
+    fn api_error(code: Option<&str>, message: &str) -> ApiError {
+        ApiError {
+            code: code.map(String::from),
+            message: message.to_string(),
+            status: 400,
+        }
+    }
+
+    #[test]
+    fn region_unavailable_is_recognised_by_its_code_in_every_wire_shape() {
+        // Typed contract: the code alone, a message that does not mention it.
+        assert!(is_region_unavailable(&api_error(
+            Some("region_unavailable"),
+            "That datacenter can't take new uploads right now."
+        )));
+        // What the server sends today: the detail glued onto `error`.
+        let today = "region_unavailable: 'hel1' is not available";
+        assert!(is_region_unavailable(&api_error(Some(today), today)));
+        // A generic code with the detail in `message`.
+        assert!(is_region_unavailable(&api_error(Some("bad_request"), today)));
+    }
+
+    #[test]
+    fn other_refusals_are_not_mistaken_for_region_unavailable() {
+        assert!(!is_region_unavailable(&api_error(Some("unauthorized"), "unauthorized")));
+        assert!(!is_region_unavailable(&api_error(
+            Some("bad_request"),
+            "preferred_region must be a string; region_unavailable is not the issue"
+        )));
+        assert!(!is_region_unavailable(&api_error(
+            Some("region_unavailable_soon"),
+            "something else"
+        )));
+        assert!(!is_region_unavailable(&api_error(None, "failed to read response")));
+    }
 
     fn list() -> Vec<Choice> {
         parse_choices(&json!([
