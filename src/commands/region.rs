@@ -1,18 +1,21 @@
-//! `bb region` — where new uploads are stored (task 1919).
+//! `bb region` — where new uploads are stored (task 1919, by COUNTRY since
+//! task 2050).
 //!
 //! * `bb region` / `bb region list` — the API's list: the default "Europe" row
-//!   (no specific country, Beebeeb places the data in any of its European
-//!   datacenters), then one row per datacenter. Datacenters that are not live
-//!   yet are shown as "coming soon" and cannot be chosen. Your current choice
-//!   is marked when you are signed in.
+//!   (any of our European data centers, Beebeeb places the data), then one row
+//!   per country. A country that is not live yet is shown as "coming soon" and
+//!   cannot be chosen. Your current choice is marked when you are signed in.
 //! * `bb region get` — just the current choice.
-//! * `bb region set <europe|id|city>` — choose. Matches the API's list by id,
-//!   then name, then city, case-insensitively (`helsinki`, `hel1`, `Europe`).
+//! * `bb region set <europe|country>` — choose. Matches the API's list by id,
+//!   then name, then country code, case-insensitively (`de`, `Germany`,
+//!   `Europe`). A legacy datacenter id (`hel1`) is passed to the server as
+//!   typed; it maps those to their country for one release. A city is not a
+//!   choice any more.
 //!
 //! Routes: `GET /api/v1/storage-regions` (public), `GET`/`PUT
 //! /api/v1/me/region`. The list is never kept in this binary; see
 //! `crate::region`. The choice affects where NEW uploads go; files already
-//! stored stay where they are.
+//! stored stay where they are. No city is ever printed.
 
 use colored::Colorize;
 use serde_json::{Value, json};
@@ -77,6 +80,7 @@ pub async fn get() -> Result<(), String> {
     let choices = parse_choices(&me);
     let id = current_id(&me, &choices);
     let label = current_label(&me);
+    let row = choices.iter().find(|c| c.id == id);
 
     if ui::is_json() {
         println!(
@@ -85,6 +89,8 @@ pub async fn get() -> Result<(), String> {
                 "preferred_region": me.get("preferred_region").cloned().unwrap_or(Value::Null),
                 "current": id,
                 "label": label,
+                "country": row.and_then(|c| c.country.clone()),
+                "country_code": row.and_then(|c| c.country_code.clone()),
             }))
             .unwrap()
         );
@@ -132,9 +138,10 @@ pub async fn set(target: String) -> Result<(), String> {
     }
 
     // Decide against the API's list BEFORE sending anything: a coming-soon or
-    // unknown name never reaches the server.
-    let chosen = match resolve(&choices, &target) {
-        Resolution::Found(c) => c,
+    // unknown name never reaches the server. The one exception is a legacy
+    // datacenter id (`hel1`), which the server maps for one release.
+    let (wire_id, chosen) = match resolve(&choices, &target) {
+        Resolution::Found(c) => (c.wire_id_for(&target), Some(c)),
         Resolution::NotSelectable(c) if c.is_coming_soon() => {
             return Err(format!(
                 "{} is coming soon and can't be chosen yet. Your choice is unchanged.",
@@ -150,22 +157,22 @@ pub async fn set(target: String) -> Result<(), String> {
         Resolution::Ambiguous(hits) => {
             let ids: Vec<&str> = hits.iter().map(|c| c.id.as_str()).collect();
             return Err(format!(
-                "'{target}' matches more than one region ({}). Use the id from `bb region list`.",
+                "'{target}' matches more than one location ({}). Use the id from `bb region list`.",
                 ids.join(", ")
             ));
         }
+        Resolution::LegacyId(id) => (id, None),
         Resolution::Unknown => return Err(unknown_message(&target, &choices)),
     };
+    let asked = chosen.map(|c| c.display()).unwrap_or_else(|| wire_id.clone());
 
     // The id goes out exactly as the list gave it.
-    let resp = api.set_my_region(Some(&chosen.id)).await.map_err(|e| {
+    let resp = api.set_my_region(Some(&wire_id)).await.map_err(|e| {
         if is_region_unavailable(&e) {
-            // Lost a race with the list (a datacenter went away between the
-            // two calls). The stored value did not change.
-            format!(
-                "{} isn't available right now. Your choice is unchanged. See `bb region list`.",
-                chosen.display()
-            )
+            // Lost a race with the list (a country went away between the two
+            // calls), or a legacy id the server no longer knows. The stored
+            // value did not change.
+            format!("{asked} isn't available right now. Your choice is unchanged. See `bb region list`.")
         } else {
             e.message
         }
@@ -173,15 +180,26 @@ pub async fn set(target: String) -> Result<(), String> {
     let stored = resp
         .get("preferred_region")
         .and_then(|v| v.as_str())
-        .unwrap_or(&chosen.id)
+        .unwrap_or(&wire_id)
         .to_string();
+    // What the server stored, as the list names it (a legacy id the server
+    // mapped reads as its country).
+    let stored_row = choices.iter().find(|c| c.is_stored_value(&stored));
+    let name = stored_row
+        .or(chosen)
+        .map(|c| c.display())
+        .unwrap_or_else(|| stored.clone());
+    let is_any = stored_row.or(chosen).is_some_and(|c| c.is_any());
+    let row = stored_row.or(chosen);
 
     if ui::is_json() {
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({
                 "preferred_region": stored,
-                "name": chosen.display(),
+                "name": name,
+                "country": row.and_then(|c| c.country.clone()),
+                "country_code": row.and_then(|c| c.country_code.clone()),
             }))
             .unwrap()
         );
@@ -192,12 +210,12 @@ pub async fn set(target: String) -> Result<(), String> {
         println!(
             "  {} {}",
             "\u{2713}".custom_color(colors::GREEN_OK),
-            format!("Storage region set to {}.", chosen.display()).custom_color(colors::INK)
+            format!("Storage location set to {name}.").custom_color(colors::INK)
         );
-        let how = if chosen.is_any() {
-            "Beebeeb places new uploads in any of its European datacenters.".to_string()
+        let how = if is_any {
+            "Beebeeb places new uploads in any of its European data centers.".to_string()
         } else {
-            format!("New uploads go to {}.", chosen.name)
+            format!("New uploads are stored in {name}.")
         };
         println!("  {}", how.custom_color(colors::INK_DIM));
         println!(
@@ -221,8 +239,20 @@ fn unknown_message(target: &str, choices: &[Choice]) -> String {
             }
         })
         .collect();
+    // Two real country ids for the hint, taken from the list itself.
+    let tries: Vec<String> = choices
+        .iter()
+        .filter(|c| c.selectable && !c.is_any())
+        .take(2)
+        .map(|c| format!("'{}'", c.id))
+        .collect();
+    let hint = if tries.is_empty() {
+        String::new()
+    } else {
+        format!(" Try {}.", tries.join(" or "))
+    };
     format!(
-        "No storage region matches '{target}'. Choose one of: {}. See `bb region list`.",
+        "No storage location matches '{target}'. Storage is chosen by country now.{hint} Choose one of: {}. See `bb region list`.",
         options.join(", ")
     )
 }
@@ -235,7 +265,7 @@ pub(crate) fn render_list(choices: &[Choice], current: Option<&str>, signed_in: 
     let name_w = choices.iter().map(|c| c.name.chars().count()).max().unwrap_or(6).max(6);
 
     let _ = writeln!(out);
-    let _ = writeln!(out, "  {}", "STORAGE REGION".custom_color(colors::AMBER));
+    let _ = writeln!(out, "  {}", "STORAGE LOCATION".custom_color(colors::AMBER));
     let _ = writeln!(out, "  {}", EXISTING_FILES_NOTE.custom_color(colors::INK_DIM));
     let _ = writeln!(out);
     for c in choices {
@@ -245,27 +275,21 @@ pub(crate) fn render_list(choices: &[Choice], current: Option<&str>, signed_in: 
             " ".to_string()
         };
         let detail = if c.is_any() {
-            let mut d = String::from("any of our European datacenters");
+            let mut d = String::from("any of our European data centers, we place your files");
             if c.is_default {
                 d.push_str(" \u{00b7} default");
             }
             d
         } else if c.is_coming_soon() {
-            let place = c
-                .country
-                .as_deref()
-                .map(|x| format!("{x} \u{00b7} "))
-                .unwrap_or_default();
-            format!("{place}coming soon \u{00b7} not selectable")
+            "coming soon \u{00b7} not selectable".to_string()
         } else if !c.selectable {
             "not available right now".to_string()
         } else {
-            c.country.clone().unwrap_or_default()
+            String::new()
         };
         let dim_row = c.is_coming_soon() || !c.selectable;
         let name = format!("{:<name_w$}", c.name);
-        let _ = writeln!(
-            out,
+        let line = format!(
             "  {marker} {}  {}  {}",
             format!("{:<id_w$}", c.id).custom_color(colors::INK_DIM),
             if dim_row {
@@ -275,19 +299,20 @@ pub(crate) fn render_list(choices: &[Choice], current: Option<&str>, signed_in: 
             },
             detail.custom_color(colors::INK_DIM),
         );
+        let _ = writeln!(out, "{}", line.trim_end());
     }
     let _ = writeln!(out);
     if signed_in {
-        // The example is taken from the list itself, never a fixed city.
+        // The example is taken from the list itself, never a fixed country.
         let example = choices
             .iter()
             .find(|c| c.selectable && !c.is_any())
-            .map(|c| c.name.to_lowercase())
+            .map(|c| c.id.clone())
             .unwrap_or_else(|| "europe".to_string());
         let _ = writeln!(
             out,
             "  {}",
-            format!("Change it with `bb region set <id or city>`, for example `bb region set {example}`.")
+            format!("Change it with `bb region set <id or country>`, for example `bb region set {example}`.")
                 .custom_color(colors::INK_SAGE)
         );
     } else {
@@ -345,11 +370,11 @@ mod tests {
     fn list() -> Vec<Choice> {
         parse_choices(&json!([
             {"id":"europe","kind":"region","name":"Europe","status":"live","selectable":true,"is_default":true},
-            {"id":"fsn1","kind":"datacenter","name":"Falkenstein","city":"Falkenstein","country":"Germany",
+            {"id":"de","kind":"country","name":"Germany","country":"Germany","country_code":"DE",
              "status":"live","selectable":true,"is_default":false},
-            {"id":"hel1","kind":"datacenter","name":"Helsinki","city":"Helsinki","country":"Finland",
+            {"id":"fi","kind":"country","name":"Finland","country":"Finland","country_code":"FI",
              "status":"live","selectable":true,"is_default":false},
-            {"id":"ede","kind":"datacenter","name":"Ede","city":"Ede","country":"Netherlands",
+            {"id":"nl","kind":"country","name":"Netherlands","country":"Netherlands","country_code":"NL",
              "status":"coming_soon","selectable":false,"is_default":false}
         ]))
     }
@@ -357,14 +382,19 @@ mod tests {
     #[test]
     fn list_marks_the_current_choice_and_coming_soon() {
         colored::control::set_override(false);
-        let out = render_list(&list(), Some("hel1"), true);
-        let line = |id: &str| out.lines().find(|l| l.contains(id)).unwrap().to_string();
-        assert!(line("hel1").contains('\u{25cf}'), "{out}");
-        assert!(!line("fsn1").contains('\u{25cf}'), "{out}");
+        let out = render_list(&list(), Some("fi"), true);
+        let line = |id: &str| {
+            out.lines()
+                .find(|l| l.split_whitespace().any(|w| w == id))
+                .unwrap()
+                .to_string()
+        };
+        assert!(line("fi").contains('\u{25cf}'), "{out}");
+        assert!(!line("de").contains('\u{25cf}'), "{out}");
         assert!(line("europe").contains("default"), "{out}");
-        assert!(line("europe").contains("any of our European datacenters"), "{out}");
+        assert!(line("europe").contains("European data centers"), "{out}");
         assert!(
-            line("ede").contains("coming soon") && line("ede").contains("not selectable"),
+            line("nl").contains("coming soon") && line("nl").contains("not selectable"),
             "{out}"
         );
         assert!(out.contains("stay where they are"), "{out}");
@@ -392,7 +422,8 @@ mod tests {
     fn unknown_message_lists_only_selectable_choices_from_the_api() {
         let m = unknown_message("paris", &list());
         assert!(m.contains("'paris'"), "{m}");
-        assert!(m.contains("hel1 (Helsinki)") && m.contains("europe"), "{m}");
-        assert!(!m.contains("ede"), "coming soon is not an option: {m}");
+        assert!(m.contains("fi (Finland)") && m.contains("europe"), "{m}");
+        assert!(m.contains("chosen by country") && m.contains("'de' or 'fi'"), "{m}");
+        assert!(!m.contains("Netherlands"), "coming soon is not an option: {m}");
     }
 }

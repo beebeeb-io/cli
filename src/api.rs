@@ -452,8 +452,9 @@ impl ApiClient {
     }
 
     /// `GET /api/v1/storage-regions` — the public list of places files can be
-    /// stored (task 1919): the default "Europe" row, live datacenters, and
-    /// coming-soon ones. No auth. The CLI keeps no list of its own.
+    /// stored (task 1919, by country since task 2050): the default "Europe"
+    /// row, live countries, and coming-soon ones. No auth. The CLI keeps no
+    /// list of its own.
     pub async fn get_storage_regions(&self) -> Result<Value, String> {
         let resp = self
             .client
@@ -465,9 +466,10 @@ impl ApiClient {
     }
 
     /// `PUT /api/v1/me/region` — store the region choice. `Some("europe")` =
-    /// default/any datacenter, `Some("<datacenter id>")` = that datacenter,
+    /// default/any data center, `Some("<country id>")` = that country (`de`),
     /// `None` clears the choice (also the default). The id is sent exactly as
-    /// the list gave it. A coming-soon or unknown id is a 400
+    /// the list gave it; a legacy datacenter id is mapped by the server for one
+    /// release. A coming-soon or unknown id is a 400
     /// `region_unavailable` (the wire shapes are in
     /// `commands::region::is_region_unavailable`); the stored value then
     /// stays unchanged.

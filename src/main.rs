@@ -490,11 +490,11 @@ enum Commands {
     #[command(subcommand)]
     Sessions(SessionsCmd),
 
-    /// Where new uploads are stored: Europe (default, any datacenter) or one datacenter
+    /// Where new uploads are stored: Europe (default, we place your files) or one country
     ///
     /// With no subcommand, lists the options (fetched from the API, so new
-    /// datacenters appear without a new `bb`). Datacenters that are not live
-    /// yet are shown as coming soon and cannot be chosen.
+    /// countries appear without a new `bb`). A country that is not live yet is
+    /// shown as coming soon and cannot be chosen.
     Region {
         #[command(subcommand)]
         action: Option<RegionCmd>,
@@ -649,14 +649,15 @@ enum SessionsCmd {
 
 #[derive(Subcommand)]
 enum RegionCmd {
-    /// List the storage regions, with your current choice marked (default)
+    /// List the storage locations by country, with your current choice marked (default)
     List,
     /// Show your current choice
     Get,
-    /// Choose where new uploads are stored
+    /// Choose where new uploads are stored, by country
     Set {
-        /// `europe` (default: any of our European datacenters), or a datacenter
-        /// id or city from `bb region list`
+        /// `europe` (default: any of our European data centers, we place your
+        /// files), or a country: its id, code or name from `bb region list`
+        /// (for example `de` or `Germany`; case does not matter)
         target: String,
     },
 }

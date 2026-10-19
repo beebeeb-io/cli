@@ -390,10 +390,10 @@ mod tests {
             "used_bytes": 3_200_000_000_000i64, "quota_bytes": 5_000_000_000_000i64
         }));
         let region = Ok(json!({
-            "preferred_region": "hel1",
+            "preferred_region": "fi",
             "choices": [
                 {"id":"europe","kind":"region","name":"Europe","status":"live","selectable":true,"is_default":true},
-                {"id":"hel1","kind":"datacenter","name":"Helsinki","city":"Helsinki","country":"Finland",
+                {"id":"fi","kind":"country","name":"Finland","country":"Finland","country_code":"FI",
                  "status":"live","selectable":true,"is_default":false}
             ]
         }));
@@ -404,8 +404,8 @@ mod tests {
         let out = build_show_payload(&me, &sub, &region, &score, &sessions, &passkeys);
         assert_eq!(out["user"]["email"], "a@b.com");
         assert_eq!(out["plan"]["id"], "pro");
-        assert_eq!(out["region"]["preferred_region"], "hel1");
-        assert_eq!(crate::region::current_label(&out["region"]), "Helsinki, Finland");
+        assert_eq!(out["region"]["preferred_region"], "fi");
+        assert_eq!(crate::region::current_label(&out["region"]), "Finland");
         assert_eq!(out["storage"]["used_bytes"], 3_200_000_000_000i64);
         assert_eq!(out["session_count"], 3);
         assert_eq!(out["passkey_count"], 2);

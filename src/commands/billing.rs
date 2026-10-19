@@ -19,9 +19,10 @@
 //! `GET /files` with no `parent_id` (`ApiClient::list_files(None)`) — ONE
 //! round-trip, root-level files only, no subfolder recursion — and labels the
 //! breakdown "approximate" in both the rich and JSON output. Each file's
-//! `storage_location.{region,city}` (confirmed present on `GET /files` rows —
+//! `storage_location.{region,country}` (present on `GET /files` rows —
 //! `beebeeb-api/src/routes/files.rs`, "Storage location on file responses" in
-//! the server's CLAUDE.md) is the aggregation key.
+//! the server's CLAUDE.md; task 2050: the unit is the country, the deprecated
+//! `city` is never read) is the aggregation key.
 //!
 //! **Reuse, not reinvention.** The bar is `ui::quota_bar` (already used by
 //! `bb quota`) rather than a new bespoke progress-bar renderer — the plan's
@@ -363,10 +364,7 @@ pub async fn usage() -> Result<(), String> {
         .unwrap_or_default();
 
     if ui::is_json() {
-        let regions: Vec<_> = by_region
-            .iter()
-            .map(|((r, c), b)| serde_json::json!({ "region": r, "city": c, "used_bytes": b }))
-            .collect();
+        let regions = region_rows_json(&by_region);
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
@@ -413,11 +411,10 @@ pub async fn usage() -> Result<(), String> {
             "region ".custom_color(crate::colors::INK_SAGE),
             "approximate — top-level files only".custom_color(crate::colors::INK_DIM)
         );
-        for ((region, city), bytes) in &by_region {
+        for ((_region, country), bytes) in &by_region {
             println!(
-                "           {} \u{00b7} {}    {}",
-                region.custom_color(crate::colors::INK_DIM),
-                city.custom_color(crate::colors::INK_DIM),
+                "           {}    {}",
+                country.custom_color(crate::colors::INK_DIM),
                 format_storage_si(*bytes).custom_color(crate::colors::INK),
             );
         }
@@ -833,12 +830,14 @@ fn format_price(cents: i64, billing_cycle: &str) -> String {
     format!("€{}.{:02} / {}", cents / 100, cents % 100, period)
 }
 
-/// Aggregate a `GET /files` `"files"` array into `(region, city) -> used_bytes`
+/// Aggregate a `GET /files` `"files"` array into `(region, country) -> used_bytes`
 /// plus a non-folder file count. Pure function so the region-breakdown logic
 /// (`bb billing usage`, eng-0486) is unit-testable without a mock server.
-/// Folders are skipped (they don't hold their own bytes); a missing/absent
-/// `storage_location` falls back to `("europe", "Falkenstein")` — the live
-/// server's documented default for the region field.
+/// Folders are skipped (they don't hold their own bytes). Task 2050: the group
+/// is the COUNTRY (`storage_location.country`), so two datacenters in one
+/// country are one row; a missing `storage_location`, or one without a country
+/// (an older server that only sent the deprecated `city`), falls back to
+/// `("europe", "Europe")`. A city is never read.
 fn aggregate_by_region(files: &[Value]) -> (BTreeMap<(String, String), i64>, i64) {
     let mut by_region: BTreeMap<(String, String), i64> = BTreeMap::new();
     let mut file_count: i64 = 0;
@@ -850,34 +849,45 @@ fn aggregate_by_region(files: &[Value]) -> (BTreeMap<(String, String), i64>, i64
         file_count += 1;
         let size = f.get("size_bytes").and_then(|v| v.as_i64()).unwrap_or(0);
         let loc = f.get("storage_location");
-        let region = loc
-            .and_then(|v| v.get("region"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("europe")
-            .to_string();
-        let city = loc
-            .and_then(|v| v.get("city"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("Falkenstein")
-            .to_string();
-        *by_region.entry((region, city)).or_insert(0) += size;
+        let text = |key: &str| {
+            loc.and_then(|v| v.get(key))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        };
+        let region = text("region").unwrap_or_else(|| "europe".to_string());
+        let country = text("country").unwrap_or_else(|| "Europe".to_string());
+        *by_region.entry((region, country)).or_insert(0) += size;
     }
     (by_region, file_count)
 }
 
-fn region_human(slug: &str) -> String {
-    match slug {
-        // "falkenstein" is the live server's literal fallback value
-        // (`beebeeb-api/src/routes/billing.rs::subscription`'s no-subscription-
-        // row branch, returned for every fresh free-tier account — the exact
-        // account this command's manual verification rung uses) — not just
-        // "europe"/"eu" from an actual subscriptions row.
-        // Task 1919: this is the subscription's billing region, not where the
-        // files are. Users can now choose a datacenter (`bb region`), so naming
-        // one city here would be a claim the data does not back.
-        "europe" | "eu" | "falkenstein" => "Europe".into(),
-        other => other.to_string(),
-    }
+/// The `by_region` rows of `bb --json billing usage`. `city` is a DEPRECATED
+/// alias that carries the country name (the server does the same on its strict
+/// refusal), so a script that reads `city` keeps working and never gets a city.
+fn region_rows_json(by_region: &BTreeMap<(String, String), i64>) -> Value {
+    Value::Array(
+        by_region
+            .iter()
+            .map(|((region, country), bytes)| {
+                serde_json::json!({
+                    "region": region,
+                    "country": country,
+                    "city": country,
+                    "used_bytes": bytes,
+                })
+            })
+            .collect(),
+    )
+}
+
+/// The subscription's `region` is a BILLING label (the server's flat default is
+/// the name of a city), not where the files are, and storage is chosen by
+/// country now (task 2050; `bb region`). It never names a place: whatever the
+/// server sends reads "Europe".
+fn region_human(_billing_region: &str) -> String {
+    "Europe".into()
 }
 
 fn capitalise(s: &str) -> String {
@@ -971,28 +981,32 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // ── aggregate_by_region (eng-0486) ──────────────────────────────────────
+    // ── aggregate_by_region (eng-0486, by country since task 2050) ─────────
+
+    fn at(region: &str, country: &str) -> (String, String) {
+        (region.to_string(), country.to_string())
+    }
 
     #[test]
-    fn aggregate_by_region_sums_bytes_per_region_and_skips_folders() {
+    fn aggregate_by_region_sums_bytes_per_country_and_skips_folders() {
         let files = vec![
             json!({
                 "is_folder": false, "size_bytes": 100,
-                "storage_location": { "region": "europe", "city": "Falkenstein", "provider": "Hetzner" },
+                "storage_location": { "region": "europe", "country": "Germany", "country_code": "DE" },
             }),
             json!({
                 "is_folder": false, "size_bytes": 250,
-                "storage_location": { "region": "europe", "city": "Falkenstein", "provider": "Hetzner" },
+                "storage_location": { "region": "europe", "country": "Germany", "country_code": "DE" },
             }),
             json!({
                 "is_folder": true, "size_bytes": 999_999,
-                "storage_location": { "region": "europe", "city": "Falkenstein", "provider": "Hetzner" },
+                "storage_location": { "region": "europe", "country": "Germany", "country_code": "DE" },
             }),
         ];
         let (by_region, file_count) = aggregate_by_region(&files);
         assert_eq!(file_count, 2, "the folder row must not be counted as a file");
         assert_eq!(
-            by_region.get(&("europe".to_string(), "Falkenstein".to_string())),
+            by_region.get(&at("europe", "Germany")),
             Some(&350),
             "folder bytes (999_999) must NOT be summed into the region total: {by_region:?}"
         );
@@ -1000,46 +1014,53 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_by_region_splits_multiple_regions() {
+    fn aggregate_by_region_splits_countries_but_merges_two_datacenters_of_one_country() {
+        // Two German files whose rows still carry different (deprecated) cities
+        // are ONE group; a Finnish file is another.
         let files = vec![
             json!({
                 "is_folder": false, "size_bytes": 10,
-                "storage_location": { "region": "europe", "city": "Falkenstein", "provider": "Hetzner" },
+                "storage_location": { "region": "europe", "country": "Germany", "country_code": "DE", "city": "Falkenstein" },
+            }),
+            json!({
+                "is_folder": false, "size_bytes": 5,
+                "storage_location": { "region": "europe", "country": "Germany", "country_code": "DE", "city": "Nuremberg" },
             }),
             json!({
                 "is_folder": false, "size_bytes": 20,
-                "storage_location": { "region": "europe", "city": "Helsinki", "provider": "Local" },
+                "storage_location": { "region": "europe", "country": "Finland", "country_code": "FI", "city": "Helsinki" },
+            }),
+        ];
+        let (by_region, file_count) = aggregate_by_region(&files);
+        assert_eq!(file_count, 3);
+        assert_eq!(
+            by_region.len(),
+            2,
+            "one group per country, never per city: {by_region:?}"
+        );
+        assert_eq!(by_region.get(&at("europe", "Germany")), Some(&15));
+        assert_eq!(by_region.get(&at("europe", "Finland")), Some(&20));
+    }
+
+    #[test]
+    fn aggregate_by_region_falls_back_to_europe_never_a_city() {
+        // No storage_location at all (defensive), and a location with only the
+        // deprecated city (an older server): both read "Europe", not the city.
+        let files = vec![
+            json!({ "is_folder": false, "size_bytes": 5 }),
+            json!({
+                "is_folder": false, "size_bytes": 7,
+                "storage_location": { "region": "europe", "city": "Falkenstein" },
             }),
         ];
         let (by_region, file_count) = aggregate_by_region(&files);
         assert_eq!(file_count, 2);
         assert_eq!(
-            by_region.len(),
-            2,
-            "two distinct (region, city) pairs must stay separate: {by_region:?}"
+            by_region.get(&at("europe", "Europe")),
+            Some(&12),
+            "missing country must fall back to Europe, not be dropped or name a city: {by_region:?}"
         );
-        assert_eq!(
-            by_region.get(&("europe".to_string(), "Falkenstein".to_string())),
-            Some(&10)
-        );
-        assert_eq!(
-            by_region.get(&("europe".to_string(), "Helsinki".to_string())),
-            Some(&20)
-        );
-    }
-
-    #[test]
-    fn aggregate_by_region_defaults_missing_storage_location_to_europe_falkenstein() {
-        // A file row with no storage_location at all (defensive — every live
-        // row carries one, but the field must never be assumed present).
-        let files = vec![json!({ "is_folder": false, "size_bytes": 5 })];
-        let (by_region, file_count) = aggregate_by_region(&files);
-        assert_eq!(file_count, 1);
-        assert_eq!(
-            by_region.get(&("europe".to_string(), "Falkenstein".to_string())),
-            Some(&5),
-            "missing storage_location must fall back to europe/Falkenstein, not be dropped: {by_region:?}"
-        );
+        assert_eq!(by_region.len(), 1);
     }
 
     #[test]
@@ -1047,6 +1068,18 @@ mod tests {
         let (by_region, file_count) = aggregate_by_region(&[]);
         assert_eq!(file_count, 0);
         assert!(by_region.is_empty());
+    }
+
+    #[test]
+    fn usage_json_rows_keep_region_and_city_keys_but_carry_the_country() {
+        let mut m = BTreeMap::new();
+        m.insert(at("europe", "Germany"), 350i64);
+        let rows = region_rows_json(&m);
+        assert_eq!(
+            rows,
+            json!([{ "region": "europe", "country": "Germany", "city": "Germany", "used_bytes": 350 }]),
+            "`city` is a deprecated alias that carries the country name"
+        );
     }
 
     // ── invoices (eng-0487) ──────────────────────────────────────────────────
@@ -1293,12 +1326,12 @@ mod tests {
     }
 
     #[test]
-    fn region_human_maps_the_live_no_subscription_fallback() {
+    fn region_human_never_names_a_place() {
         // The live server's no-subscription-row branch
         // (beebeeb-api/src/routes/billing.rs::subscription) returns the
-        // literal string "falkenstein" — exactly what a fresh free-tier
-        // account (this command's manual verification rung) sees.
+        // literal string "falkenstein" for every fresh free-tier account.
         assert_eq!(region_human("falkenstein"), "Europe");
+        assert_eq!(region_human("some-other-billing-label"), "Europe");
         assert_eq!(region_human("europe"), "Europe");
         assert_eq!(region_human("eu"), "Europe");
     }
