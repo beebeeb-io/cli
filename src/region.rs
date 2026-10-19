@@ -279,9 +279,7 @@ pub enum Resolution<'a> {
 fn looks_like_datacenter_id(s: &str) -> bool {
     let letters = s.chars().take_while(|c| c.is_ascii_alphabetic()).count();
     let digits = s.len() - letters;
-    (2..=6).contains(&letters)
-        && (1..=2).contains(&digits)
-        && s.chars().skip(letters).all(|c| c.is_ascii_digit())
+    (2..=6).contains(&letters) && (1..=2).contains(&digits) && s.chars().skip(letters).all(|c| c.is_ascii_digit())
 }
 
 /// Matches `input` case-insensitively against id first, then name, then
@@ -440,7 +438,10 @@ mod tests {
         ]);
         let c = parse_choices(&v);
         for typed in ["nowhere", "ZZ", "Nowhere"] {
-            assert!(matches!(resolve(&c, typed), Resolution::Found(x) if x.id == "zz"), "{typed}");
+            assert!(
+                matches!(resolve(&c, typed), Resolution::Found(x) if x.id == "zz"),
+                "{typed}"
+            );
         }
     }
 

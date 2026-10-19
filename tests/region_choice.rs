@@ -428,7 +428,10 @@ fn the_netherlands_is_coming_soon_and_never_reaches_the_server() {
         assert!(err(&o).contains("Netherlands is coming soon"), "{}", err(&o));
         assert!(err(&o).contains("unchanged"), "{}", err(&o));
     }
-    assert!(puts.lock().unwrap().is_empty(), "a coming-soon country must not be sent");
+    assert!(
+        puts.lock().unwrap().is_empty(),
+        "a coming-soon country must not be sent"
+    );
     assert_eq!(*preferred.lock().unwrap(), Value::Null);
 }
 
@@ -512,7 +515,10 @@ fn assert_rejection_explained(shape: RejectShape) {
     let o = bb(&home, &["region", "set", "xyz9"]);
     assert_eq!(o.status.code(), Some(1));
     let e = err(&o);
-    assert!(e.contains("isn't available right now") && e.contains("unchanged"), "{e}");
+    assert!(
+        e.contains("isn't available right now") && e.contains("unchanged"),
+        "{e}"
+    );
     assert!(!e.contains("region_unavailable"), "raw server code leaked: {e}");
 }
 
@@ -567,7 +573,11 @@ fn whoami_names_the_chosen_country_from_the_api_list() {
     assert_eq!(bb(&home, &["region", "set", "de"]).status.code(), Some(0));
     let text = out(&bb(&home, &["whoami"]));
     let region_line = text.lines().find(|l| l.trim_start().starts_with("region")).unwrap();
-    assert!(region_line.trim_end().ends_with("Germany"), "{region_line}");
+    assert_eq!(
+        region_line.split_whitespace().collect::<Vec<_>>(),
+        ["region", "Germany"],
+        "country only, no `Germany, Germany`"
+    );
     assert_no_places(&text, "");
 
     let v: Value = serde_json::from_str(&out(&bb(&home, &["--json", "whoami"]))).unwrap();
@@ -596,7 +606,11 @@ fn account_show_region_row_names_the_country_and_never_a_provider() {
         .lines()
         .find(|l| l.trim_start().starts_with("region"))
         .unwrap_or_else(|| panic!("no region row in:\n{text}"));
-    assert!(line.trim_end().ends_with("Finland"), "{line}");
+    assert_eq!(
+        line.split_whitespace().collect::<Vec<_>>(),
+        ["region", "Finland"],
+        "country only, no `Finland, Finland`"
+    );
 }
 
 // ── a server from before the by-country change ──────────────────────────────
@@ -650,7 +664,10 @@ fn an_older_server_still_gets_a_datacenter_id_it_understands() {
     assert_eq!(*puts.lock().unwrap(), vec![(json!({"preferred_region": "fsn1"}), true)]);
 
     let list = out(&bb(&home, &["region"]));
-    assert!(row(&list, "de").contains('\u{25cf}'), "stored fsn1 reads as Germany:\n{list}");
+    assert!(
+        row(&list, "de").contains('\u{25cf}'),
+        "stored fsn1 reads as Germany:\n{list}"
+    );
     assert_no_places(&list, "");
     assert_eq!(out(&bb(&home, &["--quiet", "region", "get"])).trim(), "de");
     let who = out(&bb(&home, &["whoami"]));
@@ -659,7 +676,10 @@ fn an_older_server_still_gets_a_datacenter_id_it_understands() {
 
     // Typing the exact datacenter id keeps that datacenter.
     assert_eq!(bb(&home, &["region", "set", "hel1"]).status.code(), Some(0));
-    assert_eq!(puts.lock().unwrap().last().unwrap().0, json!({"preferred_region": "hel1"}));
+    assert_eq!(
+        puts.lock().unwrap().last().unwrap().0,
+        json!({"preferred_region": "hel1"})
+    );
     assert_eq!(out(&bb(&home, &["--quiet", "region", "get"])).trim(), "fi");
 }
 
@@ -678,7 +698,10 @@ fn help_lists_the_region_command_by_country() {
         let h = out(&o);
         assert!(h.contains("list") || h.contains("country"), "{h}");
         assert!(h.contains("country"), "help names the country model: {h}");
-        assert!(!h.to_lowercase().contains("city"), "help must not advertise a city: {h}");
+        assert!(
+            !h.to_lowercase().contains("city"),
+            "help must not advertise a city: {h}"
+        );
         assert_no_places(&h, "");
     }
 }

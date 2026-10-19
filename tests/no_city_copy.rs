@@ -95,7 +95,10 @@ fn scanner_finds_a_city_in_user_facing_text() {
         vec![(3, "falkenstein".to_string()), (9, "nuremberg".to_string())],
         "a test module is skipped, code after it is still scanned: {hits:?}"
     );
-    assert!(cities_in("we needed it").is_empty(), "`ede` inside a word is not the place");
+    assert!(
+        cities_in("we needed it").is_empty(),
+        "`ede` inside a word is not the place"
+    );
     assert_eq!(cities_in("N\u{fc}rnberg, Ede").len(), 2);
 }
 
