@@ -62,10 +62,15 @@ version to 0.14.0, `Cargo.lock` (that one line), this file, and the changelog.
   and a city name added to the help text.
 - The #91 resume path was tested with the real `bb` binary killed mid-upload and re-run: 3 new
   integration tests, plus a mutation check on the `download_version` guard.
-- Not verified: the country list and `set` behaviour were exercised against a mock of the new server
-  contract, not against production. The server side of the country change is not deployed yet; until
-  it is, `bb` runs in its older-server mode, folding datacenter rows into countries. Windows: the
-  `bb.exe` is cross-compiled and is not executed on a Windows machine by this release process.
+- Real server, local: the lead ran this build (`bb 0.14.0`, built from 63345d1, scratch HOME) against a
+  local server at the production server commit b6bf7fb4. `bb region list` showed Europe (default),
+  Finland, Germany, and Netherlands "coming soon · not selectable". `bb --json region list` carried
+  `country` / `country_code` and no city key.
+- Production, read-only: the lead ran the same build, not signed in, against production's public list.
+  It gave the same four rows, and the JSON had no city or provider string.
+- Not verified: `bb region set` against production. It needs a signed-in account, and the lead does not
+  use real accounts for checks. Also, `bb.exe` is cross-compiled and is not run on a Windows machine by
+  this release process.
 
 ### Install / Update
 
