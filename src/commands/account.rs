@@ -60,7 +60,7 @@ fn build_show_payload(
     };
 
     let region_v = match region {
-        Ok(v) => v.clone(),
+        Ok(v) => crate::region::without_city(v),
         Err(e) => unavailable(e),
     };
 
@@ -390,10 +390,10 @@ mod tests {
             "used_bytes": 3_200_000_000_000i64, "quota_bytes": 5_000_000_000_000i64
         }));
         let region = Ok(json!({
-            "preferred_region": "hel1",
+            "preferred_region": "fi",
             "choices": [
                 {"id":"europe","kind":"region","name":"Europe","status":"live","selectable":true,"is_default":true},
-                {"id":"hel1","kind":"datacenter","name":"Helsinki","city":"Helsinki","country":"Finland",
+                {"id":"fi","kind":"country","name":"Finland","country":"Finland","country_code":"FI",
                  "status":"live","selectable":true,"is_default":false}
             ]
         }));
@@ -404,12 +404,30 @@ mod tests {
         let out = build_show_payload(&me, &sub, &region, &score, &sessions, &passkeys);
         assert_eq!(out["user"]["email"], "a@b.com");
         assert_eq!(out["plan"]["id"], "pro");
-        assert_eq!(out["region"]["preferred_region"], "hel1");
-        assert_eq!(crate::region::current_label(&out["region"]), "Helsinki, Finland");
+        assert_eq!(out["region"]["preferred_region"], "fi");
+        assert_eq!(crate::region::current_label(&out["region"]), "Finland");
         assert_eq!(out["storage"]["used_bytes"], 3_200_000_000_000i64);
         assert_eq!(out["session_count"], 3);
         assert_eq!(out["passkey_count"], 2);
         assert!((out["storage"]["percentage"].as_f64().unwrap() - 0.64).abs() < 1e-6);
+    }
+
+    #[test]
+    fn build_show_payload_drops_legacy_city_keys() {
+        let me = Ok(json!({ "email": "a@b.com" }));
+        let bad = Err::<Value, String>("x".to_string());
+        let region = Ok(json!({
+            "preferred_region": "de",
+            "available_regions": [
+                {"id": "de", "example_city": "Falkenstein", "example_country": "Germany"}
+            ],
+            "choices": [{"id": "de", "name": "Germany", "city": "Falkenstein", "country": "Germany"}]
+        }));
+        let out = build_show_payload(&me, &bad, &region, &bad, &bad, &bad);
+        let text = out.to_string();
+        assert!(!text.contains("Falkenstein"), "city leaked: {text}");
+        assert!(!text.contains("example_city"), "example_city key leaked: {text}");
+        assert!(text.contains("example_country"), "country must stay: {text}");
     }
 
     #[test]

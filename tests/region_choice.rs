@@ -1,16 +1,24 @@
 //! `bb region` and the region rows of `bb whoami` / `bb account show`
-//! (task 1919), against an in-process mock of the server contract:
+//! (task 1919, by COUNTRY since task 2050), against an in-process mock of the
+//! server contract (server PR #251):
 //!
-//! * `GET /api/v1/storage-regions` — public bare array;
+//! * `GET /api/v1/storage-regions` — public bare array of
+//!   `europe` / `de` / `fi` / `nl` rows (`kind` region|country, no city);
 //! * `GET /api/v1/me/region` — `{preferred_region, available_regions, choices}`;
 //! * `PUT /api/v1/me/region` — validates exactly as the server does
-//!   (`null` | `europe` | live datacenter id; anything else 400
-//!   `region_unavailable`) and stores the value.
+//!   (`null` | `europe` | live country; the legacy datacenter ids
+//!   `fsn1`/`nbg1`/`hel1` are mapped to their country for one release;
+//!   anything else 400 `region_unavailable`) and stores the canonical value.
+//!
+//! A second mock shape (`Mock::legacy`) serves what a server BEFORE #251 sends:
+//! one `datacenter` row per city. The CLI must fold those by country and must
+//! never print a city, whichever server it talks to.
 //!
 //! Every test runs the real `bb` binary with a scratch HOME. The point under
 //! test: the list is whatever the API says (change the mock's data, the output
-//! changes, same binary), a coming-soon row is shown and cannot be chosen, and
-//! the id that goes on the wire is the list's id verbatim.
+//! changes, same binary), a coming-soon row is shown and cannot be chosen, the
+//! id that goes on the wire is the list's id verbatim, and no city is ever
+//! printed.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -26,7 +34,23 @@ use serde_json::{Value, json};
 
 static SEQ: AtomicUsize = AtomicUsize::new(0);
 
+/// What server PR #251 serves: countries, no city key anywhere.
 fn contract_list() -> Value {
+    json!([
+        {"id":"europe","kind":"region","name":"Europe","country":null,"country_code":null,
+         "status":"live","selectable":true,"is_default":true},
+        {"id":"de","kind":"country","name":"Germany","country":"Germany","country_code":"DE",
+         "status":"live","selectable":true,"is_default":false},
+        {"id":"fi","kind":"country","name":"Finland","country":"Finland","country_code":"FI",
+         "status":"live","selectable":true,"is_default":false},
+        {"id":"nl","kind":"country","name":"Netherlands","country":"Netherlands","country_code":"NL",
+         "status":"coming_soon","selectable":false,"is_default":false}
+    ])
+}
+
+/// What a server before #251 serves: one datacenter row per city, two of them
+/// in Germany. The cities are fixture data that must never reach the output.
+fn legacy_list() -> Value {
     json!([
         {"id":"europe","kind":"region","name":"Europe","city":null,"country":null,"country_code":null,
          "status":"live","selectable":true,"is_default":true},
@@ -41,6 +65,18 @@ fn contract_list() -> Value {
     ])
 }
 
+/// No place name a user could read as a city may appear in `text` (word match,
+/// case-insensitive: `ede` the place, not "needed"). `allow` is what the user
+/// typed themselves, which the CLI may echo back.
+fn assert_no_places(text: &str, allow: &str) {
+    let text = text.to_lowercase().replace(&allow.to_lowercase(), "");
+    for word in text.split(|c: char| !(c.is_alphanumeric())) {
+        for banned in ["falkenstein", "helsinki", "nuremberg", "nürnberg", "nurnberg", "ede"] {
+            assert!(word != banned, "city {banned:?} printed:\n{text}");
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Mock {
     list: Arc<Mutex<Value>>,
@@ -52,6 +88,9 @@ struct Mock {
     reject_all_puts: Arc<Mutex<bool>>,
     /// The wire shape of every 400 `region_unavailable` the mock sends.
     reject_shape: Arc<Mutex<RejectShape>>,
+    /// Server #251 maps the legacy datacenter ids to their country for one
+    /// release; a server before it does not know them (they are list ids).
+    maps_legacy_ids: bool,
 }
 
 /// The shapes a `region_unavailable` refusal can arrive in. `bb` must explain
@@ -79,7 +118,16 @@ impl Mock {
             puts: Arc::new(Mutex::new(Vec::new())),
             reject_all_puts: Arc::new(Mutex::new(false)),
             reject_shape: Arc::new(Mutex::new(RejectShape::ServerToday)),
+            maps_legacy_ids: true,
         }
+    }
+
+    /// A server from before the by-country change.
+    fn legacy() -> Mock {
+        let mut m = Mock::new();
+        *m.list.lock().unwrap() = legacy_list();
+        m.maps_legacy_ids = false;
+        m
     }
 }
 
@@ -99,7 +147,7 @@ fn spawn(mock: Mock) -> String {
                         Json(json!({
                             "preferred_region": m.preferred.lock().unwrap().clone(),
                             "available_regions": [{"continent":"europe","display_name":"Europe",
-                                "example_city":"Falkenstein","is_default":true}],
+                                "example_country":"Germany","example_city":"Falkenstein","is_default":true}],
                             "choices": m.list.lock().unwrap().clone(),
                         }))
                     })
@@ -126,10 +174,17 @@ fn spawn(mock: Mock) -> String {
                             }
                             let want = body.get("preferred_region").cloned().unwrap_or(Value::Null);
                             if let Some(id) = want.as_str() {
-                                let id = id.to_lowercase();
+                                let mut id = id.to_lowercase();
+                                if m.maps_legacy_ids {
+                                    id = match id.as_str() {
+                                        "fsn1" | "nbg1" => "de".to_string(),
+                                        "hel1" => "fi".to_string(),
+                                        _ => id,
+                                    };
+                                }
                                 let ok = id == "europe"
                                     || m.list.lock().unwrap().as_array().unwrap().iter().any(|c| {
-                                        c["id"] == id.as_str() && c["status"] == "live" && c["kind"] == "datacenter"
+                                        c["id"] == id.as_str() && c["status"] == "live" && c["kind"] != "region"
                                     });
                                 if !ok {
                                     return reject(&id);
@@ -225,7 +280,7 @@ fn row<'a>(text: &'a str, id: &str) -> &'a str {
 }
 
 #[test]
-fn list_shows_europe_default_the_datacenters_and_ede_as_coming_soon() {
+fn list_shows_europe_default_the_countries_and_the_netherlands_as_coming_soon() {
     let mock = Mock::new();
     let api = spawn(mock);
     let home = scratch_home(&api, true);
@@ -234,22 +289,21 @@ fn list_shows_europe_default_the_datacenters_and_ede_as_coming_soon() {
     let text = out(&o);
     assert_eq!(o.status.code(), Some(0), "stdout: {text}\nstderr: {}", err(&o));
 
-    assert!(row(&text, "europe").contains("default"), "{text}");
+    let europe = row(&text, "europe");
+    assert!(europe.contains("default"), "{text}");
+    assert!(europe.contains("European data centers"), "{text}");
     assert!(
-        row(&text, "europe").contains('\u{25cf}'),
+        europe.contains('\u{25cf}'),
         "no preference = the default is current:\n{text}"
     );
-    for (id, city, country) in [
-        ("fsn1", "Falkenstein", "Germany"),
-        ("hel1", "Helsinki", "Finland"),
-        ("nbg1", "Nuremberg", "Germany"),
-    ] {
-        let r = row(&text, id);
-        assert!(r.contains(city) && r.contains(country), "{r}");
-        assert!(!r.contains("coming soon"), "{r}");
-    }
-    let ede = row(&text, "ede");
-    assert!(ede.contains("coming soon") && ede.contains("not selectable"), "{ede}");
+    assert!(row(&text, "de").contains("Germany") && !row(&text, "de").contains("coming soon"));
+    assert!(row(&text, "fi").contains("Finland") && !row(&text, "fi").contains("coming soon"));
+    let nl = row(&text, "nl");
+    assert!(
+        nl.contains("Netherlands") && nl.contains("coming soon") && nl.contains("not selectable"),
+        "{nl}"
+    );
+    assert_no_places(&text, "");
     // `bb region list` is the same as bare `bb region`.
     assert_eq!(out(&bb(&home, &["region", "list"])), text);
 }
@@ -262,33 +316,30 @@ fn the_list_is_fetched_from_the_api_changing_it_changes_the_output() {
     let home = scratch_home(&api, true);
 
     let before = out(&bb(&home, &["region"]));
-    assert!(!before.contains("Qwerty"));
-    assert!(row(&before, "ede").contains("coming soon"));
+    assert!(!before.contains("Sweden"));
+    assert!(row(&before, "nl").contains("coming soon"));
 
-    // Ede goes live and a brand-new datacenter appears. Same binary, no release.
+    // The Netherlands goes live and a brand-new country appears. Same binary, no release.
     {
         let mut l = list.lock().unwrap();
         let arr = l.as_array_mut().unwrap();
         for c in arr.iter_mut() {
-            if c["id"] == "ede" {
+            if c["id"] == "nl" {
                 c["status"] = json!("live");
                 c["selectable"] = json!(true);
             }
         }
-        arr.push(
-            json!({"id":"zzz9","kind":"datacenter","name":"Qwerty","city":"Qwerty","country":"Nowhere",
-            "country_code":"NW","status":"live","selectable":true,"is_default":false}),
-        );
+        arr.push(json!({"id":"se","kind":"country","name":"Sweden","country":"Sweden",
+            "country_code":"SE","status":"live","selectable":true,"is_default":false}));
     }
     let after = out(&bb(&home, &["region"]));
-    assert!(!row(&after, "ede").contains("coming soon"), "{after}");
-    assert!(
-        row(&after, "zzz9").contains("Qwerty") && row(&after, "zzz9").contains("Nowhere"),
-        "{after}"
-    );
+    assert!(!row(&after, "nl").contains("coming soon"), "{after}");
+    assert!(row(&after, "se").contains("Sweden"), "{after}");
 
-    let o = bb(&home, &["region", "set", "qwerty"]);
-    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    for typed in ["sweden", "SE", "Netherlands"] {
+        let o = bb(&home, &["region", "set", typed]);
+        assert_eq!(o.status.code(), Some(0), "{typed}: {}", err(&o));
+    }
 }
 
 #[test]
@@ -298,44 +349,63 @@ fn json_list_passes_the_server_rows_through_and_names_the_current_choice() {
     let o = bb(&home, &["--json", "region"]);
     let v: Value = serde_json::from_str(&out(&o)).unwrap_or_else(|e| panic!("{e}: {}", out(&o)));
     assert_eq!(v["current"], "europe");
-    assert_eq!(v["regions"].as_array().unwrap().len(), 5);
-    assert_eq!(v["regions"][4]["status"], "coming_soon");
-    assert_eq!(v["regions"][4]["selectable"], false);
+    assert_eq!(v["regions"].as_array().unwrap().len(), 4);
+    assert_eq!(v["regions"][3]["status"], "coming_soon");
+    assert_eq!(v["regions"][3]["selectable"], false);
+    assert_eq!(v["regions"][1]["country"], "Germany");
+    assert_eq!(v["regions"][1]["country_code"], "DE");
     assert_eq!(v["regions"], contract_list(), "rows are the server's, verbatim");
 }
 
 #[test]
-fn set_helsinki_sends_the_list_id_verbatim_with_the_session_and_sticks() {
-    let mock = Mock::new();
-    let puts = mock.puts.clone();
-    let api = spawn(mock);
+fn set_accepts_a_country_name_or_code_in_any_case_and_sends_the_list_id_verbatim() {
+    for typed in ["de", "DE", "Germany", "GERMANY", "  germany "] {
+        let mock = Mock::new();
+        let puts = mock.puts.clone();
+        let api = spawn(mock);
+        let home = scratch_home(&api, true);
+
+        let o = bb(&home, &["region", "set", typed]);
+        assert_eq!(o.status.code(), Some(0), "{typed}: {}\n{}", out(&o), err(&o));
+        assert!(out(&o).contains("Storage location set to Germany."), "{}", out(&o));
+        assert!(out(&o).contains("stay where they are"), "{}", out(&o));
+        assert_no_places(&out(&o), "");
+        assert_eq!(
+            *puts.lock().unwrap(),
+            vec![(json!({"preferred_region": "de"}), true)],
+            "{typed}"
+        );
+    }
+
+    // Read back through the API: the list marks Germany, `get` and `whoami` agree.
+    let api = spawn(Mock::new());
     let home = scratch_home(&api, true);
-
-    let o = bb(&home, &["region", "set", "Helsinki"]);
-    assert_eq!(o.status.code(), Some(0), "stdout: {}\nstderr: {}", out(&o), err(&o));
-    assert!(out(&o).contains("Helsinki, Finland"), "{}", out(&o));
-    assert!(out(&o).contains("stay where they are"), "{}", out(&o));
-    assert_eq!(*puts.lock().unwrap(), vec![(json!({"preferred_region": "hel1"}), true)]);
-
-    // Read back through the API: the list marks Helsinki, `get` and `whoami` agree.
+    assert_eq!(bb(&home, &["region", "set", "Finland"]).status.code(), Some(0));
     let list = out(&bb(&home, &["region"]));
-    assert!(row(&list, "hel1").contains('\u{25cf}'), "{list}");
+    assert!(row(&list, "fi").contains('\u{25cf}'), "{list}");
     assert!(!row(&list, "europe").contains('\u{25cf}'), "{list}");
-    assert!(out(&bb(&home, &["region", "get"])).contains("Helsinki, Finland"));
-    assert_eq!(out(&bb(&home, &["--quiet", "region", "get"])).trim(), "hel1");
+    let get = out(&bb(&home, &["region", "get"]));
+    assert!(get.contains("Finland"), "{get}");
+    assert_no_places(&get, "");
+    assert_eq!(out(&bb(&home, &["--quiet", "region", "get"])).trim(), "fi");
+    let v: Value = serde_json::from_str(&out(&bb(&home, &["--json", "region", "get"]))).unwrap();
+    assert_eq!(v["current"], "fi");
+    assert_eq!(v["country"], "Finland");
+    assert_eq!(v["country_code"], "FI");
+    assert_eq!(v["preferred_region"], "fi", "existing machine fields stay");
 }
 
 #[test]
-fn set_europe_chooses_the_default_any_datacenter() {
+fn set_europe_chooses_the_default_any_data_center() {
     let mock = Mock::new();
     let puts = mock.puts.clone();
     let api = spawn(mock);
     let home = scratch_home(&api, true);
 
-    assert_eq!(bb(&home, &["region", "set", "hel1"]).status.code(), Some(0));
+    assert_eq!(bb(&home, &["region", "set", "fi"]).status.code(), Some(0));
     let o = bb(&home, &["region", "set", "europe"]);
     assert_eq!(o.status.code(), Some(0), "{}", err(&o));
-    assert!(out(&o).contains("any of its European datacenters"), "{}", out(&o));
+    assert!(out(&o).contains("any of its European data centers"), "{}", out(&o));
     assert_eq!(
         puts.lock().unwrap().last().unwrap().0,
         json!({"preferred_region": "europe"})
@@ -345,25 +415,28 @@ fn set_europe_chooses_the_default_any_datacenter() {
 }
 
 #[test]
-fn ede_is_coming_soon_and_never_reaches_the_server() {
+fn the_netherlands_is_coming_soon_and_never_reaches_the_server() {
     let mock = Mock::new();
     let puts = mock.puts.clone();
     let preferred = mock.preferred.clone();
     let api = spawn(mock);
     let home = scratch_home(&api, true);
 
-    for typed in ["ede", "Ede"] {
+    for typed in ["nl", "NL", "Netherlands"] {
         let o = bb(&home, &["region", "set", typed]);
         assert_eq!(o.status.code(), Some(1), "stdout: {}", out(&o));
-        assert!(err(&o).contains("coming soon"), "{}", err(&o));
+        assert!(err(&o).contains("Netherlands is coming soon"), "{}", err(&o));
         assert!(err(&o).contains("unchanged"), "{}", err(&o));
     }
-    assert!(puts.lock().unwrap().is_empty(), "a coming-soon region must not be sent");
+    assert!(
+        puts.lock().unwrap().is_empty(),
+        "a coming-soon country must not be sent"
+    );
     assert_eq!(*preferred.lock().unwrap(), Value::Null);
 }
 
 #[test]
-fn unknown_name_fails_without_a_request_and_lists_the_real_options() {
+fn unknown_input_fails_without_a_request_and_lists_the_real_options() {
     let mock = Mock::new();
     let puts = mock.puts.clone();
     let api = spawn(mock);
@@ -373,11 +446,48 @@ fn unknown_name_fails_without_a_request_and_lists_the_real_options() {
     assert_eq!(o.status.code(), Some(1));
     let e = err(&o);
     assert!(
-        e.contains("'paris'") && e.contains("hel1 (Helsinki)") && e.contains("europe"),
+        e.contains("'paris'") && e.contains("de (Germany)") && e.contains("fi (Finland)") && e.contains("europe"),
         "{e}"
     );
-    assert!(!e.contains("ede"), "coming soon is not an option: {e}");
+    assert!(!e.contains("Netherlands"), "coming soon is not an option: {e}");
     assert!(puts.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_city_is_no_longer_a_choice_and_the_error_prints_no_city_list() {
+    let mock = Mock::new();
+    let puts = mock.puts.clone();
+    let api = spawn(mock);
+    let home = scratch_home(&api, true);
+
+    for typed in ["helsinki", "Falkenstein", "nuremberg"] {
+        let o = bb(&home, &["region", "set", typed]);
+        assert_eq!(o.status.code(), Some(1), "{typed}");
+        let e = err(&o);
+        assert!(e.contains("chosen by country"), "{typed}: {e}");
+        assert!(e.contains("'de'") && e.contains("'fi'"), "{typed}: {e}");
+        // The CLI may echo what the user typed; it must not volunteer a city.
+        assert_no_places(&e, typed);
+    }
+    assert!(puts.lock().unwrap().is_empty(), "a city never reaches the server");
+}
+
+#[test]
+fn a_legacy_datacenter_id_is_passed_through_and_the_server_maps_it() {
+    let mock = Mock::new();
+    let puts = mock.puts.clone();
+    let api = spawn(mock);
+    let home = scratch_home(&api, true);
+
+    // `hel1` is not in the country list. It is datacenter-shaped, so it goes to
+    // the server verbatim (one release of mapping), and the answer is read
+    // back as the country the server stored.
+    let o = bb(&home, &["region", "set", "HEL1"]);
+    assert_eq!(o.status.code(), Some(0), "{}\n{}", out(&o), err(&o));
+    assert!(out(&o).contains("Storage location set to Finland."), "{}", out(&o));
+    assert_no_places(&out(&o), "");
+    assert_eq!(*puts.lock().unwrap(), vec![(json!({"preferred_region": "HEL1"}), true)]);
+    assert_eq!(out(&bb(&home, &["--quiet", "region", "get"])).trim(), "fi");
 }
 
 /// A PUT refused with `region_unavailable` (the choice lost a race with the
@@ -391,15 +501,25 @@ fn assert_rejection_explained(shape: RejectShape) {
     let api = spawn(mock);
     let home = scratch_home(&api, true);
 
-    let o = bb(&home, &["region", "set", "hel1"]);
+    let o = bb(&home, &["region", "set", "fi"]);
     assert_eq!(o.status.code(), Some(1));
     let e = err(&o);
     assert!(
-        e.contains("Helsinki") && e.contains("isn't available right now") && e.contains("unchanged"),
+        e.contains("Finland") && e.contains("isn't available right now") && e.contains("unchanged"),
         "{e}"
     );
     assert!(!e.contains("region_unavailable"), "raw server code leaked: {e}");
     assert_eq!(*preferred.lock().unwrap(), Value::Null);
+
+    // A passed-through legacy id the server refuses is explained the same way.
+    let o = bb(&home, &["region", "set", "xyz9"]);
+    assert_eq!(o.status.code(), Some(1));
+    let e = err(&o);
+    assert!(
+        e.contains("isn't available right now") && e.contains("unchanged"),
+        "{e}"
+    );
+    assert!(!e.contains("region_unavailable"), "raw server code leaked: {e}");
 }
 
 #[test]
@@ -432,9 +552,9 @@ fn signed_out_the_list_still_prints_but_set_and_get_refuse() {
         "no session, no current-choice marker:\n{text}"
     );
     assert!(text.contains("bb login"), "{text}");
-    assert!(row(&text, "hel1").contains("Finland"));
+    assert!(row(&text, "fi").contains("Finland"));
 
-    for args in [&["region", "set", "hel1"][..], &["region", "get"][..]] {
+    for args in [&["region", "set", "fi"][..], &["region", "get"][..]] {
         let o = bb(&home, args);
         assert_eq!(o.status.code(), Some(1));
         assert!(err(&o).contains("Not logged in"), "{}", err(&o));
@@ -443,48 +563,128 @@ fn signed_out_the_list_still_prints_but_set_and_get_refuse() {
 }
 
 #[test]
-fn whoami_names_the_chosen_datacenter_from_the_api_list() {
+fn whoami_names_the_chosen_country_from_the_api_list() {
     let api = spawn(Mock::new());
     let home = scratch_home(&api, true);
 
     let default = out(&bb(&home, &["whoami"]));
-    assert!(default.contains("Europe \u{00b7} default, any datacenter"), "{default}");
+    assert!(default.contains("Europe \u{00b7} default"), "{default}");
 
-    assert_eq!(bb(&home, &["region", "set", "nbg1"]).status.code(), Some(0));
+    assert_eq!(bb(&home, &["region", "set", "de"]).status.code(), Some(0));
     let text = out(&bb(&home, &["whoami"]));
     let region_line = text.lines().find(|l| l.trim_start().starts_with("region")).unwrap();
-    assert!(region_line.contains("Nuremberg, Germany"), "{text}");
+    assert_eq!(
+        region_line.split_whitespace().collect::<Vec<_>>(),
+        ["region", "Germany"],
+        "country only, no `Germany, Germany`"
+    );
+    assert_no_places(&text, "");
 
     let v: Value = serde_json::from_str(&out(&bb(&home, &["--json", "whoami"]))).unwrap();
-    assert_eq!(v["region"], "Nuremberg");
-    assert_eq!(v["region_id"], "nbg1");
+    assert_eq!(v["region"], "Germany");
+    assert_eq!(v["region_id"], "de");
 }
 
 #[test]
-fn account_show_region_row_names_the_choice_and_never_a_provider() {
+fn account_show_region_row_names_the_country_and_never_a_provider() {
     let api = spawn(Mock::new());
     let home = scratch_home(&api, true);
-    assert_eq!(bb(&home, &["region", "set", "hel1"]).status.code(), Some(0));
+    assert_eq!(bb(&home, &["region", "set", "fi"]).status.code(), Some(0));
 
     let o = bb(&home, &["--json", "account", "show"]);
     assert_eq!(o.status.code(), Some(0), "{}", err(&o));
     let v: Value = serde_json::from_str(&out(&o)).unwrap_or_else(|e| panic!("{e}: {}", out(&o)));
-    assert_eq!(v["region"]["preferred_region"], "hel1", "{v}");
-    assert_eq!(v["region"]["choices"].as_array().map(|a| a.len()), Some(5));
+    assert_eq!(v["region"]["preferred_region"], "fi", "{v}");
+    assert_eq!(v["region"]["choices"].as_array().map(|a| a.len()), Some(4));
 
     let o = bb(&home, &["account", "show"]);
     assert_eq!(o.status.code(), Some(0), "{}", err(&o));
     let text = out(&o);
     assert!(!text.to_lowercase().contains("hetzner"), "{text}");
+    assert_no_places(&text, "");
     let line = text
         .lines()
         .find(|l| l.trim_start().starts_with("region"))
         .unwrap_or_else(|| panic!("no region row in:\n{text}"));
-    assert!(line.contains("Helsinki, Finland"), "{line}");
+    assert_eq!(
+        line.split_whitespace().collect::<Vec<_>>(),
+        ["region", "Finland"],
+        "country only, no `Finland, Finland`"
+    );
+}
+
+// ── a server from before the by-country change ──────────────────────────────
+
+#[test]
+fn an_older_server_with_city_rows_is_folded_by_country_and_prints_no_city() {
+    let api = spawn(Mock::legacy());
+    let home = scratch_home(&api, true);
+
+    let o = bb(&home, &["region"]);
+    let text = out(&o);
+    assert_eq!(o.status.code(), Some(0), "{text}\n{}", err(&o));
+    assert_no_places(&text, "");
+    // Two German datacenters are one Germany row.
+    assert_eq!(
+        text.lines().filter(|l| l.contains("Germany")).count(),
+        1,
+        "Germany once:\n{text}"
+    );
+    assert!(row(&text, "de").contains("Germany") && !row(&text, "de").contains("coming soon"));
+    assert!(row(&text, "fi").contains("Finland"));
+    let nl = row(&text, "nl");
+    assert!(nl.contains("Netherlands") && nl.contains("coming soon") && nl.contains("not selectable"));
+    assert!(row(&text, "europe").contains("default"));
+
+    // Machine output: folded rows carry the stable fields plus country/code, no city.
+    let v: Value = serde_json::from_str(&out(&bb(&home, &["--json", "region"]))).unwrap();
+    let rows = v["regions"].as_array().unwrap();
+    assert_eq!(rows.len(), 4, "{v}");
+    let de = rows.iter().find(|r| r["id"] == "de").unwrap();
+    assert_eq!(de["country"], "Germany");
+    assert_eq!(de["country_code"], "DE");
+    assert_eq!(de["status"], "live");
+    assert_eq!(de["selectable"], true);
+    assert_no_places(&v.to_string(), "");
 }
 
 #[test]
-fn help_lists_the_region_command() {
+fn an_older_server_still_gets_a_datacenter_id_it_understands() {
+    let mock = Mock::legacy();
+    let puts = mock.puts.clone();
+    let api = spawn(mock);
+    let home = scratch_home(&api, true);
+
+    // `germany` folds two datacenters; the first selectable one is what that
+    // server can store. Whoever reads it back sees the country.
+    let o = bb(&home, &["region", "set", "germany"]);
+    assert_eq!(o.status.code(), Some(0), "{}\n{}", out(&o), err(&o));
+    assert!(out(&o).contains("Storage location set to Germany."), "{}", out(&o));
+    assert_no_places(&out(&o), "");
+    assert_eq!(*puts.lock().unwrap(), vec![(json!({"preferred_region": "fsn1"}), true)]);
+
+    let list = out(&bb(&home, &["region"]));
+    assert!(
+        row(&list, "de").contains('\u{25cf}'),
+        "stored fsn1 reads as Germany:\n{list}"
+    );
+    assert_no_places(&list, "");
+    assert_eq!(out(&bb(&home, &["--quiet", "region", "get"])).trim(), "de");
+    let who = out(&bb(&home, &["whoami"]));
+    assert!(who.contains("Germany"), "{who}");
+    assert_no_places(&who, "");
+
+    // Typing the exact datacenter id keeps that datacenter.
+    assert_eq!(bb(&home, &["region", "set", "hel1"]).status.code(), Some(0));
+    assert_eq!(
+        puts.lock().unwrap().last().unwrap().0,
+        json!({"preferred_region": "hel1"})
+    );
+    assert_eq!(out(&bb(&home, &["--quiet", "region", "get"])).trim(), "fi");
+}
+
+#[test]
+fn help_lists_the_region_command_by_country() {
     let api = spawn(Mock::new());
     let home = scratch_home(&api, false);
     let o = bb(&home, &["--help"]);
@@ -493,7 +693,15 @@ fn help_lists_the_region_command() {
         "{}",
         out(&o)
     );
-    let o = bb(&home, &["region", "--help"]);
-    let h = out(&o);
-    assert!(h.contains("list") && h.contains("get") && h.contains("set"), "{h}");
+    for args in [&["region", "--help"][..], &["region", "set", "--help"][..]] {
+        let o = bb(&home, args);
+        let h = out(&o);
+        assert!(h.contains("list") || h.contains("country"), "{h}");
+        assert!(h.contains("country"), "help names the country model: {h}");
+        assert!(
+            !h.to_lowercase().contains("city"),
+            "help must not advertise a city: {h}"
+        );
+        assert_no_places(&h, "");
+    }
 }

@@ -3,14 +3,6 @@ use std::time::Instant;
 
 use crate::{api::ApiClient, colors, ui};
 
-fn capitalise(s: &str) -> String {
-    let mut c = s.chars();
-    match c.next() {
-        None => String::new(),
-        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-    }
-}
-
 pub async fn run() -> Result<(), String> {
     let api = ApiClient::from_config();
     api.require_auth()?;
@@ -24,11 +16,10 @@ pub async fn run() -> Result<(), String> {
 
     // Get user's preferred region
     let region_info = api.get_my_region().await.ok();
+    // Task 2050: the country the API's own list names, never a raw id or city.
     let region = region_info
         .as_ref()
-        .and_then(|r| r.get("preferred_region"))
-        .and_then(|v| v.as_str())
-        .map(capitalise)
+        .map(crate::region::current_name)
         .unwrap_or_else(|| "Europe".to_string());
     println!(
         "{}",
@@ -238,11 +229,10 @@ pub async fn run() -> Result<(), String> {
 async fn run_json(api: &ApiClient) -> Result<(), String> {
     // Region
     let region_info = api.get_my_region().await.ok();
+    // Task 2050: the country the API's own list names, never a raw id or city.
     let region = region_info
         .as_ref()
-        .and_then(|r| r.get("preferred_region"))
-        .and_then(|v| v.as_str())
-        .map(capitalise)
+        .map(crate::region::current_name)
         .unwrap_or_else(|| "Europe".to_string());
 
     // Latency
