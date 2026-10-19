@@ -60,7 +60,7 @@ fn build_show_payload(
     };
 
     let region_v = match region {
-        Ok(v) => v.clone(),
+        Ok(v) => crate::region::without_city(v),
         Err(e) => unavailable(e),
     };
 
@@ -410,6 +410,24 @@ mod tests {
         assert_eq!(out["session_count"], 3);
         assert_eq!(out["passkey_count"], 2);
         assert!((out["storage"]["percentage"].as_f64().unwrap() - 0.64).abs() < 1e-6);
+    }
+
+    #[test]
+    fn build_show_payload_drops_legacy_city_keys() {
+        let me = Ok(json!({ "email": "a@b.com" }));
+        let bad = Err::<Value, String>("x".to_string());
+        let region = Ok(json!({
+            "preferred_region": "de",
+            "available_regions": [
+                {"id": "de", "example_city": "Falkenstein", "example_country": "Germany"}
+            ],
+            "choices": [{"id": "de", "name": "Germany", "city": "Falkenstein", "country": "Germany"}]
+        }));
+        let out = build_show_payload(&me, &bad, &region, &bad, &bad, &bad);
+        let text = out.to_string();
+        assert!(!text.contains("Falkenstein"), "city leaked: {text}");
+        assert!(!text.contains("example_city"), "example_city key leaked: {text}");
+        assert!(text.contains("example_country"), "country must stay: {text}");
     }
 
     #[test]

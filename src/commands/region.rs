@@ -56,7 +56,7 @@ pub async fn list() -> Result<(), String> {
             "{}",
             serde_json::to_string_pretty(&json!({
                 "current": current,
-                "regions": choices.iter().map(|c| c.raw.clone()).collect::<Vec<Value>>(),
+                "regions": choices.iter().map(|c| crate::region::without_city(&c.raw)).collect::<Vec<Value>>(),
             }))
             .unwrap()
         );

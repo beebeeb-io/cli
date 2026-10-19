@@ -177,6 +177,22 @@ fn synthetic_raw(c: &Choice) -> Value {
     })
 }
 
+/// Deep copy of a server payload with every deprecated city key removed
+/// (`city`, `example_city`). The server keeps `available_regions[].example_city`
+/// one more release for the desktop; `--json` output must never carry it.
+pub fn without_city(v: &Value) -> Value {
+    match v {
+        Value::Object(m) => Value::Object(
+            m.iter()
+                .filter(|(k, _)| k.as_str() != "city" && k.as_str() != "example_city")
+                .map(|(k, x)| (k.clone(), without_city(x)))
+                .collect(),
+        ),
+        Value::Array(a) => Value::Array(a.iter().map(without_city).collect()),
+        other => other.clone(),
+    }
+}
+
 /// Reads a bare array, or an object carrying it under `choices` (the
 /// `/me/region` response). Anything else is an empty list. Older-server
 /// datacenter rows are folded by country (see the module docs).
