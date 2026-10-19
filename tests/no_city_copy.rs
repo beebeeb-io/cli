@@ -50,13 +50,12 @@ fn production_text(source: &str) -> String {
                 item = lines.next().unwrap_or("");
             }
             out.push('\n');
-            if item.trim_start().starts_with("mod ") || item.trim_start().starts_with("pub(crate) mod ") {
-                if item.trim_end().ends_with('{') {
-                    for inner in lines.by_ref() {
-                        out.push('\n');
-                        if inner == "}" {
-                            break;
-                        }
+            let is_mod = item.trim_start().starts_with("mod ") || item.trim_start().starts_with("pub(crate) mod ");
+            if is_mod && item.trim_end().ends_with('{') {
+                for inner in lines.by_ref() {
+                    out.push('\n');
+                    if inner == "}" {
+                        break;
                     }
                 }
             }
