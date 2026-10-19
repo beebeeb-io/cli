@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-19
+
+### Added
+- `bb region` works by country. `bb region list` shows Europe (the default), Germany and Finland, with Netherlands as coming soon; `bb region set` takes a country code or name (`de`, `germany`, `europe`), case-insensitive. A city is no longer a choice: typing one is refused with a hint to use a country code, and your setting is unchanged. Older servers that list one row per datacenter are folded into one row per country, and legacy datacenter ids (the short datacenter ids) are still accepted. (task 2050)
+- `--json` output gains `country` and `country_code` on `bb region get` / `set`, and `country` on `bb billing usage` rows. (task 2050)
+- Re-running an interrupted `bb push` resumes it instead of refusing with "already exists". It resumes only your own unfinished first upload of the same file; a completed file, or an interrupted `--replace`, is still a conflict. (task 1950)
+
+### Changed
+- `bb billing usage` groups by country; usage with no country is shown under Europe. In `--json` the deprecated `city` key is kept and now carries the country name. (task 2050)
+- `bb whoami`, `bb account show` and `bb speedtest` name your storage choice by country (`bb speedtest` used to print a raw datacenter id), and `bb billing show` always reads "Europe" for the billing region. (task 2050)
+
+### Fixed
+- No city name appears anywhere in `bb` output, including `--json`: `bb account show` and `bb region list` strip the server's deprecated city keys. A test guards the production source and the README. (task 2050)
+
 ## [0.13.6] - 2026-10-17
 
 ### Added
