@@ -1,18 +1,21 @@
-//! OTA self-update — checks GitHub releases on startup and auto-updates the binary.
+//! Automatic and explicit (`bb update`) release updates from GitHub.
 //!
 //! Behaviour:
 //! - Cooldown of 1 hour between checks (timestamp persisted in `~/.config/beebeeb/last_update_check`).
 //! - Network requests time out after 10 seconds so they never block startup noticeably.
-//! - Skipped entirely when `BB_NO_UPDATE=1` or running from a cargo development build.
-//! - On failure at any stage, we silently fall through — the user's command runs normally.
-//! - After a successful update, the process re-execs itself with the same arguments.
+//! - Automatic checks skip `BB_NO_UPDATE=1`, cargo development paths, and help/version output.
+//! - Automatic failures leave the user's command running normally; explicit failures return an error.
+//! - Automatic updates re-exec the original command; explicit updates print the result and finish.
+//! - Homebrew and Scoop retain ownership of managed installations.
 
+#[cfg(any(not(windows), test))]
 use std::collections::HashMap;
+#[cfg(not(windows))]
 use std::io::Read as _;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use colored::Colorize;
+#[cfg(any(not(windows), test))]
 use sha2::{Digest, Sha256};
 
 const CHECK_INTERVAL: Duration = Duration::from_secs(3600); // 1 hour
@@ -21,230 +24,325 @@ const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const GITHUB_RELEASES_URL: &str = "https://api.github.com/repos/beebeeb-io/cli/releases/latest";
 
 // ---------------------------------------------------------------------------
-// Public entry point
+// Public entry points
 // ---------------------------------------------------------------------------
 
-/// Check for updates and, if a newer version exists, download and replace the
-/// current binary then re-exec the process. Returns normally when no update is
-/// needed or when anything goes wrong (never surfaces errors to the user).
+type UpdateResult<T> = Result<T, Box<dyn std::error::Error>>;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UpdateMode {
+    Automatic,
+    Manual,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum UpdateOutcome {
+    AlreadyCurrent,
+    Updated { version: String, executable: PathBuf },
+}
+
+fn should_check(mode: UpdateMode, disabled: bool, development: bool, elapsed: bool) -> bool {
+    mode == UpdateMode::Manual || (!disabled && !development && elapsed)
+}
+
+/// Best-effort startup check. Only automatic updates restart the original command.
 pub async fn check_and_update() {
-    // Opt-out via env var.
-    if std::env::var("BB_NO_UPDATE").unwrap_or_default() == "1" {
-        return;
-    }
-
-    // Skip when running from a Cargo development build.
-    if is_dev_build() {
-        return;
-    }
-
-    // Cooldown — don't check more than once per hour.
     let state = state_file();
-    if !cooldown_elapsed(&state) {
+    if !should_check(
+        UpdateMode::Automatic,
+        std::env::var("BB_NO_UPDATE").unwrap_or_default() == "1",
+        is_dev_build(),
+        cooldown_elapsed(&state),
+    ) {
         return;
     }
-
-    // Run the actual check + update, ignoring any errors.
-    if let Err(_e) = try_update(&state).await {
-        // Silently swallow — don't disturb the user.
-        #[cfg(debug_assertions)]
-        eprintln!("  [update debug] {_e}");
+    let result = match std::env::current_exe() {
+        Ok(exe) => try_update(&state, &exe, GITHUB_RELEASES_URL, std::path::Path::new("brew")).await,
+        Err(error) => Err(error.into()),
+    };
+    match result {
+        Ok(UpdateOutcome::Updated { executable, .. }) => re_exec(&executable),
+        Ok(UpdateOutcome::AlreadyCurrent) => {}
+        Err(_error) => {
+            #[cfg(debug_assertions)]
+            eprintln!("  [update debug] {_error}");
+        }
     }
 }
 
+/// A user-requested update always checks now and surfaces errors. It finishes
+/// normally after replacement instead of re-running `bb update` in a loop.
+pub async fn run_manual() -> Result<(), String> {
+    let state = state_file();
+    if !should_check(
+        UpdateMode::Manual,
+        std::env::var("BB_NO_UPDATE").unwrap_or_default() == "1",
+        is_dev_build(),
+        cooldown_elapsed(&state),
+    ) {
+        return Ok(());
+    }
+    if cfg!(debug_assertions) {
+        return Err(
+            "development builds cannot self-update; install a release with curl -fsSL https://get.beebeeb.io | sh"
+                .into(),
+        );
+    }
+    let exe = std::env::current_exe().map_err(|error| error.to_string())?;
+    let outcome = try_update(&state, &exe, GITHUB_RELEASES_URL, std::path::Path::new("brew"))
+        .await
+        .map_err(|error| error.to_string())?;
+    let (updated, version) = match outcome {
+        UpdateOutcome::AlreadyCurrent => (false, CURRENT_VERSION.to_string()),
+        UpdateOutcome::Updated { version, .. } => (true, version),
+    };
+    if crate::ui::is_json() {
+        println!("{}", serde_json::json!({"updated": updated, "version": version}));
+    } else if crate::ui::is_quiet() {
+        println!("{version}");
+    } else if updated {
+        println!("Updated bb v{CURRENT_VERSION} -> v{version}");
+    } else {
+        println!("bb v{version} is already up to date.");
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
-// Core update logic
+// Core update logic. Endpoint/executable arguments are internal test seams;
+// production entry points always use the fixed GitHub release URL above.
 // ---------------------------------------------------------------------------
 
-async fn try_update(state: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+async fn try_update(
+    state: &std::path::Path,
+    current_exe: &std::path::Path,
+    releases_url: &str,
+    _brew: &std::path::Path,
+) -> UpdateResult<UpdateOutcome> {
     let client = reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
         .user_agent(format!("bb/{CURRENT_VERSION}"))
         .build()?;
-
-    let resp = client.get(GITHUB_RELEASES_URL).send().await?;
-    if !resp.status().is_success() {
-        // Rate-limited or other API error — skip silently.
-        return Ok(());
-    }
-
-    let release: GitHubRelease = resp.json().await?;
+    let release: GitHubRelease = client
+        .get(releases_url)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
     let remote_ver = release.tag_name.strip_prefix('v').unwrap_or(&release.tag_name);
-
     let local = semver::Version::parse(CURRENT_VERSION)?;
     let remote = semver::Version::parse(remote_ver)?;
-
-    // Write the timestamp regardless of whether there's an update.
     write_timestamp(state);
-
     if remote <= local {
-        return Ok(()); // Already up to date — print nothing.
+        return Ok(UpdateOutcome::AlreadyCurrent);
     }
 
-    // Detect if installed via Homebrew and delegate if so.
-    if is_homebrew_install() {
-        return update_via_homebrew(CURRENT_VERSION, remote_ver);
+    #[cfg(windows)]
+    {
+        let executable = update_via_scoop(current_exe, &remote)?;
+        Ok(UpdateOutcome::Updated {
+            version: remote.to_string(),
+            executable,
+        })
     }
 
-    // Find the right asset for this platform.
-    let target = current_target();
-    let asset_name = format!("beebeeb-cli-{target}.tar.xz");
-    let asset = release
-        .assets
-        .iter()
-        .find(|a| a.name == asset_name)
-        .ok_or_else(|| format!("no release asset for {target}"))?;
+    #[cfg(not(windows))]
+    {
+        if let Some(executable) = homebrew_executable(current_exe, _brew)? {
+            update_via_homebrew(_brew, &executable, &remote)?;
+            return Ok(UpdateOutcome::Updated {
+                version: remote.to_string(),
+                executable,
+            });
+        }
+        let target = current_target();
+        let asset_name = format!("beebeeb-cli-{target}.tar.xz");
+        let asset = release
+            .assets
+            .iter()
+            .find(|asset| asset.name == asset_name)
+            .ok_or_else(|| format!("no release asset for {target}"))?;
+        let manifest_asset = release
+            .assets
+            .iter()
+            .find(|asset| asset.name == "dist-manifest.json")
+            .ok_or("dist-manifest.json missing from release — refusing to update without checksum verification")?;
+        eprintln!("  Updating bb v{CURRENT_VERSION} -> v{remote}...");
 
-    // Locate the cargo-dist manifest published alongside the tarball.
-    // Fail-closed: if the manifest is missing, refuse to update — the previous
-    // behaviour of "just trust HTTPS to GitHub Releases" is not acceptable.
-    let manifest_asset = release
-        .assets
-        .iter()
-        .find(|a| a.name == "dist-manifest.json")
-        .ok_or("dist-manifest.json missing from release — refusing to update without checksum verification")?;
+        // The manifest is checksum metadata, not a cryptographic signature.
+        let manifest: DistManifest = client
+            .get(&manifest_asset.browser_download_url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await
+            .map_err(|error| format!("dist-manifest.json is malformed: {error}"))?;
+        let expected = manifest
+            .artifacts
+            .get(&asset_name)
+            .and_then(|artifact| artifact.checksums.as_ref())
+            .and_then(|checksums| checksums.sha256.as_deref())
+            .ok_or_else(|| format!("dist-manifest.json has no sha256 for {asset_name} — refusing to update"))?;
+        let archive = client
+            .get(&asset.browser_download_url)
+            .send()
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await?;
+        let actual = sha256_hex(&archive);
+        if !ct_eq_ignore_case(&actual, expected) {
+            return Err(format!(
+                "SHA-256 mismatch for {asset_name}: expected {expected}, got {actual} — aborting update"
+            )
+            .into());
+        }
+        let binary = extract_binary_from_tarball(&archive, target)?;
+        replace_binary(current_exe, &binary, &remote)?;
+        Ok(UpdateOutcome::Updated {
+            version: remote.to_string(),
+            executable: current_exe.to_path_buf(),
+        })
+    }
+}
 
-    eprintln!(
-        "  {} bb v{CURRENT_VERSION} -> v{remote}...",
-        "Updating".custom_color(crate::colors::AMBER),
-    );
+#[cfg(not(windows))]
+fn replace_binary(executable: &std::path::Path, binary: &[u8], version: &semver::Version) -> UpdateResult<()> {
+    use std::io::Write as _;
+    let staged = executable.with_extension(format!("update-tmp-{}", std::process::id()));
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&staged)?;
+    let result = (|| {
+        file.write_all(binary)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o755))?;
+        }
+        file.sync_all()?;
+        verify_installed_version(&staged, version)?;
+        std::fs::rename(&staged, executable)?;
+        Ok(())
+    })();
+    // A failed verification/replacement must not leave an executable behind.
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staged);
+    }
+    result
+}
 
-    // Download the signed manifest first so we have the expected hash before
-    // we have the bytes to compare it against.
-    let manifest_bytes = client
-        .get(&manifest_asset.browser_download_url)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
-
-    let manifest: DistManifest =
-        serde_json::from_slice(&manifest_bytes).map_err(|e| format!("dist-manifest.json is malformed: {e}"))?;
-
-    let expected_sha256 = manifest
-        .artifacts
-        .get(&asset_name)
-        .and_then(|a| a.checksums.as_ref())
-        .and_then(|c| c.sha256.as_deref())
-        .ok_or_else(|| format!("dist-manifest.json has no sha256 for {asset_name} — refusing to update"))?;
-
-    // Download the tarball.
-    let tarball_bytes = client
-        .get(&asset.browser_download_url)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
-
-    // Verify SHA-256 BEFORE extracting or touching the binary. If the hash
-    // does not match the manifest we abort and never run any code from the
-    // downloaded archive.
-    let actual_sha256 = sha256_hex(&tarball_bytes);
-    if !ct_eq_ignore_case(&actual_sha256, expected_sha256) {
+fn verify_installed_version(executable: &std::path::Path, expected: &semver::Version) -> UpdateResult<()> {
+    let output = std::process::Command::new(executable)
+        .arg("--version")
+        .env("BB_NO_UPDATE", "1")
+        .output()?;
+    if !output.status.success() {
+        return Err("updated bb --version failed; refusing to report an update".into());
+    }
+    let output = String::from_utf8(output.stdout)?;
+    let found = output
+        .split_whitespace()
+        .last()
+        .and_then(|value| semver::Version::parse(value).ok());
+    if found.as_ref() != Some(expected) {
         return Err(format!(
-            "SHA-256 mismatch for {asset_name}: expected {expected_sha256}, got {actual_sha256} — aborting update"
+            "installed bb reports {}; expected v{expected}. Refresh your package manager and retry bb update.",
+            output.trim()
         )
         .into());
     }
-
-    // Extract the `bb` binary from the tarball.
-    let binary_data = extract_binary_from_tarball(&tarball_bytes, target)?;
-
-    // Atomic replacement: write to a temp file next to the current exe, then rename.
-    let current_exe = std::env::current_exe()?;
-    let temp_path = current_exe.with_extension("update-tmp");
-
-    std::fs::write(&temp_path, &binary_data)?;
-
-    // Ensure executable permission on Unix.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o755))?;
-    }
-
-    // Replace the old binary.
-    std::fs::rename(&temp_path, &current_exe)?;
-
-    eprintln!(
-        "  {} Updated bb v{} -> v{}",
-        "✓".custom_color(crate::colors::GREEN_OK),
-        CURRENT_VERSION.custom_color(crate::colors::AMBER),
-        remote.to_string().custom_color(crate::colors::AMBER),
-    );
-
-    // Re-exec with the same arguments — this never returns.
-    re_exec(&current_exe)
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// Homebrew detection and update
+// Package-manager updates: preserve ownership and verify the linked executable.
 // ---------------------------------------------------------------------------
 
-/// Returns `true` when the binary was installed via Homebrew — either a
-/// symlink into the Cellar or a direct file under /opt/homebrew/bin/ (which
-/// happens when a previous OTA update overwrote the symlink).
-fn is_homebrew_install() -> bool {
-    let Ok(exe) = std::env::current_exe() else {
-        return false;
+#[cfg(not(windows))]
+fn homebrew_executable(executable: &std::path::Path, brew: &std::path::Path) -> UpdateResult<Option<PathBuf>> {
+    let cellar = executable.components().any(|part| part.as_os_str() == "Cellar");
+    let output = std::process::Command::new(brew).arg("--prefix").output();
+    let prefix = match output {
+        Ok(output) if output.status.success() => PathBuf::from(String::from_utf8(output.stdout)?.trim()),
+        _ if cellar => {
+            return Err(
+                "Homebrew install detected but brew --prefix failed; repair Homebrew and retry bb update".into(),
+            );
+        }
+        _ => return Ok(None),
     };
-    let path = exe.to_string_lossy();
-    if path.contains("/Cellar/") {
-        return true;
+    if !prefix.is_absolute() || (cellar && !executable.starts_with(prefix.join("Cellar/bb"))) {
+        return Err("Homebrew prefix does not match this bb installation; use its matching brew command".into());
     }
-    if path.contains("/homebrew/bin/") {
-        // Check if Homebrew actually manages this formula
-        let output = std::process::Command::new("brew")
-            .args(["list", "--formula", "beebeeb-io/tap/bb"])
-            .output();
-        return output.map(|o| o.status.success()).unwrap_or(false);
+    let linked = prefix.join("bin/bb");
+    if !cellar && executable != linked {
+        return Ok(None);
     }
-    false
+    let listed = std::process::Command::new(brew)
+        .args(["list", "--formula", "beebeeb-io/tap/bb"])
+        .output()?;
+    if !listed.status.success() {
+        if cellar {
+            return Err("Homebrew does not list beebeeb-io/tap/bb; repair the installation before updating".into());
+        }
+        return Ok(None);
+    }
+    Ok(Some(linked))
 }
 
-/// Update via `brew upgrade` instead of self-replacing.
-fn update_via_homebrew(old_ver: &str, new_ver: &str) -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!(
-        "  {} bb v{old_ver} -> v{new_ver} via Homebrew...",
-        "Updating".custom_color(crate::colors::AMBER),
-    );
-
-    let status = std::process::Command::new("brew")
-        .args(["upgrade", "beebeeb-io/tap/bb"])
-        .status()?;
-
-    if !status.success() {
-        return Err("brew upgrade failed".into());
+#[cfg(not(windows))]
+fn update_via_homebrew(
+    brew: &std::path::Path,
+    linked: &std::path::Path,
+    version: &semver::Version,
+) -> UpdateResult<()> {
+    eprintln!("  Updating bb via Homebrew...");
+    for args in [
+        ["update", "--quiet"].as_slice(),
+        ["upgrade", "beebeeb-io/tap/bb"].as_slice(),
+        ["link", "--overwrite", "beebeeb-io/tap/bb"].as_slice(),
+    ] {
+        let status = std::process::Command::new(brew).args(args).status()?;
+        if !status.success() {
+            return Err(format!("brew {} failed; retry after fixing Homebrew", args[0]).into());
+        }
     }
+    verify_installed_version(linked, version)
+}
 
-    // Restore the symlink in case a previous OTA update overwrote it with a
-    // direct binary. Without this, brew upgrades the Cellar but the bin path
-    // stays stale.
-    let _ = std::process::Command::new("brew")
-        .args(["link", "--overwrite", "beebeeb-io/tap/bb"])
-        .status();
+#[cfg(any(windows, test))]
+fn scoop_executable(executable: &std::path::Path) -> Option<PathBuf> {
+    executable
+        .ancestors()
+        .find(|path| {
+            path.file_name().is_some_and(|name| name == "bb")
+                && path
+                    .parent()
+                    .and_then(std::path::Path::file_name)
+                    .is_some_and(|name| name == "apps")
+        })
+        .map(|root| root.join("current/bb.exe"))
+}
 
-    eprintln!(
-        "  {} Updated bb v{} -> v{}",
-        "✓".custom_color(crate::colors::GREEN_OK),
-        old_ver.custom_color(crate::colors::AMBER),
-        new_ver.custom_color(crate::colors::AMBER),
-    );
-
-    // Re-exec from the Homebrew-linked path, not current_exe() which may be
-    // a stale direct binary from a previous OTA overwrite.
-    let brew_bin = PathBuf::from("/opt/homebrew/bin/bb");
-    let exe = if brew_bin.exists() {
-        brew_bin
-    } else {
-        std::env::current_exe()?
-    };
-    re_exec(&exe)
+#[cfg(windows)]
+fn update_via_scoop(executable: &std::path::Path, version: &semver::Version) -> UpdateResult<PathBuf> {
+    let linked = scoop_executable(executable).ok_or("unmanaged Windows installation: reinstall the latest release from https://github.com/beebeeb-io/cli/releases or install with Scoop; bb update uses scoop update bb for Scoop-managed installs")?;
+    for args in [
+        ["/C", "scoop", "update"].as_slice(),
+        ["/C", "scoop", "update", "bb"].as_slice(),
+    ] {
+        let status = std::process::Command::new("cmd").args(args).status()?;
+        if !status.success() {
+            return Err("scoop update failed; repair Scoop and retry bb update".into());
+        }
+    }
+    verify_installed_version(&linked, version)?;
+    Ok(linked)
 }
 
 /// Extract the `bb` binary from a `.tar.xz` archive.
+#[cfg(not(windows))]
 fn extract_binary_from_tarball(data: &[u8], target: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let xz_reader = xz2::read::XzDecoder::new(data);
     let mut archive = tar::Archive::new(xz_reader);
@@ -297,6 +395,7 @@ fn re_exec(exe: &std::path::Path) -> ! {
 // ---------------------------------------------------------------------------
 
 /// Return the Rust target triple for the currently running binary.
+#[cfg(not(windows))]
 fn current_target() -> &'static str {
     // These are set at compile time via cfg.
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
@@ -337,7 +436,7 @@ fn is_dev_build() -> bool {
         return false;
     };
     let path = exe.to_string_lossy();
-    path.contains("target/debug") || path.contains("target/release")
+    cfg!(debug_assertions) || path.contains("target/debug") || path.contains("target/release")
 }
 
 // ---------------------------------------------------------------------------
@@ -352,7 +451,7 @@ fn state_file() -> PathBuf {
 }
 
 /// Returns `true` when enough time has passed since the last check.
-fn cooldown_elapsed(path: &PathBuf) -> bool {
+fn cooldown_elapsed(path: &std::path::Path) -> bool {
     let Ok(contents) = std::fs::read_to_string(path) else {
         return true; // No state file — first run.
     };
@@ -366,7 +465,7 @@ fn cooldown_elapsed(path: &PathBuf) -> bool {
     elapsed >= CHECK_INTERVAL
 }
 
-fn write_timestamp(path: &PathBuf) {
+fn write_timestamp(path: &std::path::Path) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -384,9 +483,11 @@ fn write_timestamp(path: &PathBuf) {
 #[derive(serde::Deserialize)]
 struct GitHubRelease {
     tag_name: String,
+    #[cfg(not(windows))]
     assets: Vec<GitHubAsset>,
 }
 
+#[cfg(not(windows))]
 #[derive(serde::Deserialize)]
 struct GitHubAsset {
     name: String,
@@ -397,6 +498,7 @@ struct GitHubAsset {
 // cargo-dist manifest types (minimal — we only read the fields we trust)
 // ---------------------------------------------------------------------------
 
+#[cfg(any(not(windows), test))]
 #[derive(serde::Deserialize)]
 struct DistManifest {
     /// Map of artifact filename -> metadata. cargo-dist emits one entry per
@@ -405,12 +507,14 @@ struct DistManifest {
     artifacts: HashMap<String, DistArtifact>,
 }
 
+#[cfg(any(not(windows), test))]
 #[derive(serde::Deserialize)]
 struct DistArtifact {
     #[serde(default)]
     checksums: Option<DistChecksums>,
 }
 
+#[cfg(any(not(windows), test))]
 #[derive(serde::Deserialize)]
 struct DistChecksums {
     #[serde(default)]
@@ -422,6 +526,7 @@ struct DistChecksums {
 // ---------------------------------------------------------------------------
 
 /// Compute the SHA-256 of `bytes` and return it as a lowercase hex string.
+#[cfg(any(not(windows), test))]
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -439,6 +544,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// Constant-time-ish equality for two equal-length hex strings (case-insensitive).
 /// Hash comparison is not a high-value timing target, but folding the check in
 /// constant time costs us nothing and avoids early-exit on byte mismatch.
+#[cfg(any(not(windows), test))]
 fn ct_eq_ignore_case(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
@@ -457,6 +563,340 @@ fn ct_eq_ignore_case(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_update_bypasses_automatic_policy() {
+        for disabled in [false, true] {
+            for development in [false, true] {
+                for elapsed in [false, true] {
+                    assert!(should_check(UpdateMode::Manual, disabled, development, elapsed));
+                    assert_eq!(
+                        should_check(UpdateMode::Automatic, disabled, development, elapsed),
+                        !disabled && !development && elapsed
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scoop_only_targets_its_managed_install() {
+        assert_eq!(
+            scoop_executable(std::path::Path::new("/users/test/scoop/apps/bb/0.14.1/bb.exe")),
+            Some(PathBuf::from("/users/test/scoop/apps/bb/current/bb.exe"))
+        );
+        assert_eq!(scoop_executable(std::path::Path::new("/downloads/bb.exe")), None);
+    }
+
+    #[cfg(unix)]
+    mod unix {
+        use super::*;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        struct Scratch(PathBuf);
+        impl Scratch {
+            fn new() -> Self {
+                let root = std::env::temp_dir().join(format!("bb-update-test-{}", uuid::Uuid::new_v4()));
+                std::fs::create_dir_all(&root).unwrap();
+                Self(root)
+            }
+            fn path(&self, name: &str) -> PathBuf {
+                self.0.join(name)
+            }
+        }
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        fn write_executable(path: &std::path::Path, bytes: &[u8]) {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        fn archive(binary: &[u8]) -> Vec<u8> {
+            let encoder = xz2::write::XzEncoder::new(Vec::new(), 1);
+            let mut archive = tar::Builder::new(encoder);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(binary.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, format!("beebeeb-cli-{}/bb", current_target()), binary)
+                .unwrap();
+            archive.into_inner().unwrap().finish().unwrap()
+        }
+
+        struct Server {
+            url: String,
+            calls: Arc<AtomicUsize>,
+            task: tokio::task::JoinHandle<()>,
+        }
+        impl Drop for Server {
+            fn drop(&mut self) {
+                self.task.abort();
+            }
+        }
+
+        async fn server(version: &str, checksum: Option<&str>, binary: &[u8], status: u16) -> Server {
+            use axum::{Router, response::IntoResponse, routing::get};
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let name = format!("beebeeb-cli-{}.tar.xz", current_target());
+            let release = serde_json::json!({"tag_name": version, "assets": [
+                {"name": name, "browser_download_url": format!("{base}/archive")},
+                {"name": "dist-manifest.json", "browser_download_url": format!("{base}/manifest")}
+            ]})
+            .to_string();
+            let manifest = serde_json::json!({"artifacts": {name: {"checksums": {"sha256": checksum}}}}).to_string();
+            let archive = archive(binary);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let api = Router::new()
+                .route(
+                    "/latest",
+                    get({
+                        let calls = calls.clone();
+                        move || {
+                            let calls = calls.clone();
+                            let release = release.clone();
+                            async move {
+                                calls.fetch_add(1, Ordering::SeqCst);
+                                (
+                                    axum::http::StatusCode::from_u16(status).unwrap(),
+                                    [("content-type", "application/json")],
+                                    release,
+                                )
+                                    .into_response()
+                            }
+                        }
+                    }),
+                )
+                .route(
+                    "/manifest",
+                    get({
+                        let calls = calls.clone();
+                        move || {
+                            let calls = calls.clone();
+                            let manifest = manifest.clone();
+                            async move {
+                                calls.fetch_add(1, Ordering::SeqCst);
+                                ([("content-type", "application/json")], manifest)
+                            }
+                        }
+                    }),
+                )
+                .route(
+                    "/archive",
+                    get({
+                        let calls = calls.clone();
+                        move || {
+                            let calls = calls.clone();
+                            let archive = archive.clone();
+                            async move {
+                                calls.fetch_add(1, Ordering::SeqCst);
+                                archive
+                            }
+                        }
+                    }),
+                );
+            let task = tokio::spawn(async move {
+                axum::serve(listener, api).await.unwrap();
+            });
+            Server {
+                url: format!("{base}/latest"),
+                calls,
+                task,
+            }
+        }
+
+        const BINARY: &[u8] = b"#!/bin/sh\nprintf 'bb 999.0.0\\n'\n";
+
+        #[tokio::test]
+        async fn already_current_reports_success_after_a_fresh_request() {
+            let scratch = Scratch::new();
+            let exe = scratch.path("bb");
+            std::fs::write(&exe, b"original").unwrap();
+            // A future cooldown cannot suppress an explicitly requested check.
+            let state = scratch.path("last_update_check");
+            std::fs::write(&state, "9999999999").unwrap();
+            let server = server(CURRENT_VERSION, None, BINARY, 200).await;
+            let outcome = try_update(&state, &exe, &server.url, &scratch.path("no-brew"))
+                .await
+                .unwrap();
+            assert_eq!(outcome, UpdateOutcome::AlreadyCurrent);
+            assert_eq!(server.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(std::fs::read(&exe).unwrap(), b"original");
+            assert_ne!(std::fs::read_to_string(&state).unwrap(), "9999999999");
+        }
+
+        #[tokio::test]
+        async fn release_http_error_is_surfaced() {
+            let scratch = Scratch::new();
+            let server = server("999.0.0", None, BINARY, 503).await;
+            let error = try_update(
+                &scratch.path("state"),
+                &scratch.path("bb"),
+                &server.url,
+                &scratch.path("no-brew"),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("503"), "{error}");
+            assert_eq!(server.calls.load(Ordering::SeqCst), 1);
+        }
+
+        #[tokio::test]
+        async fn verified_release_replaces_executable_without_restarting_update() {
+            let scratch = Scratch::new();
+            let exe = scratch.path("bb");
+            std::fs::write(&exe, b"original").unwrap();
+            let digest = sha256_hex(&archive(BINARY));
+            let server = server("999.0.0", Some(&digest), BINARY, 200).await;
+            let result = try_update(&scratch.path("state"), &exe, &server.url, &scratch.path("no-brew"))
+                .await
+                .unwrap();
+            assert_eq!(
+                result,
+                UpdateOutcome::Updated {
+                    version: "999.0.0".into(),
+                    executable: exe.clone()
+                }
+            );
+            assert_eq!(server.calls.load(Ordering::SeqCst), 3);
+            assert_eq!(std::fs::read(&exe).unwrap(), BINARY);
+            verify_installed_version(&exe, &semver::Version::parse("999.0.0").unwrap()).unwrap();
+            assert!(
+                !exe.with_extension(format!("update-tmp-{}", std::process::id()))
+                    .exists()
+            );
+        }
+
+        #[tokio::test]
+        async fn checksum_failure_keeps_original_executable() {
+            let scratch = Scratch::new();
+            let exe = scratch.path("bb");
+            std::fs::write(&exe, b"original").unwrap();
+            let server = server("999.0.0", Some("00"), BINARY, 200).await;
+            let error = try_update(&scratch.path("state"), &exe, &server.url, &scratch.path("no-brew"))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("SHA-256 mismatch"), "{error}");
+            assert_eq!(server.calls.load(Ordering::SeqCst), 3);
+            assert_eq!(std::fs::read(&exe).unwrap(), b"original");
+        }
+
+        #[tokio::test]
+        async fn missing_checksum_does_not_download_or_replace_executable() {
+            let scratch = Scratch::new();
+            let exe = scratch.path("bb");
+            std::fs::write(&exe, b"original").unwrap();
+            let server = server("999.0.0", None, BINARY, 200).await;
+            let error = try_update(&scratch.path("state"), &exe, &server.url, &scratch.path("no-brew"))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("has no sha256"), "{error}");
+            assert_eq!(server.calls.load(Ordering::SeqCst), 2);
+            assert_eq!(std::fs::read(&exe).unwrap(), b"original");
+        }
+
+        #[test]
+        fn existing_staging_file_is_never_overwritten_or_removed() {
+            let scratch = Scratch::new();
+            let exe = scratch.path("bb");
+            std::fs::write(&exe, b"original").unwrap();
+            let staged = exe.with_extension(format!("update-tmp-{}", std::process::id()));
+            std::fs::write(&staged, b"existing").unwrap();
+            assert!(replace_binary(&exe, BINARY, &semver::Version::parse("999.0.0").unwrap()).is_err());
+            assert_eq!(std::fs::read(&staged).unwrap(), b"existing");
+            assert_eq!(std::fs::read(&exe).unwrap(), b"original");
+        }
+
+        #[test]
+        fn wrong_binary_version_keeps_original_and_removes_staging_file() {
+            let scratch = Scratch::new();
+            let exe = scratch.path("bb");
+            std::fs::write(&exe, b"original").unwrap();
+            let error = replace_binary(&exe, BINARY, &semver::Version::parse("999.0.1").unwrap())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("expected v999.0.1"), "{error}");
+            assert_eq!(std::fs::read(&exe).unwrap(), b"original");
+            assert!(
+                !exe.with_extension(format!("update-tmp-{}", std::process::id()))
+                    .exists()
+            );
+        }
+
+        fn brew(scratch: &Scratch, fail: &str, version: &str) -> (PathBuf, PathBuf) {
+            let prefix = scratch.path("custom-prefix");
+            let linked = prefix.join("bin/bb");
+            write_executable(&linked, format!("#!/bin/sh\nprintf 'bb {version}\\n'\n").as_bytes());
+            let brew = scratch.path("brew");
+            write_executable(
+                &brew,
+                format!(
+                    r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+case "$1" in
+  --prefix) printf '%s\n' '{}' ;;
+  list) exit 0 ;;
+  update|upgrade|link) [ "$1" != '{}' ] ;;
+  *) exit 2 ;;
+esac
+"#,
+                    scratch.path("brew.log").display(),
+                    prefix.display(),
+                    fail
+                )
+                .as_bytes(),
+            );
+            (brew, linked)
+        }
+
+        #[test]
+        fn homebrew_uses_its_prefix_and_checks_upgrade_link_and_version() {
+            let scratch = Scratch::new();
+            let (brew, linked) = brew(&scratch, "", "999.0.0");
+            assert_eq!(homebrew_executable(&linked, &brew).unwrap(), Some(linked.clone()));
+            update_via_homebrew(&brew, &linked, &semver::Version::parse("999.0.0").unwrap()).unwrap();
+            let log = std::fs::read_to_string(scratch.path("brew.log")).unwrap();
+            assert_eq!(log.lines().count(), 5);
+            assert!(log.contains("update --quiet"));
+            assert!(log.contains("upgrade beebeeb-io/tap/bb"));
+            assert!(log.contains("link --overwrite beebeeb-io/tap/bb"));
+        }
+
+        #[test]
+        fn homebrew_failures_are_reported() {
+            for fail in ["update", "upgrade", "link"] {
+                let scratch = Scratch::new();
+                let (brew, linked) = brew(&scratch, fail, "999.0.0");
+                let error = update_via_homebrew(&brew, &linked, &semver::Version::parse("999.0.0").unwrap())
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains(&format!("brew {fail} failed")), "{error}");
+            }
+        }
+
+        #[test]
+        fn homebrew_cannot_claim_latest_when_formula_is_stale() {
+            let scratch = Scratch::new();
+            let (brew, linked) = brew(&scratch, "", "0.13.2");
+            let error = update_via_homebrew(&brew, &linked, &semver::Version::parse("999.0.0").unwrap())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("expected v999.0.0"), "{error}");
+        }
+    }
 
     #[test]
     fn sha256_hex_empty_input_matches_known_value() {
