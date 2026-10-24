@@ -303,7 +303,10 @@ fn update_via_homebrew(
         ["upgrade", "beebeeb-io/tap/bb"].as_slice(),
         ["link", "--overwrite", "beebeeb-io/tap/bb"].as_slice(),
     ] {
-        let status = std::process::Command::new(brew).args(args).status()?;
+        let status = std::process::Command::new(brew)
+            .args(args)
+            .stdout(std::process::Stdio::from(std::io::stderr()))
+            .status()?;
         if !status.success() {
             return Err(format!("brew {} failed; retry after fixing Homebrew", args[0]).into());
         }
@@ -332,7 +335,10 @@ fn update_via_scoop(executable: &std::path::Path, version: &semver::Version) -> 
         ["/C", "scoop", "update"].as_slice(),
         ["/C", "scoop", "update", "bb"].as_slice(),
     ] {
-        let status = std::process::Command::new("cmd").args(args).status()?;
+        let status = std::process::Command::new("cmd")
+            .args(args)
+            .stdout(std::process::Stdio::from(std::io::stderr()))
+            .status()?;
         if !status.success() {
             return Err("scoop update failed; repair Scoop and retry bb update".into());
         }
@@ -873,6 +879,41 @@ esac
             assert!(log.contains("update --quiet"));
             assert!(log.contains("upgrade beebeeb-io/tap/bb"));
             assert!(log.contains("link --overwrite beebeeb-io/tap/bb"));
+        }
+
+        #[test]
+        fn homebrew_progress_uses_stderr() {
+            if std::env::var_os("BB_UPDATE_STDIO_CHILD").is_some() {
+                let scratch = Scratch::new();
+                let (brew, linked) = brew(&scratch, "", "999.0.0");
+                let script = std::fs::read_to_string(&brew).unwrap().replace(
+                    "  update|upgrade|link)",
+                    "  update|upgrade|link) printf 'manager-progress\\n';",
+                );
+                std::fs::write(&brew, script).unwrap();
+                update_via_homebrew(&brew, &linked, &semver::Version::parse("999.0.0").unwrap()).unwrap();
+                return;
+            }
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "update::tests::unix::homebrew_progress_uses_stderr",
+                    "--nocapture",
+                ])
+                .env("BB_UPDATE_STDIO_CHILD", "1")
+                .output()
+                .unwrap();
+            assert!(child.status.success());
+            assert!(
+                !String::from_utf8_lossy(&child.stdout).contains("manager-progress"),
+                "package-manager output polluted command stdout"
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&child.stderr)
+                    .matches("manager-progress")
+                    .count(),
+                3
+            );
         }
 
         #[test]
