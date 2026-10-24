@@ -233,6 +233,11 @@ jobs:
           # shellcheck disable=SC2086
           dist build $DIST_TAG_FLAG --print=linkage --output-format=json $DIST_ARGS > dist-manifest.json
           echo "dist ran successfully"
+      - name: Verify native packaged version
+        shell: bash
+        env:
+          BEEBEEB_EXPECTED_TARGETS: ${{ join(matrix.targets, ' ') }}
+        run: python3 scripts/check-packaged-version.py target/distrib --self-test
       - id: cargo-dist
         name: Post-build
         # We force bash here just because github makes it really hard to get values up
@@ -291,6 +296,8 @@ jobs:
         run: |
           set -euo pipefail
           dist build $DIST_TAG_FLAG --output-format=json "--artifacts=global" > dist-manifest.json
+          python3 scripts/customize-installer.py target/distrib/beebeeb-cli-installer.sh
+          python3 scripts/test-installer.py target/distrib/beebeeb-cli-installer.sh
           echo "dist ran successfully"
 
           # Parse out what we just built and upload it to scratch storage
