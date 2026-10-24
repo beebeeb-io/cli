@@ -1,0 +1,94 @@
+name: Released package checks
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Published CLI version (X.Y.Z)
+        required: true
+        type: string
+  release:
+    types: [published]
+
+permissions: {}
+
+jobs:
+  packages:
+    name: Native package (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      REQUESTED_VERSION: ${{ inputs.version || github.event.release.tag_name }}
+      PACKAGE_DIR: ${{ runner.temp }}/cli-released-packages
+      BEEBEEB_EXPECTED_TARGETS: aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-musl x86_64-unknown-linux-musl x86_64-pc-windows-msvc
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Validate release version
+        id: version
+        run: |
+          python3 - <<'PY'
+          import os, re
+          version = os.environ['REQUESTED_VERSION'].removeprefix('v')
+          if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version):
+              raise ValueError('version must be X.Y.Z')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'tag=v{version}\nversion={version}\n')
+          print(f'version validation: 1 passed, 0 failed (v{version})')
+          PY
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ steps.version.outputs.tag }}
+          persist-credentials: false
+      - name: Download published archives
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$PACKAGE_DIR"
+          gh release download "$RELEASE_TAG" --dir "$PACKAGE_DIR" \
+            --pattern 'beebeeb-cli-*.tar.xz' --pattern 'beebeeb-cli-*.zip' \
+            --pattern dist-manifest.json
+      - name: Verify five archives and checksum failure control
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, re
+          from pathlib import Path
+          directory = Path(os.environ['PACKAGE_DIR'])
+          expected = {f'beebeeb-cli-{t}' + ('.zip' if t.endswith('windows-msvc') else '.tar.xz')
+                      for t in os.environ['BEEBEEB_EXPECTED_TARGETS'].split()}
+          actual = {p.name for p in directory.iterdir()}
+          if len(expected) != 5 or actual != expected | {'dist-manifest.json'}:
+              raise ValueError(f'expected exactly five archives and manifest, got {sorted(actual)}')
+          manifest = json.loads((directory / 'dist-manifest.json').read_text())
+          if manifest.get('announcement_tag') != os.environ['RELEASE_TAG']:
+              raise ValueError('manifest belongs to a different release')
+          def verify(path, expected_hash):
+              if not isinstance(expected_hash, str) or not re.fullmatch(r'[0-9a-fA-F]{64}', expected_hash):
+                  raise ValueError('missing or malformed SHA256')
+              if hashlib.sha256(path.read_bytes()).hexdigest() != expected_hash.lower():
+                  raise ValueError('SHA256 mismatch')
+          for name in sorted(expected):
+              verify(directory / name, manifest['artifacts'][name].get('checksums', {}).get('sha256'))
+          try:
+              verify(directory / sorted(expected)[0], '0' * 64)
+          except ValueError as error:
+              if str(error) != 'SHA256 mismatch':
+                  raise
+          else:
+              raise ValueError('checksum guard accepted deliberately wrong expected hash')
+          print('archive checksums: 5 passed, 0 failed; red control: 1 rejected, 0 accepted')
+          PY
+      - name: Run native archive and two failure controls
+        run: python3 scripts/check-packaged-version.py "$PACKAGE_DIR" --self-test
