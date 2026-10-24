@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-10-24
+
+### Added
+- `bb update` explicitly checks for and installs the latest CLI release, with visible errors and no automatic-check cooldown.
+
+### Fixed
+- Re-running the curl installer updates the existing Beebeeb installation selected by PATH, including a stale binary shadowing Homebrew.
+- `bb account billing` and `bb billing portal` open the Beebeeb web billing page instead of starting a payment-provider session.
+
 ## [0.14.1] - 2026-10-24
 
 ### Changed
