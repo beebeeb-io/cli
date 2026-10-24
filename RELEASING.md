@@ -155,6 +155,10 @@ build only. Nothing to patch by hand.
 Tests for these scripts: `scripts/update-scoop-manifest.test.sh`, `scripts/release-exists.test.sh`,
 `scripts/release-workflow.test.sh` (each is red against the old behaviour; run them after touching a script).
 
+## Explicit updates (0.14.2 and newer)
+
+`bb update` checks immediately and reports errors. `BB_NO_UPDATE=1` disables only the automatic startup check. Homebrew installations update through Homebrew; Windows installations use Scoop when managed by it. Unmanaged Windows installs must be replaced using the latest release archive or installed through Scoop.
+
 ## Installation methods (post-release)
 
 ```bash

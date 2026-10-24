@@ -1,47 +1,34 @@
-# Beebeeb CLI 0.14.1 — compatibility and packaging refresh
+# bb 0.14.2 — reliable updates and web billing
 
-This patch prepares the CLI for the coordinated server 0.1.1 release. It retains the command
-behavior of 0.14.0. Since that release, the only change on main updated the Windows Scoop
-manifest to 0.14.0; this release adds version metadata and these authored notes.
+This patch makes updating bb explicit and fixes billing navigation. Both billing commands now take you to Beebeeb's web app to manage your account.
 
 ### What's New
 
-- **A fresh release package.** Existing upload, download, region and sync commands keep their
-  current behavior. No new command or transfer protocol is introduced.
+- **`bb update`** checks for a newer CLI immediately and reports the result. It bypasses the background-check cooldown; `BB_NO_UPDATE=1` still disables automatic updates.
 
 ### Bug Fixes / Hardening
 
-- The existing core pin (`337436ae753ba99ac6c4dabd18593543367f1324`) and all dependency versions
-  remain unchanged. The server uses a different reviewed core revision; compatibility must be
-  checked before publishing this CLI release.
-- This metadata update does not claim a new runtime or security fix.
+- Re-running `curl -fsSL https://get.beebeeb.io | sh` updates the existing Beebeeb installation your shell selects. Homebrew installations remain managed by Homebrew, including repair of a stale binary shadowing the formula.
+- **`bb account billing` and `bb billing portal`** open the Beebeeb web billing page. They no longer initiate a payment-method update or send you directly to Mollie.
+- Updates retain SHA-256 verification before replacing the executable. This release adds no new dependency or signing-key scheme.
 
 ### Verification
 
-- The existing release-notes guard rejected the stale 0.14.0 notes for a 0.14.1 release before
-  this update (exit 1); the updated notes passed (exit 0). Locked offline metadata and formatting
-  checks also passed (exit 0).
-- Of 443 locked package entries, the first-party CLI package is the only changed version.
-  No dependency, core pin, source module or release script changes are included.
-- Not yet verified for 0.14.1: server 0.1.1 compatibility, platform binaries, installer/updater
-  behavior, the five-target release build, or the sixteen packaged assets and checksums. The
-  existing release-local procedure must pass those applicable gates before publication.
-- Previous 0.14.0 test results remain evidence for that earlier source; no new full test-suite
-  or performance result is claimed here.
+- Billing navigation: **6 passed; 0 failed**. Deliberately restoring Mollie navigation/removing authentication made all six fail; restored tests pass with zero payment API requests.
+- Installer: **16 passed; 0 failed**, against both the published cargo-dist template and a freshly generated template. Deliberate preflight/version-check mutations were rejected.
+- Focused updater run: **21 passed; 0 failed**, plus **2 public command tests** and **1 package-manager output test**. New behavior was checked against deliberate mutations before restoring the passing implementation.
+- The release is gated by the full CLI test suite, Clippy with warnings denied, formatting, five platform builds, generated-installer fixtures, and native archive version checks. Final publication evidence is recorded with the release task.
+- Of **443 locked packages**, only the first-party CLI version changed; **0 dependency versions** changed.
 
 ### Install / Update
 
-0.14.1 is a release candidate until its release gates pass and the release is published.
-Once published, use the existing installer or package manager:
-
 ```sh
 curl -fsSL https://get.beebeeb.io | sh
-brew upgrade beebeeb-io/tap/bb
-scoop update bb
+# After installing 0.14.2:
+bb update
+bb --version
 ```
 
-The Scoop manifest is updated through its normal follow-up pull request after the Windows
-artifact checksum is available. Until then, Scoop can continue to offer the previous version.
-Restart a running `bb sync` daemon after updating. Windows users update through Scoop.
+Homebrew users can also run `brew upgrade beebeeb-io/tap/bb`; Windows users can run `scoop update bb`; `bb update` delegates to Scoop for Scoop-managed installations. Unmanaged Windows binaries require reinstalling the release archive or using Scoop. Restart a running `bb sync` daemon after updating.
 
-Full changelog: https://github.com/beebeeb-io/cli/compare/v0.14.0...v0.14.1
+Full changelog: https://github.com/beebeeb-io/cli/compare/v0.14.1...v0.14.2

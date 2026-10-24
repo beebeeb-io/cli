@@ -169,6 +169,7 @@ assert_release() { # dir
   #    hashes so `curl | sh` verifies downloads instead of printing "no checksums
   #    to verify". Releases cut before 1839 (0.13.2) lack this: a warning there.
   if grep -q "$VERSION" "$dir/beebeeb-cli-installer.sh"; then pass "installer references $VERSION"; else fail "installer does not mention $VERSION"; fi
+  if python3 "$ROOT/scripts/customize-installer.py" --check "$dir/beebeeb-cli-installer.sh"; then pass "installer update policy and 4 hooks verified"; else fail "installer update policy missing or changed"; fi
   local emb=0 t2
   for t2 in $ARCHIVE_TARGETS; do
     if [[ -s "$dir/$(archive_name "$t2").sha256" ]] && grep -q "$(awk '{print $1}' "$dir/$(archive_name "$t2").sha256")" "$dir/beebeeb-cli-installer.sh"; then emb=$((emb + 1)); fi
@@ -332,6 +333,7 @@ finalize() { # dir
   # `--no-local-paths` does not remove once merged; strip them (published manifests
   # have no absolute paths; the first real build leaked 15).
   jq 'del(.. | .path? | select(type == "string" and startswith("/")))' "$LOG_DIR/dist-manifest.json" > "$dir/dist-manifest.json"
+  python3 "$ROOT/scripts/customize-installer.py" "$dir/beebeeb-cli-installer.sh"
   inject_checksums "$dir"
   patch_bb_rb "$dir"
   echo "== scoop manifest"

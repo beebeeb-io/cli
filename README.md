@@ -55,6 +55,7 @@ bb sync ~/vault /Documents  # Two-way sync, then watch for live changes
 
 | Command | What it does |
 | --- | --- |
+| `bb update` | Check for and install the latest CLI release now |
 | `bb signup` | Open the web signup. Accounts are created in the web app (a new account starts a trial that needs a payment method); the CLI only signs in |
 | `bb login` / `bb logout` | Start or end a session via browser device authorization |
 | `bb whoami` / `bb status` | Show email, device, region, quota, and account state (no plan yet, or trial ended and read-only) |
@@ -70,7 +71,7 @@ bb sync ~/vault /Documents  # Two-way sync, then watch for live changes
 | `bb sync <local> [remote]` | Bidirectional folder sync; continuous by default (`--once`, `--daemon`, `--delete`) |
 | `bb webdav` | Serve the vault over local WebDAV (Finder, rclone, Cyberduck, WinSCP; not Windows Explorer, see below). Read-only by default (`--read-write` to allow changes); prints a random per-run password that every client must send |
 | `bb mount <point>` | FUSE mount (macFUSE / libfuse3). Source builds with `--features fuse` only; release binaries do not include it, so use `bb webdav` |
-| `bb billing <show\|usage\|invoices\|portal\|addons>` | Plan and renewal info, per-region usage, invoices (`bb billing invoices --open <id>` downloads one as PDF), the billing portal, and add-ons |
+| `bb billing <show\|usage\|invoices\|portal\|addons>` | Plan and renewal info, per-region usage, invoices (`bb billing invoices --open <id>` downloads one as PDF), the Beebeeb web billing page, and add-ons |
 | `bb speedtest` | Benchmark network throughput and crypto speed |
 | `bb completions <shell>` | Print a completion script for bash, zsh, fish, or powershell |
 

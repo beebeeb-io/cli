@@ -59,3 +59,21 @@ jobs:
       # the footer linked two 404 pages). Network test, ignored locally.
       - name: help link check
         run: cargo test --bin bb help_links_return_200 -- --ignored --nocapture
+
+  installer:
+    name: Installer update regression
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      # Fixed upstream cargo-dist template, pinned by SHA256. The release job
+      # also tests the freshly generated installer before uploading artifacts.
+      - name: Test installer against offline PATH and archive fixtures
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            https://github.com/beebeeb-io/cli/releases/download/v0.14.1/beebeeb-cli-installer.sh \
+            --output "$RUNNER_TEMP/beebeeb-cli-installer.sh"
+          echo "4425b5e940633d1793de5dc3591e6df450bbd55e60bd6ac812fe20f42fb496d6  $RUNNER_TEMP/beebeeb-cli-installer.sh" | sha256sum --check
+          python3 scripts/test-installer.py "$RUNNER_TEMP/beebeeb-cli-installer.sh"

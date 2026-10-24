@@ -1534,29 +1534,6 @@ impl ApiClient {
         parse_response(resp).await
     }
 
-    /// POST /api/v1/billing/payment-method/update — the provider-agnostic
-    /// "manage billing" entry point (`beebeeb-api/src/routes/billing.rs::
-    /// update_payment_method`, server task 0925). Mollie-primary: starts a €0
-    /// card mandate-capture flow (never charges; re-points the user's existing
-    /// active subscription to the new mandate on completion). Falls back to
-    /// the legacy Stripe hosted portal only when Mollie isn't configured. This
-    /// is exactly what the web app's `updatePaymentMethod()` calls for its
-    /// manage-billing button — `bb billing portal` used to call the
-    /// Stripe-only `/billing/portal-session` alias instead (task 1547 finding
-    /// 2), which 400s "stripe not configured" on every current Mollie-era
-    /// account.
-    pub async fn update_payment_method(&self) -> Result<Value, String> {
-        let token = self.require_auth()?;
-        let resp = self
-            .client
-            .post(self.url("/api/v1/billing/payment-method/update"))
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(format_request_error)?;
-        parse_response(resp).await
-    }
-
     pub async fn get_billing_addons(&self) -> Result<Value, String> {
         let token = self.require_auth()?;
         let resp = self
@@ -3026,68 +3003,6 @@ mod billing_usage_route_tests {
             resp.get("plan_limit_bytes").is_none(),
             "response carries plan_limit_bytes — get_billing_usage() hit /api/v1/files/usage \
              instead of /api/v1/billing/usage: {resp}"
-        );
-    }
-}
-
-/// Task 1547 finding 2 — `bb billing portal` called the legacy Stripe-only
-/// `/billing/portal-session` alias (`stripe_portal_url()`, which 400s
-/// "stripe not configured" on every current Mollie-era account). The web
-/// app's own manage-billing button calls `updatePaymentMethod()` →
-/// `POST /api/v1/billing/payment-method/update` instead — the
-/// provider-agnostic route (Mollie €0 mandate-capture, primary; Stripe
-/// hosted portal, legacy fallback). `update_payment_method()` must hit that
-/// route, not the Stripe-only one.
-#[cfg(test)]
-mod billing_portal_route_tests {
-    use axum::routing::post;
-    use axum::{Json, Router};
-    use serde_json::json;
-
-    use super::ApiClient;
-
-    async fn spawn_payment_method_update_mock() -> String {
-        let app = Router::new()
-            .route(
-                "/api/v1/billing/payment-method/update",
-                post(|| async { Json(json!({ "url": "https://www.mollie.com/checkout/pm-update/abc123" })) }),
-            )
-            .route(
-                "/api/v1/billing/portal-session",
-                // The legacy Stripe-only route this used to hit — always
-                // errors in a Mollie-era deployment (`state.stripe.is_none()`
-                // per the live handler). If `update_payment_method()` ever
-                // regresses back to calling this alias, the test fails
-                // loudly instead of coincidentally passing.
-                post(|| async {
-                    (
-                        axum::http::StatusCode::BAD_REQUEST,
-                        Json(json!({ "error": "stripe not configured" })),
-                    )
-                }),
-            );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        format!("http://{addr}")
-    }
-
-    #[tokio::test]
-    async fn update_payment_method_hits_the_provider_agnostic_route_not_the_stripe_only_alias() {
-        let api = ApiClient::new_for_test(spawn_payment_method_update_mock().await);
-        let resp = api
-            .update_payment_method()
-            .await
-            .expect("mock /payment-method/update request should succeed");
-
-        assert_eq!(
-            resp.get("url").and_then(|v| v.as_str()),
-            Some("https://www.mollie.com/checkout/pm-update/abc123"),
-            "update_payment_method() must POST /api/v1/billing/payment-method/update \
-             (the Mollie-primary, provider-agnostic route), not the legacy Stripe-only \
-             /billing/portal-session alias which 400s on every Mollie-era account: {resp:?}"
         );
     }
 }

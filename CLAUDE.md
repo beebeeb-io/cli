@@ -66,7 +66,7 @@ Account-less links that let **anyone** upload an encrypted file *into* your vaul
 ### Billing
 
 - `bb billing show` — read-only plan, storage, and renewal info. `--json` outputs the raw API merge.
-- `bb billing usage` / `bb billing invoices [--open <id>]` / `bb billing portal` / `bb billing addons [purchase <addon_id>]` — per-region usage, invoice list + PDF, billing portal, add-ons.
+- `bb billing usage` / `bb billing invoices [--open <id>]` / `bb billing portal` / `bb billing addons [purchase <addon_id>]` — per-region usage, invoice list + PDF, Beebeeb web billing page, add-ons.
 
 ### Two-factor authentication
 
@@ -92,6 +92,8 @@ With stdin not a terminal (cron, CI, a pipe), nothing prompts and nothing silent
 Covered by `tests/non_interactive.rs` (runs the real binary with `stdin = null` against an in-process mock API, scratch `HOME`, `BB_NO_UPDATE=1`).
 
 ### Utilities
+
+- `bb update` — explicitly check/install the latest CLI release; bypasses automatic-check cooldown and `BB_NO_UPDATE`. Automatic startup updates keep honoring that opt-out. Homebrew/Scoop installations remain package-manager managed.
 
 - `bb speedtest` — benchmark network throughput + crypto speed against the API.
 - `bb repair [--dry-run]` — re-encrypt files stuck in the legacy binary-UUID key derivation so they open in the web app.
