@@ -695,30 +695,18 @@ fn write_private_temp_pdf(stem: &str, bytes: &[u8]) -> Result<std::path::PathBuf
     Ok(path)
 }
 
-/// `bb billing portal` — opens the browser to manage the payment method.
-///
-/// **Task 1547 finding 2.** This used to call `create_billing_portal_session()`
-/// → `POST /api/v1/billing/portal-session`, a Stripe-only alias
-/// (`stripe_portal_url()`) that 400s "stripe not configured" on every current
-/// Mollie-era subscription. It now calls `update_payment_method()` →
-/// `POST /api/v1/billing/payment-method/update`, the same provider-agnostic
-/// route the web app's manage-billing button uses (Mollie €0 mandate-capture,
-/// primary; Stripe hosted portal, legacy fallback).
+/// `bb billing portal` / `bb account billing` — manage billing in the web app.
+/// Navigation must not initiate a payment-provider checkout or mandate change.
 pub async fn portal() -> Result<(), String> {
     let api = ApiClient::from_config();
     api.require_auth()?;
 
-    let response = api.update_payment_method().await?;
-    let url = response
-        .get("url")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "server did not return a url".to_string())?;
-
+    let url = format!("{}/billing", crate::web_url::web_app_base());
     if !crate::env_detect::is_headless() {
-        let _ = open::that(url);
+        let _ = open::that(&url);
     }
 
-    println!("Billing portal: {url}");
+    println!("Billing: {url}");
     Ok(())
 }
 
