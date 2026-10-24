@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-10-24
+
+### Changed
+- Prepare a compatibility and packaging refresh alongside the server 0.1.1 release. The CLI command behavior is unchanged from 0.14.0; the intervening main-branch change updated the Windows Scoop manifest for 0.14.0. The CLI keeps its existing core pin and dependency versions.
+
 ## [0.14.0] - 2026-10-19
 
 ### Added
