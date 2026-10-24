@@ -15,194 +15,87 @@ cargo fmt -- --check
 
 ## Commands
 
-Generated from `bb --help`. Source of truth is `src/main.rs` (clap derive).
+Source of truth is `src/main.rs` (clap derive); the generated listing is archived (details: docs/runbook/cli-task-history.md).
 
 ### Auth & session
 
-- `bb login` — browser-based device authorisation. The handshake crypto (P-256 ECDH + HKDF-SHA256 + AES-GCM handoff, with raw fallback for v0.4 web apps) lives in `beebeeb_core::cli_auth` (`CliEphemeralKey` / `decrypt_browser_payload`) — `login.rs` no longer hand-rolls it (task 0861). Supports `--headless` for SSH boxes. CLI auth sessions stored in Redis (HA-safe across API servers). **Task 1734:** the link `bb login` prints carries NO code — the user TYPES the `Authorization code:` line into the approval page (a link someone else sends has nothing to approve), and the page asks for the account password before it releases anything. The WS init frame (`login.rs::init_frame`) adds `client`/`client_version`/`os`/`device_name` for the page to show as "reported by the device"; the server ignores what it does not recognise. Unit tests: `commands::login::tests`.
-- `bb signup` — **does not create accounts** (task 1037: signup starts a trial that needs a payment mandate, collected only by the web checkout). Prints "Create your account at <web>/signup — then run `bb login`.", best-effort `open::that`s it (not when `--json`/`--quiet`/headless), exits 0. The web host comes from `src/web_url.rs` (`APP_URL` env, else derived from the configured API: `api.X` → `app.X`, localhost → `localhost:5173`, unknown host → itself; shared with `bb passkey add`). The CLI has no registration code at all (the old `#[allow(dead_code)] ApiClient::signup` was removed).
-- **Onboarding document (task 1750, epic 1725 spec T13).** `ApiClient::get_onboarding(with_session)` reads `GET /api/v1/onboarding` (headers: `X-Beebeeb-Client: cli`, `X-Beebeeb-Onboarding-Schema: 1`, `X-Beebeeb-Client-OS`, `X-Beebeeb-Store-Channel: direct`; 5 s timeout; 404/405 → `Ok(None)`). `src/account_state.rs::OnboardingDoc` is the lenient reader (unknown fields ignored, only schema major 1 parses, unknown `signup.mode` → `web_only`, unknown `account.state` is a label and the capabilities decide). It **changes words, never behaviour**: `bb signup` still only points at the web (the CLI is never lifted for native signup, policy matrix 1741), and adds one explanatory line from `signup.mode`/`allowed`/`reason` plus a `signup` key (the server block verbatim, `null` without the endpoint) in `--json`. `bb whoami` shows the document's `account.state` label, its explanation and the denied capabilities (`--json`: `account`, `null` without the endpoint); plan and quota rows stay the subscription's. Any failure or non-major-1 answer = the legacy `/billing/subscription` logic above, unchanged. **Contract copy:** `contracts/onboarding/` is vendored byte-for-byte from `repos/server/contracts/onboarding/` (drift guard: `make check-onboarding-contract` at the workspace root); unit tests in `account_state.rs` and `tests/onboarding_state.rs` read the vendored fixtures. Re-vendor with `cp -R repos/server/contracts/onboarding contracts/onboarding` and update the fixture count in `every_vendored_fixture_parses_as_schema_major_one`.
-- `bb logout` — end the current session.
-- `bb whoami` — show email, device, region, quota, and **account state** (`src/account_state.rs`, parsed off `GET /billing/subscription`'s `account_state` / `data_deletion_at`; missing or unknown ⇒ `ok`). A `needs_plan` / `lapsed` account shows plan `none`, upload `blocked` and the notice; `--json` carries `account_state` + `data_deletion_at`. `bb quota` and `bb billing show` show the same notice. Exits 1 (message on stderr, no placeholder plan data) when logged out or when the server rejects the session.
-- `bb status` — connection + session + storage status (same exit behaviour as `whoami`).
-- Any generic 401 surfaces as "Your session expired or was revoked. Run `bb login` to sign in again." (`api::SESSION_EXPIRED_MESSAGE`; the stable `unauthorized` code is kept on `ApiError` for the `classify_*` helpers). A connect failure surfaces as "Can't reach <api_url> — check your connection or --api".
-- `bb config` — print current configuration with secrets masked.
+- `bb login` — browser device authorisation; handshake crypto (P-256 ECDH + HKDF-SHA256 + AES-GCM, raw fallback for v0.4 web apps) lives in `beebeeb_core::cli_auth` (`CliEphemeralKey`/`decrypt_browser_payload`). `--headless` for SSH boxes; CLI auth sessions stored in Redis (HA-safe). The printed link carries NO code — the user TYPES the `Authorization code:` line into the approval page (a link someone else sends has nothing to approve); the WS init frame (`login.rs::init_frame`) adds `client`/`client_version`/`os`/`device_name` ("reported by the device").
+- `bb signup` — does not create accounts (trial needs a payment mandate, collected only by the web checkout). Prints "Create your account at <web>/signup — then run `bb login`.", best-effort `open::that` (not when `--json`/`--quiet`/headless), exit 0. Web host from `src/web_url.rs` (`APP_URL` env, else derived from the API URL). No registration code in the CLI at all.
+- **Onboarding document:** `ApiClient::get_onboarding(with_session)` reads `GET /api/v1/onboarding` (headers `X-Beebeeb-Client: cli`, `X-Beebeeb-Onboarding-Schema: 1`, `X-Beebeeb-Client-OS`, `X-Beebeeb-Store-Channel: direct`; 5 s timeout; 404/405 → `Ok(None)`). `src/account_state.rs::OnboardingDoc` is lenient (schema major 1 only; unknown → defaults). It changes words, never behaviour: `bb signup` still only points at the web; adds an explanatory line + `signup` key in `--json`; `bb whoami` shows the account state label + denied capabilities. Contracts vendored at `contracts/onboarding/` from `repos/server/contracts/onboarding/` (drift guard: `make check-onboarding-contract`; re-vendor with `cp -R`).
+- `bb logout` / `bb whoami` (email, device, region, quota, account state off `GET /billing/subscription`'s `account_state`/`data_deletion_at`; `needs_plan`/`lapsed` → plan `none`, upload `blocked`, notice; exit 1 when logged out / session rejected) / `bb status` (same exit behaviour) / `bb config` (masked secrets).
+- Generic 401 → "Your session expired or was revoked. Run `bb login` to sign in again." (`api::SESSION_EXPIRED_MESSAGE`; stable `unauthorized` code kept on `ApiError`). Connect failure → "Can't reach <api_url> — check your connection or --api".
 
 ### Files
 
-- `bb push <path>` (alias `bb upload`) — encrypt and upload a file or folder. Uses the **v2 upload-session route** `/api/v1/uploads/*` (`init` → `chunks/{i}` → `complete`), keyed by `upload_session_id`. `bb push --replace` sends the existing file's `file_id` + `base_version_number` so the server versions **by file_id** (snapshots the prior version, bumps `version_number`, UPDATEs in place) — no `name_encrypted` byte-match. A fresh push omits `file_id`.
-- `bb pull <id-or-path>` (alias `bb download`) — **streaming** download + decrypt (constant memory, live progress bar). Preserves legacy decrypt: JSON-blob chunks and pre-`bb repair` binary-UUID files fall back to the buffered path. **Never silently overwrites** an existing local file (single-file and `--zip` output): `-f/--force` overwrites; otherwise a rich TTY gets a `y/N` prompt and every non-interactive run (`--json`, `--quiet`, piped stdin) refuses with a non-zero exit naming `--force` / `-o <path>`. Checked before any bytes download. Covered by `tests/pull_overwrite.rs` (real `bb` binary vs an in-process mock API). Recursive folder pulls into an existing directory are guarded only for file-request uploads (an attacker-named file must not replace a local file; skipped, exit 3, `--force` overrides) — ordinary files in a folder pull are not guarded yet.
-- **Upload / share refused for account state (task 1037).** The server refuses upload init and share create with `409 { error: "plan_required" | "account_lapsed" }` (older path: `413 quota_exceeded`). `needs_plan` → "Your account has no plan yet — choose one at <web>/choose-plan"; `lapsed` → "Your trial has ended; your vault is read-only and will be deleted on <date>. Subscribe at <web>/billing?view=change". `bb push`'s pre-flight `check_quota` reads it off the subscription GET it already makes. Every uploader (via `ApiClient::upload_init_typed`) and `ApiClient::create_share` go through `explain_account_refusal`: failure path only; `plan_required` needs no lookup, `account_lapsed` fetches the subscription for the deletion date (still explains without it), `quota_exceeded` is rewritten only if the subscription says the account can't upload. The lookup is cached once per `ApiClient` (`tokio::sync::OnceCell`); code + status are kept. Classification is `account_state::Refusal`. The happy path never pays an extra round-trip.
-- `bb ls [path]` — list vault contents.
-- `bb mv <src> <dst>` — move/rename files and folders, including `/` as the root destination. The shared `ApiClient::move_file` parent argument is tri-state: `None` leaves the parent unchanged (rename-only), `Some(None)` sends `parent_id: null` (root), and `Some(Some(uuid))` sends the destination folder UUID. Single/bulk mv, WebDAV MOVE and FUSE rename preserve this distinction; folder repair omits the parent. Only an explicit root destination may send null; missing destination entries or missing/invalid folder UUIDs abort before PATCH. Restore uses its separate bodyless POST endpoint.
-- `bb quota` — storage usage with a colour-coded bar.
-- `bb region [list|get|set <europe|country>]` — where NEW uploads are stored, **by COUNTRY (task 2050, Guus 2026-10-19; was by datacenter in task 1919)**. **Model:** `europe` is the default = no specific country, the server places the data in any of its European data centers; below it the user picks a country (`de`, `fi`); a country that is not live (`nl`) is listed "coming soon" and is not selectable. **No city is ever printed**, in any command, whichever server answers (guard: `tests/no_city_copy.rs` scans the production source + README for Falkenstein / Helsinki / Nuremberg / Nürnberg / Ede; `tests/region_choice.rs` drives the real binary against an older-server mock full of cities). **The list comes from the API, never from the binary** (`src/region.rs` reads `GET /api/v1/storage-regions`, a public bare array of `{id: europe|de|fi|nl, kind: region|country, name, country, country_code, status: live|coming_soon, selectable, is_default}`, no city key; `/me/region` carries the same array as `choices`). `set` matches what the user typed against id, then name, then country code (case-insensitive), refuses a non-`selectable` row (coming soon) or an unknown name WITHOUT sending a request, and sends the row's `id` verbatim in `PUT /api/v1/me/region {preferred_region}`. **Legacy datacenter ids** (`hel1`, `fsn1`, `nbg1`): not in the list, but datacenter-SHAPED (2-6 letters + 1-2 digits, recognised by shape, no list in the binary), so they are sent to the server as typed; server #251 maps them to their country for one release (the answer is read back as the country). A **city** typed is not a choice: "Storage is chosen by country now. Try 'de' or 'fi'." with the ids taken from the list, no city list. **Older servers** (before #251) send one `datacenter` row per city: `parse_choices` FOLDS them by `country_code` into one row per country (a row with no country is dropped), remembers the datacenter ids as `aliases`, sends the first selectable datacenter id for the country (that server only stores those; a typed alias is sent as typed) and reads a stored datacenter id as its country. A server `region_unavailable` is shown as "isn't available right now. Your choice is unchanged". The CLI sends no region on upload and exposes no strict flag (`region_strict`, server task 1952, is set in the web/mobile apps; note `bb region set` sends only `preferred_region`, which the server reads as strict=false). `bb whoami` / `bb account show` / `bb speedtest` resolve the stored id against `choices` (`region::current_label` / `current_name`: country only); a stored id that the list no longer carries reads "not available right now". `--json`: `bb region --json` prints the server's rows verbatim (older server: synthetic country rows with the same stable fields), `bb region get --json` and `set --json` keep their old keys and add `country` + `country_code`, `bb billing usage --json` `by_region[]` keeps `region` and a deprecated `city` alias that carries the COUNTRY name and adds `country` (grouped by country; no `storage_location.country` = "Europe"). `bb billing show` prints "Europe" for the subscription's billing region. Tests: `src/region.rs` + `commands::region` unit tests, `tests/region_choice.rs`, `tests/no_city_copy.rs`.
+- `bb push <path>` (alias `bb upload`) — v2 upload-session route (`/api/v1/uploads/*`); `--replace` sends `file_id` + `base_version_number` (version by file_id, no name byte-match); a fresh push omits `file_id`.
+- `bb pull <id-or-path>` — streaming download + decrypt (constant memory); legacy decrypt preserved (JSON-blob chunks, pre-`bb repair` binary-UUID files → buffered path). **Never silently overwrites**: `-f/--force` overwrites; a rich TTY gets `y/N`; non-interactive runs refuse with non-zero exit naming `--force`/`-o`. Guarded before any bytes download (`tests/pull_overwrite.rs`). Folder pulls guard only file-request uploads (attacker-named file must not replace a local file; skip, exit 3).
+- Upload/share refused by account state: `409 plan_required | account_lapsed` (older: `413 quota_exceeded`) → typed messages via `explain_account_refusal` (cached once per `ApiClient`; happy path pays no extra round-trip). `bb push` pre-flight `check_quota`.
+- `bb ls [path]` / `bb mv <src> <dst>` (shared `ApiClient::move_file` parent is tri-state: `None` unchanged, `Some(None)` root null, `Some(Some(uuid))` folder; only an explicit root destination may send null; folder repair omits the parent) / `bb quota`.
+- `bb region [list|get|set <europe|country>]` — where NEW uploads are stored, by COUNTRY (`europe` = default, no specific country). The choices come from `GET /api/v1/storage-regions`, never from the binary; `set` sends the row's `id` verbatim and refuses a non-`selectable` (coming soon) row or an unknown name without sending a request. **No city is ever printed**, in any command, whichever server answers (guards `tests/no_city_copy.rs`, `tests/region_choice.rs`). Detail (legacy datacenter ids, older-server folding, `--json` keys): docs/runbook/cli-task-history.md.
 
 ### Sharing
 
-- `bb share <path-or-id>` — create an encrypted share link; accepts a vault path, the short ID `bb ls` prints, or a UUID (same resolver as `bb pull`: `commands::pull::resolve_file_arg`) (`--expires`, `--max-opens`, `--passphrase`). Always double-encrypted, in the **web wire format** (see "Share wire format" in `src/commands/share.rs`): `wrapped_file_key` = STANDARD base64 of `nonce(12) || AES-256-GCM(raw K_c, FileKey)` — no KDF, no AAD, pinned against the core `share_key_wrap` KAT vector; link = `{APP_URL}/s/<token>#key=<base64url K_c>`. The token is client-minted (`core::share_token`) and sent with `owner_wrapped_key` + `owner_wrapped_token` (both wrapped under the master key) so the owner can rebuild the link. `--passphrase` is a server-checked Argon2id gate, not encryption. `--no-double-encrypt` is hidden and errors (the server refuses non-E2E shares). README flags are guarded by `src/readme_flags_tests.rs` (`readme_flags_exist`).
-- `bb shares` — list active share links; rebuilds each link from `owner_wrapped_key`/`owner_wrapped_token` (shares made by older clients without those blobs show "link not stored").
-- `bb unshare [share-id]` — revoke a share link (interactive picker without args).
+- `bb share <path-or-id>` (`--expires`, `--max-opens`, `--passphrase`) — always double-encrypted, web wire format (`src/commands/share.rs`): `wrapped_file_key` = STANDARD base64 of `nonce(12) || AES-256-GCM(raw K_c, FileKey)` (no KDF, no AAD; pinned by the core `share_key_wrap` KAT); link = `{APP_URL}/s/<token>#key=<base64url K_c>`; token client-minted + `owner_wrapped_key`/`owner_wrapped_token` so the owner can rebuild the link. `--passphrase` is a server-checked Argon2id gate, not encryption. `--no-double-encrypt` hidden and errors (README flags guarded by `src/readme_flags_tests.rs`).
+- `bb shares` — rebuilds each link from the owner blobs ("link not stored" for older shares) / `bb unshare [share-id]` (interactive picker without args).
 
 ### File requests
 
-Account-less links that let **anyone** upload an encrypted file *into* your vault. Crypto via the `core` crate's `file_request` module (per-request X25519 keypair; private half wrapped under the master key, public half only in the link fragment).
-
-- `bb request create [--folder <id|name>] [--max-files N] [--max-bytes 100MB] [--expires 7d] [--title ..] [--desc ..]` — mints a request and prints the link `<APP_URL>/r/<token>#<R_pub>`. The keypair is generated locally; only the wrapped private key reaches the server.
-- `bb request list` — table of your requests (title, files, bytes, status, expiry) plus each rebuilt link (derives `R_pub` by unwrapping the stored private key under your master key).
-- `bb request rm <id>` — close the request (stops new uploads). `--delete` hard-deletes (note: the server `DELETE` route is not live yet; until it lands, `--delete` returns a clear error and you should close instead).
-- `bb request send <url> <file>...` — account-less upload **to** a request. Parses the `token` + `#<R_pub>` from the link, seals a per-file content key to `R_pub` via `core`, and POSTs the encrypted blob to the configured API. Fails loudly if the link has no public-key fragment.
-
-**Key-derivation context:** the HKDF context for both the private-key wrap and the per-upload seal is currently the **empty byte string**, because the server assigns the request id / token / file id only *after* the client crypto must already be done. Every client (web/cli/mobile) must use the same constant — see the module docs in `src/commands/request.rs` and the cross-client decision note.
+Account-less links for uploads into your vault; crypto via core's `file_request` module (per-request X25519 keypair; private half wrapped under the master key, public half only in the link fragment). `bb request create|list|rm|send` (mints `<APP_URL>/r/<token>#<R_pub>`; `--delete` errors until the server DELETE route is live — close instead). **Key-derivation context:** the HKDF context for the private-key wrap and the per-upload seal is the EMPTY byte string (the server assigns ids only after client crypto must be done) — every client must use the same constant (module docs in `src/commands/request.rs`).
 
 ### Sync & mount
 
-- `bb sync <local> [remote]` — bidirectional folder sync (continuous by default; `--once`, `--daemon`, `--stop`, `--dry-run`, `--force`, `--delete`, `--concurrency`, `--rehash`, `--allow-mass-delete`, `--rebind`). V2 **streaming** uploads (constant memory). Remote path auto-strips `~/` home prefix. Gracefully handles 409 stuck uploads. **Sync never deletes on absence (tasks 1915 + 1916, deletion-safety spec 2026-10-17 R4/R5):** a file missing from the remote listing is not a deletion. A local file is removed only when the server's own record for that id (`GET /files/{id}`, via `sync_safety::confirm_tombstones`) says `is_trashed`, the file is still byte-identical to the manifest (re-checked right before the move, not from the scan), the listing is trustworthy (`sync_safety::untrusted_reason`: not empty while the manifest has files, no skipped/undecryptable/unsafe entries via `ListingHealth`, no 50,000-entry truncation (only when entries were discarded or a cursor remains), and the remote root is the one `.bb-sync.json` last synced against; on a mismatch the old `remote_folder_id` is KEPT, so `root_unreconciled` blocks removals in every later pass and in both watch loops until `bb sync --rebind`, which adopts the new folder and drops the old manifest), and the pass stays under the mass-delete breaker (max(50, floor(10 % of tracked files)) removals, so 51 of 501 trips; over it nothing is removed and the run exits 3 until `--allow-mass-delete`, which the daemon never gets). Removal is a MOVE into `.bb-trash/<UTC stamp>/<rel>` inside the sync folder (dot-prefixed, so never scanned or uploaded), never an unlink. A missing file with no tombstone (moved/renamed remotely, 404, another account) is kept and reported. The watch loops never mass-delete. A download that fails to decrypt (`do_download` -> `DownloadOutcome::Unreadable`) leaves the remote copy untouched, writes no local file or manifest entry, is reported, makes a one-shot pass exit 3, and is retried by the next full pass; no code path in sync trashes a remote file because of a decrypt error. While the root is unreconciled, `trusted_prior` also treats an old manifest entry as absent for any file that exists in the current remote folder, so a same-named file is a both-sides conflict (skipped unless `--force`, which keeps its usual local-replaces-remote meaning) and never a trash, replace-upload or download-over-local on the old entry's account; the one-shot pass and both watch loops use it. An explicit `--delete` on an unreconciled root trashes nothing (its "synced before, missing locally" entries belong to the old tree), prints a notice naming `bb sync --rebind` and exits 3; after `--rebind` it behaves as before. Not covered here: `--delete` on a trusted root (explicit local-to-remote trashing), and sync's trash-then-upload replace (spec H15). Shows a scan spinner, then live per-file + overall progress bars (rich TTY only). `--rehash` forces a full re-hash of every file instead of trusting unchanged `(size, mtime)` entries from the last sync.
-- `bb watch <path>` — deprecated alias for `bb sync`.
-- `bb mount <mountpoint>` — FUSE mount, **source builds with `--features fuse` only**. Release binaries (cargo-dist) ship WITHOUT FUSE and no FUSE asset is published: there `mount`/`unmount` are hidden from `--help` and the stub exits 1 pointing at `bb webdav` (pinned by `tests/mount_availability.rs`). V2 uploads.
-- `bb unmount <mountpoint>` — unmount a previously mounted vault.
-- `bb webdav` — serve the vault as a local WebDAV server (`--port`, `--read-only`, `--cache-ttl`, `--no-cache`, `--verbose`).
+- `bb sync <local> [remote]` — bidirectional, continuous (`--once`, `--daemon`, `--stop`, `--dry-run`, `--force`, `--delete`, `--concurrency`, `--rehash`, `--allow-mass-delete`, `--rebind`); v2 streaming uploads. **Sync never deletes on absence (deletion-safety spec R4/R5):** a file missing from the remote listing is not a deletion — local removal only when the server's own record says `is_trashed` (confirmed tombstones), the file is byte-identical to the manifest, the listing is trustworthy (`ListingHealth`, no truncation, remote root matches `.bb-sync.json` or `root_unreconciled` blocks until `--rebind`), and under the mass-delete breaker (max(50, 10% of tracked); over it nothing is removed, exit 3, daemon never gets `--allow-mass-delete`). Removal is a MOVE into `.bb-trash/<UTC stamp>/<rel>`, never an unlink. An undecryptable download leaves the remote untouched, writes nothing locally, is reported, exit 3. (details: docs/runbook/cli-task-history.md)
+- `bb watch` — deprecated alias for `bb sync`.
+- `bb mount` — FUSE, `--features fuse` only; release binaries ship WITHOUT FUSE (hidden, stub exits 1 → `bb webdav`; pinned by `tests/mount_availability.rs`) / `bb unmount` / `bb webdav` (`--port`, `--read-only`, `--cache-ttl`, `--no-cache`, `--verbose`).
 
 ### Billing
 
-- `bb billing show` — read-only plan, storage, and renewal info. `--json` outputs the raw API merge.
-- `bb billing usage` / `bb billing invoices [--open <id>]` / `bb billing portal` / `bb billing addons [purchase <addon_id>]` — per-region usage, invoice list + PDF, Beebeeb web billing page, add-ons.
+- `bb billing show` (`--json` = raw API merge) / `bb billing usage` / `invoices [--open <id>]` / `portal` (the Beebeeb web billing page) / `addons [purchase <addon_id>]`.
 
 ### Two-factor authentication
 
-- `bb 2fa status` — TOTP enabled/disabled. Reads `totp_enabled` off `GET /api/v1/auth/me` (TOTP-specific), not `GET /api/v1/account/security-score`'s `two_factor_enabled` factor (which is `has_totp || has_passkey` — would misreport a passkey-only account). No live route exposes backup-codes-remaining or a last-verified timestamp yet, so `status` shows enabled/disabled only.
-- `bb 2fa setup` — begins setup, prints the QR/secret/backup codes (`src/commands/twofa.rs`, task 0478). `bb 2fa enable --code <6 digits>` activates it; `bb 2fa disable --code <6 digits>` turns it off (task 0479) — both POST only the code, no step-up token (the live server routes enforce the code alone, not the plan's assumed `X-Confirm-Token`).
-- `bb 2fa verify` **does not exist** — removed from the clap tree (task 0479). The live `POST /api/v1/auth/2fa/verify` is the login-time `{partial_token, code}` exchange, but `bb login`'s browser handshake never produces a partial token, so there was no CLI caller for it.
+- `bb 2fa status` — reads `totp_enabled` off `GET /api/v1/auth/me` (NOT the security-score factor `has_totp || has_passkey`, which misreports passkey-only). Enabled/disabled only (no backup-codes-remaining route).
+- `bb 2fa setup` / `enable --code` / `disable --code` — both POST only the code, no step-up token. `bb 2fa verify` does not exist (removed; the live route is the login-time partial-token exchange).
 
-### Step-up confirm over OPAQUE (task 0856)
+### Step-up confirm over OPAQUE
 
-`bb trash empty`, `bb rm --permanent` and `bb account update` ask for the account password and exchange it for a single-use `X-Confirm-Token` (`commands::confirm::acquire_confirm_token` -> `ApiClient::confirm_password`). For an OPAQUE account the plaintext password never reaches the server: `beebeeb_core::opaque_protocol::client_login_start`, `POST /auth/confirm-opaque-start`, `client_login_finish` (with the `ksf_version` the server returns), `POST /auth/confirm-opaque-finish` (mirrors web's `confirmAction`). A wrong password fails inside `client_login_finish`, so no finish request is sent; it is reported as `unauthorized` -> "incorrect password". Only `409 { "opaque_unavailable": true }` on the start call (account with no OPAQUE credential) falls back to the legacy plaintext `POST /auth/confirm`; any other 409 or error is surfaced, never retried in plaintext. The password prompt is a `Zeroizing<String>`, as are the OPAQUE client state and the session/export keys. `bb account update` still sends the password in the body of the legacy `PUT /auth/account/email`; that route is not part of this change. Tests: `commands::confirm::tests` (real OPAQUE server half as the mock, every request body scanned for the password) and `tests/step_up_opaque.rs` (the real `bb` binary under a pseudo-terminal, unix only).
+`bb trash empty`, `bb rm --permanent`, `bb account update` ask for the password and exchange it for a single-use `X-Confirm-Token` (`commands::confirm::acquire_confirm_token`). For OPAQUE accounts the plaintext password never reaches the server (confirm-opaque-start/finish; wrong password fails inside `client_login_finish` → "incorrect password"). Only `409 {"opaque_unavailable": true}` falls back to legacy plaintext `POST /auth/confirm`; never retried in plaintext otherwise. Password prompt and OPAQUE state are `Zeroizing<String>`.
 
 ### Exit codes and non-interactive runs (`src/exit.rs`)
 
-`0` success · `1` any error · `2` a prompt was needed but stdin is not a terminal · `3` the run finished but left items failed or unresolved. A command sets `2`/`3` by building its error with `exit::with_code(code, msg)`; `main` exits with `exit::code()`.
-
-With stdin not a terminal (cron, CI, a pipe), nothing prompts and nothing silently no-ops:
-
-- `bb push <name>` where the name exists → exit 2, "pass --replace or --keep-both".
-- `bb rm <target>` without `-f` → exit 2, nothing trashed (`--json`/`--quiet` keep skipping the prompt as before).
-- `bb unshare` with no id → exit 2, "pass a share id … `bb shares`" (the picker needs a terminal).
-- `bb sync` one-shot pass (`--once`, `--json`, `--quiet`) with failed uploads or unresolved conflicts → summary says `! incomplete · N failed · M ⚡`, exit 3; `--json` carries `ok` + `failed`. Dry runs and the continuous watch loop don't fail on it.
-
-Covered by `tests/non_interactive.rs` (runs the real binary with `stdin = null` against an in-process mock API, scratch `HOME`, `BB_NO_UPDATE=1`).
+`0` success · `1` any error · `2` a prompt was needed but stdin is not a terminal · `3` the run finished but left items failed or unresolved (`exit::with_code`). Non-interactive: `bb push` existing name → 2; `bb rm` without `-f` → 2; `bb unshare` without id → 2; `bb sync --once` with failures → 3 (`! incomplete · N failed · M ⚡`). Covered by `tests/non_interactive.rs`.
 
 ### Utilities
 
-- `bb update` — explicitly check/install the latest CLI release; bypasses automatic-check cooldown and `BB_NO_UPDATE`. Automatic startup updates keep honoring that opt-out. Homebrew/Scoop installations remain package-manager managed.
+`bb update` — explicit check/install of the latest CLI release; bypasses the automatic-check cooldown and `BB_NO_UPDATE`, while automatic startup updates keep honoring that opt-out; Homebrew/Scoop installs stay package-manager managed.
 
-- `bb speedtest` — benchmark network throughput + crypto speed against the API.
-- `bb repair [--dry-run]` — re-encrypt files stuck in the legacy binary-UUID key derivation so they open in the web app.
-- `bb completions <shell>` — print a shell completion script (`bash`, `zsh`, `fish`, `powershell`).
+`bb speedtest` / `bb repair [--dry-run]` (re-encrypt legacy binary-UUID derivation files) / `bb completions <shell>`.
 
 ## Upload pipeline (`src/upload.rs`)
 
-`bb push` and `bb sync` share **one** streaming upload driver:
-`upload::stream_encrypt_upload(api, Arc<MasterKey>, UploadSpec, &dyn ChunkProgress)`.
+`bb push` and `bb sync` share one streaming driver: `upload::stream_encrypt_upload(api, Arc<MasterKey>, UploadSpec, &dyn ChunkProgress)` on the v2 `/api/v1/uploads/*` route (session init → `chunks/{i}` → `complete`; durable `file_id` keys the file). All direct-upload callers (webdav, mount, repair) use the same three `ApiClient` methods; the legacy `/api/v1/files/upload` route is never called by the CLI.
 
-- **v2 transport.** The driver runs entirely on the v2 `/api/v1/uploads/*`
-  route: `upload_init` opens an upload **session** (`POST /uploads/init`,
-  returning `upload_session_id` + the durable `file_id` + the server-derived
-  chunk plan), each chunk PUTs to `PUT /uploads/{session}/chunks/{index}`, and
-  `POST /uploads/{session}/complete` finalises the version. The session id keys
-  the chunk/complete calls; the durable `file_id` keys the file (and thumbnails).
-  All other direct upload callers (`webdav.rs`, `mount.rs`, `repair.rs`) use the
-  same three `ApiClient` methods. The legacy `/api/v1/files/upload` route is **no
-  longer called by the CLI** — `repair.rs` was the last caller; it was migrated to
-  v2 in the fix/cli-repair-v2-upload branch (task 0689 follow-up).
-- **Replace = versioning by file_id.** `UploadSpec.base_version_number` is
-  `Some(n)` on a `bb push --replace`; the init sends `file_id` + that base
-  version, and the server versions in place (stale-version → 409). `bb sync` and
-  `bb mount`/`bb webdav` mint fresh ids (sync trashes + re-uploads), so they pass
-  `None`. The init body sends the **plaintext** `file_size_bytes`; the server
-  recomputes the stored encrypted total at complete. `profile` is sent as
-  `"desktop"` (the v2 route has no `"cli"` profile; the CLI sends an explicit
-  `chunk_size_bytes`/`chunk_count` plan which the server uses verbatim, so the
-  wire profile is non-load-bearing) — the driver asserts the init response's plan
-  equals what it sent before streaming.
-- **Resume.** The sidecar (`resume.rs`) persists `(file_id, upload_session_id)`
-  keyed by path. On resume (unchanged `size`+`mtime`) the driver skips `init`
-  (re-init of an in-progress file is a 409) and re-PUTs every chunk to the stored
-  session; the v2 chunk route is **idempotent** (an already-stored chunk returns
-  `{skipped:true}` without re-writing the blob), so re-PUTs are cheap. Entries
-  written by an older (v1) CLI lack a session id and are treated as
-  non-resumable.
+- **Replace** = versioning by file_id (`base_version_number`); sync/mount/webdav mint fresh ids (`None`). Init body sends plaintext `file_size_bytes`; `profile` sent as `"desktop"` with an explicit chunk plan (the server uses it verbatim); the driver asserts the response plan equals what it sent.
+- **Resume** (`resume.rs`): persists `(file_id, upload_session_id)` keyed by path; unchanged size+mtime skips init and re-PUTs every chunk (v2 chunk route is idempotent: `{skipped:true}`); pre-v2 entries are non-resumable.
+- Consumes core's `ChunkEncryptor` in a producer task (`spawn_blocking`) feeding a bounded `tokio::mpsc` (cap 1); constant memory (peak ≈ concurrency × ~4 × chunk_size); `expected_total_ciphertext()` = size + 28·chunk_count; `finish()` guards shrink, re-stat guards size change. Cancellation via shared `AtomicBool` + `rx.close()`. Progress via `indicatif` (amber accent, bytes only on server-confirmed chunks; `--json`/`--quiet`/non-TTY → no-op progress). Thumbnails (image/*, ≤64 MiB read) best-effort, non-fatal. `ApiClient` 300 s timeout (SSE stream 24 h). Provenance headers: `X-Beebeeb-Client: cli` + `X-Beebeeb-Client-Version: <CARGO_PKG_VERSION>` on every request (`build_client()`); the self-update checker's GitHub client intentionally does not send them.
 
-- Consumes `beebeeb_core::chunk_stream::ChunkEncryptor` (the shared core
-  primitive). A producer task owns the encryptor and runs `next_chunk()` inside
-  `spawn_blocking` (AES off the reactor), feeding a bounded `tokio::mpsc`
-  (cap 1); the consumer PUTs each chunk and advances progress on the 200.
-- **Constant memory**: peak ≈ `concurrency × ~4 × chunk_size`, never
-  file-size- or tree-size-proportional. (Measured: ~75 MiB RSS for a 5.2 GB
-  tree.) Replaces the old read-whole-file + encrypt-all-into-RAM path.
-- `upload_init` uses `ChunkEncryptor::expected_total_ciphertext()`
-  (`= size + 28·chunk_count`) — no full read. `finish()` guards a file that
-  shrank mid-stream; a re-stat before init guards a size change.
-- **Cancellation**: a shared `AtomicBool` (set by the Ctrl-C handler) is checked
-  at the top of the producer loop and consumer loop; the consumer always
-  `rx.close()`s before awaiting the producer (cap-1 deadlock-proof).
-- **Progress** uses `indicatif` (now an active dependency): a scan spinner
-  around `walk`/`scan_local_files` + a `MultiProgress` (overall bar + transient
-  per-file bars), amber accent (xterm 214), bytes advancing only on
-  server-confirmed chunks. `--json`/`--quiet`/non-TTY → a no-op `ChunkProgress`
-  + the existing plain `println!` lines.
-- Thumbnails (image/* only, one bounded ≤64 MiB read) are best-effort and
-  non-fatal, encrypted with the per-file key derived in the CLI.
-- The `ApiClient` (`api.rs`) now carries a **300 s per-request timeout**; the SSE
-  sync stream overrides it per-request with its own 24 h timeout.
-- Every request the `ApiClient` sends carries `X-Beebeeb-Client: cli` and
-  `X-Beebeeb-Client-Version: <CARGO_PKG_VERSION>` (set as `default_headers` on
-  the shared `reqwest::Client` in `build_client()`, task 1392) — the same
-  version string `bb --version` prints. The server records both on every
-  `object_versions` row (server PR #23 / task 1369) for writer-provenance
-  queries. The self-update checker's separate client (`update.rs`, talking to
-  `api.github.com`, not the beebeeb API) intentionally does not send these.
+## Server-provided names become local paths only via `src/safe_path.rs`
 
-## Server-provided names become local paths only via `src/safe_path.rs` (task 1733)
+Names come from the server — for file-request uploads from an anonymous stranger — so `out_dir.join(name)` is never used directly:
 
-File and folder names come from the server — and for **file-request uploads from an anonymous stranger** (the uploader seals the name under a content key *they* chose). `out_dir.join(name)` is therefore never used directly:
-
-- `safe_path::safe_child(dir, name, Rules::Portable)` (`bb pull` folder items): the name must be ONE plain component (no empty/`.`/`..`, `/`, `\`, NUL, control chars, `C:` drive prefix), the target must not be a symlink, and its canonical location must stay inside `dir`. An unsafe item is **skipped with a stderr warning and the run exits 3** (`exit::INCOMPLETE`); the rest still pulls.
-- `safe_path::default_output_path(name)` (`bb pull <id>` without `-o`, folder default dir): same check; failure says "pass -o <path>". An explicit `-o` is the user's own choice and is never checked.
-- `bb pull --zip`: `check_component` per entry name; unsafe entries are left out of the archive (exit 3) — they would be zip-slip entries for whoever extracts it.
-- `bb sync`: `Rules::Host` (only what is dangerous on THIS host, so legitimate local names like `a\b` synced earlier keep working) in `walk_remote`, plus `safe_rel_join` before the local mkdir / download / unlink so a symlinked subdirectory cannot redirect a write outside the sync root.
-
-Windows reserved names / `:` / trailing dots are enforced on Windows hosts only (the rule set is unit-tested with `windows = true` on every host). Core has no such helper at the pinned rev; desktop has its own copy of this problem (task 1735). Covered by `tests/pull_path_traversal.rs` (real `bb` vs an in-process mock API serving malicious names) and the `safe_path` unit tests.
+- `safe_path::safe_child(dir, name, Rules::Portable)` (bb pull folder items): ONE plain component, no symlink target, canonical inside `dir`; unsafe item = skip + warning + exit 3, the rest still pulls.
+- `safe_path::default_output_path(name)` (bb pull without `-o`): same check, failure says "pass -o <path>"; explicit `-o` is never checked.
+- `bb pull --zip`: `check_component` per entry; unsafe entries left out of the archive (exit 3).
+- `bb sync`: `Rules::Host` in `walk_remote` + `safe_rel_join` before local mkdir/download/unlink.
+- Windows reserved names/`:`/trailing dots enforced on Windows hosts only. Covered by `tests/pull_path_traversal.rs` + unit tests.
 
 ## Download pipeline (`src/download.rs`)
 
-`bb pull` and `bb sync`'s `download_to` share `download::stream_download_decrypt`
-— the read-side counterpart to `upload.rs`:
-
-- Reads the response body incrementally with `ApiClient::download_stream` +
-  `reqwest::Response::chunk()` (no whole-payload buffer), reassembles one logical
-  frame at a time, decrypts via `beebeeb_core::chunk_stream::ChunkDecryptor`
-  (`push_frame`), and writes to a `.tmp` + atomic rename. Constant memory
-  (~one chunk; measured ~40 MiB RSS for a 256 MiB download).
-- Frame sizing = `total / chunk_count` for the first N-1 frames, remainder for
-  the last (matches `crypto::decrypt_raw_chunks`); `total` from `Content-Length`
-  or `X-Original-Size + 28·chunk_count`. The download API sends no
-  `X-Chunk-Size`, so `push_frame` (self-describing per frame) is used.
-- **Legacy preserved** (user-data safety): JSON-blob chunks (first byte `{`) and
-  pre-`bb repair` binary-UUID files fall back to the unchanged buffered
-  `crypto::decrypt_file_chunks` (which retries binary-UUID then string-UUID).
-  `ChunkDecryptor` only derives the string-UUID key, so a first-frame decrypt
-  failure triggers the buffered fallback. `bb repair` semantics intact.
-- 600 s download timeout (via `download_stream`), matching `beebeeb-upload`.
-- `bb pull --zip` (batch folder zip) stays buffered by design (the zip streamer
-  needs random access).
+`bb pull` and `bb sync`'s `download_to` share `download::stream_download_decrypt`: incremental body read + `ChunkDecryptor::push_frame`, `.tmp` + atomic rename, constant memory. Frame sizing = `total / chunk_count` (remainder last); no `X-Chunk-Size` sent. Legacy preserved (user-data safety): JSON-blob chunks and pre-`bb repair` binary-UUID files fall back to buffered `crypto::decrypt_file_chunks`. 600 s download timeout. `bb pull --zip` stays buffered by design.
 
 ## Dependencies
 
-Uses `beebeeb-core` and `beebeeb-types` from the `core` repo via Cargo git dependency, pinned to a full 40-char commit SHA in `[dependencies]` (`rev = "..."`) — **not** a floating branch. This is deliberate: an unpinned `branch = "main"` dependency would let an unrelated core commit change the CLI's build (or behaviour) without a corresponding CLI commit, and CI has no separate core-freshness gate the way `repos/server`'s `CORE_REV` file + `ci.yml` check does.
-
-**Keep the pin aligned with `repos/server/CORE_REV`** (not core `main` tip) — that file names the core commit already deploy-verified in production, so pinning the CLI to the same SHA means every backend-consuming Rust client builds against one shared, known-good core snapshot. Bumping core introduces new types/variants (e.g. `Plan::Starter`, task 1386) that the CLI must handle explicitly — non-exhaustive `match` on a core enum is intentional (no `_ =>` catch-all) so a new variant is a compile error here, not a silent gap. To bump: update the `rev` in both `beebeeb-core` and `beebeeb-types` lines below, `cargo build` to refresh `Cargo.lock`, fix whatever the compiler flags, then commit both files together.
-
-For local development, add to `.cargo/config.toml`:
+`beebeeb-core` + `beebeeb-types` via Cargo git dependency pinned to a full 40-char SHA — not a floating branch. **Keep the pin aligned with `repos/server/CORE_REV`** (the deploy-verified snapshot); bump `rev` in both lines + `cargo build` + fix what the compiler flags, committed together. Non-exhaustive `match` on core enums is intentional (a new variant is a compile error). Local dev:
 
 ```toml
 [patch."https://github.com/beebeeb-io/core"]
@@ -214,45 +107,28 @@ CI strips `[patch]` before building (see `release.yml`).
 
 ## Config
 
-Stored at:
-- macOS: `~/Library/Application Support/beebeeb/config.json`
-- Linux: `~/.config/beebeeb/config.json`
+macOS `~/Library/Application Support/beebeeb/config.json`; Linux `~/.config/beebeeb/config.json`. Contains `api_url`, `session_token`, `master_key`, `email`. Guard like an SSH identity file.
 
-Contains `api_url`, `session_token`, `master_key`, `email`. Guard this file like an SSH identity file.
+## Design reference / Colors
 
-## Design reference
-
-Terminal mockups: `../../design/hifi/hifi-cli.jsx`.
-
-## Colors
-
-Defined in `src/colors.rs` — amber `#f5b800` for branding, sage green `#8fc18b` for success, coral red `#e07a6a` for errors. Always use the `colors::*` constants, not raw `.truecolor()`.
+Terminal mockups: `../../design/hifi/hifi-cli.jsx`. Colors in `src/colors.rs` — amber `#f5b800`, sage green `#8fc18b`, coral red `#e07a6a`; always use `colors::*`, not raw `.truecolor()`.
 
 ## How we work (evidence, design, done, parallel agents)
 
-The full rules live in the workspace `CLAUDE.md` → "How we work" (also summarised in the workspace `AGENTS.md`). Read them; they apply here. The repo-specific instantiation:
+The full rules live in the workspace `CLAUDE.md` → "How we work". The repo-specific instantiation:
 
-- **The count-shaped truth line:** `cargo test 2>&1 | tee /tmp/bb-cli-test.log` → per-binary
-  `test result: ok. N passed; 0 failed`; assert the Ns. `cargo clippy -- -D warnings` /
-  `cargo fmt -- --check` assert the exit code.
-- **CLI tasks are verified by running the command and pasting its output** into the task file —
-  the binary compiling is not a verification.
-- **The core pin is a reviewed number:** bump `rev` only together with `repos/server/CORE_REV`,
-  `cargo build` to refresh the lock, and fix what the compiler flags in the SAME commit.
+- Truth line: `cargo test 2>&1 | tee /tmp/bb-cli-test.log` → per-binary `test result: ok. N passed; 0 failed`; clippy/fmt assert exit code.
+- CLI tasks are verified by running the command and pasting its output — compiling is not a verification.
+- The core pin is a reviewed number: bump `rev` only together with `repos/server/CORE_REV`, in the SAME commit.
 
 ## Graphify
 
-This repo has a knowledge graph at `graphify-out/`:
-- Before exploring code, read `graphify-out/GRAPH_REPORT.md` for module structure.
-- After modifying code, run `graphify update .` and commit the updated `graphify-out/`.
-- Use `graphify query "<question>"` to ask questions about the codebase.
-- Use `graphify path "<A>" "<B>"` to find connections between two concepts.
+This repo has a knowledge graph at graphify-out/. Read `graphify-out/GRAPH_REPORT.md` before exploring code; run `graphify update .` after modifying code and commit; `graphify query "<question>"`; `graphify path "<A>" "<B>"`.
 
 ## Keep shared docs in sync
 
-When you add/change/remove endpoints, types, build commands, or dependencies, update the relevant skill file in `.claude/skills/`:
-- API endpoints → `beebeeb-api.md`
-- Designs → `beebeeb-designs.md`
-- Build / deps / ports → `beebeeb-stack.md`, `beebeeb-dev.md`
+When you add/change/remove endpoints, types, build commands, or dependencies: update the matching skill file in the workspace `.claude/skills/` directory (beebeeb-api.md, beebeeb-designs.md, beebeeb-stack.md, beebeeb-dev.md). Other agents depend on these being accurate.
 
-Other agents depend on these being accurate.
+## Task history
+
+Pre-distillation CLAUDE.md verbatim: docs/runbook/cli-task-history.md
