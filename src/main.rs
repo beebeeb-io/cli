@@ -110,6 +110,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Update bb to the latest release
+    Update,
+
     /// Authenticate with your Beebeeb account
     Login {
         /// Skip browser auto-open and print only the URL + code
@@ -589,7 +592,7 @@ enum RequestCmd {
 enum AccountCmd {
     /// Show profile, plan, security, sessions, passkeys
     Show,
-    /// Open the billing portal
+    /// Open the Beebeeb web billing page
     Billing,
     /// View or purchase billing add-ons
     Addons {
@@ -698,7 +701,7 @@ enum BillingAction {
         #[arg(long, value_name = "ID")]
         open: Option<String>,
     },
-    /// Open the billing portal
+    /// Open the Beebeeb web billing page
     Portal,
     /// View or purchase billing add-ons
     Addons {
@@ -735,6 +738,7 @@ const HELP_MAIN_COMMANDS: &[(&str, &str, &str)] = &[
     ("whoami", "", "user · plan · region · quota · session"),
     ("speedtest", "", "benchmark network + crypto speed"),
     ("repair", "", "fix cross-client encryption"),
+    ("update", "", "install the latest bb release"),
 ];
 
 /// The curated `ACCOUNT` section — account-security commands added in 0.10.0
@@ -893,8 +897,6 @@ fn print_custom_help() {
 
 #[tokio::main]
 async fn main() {
-    update::check_and_update().await;
-
     // Custom help — intercept before clap's default
     {
         let args: Vec<String> = std::env::args().collect();
@@ -912,6 +914,11 @@ async fn main() {
 
     ui::init(cli.json, cli.quiet, cli.no_color);
 
+    // Explicit updates bypass automatic opt-out/cooldown and report errors.
+    if !matches!(cli.command, Commands::Update) {
+        update::check_and_update().await;
+    }
+
     if let Some(api_url) = cli.api {
         if let Err(e) = config::set_api_url_override(api_url) {
             eprintln!(
@@ -924,6 +931,7 @@ async fn main() {
     }
 
     let result = match cli.command {
+        Commands::Update => update::run_manual().await,
         Commands::Login { headless } => {
             daemon::migrate_sync_services();
             commands::login::run(headless).await
@@ -1172,6 +1180,14 @@ mod help_screen_tests {
     /// command tree shows up SOMEWHERE in the rendered help text (curated
     /// section or the derived overflow line), so a future subcommand can't
     /// go missing the same way.
+    #[test]
+    fn manual_update_is_an_explicit_command() {
+        assert!(
+            Cli::try_parse_from(["bb", "update"]).is_ok(),
+            "bb update must be recognized"
+        );
+    }
+
     #[test]
     fn help_screen_lists_every_top_level_subcommand() {
         // Force plain text so ANSI escape codes never hide a name from the
