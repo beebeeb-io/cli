@@ -27,7 +27,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       REQUESTED_VERSION: ${{ inputs.version || github.event.release.tag_name }}
-      PACKAGE_DIR: ${{ runner.temp }}/cli-released-packages
+      PACKAGE_DIR: cli-released-packages
       BEEBEEB_EXPECTED_TARGETS: aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-musl x86_64-unknown-linux-musl x86_64-pc-windows-msvc
     defaults:
       run:
