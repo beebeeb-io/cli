@@ -221,6 +221,8 @@ fn replace_binary(executable: &std::path::Path, binary: &[u8], version: &semver:
             file.set_permissions(std::fs::Permissions::from_mode(0o755))?;
         }
         file.sync_all()?;
+        // Linux refuses to execute a file while a writable handle remains open.
+        drop(file);
         verify_installed_version(&staged, version)?;
         std::fs::rename(&staged, executable)?;
         Ok(())
