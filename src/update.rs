@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 const CHECK_INTERVAL: Duration = Duration::from_secs(3600); // 1 hour
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-const GITHUB_RELEASES_URL: &str = "https://api.github.com/repos/beebeeb-io/cli/releases/latest";
+const GITHUB_RELEASES_URL: &str = "https://github.com/beebeeb-io/cli/releases";
 
 // ---------------------------------------------------------------------------
 // Public entry points
@@ -123,14 +123,21 @@ async fn try_update(
         .timeout(REQUEST_TIMEOUT)
         .user_agent(format!("bb/{CURRENT_VERSION}"))
         .build()?;
-    let release: GitHubRelease = client
-        .get(releases_url)
+    // Public release assets do not consume GitHub's shared-IP REST API budget.
+    // One manifest supplies both the version and checksums; pin the archive to
+    // its tag so publishing a newer release cannot mix versions between GETs.
+    let manifest: DistManifest = client
+        .get(format!("{releases_url}/latest/download/dist-manifest.json"))
         .send()
         .await?
         .error_for_status()?
         .json()
-        .await?;
-    let remote_ver = release.tag_name.strip_prefix('v').unwrap_or(&release.tag_name);
+        .await
+        .map_err(|error| format!("dist-manifest.json is malformed: {error}"))?;
+    let remote_ver = manifest
+        .announcement_tag
+        .strip_prefix('v')
+        .unwrap_or(&manifest.announcement_tag);
     let local = semver::Version::parse(CURRENT_VERSION)?;
     let remote = semver::Version::parse(remote_ver)?;
     write_timestamp(state);
@@ -158,27 +165,9 @@ async fn try_update(
         }
         let target = current_target();
         let asset_name = format!("beebeeb-cli-{target}.tar.xz");
-        let asset = release
-            .assets
-            .iter()
-            .find(|asset| asset.name == asset_name)
-            .ok_or_else(|| format!("no release asset for {target}"))?;
-        let manifest_asset = release
-            .assets
-            .iter()
-            .find(|asset| asset.name == "dist-manifest.json")
-            .ok_or("dist-manifest.json missing from release — refusing to update without checksum verification")?;
         eprintln!("  Updating bb v{CURRENT_VERSION} -> v{remote}...");
 
         // The manifest is checksum metadata, not a cryptographic signature.
-        let manifest: DistManifest = client
-            .get(&manifest_asset.browser_download_url)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await
-            .map_err(|error| format!("dist-manifest.json is malformed: {error}"))?;
         let expected = manifest
             .artifacts
             .get(&asset_name)
@@ -186,7 +175,10 @@ async fn try_update(
             .and_then(|checksums| checksums.sha256.as_deref())
             .ok_or_else(|| format!("dist-manifest.json has no sha256 for {asset_name} — refusing to update"))?;
         let archive = client
-            .get(&asset.browser_download_url)
+            .get(format!(
+                "{releases_url}/download/{}/{asset_name}",
+                manifest.announcement_tag
+            ))
             .send()
             .await?
             .error_for_status()?
@@ -485,32 +477,15 @@ fn write_timestamp(path: &std::path::Path) {
 }
 
 // ---------------------------------------------------------------------------
-// GitHub API types (minimal)
-// ---------------------------------------------------------------------------
-
-#[derive(serde::Deserialize)]
-struct GitHubRelease {
-    tag_name: String,
-    #[cfg(not(windows))]
-    assets: Vec<GitHubAsset>,
-}
-
-#[cfg(not(windows))]
-#[derive(serde::Deserialize)]
-struct GitHubAsset {
-    name: String,
-    browser_download_url: String,
-}
-
-// ---------------------------------------------------------------------------
 // cargo-dist manifest types (minimal — we only read the fields we trust)
 // ---------------------------------------------------------------------------
 
-#[cfg(any(not(windows), test))]
 #[derive(serde::Deserialize)]
 struct DistManifest {
+    announcement_tag: String,
     /// Map of artifact filename -> metadata. cargo-dist emits one entry per
     /// release asset (tarballs, installers, checksums, etc.).
+    #[cfg(any(not(windows), test))]
     #[serde(default)]
     artifacts: HashMap<String, DistArtifact>,
 }
@@ -644,6 +619,7 @@ mod tests {
         struct Server {
             url: String,
             calls: Arc<AtomicUsize>,
+            api_calls: Arc<AtomicUsize>,
             task: tokio::task::JoinHandle<()>,
         }
         impl Drop for Server {
@@ -657,36 +633,23 @@ mod tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let base = format!("http://{}", listener.local_addr().unwrap());
             let name = format!("beebeeb-cli-{}.tar.xz", current_target());
-            let release = serde_json::json!({"tag_name": version, "assets": [
-                {"name": name, "browser_download_url": format!("{base}/archive")},
-                {"name": "dist-manifest.json", "browser_download_url": format!("{base}/manifest")}
-            ]})
-            .to_string();
-            let manifest = serde_json::json!({"artifacts": {name: {"checksums": {"sha256": checksum}}}}).to_string();
+            let manifest = serde_json::json!({"announcement_tag": format!("v{version}"), "artifacts": {name.clone(): {"checksums": {"sha256": checksum}}}}).to_string();
             let archive = archive(binary);
             let calls = Arc::new(AtomicUsize::new(0));
+            let api_calls = Arc::new(AtomicUsize::new(0));
             let api = Router::new()
                 .route(
-                    "/latest",
+                    "/",
                     get({
-                        let calls = calls.clone();
+                        let api_calls = api_calls.clone();
                         move || {
-                            let calls = calls.clone();
-                            let release = release.clone();
-                            async move {
-                                calls.fetch_add(1, Ordering::SeqCst);
-                                (
-                                    axum::http::StatusCode::from_u16(status).unwrap(),
-                                    [("content-type", "application/json")],
-                                    release,
-                                )
-                                    .into_response()
-                            }
+                            api_calls.fetch_add(1, Ordering::SeqCst);
+                            async { (axum::http::StatusCode::FORBIDDEN, "API rate limit exceeded") }
                         }
                     }),
                 )
                 .route(
-                    "/manifest",
+                    "/latest/download/dist-manifest.json",
                     get({
                         let calls = calls.clone();
                         move || {
@@ -694,13 +657,18 @@ mod tests {
                             let manifest = manifest.clone();
                             async move {
                                 calls.fetch_add(1, Ordering::SeqCst);
-                                ([("content-type", "application/json")], manifest)
+                                (
+                                    axum::http::StatusCode::from_u16(status).unwrap(),
+                                    [("content-type", "application/json")],
+                                    manifest,
+                                )
+                                    .into_response()
                             }
                         }
                     }),
                 )
                 .route(
-                    "/archive",
+                    &format!("/download/v{version}/{name}"),
                     get({
                         let calls = calls.clone();
                         move || {
@@ -717,13 +685,34 @@ mod tests {
                 axum::serve(listener, api).await.unwrap();
             });
             Server {
-                url: format!("{base}/latest"),
+                url: base,
                 calls,
+                api_calls,
                 task,
             }
         }
 
         const BINARY: &[u8] = b"#!/bin/sh\nprintf 'bb 999.0.0\\n'\n";
+
+        #[tokio::test]
+        async fn public_manifest_works_when_rest_api_is_rate_limited() {
+            let scratch = Scratch::new();
+            let exe = scratch.path("bb");
+            std::fs::write(&exe, b"original").unwrap();
+            let server = server(CURRENT_VERSION, None, BINARY, 200).await;
+            let outcome = try_update(&scratch.path("state"), &exe, &server.url, &scratch.path("no-brew"))
+                .await
+                .expect("public release discovery must work despite the REST API returning403");
+            assert_eq!(outcome, UpdateOutcome::AlreadyCurrent);
+            assert_eq!(server.api_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(server.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(std::fs::read(exe).unwrap(), b"original");
+        }
+
+        #[test]
+        fn production_discovery_uses_public_github_releases() {
+            assert_eq!(GITHUB_RELEASES_URL, "https://github.com/beebeeb-io/cli/releases");
+        }
 
         #[tokio::test]
         async fn already_current_reports_success_after_a_fresh_request() {
@@ -777,7 +766,8 @@ mod tests {
                     executable: exe.clone()
                 }
             );
-            assert_eq!(server.calls.load(Ordering::SeqCst), 3);
+            assert_eq!(server.calls.load(Ordering::SeqCst), 2);
+            assert_eq!(server.api_calls.load(Ordering::SeqCst), 0);
             assert_eq!(std::fs::read(&exe).unwrap(), BINARY);
             verify_installed_version(&exe, &semver::Version::parse("999.0.0").unwrap()).unwrap();
             assert!(
@@ -797,7 +787,7 @@ mod tests {
                 .unwrap_err()
                 .to_string();
             assert!(error.contains("SHA-256 mismatch"), "{error}");
-            assert_eq!(server.calls.load(Ordering::SeqCst), 3);
+            assert_eq!(server.calls.load(Ordering::SeqCst), 2);
             assert_eq!(std::fs::read(&exe).unwrap(), b"original");
         }
 
@@ -812,7 +802,7 @@ mod tests {
                 .unwrap_err()
                 .to_string();
             assert!(error.contains("has no sha256"), "{error}");
-            assert_eq!(server.calls.load(Ordering::SeqCst), 2);
+            assert_eq!(server.calls.load(Ordering::SeqCst), 1);
             assert_eq!(std::fs::read(&exe).unwrap(), b"original");
         }
 
@@ -973,6 +963,7 @@ esac
         // artifacts -> checksums.sha256 path.
         let json = r#"{
             "dist_version": "0.31.0",
+            "announcement_tag": "v0.14.3",
             "artifacts": {
                 "beebeeb-cli-aarch64-apple-darwin.tar.xz": {
                     "name": "beebeeb-cli-aarch64-apple-darwin.tar.xz",
