@@ -487,4 +487,49 @@ mod tests {
         assert_eq!(rolled_back.load(Ordering::SeqCst), 1028);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    fn unhex(h: &str) -> Vec<u8> {
+        (0..h.len() / 2)
+            .map(|i| u8::from_str_radix(&h[2 * i..2 * i + 2], 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn a_stream_cut_before_its_last_frame_is_unreadable_and_takes_its_bytes_back() {
+        // The checked-in core v2 file with its last frame missing: every frame that arrived
+        // authenticates, but the stream never reaches the frame marked last. This client cannot read
+        // the file now; it is not "some other failure", and sync decides on the type.
+        let doc: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/core_1908_vectors.json")).unwrap();
+        let f = &doc["v2_file"];
+        let key: [u8; 32] = unhex(f["master_key_hex"].as_str().unwrap()).try_into().unwrap();
+        let mk = MasterKey::from_bytes(key);
+        let wire = unhex(f["wire_hex"].as_str().unwrap());
+        let stride = f["chunk_size"].as_u64().unwrap() as usize + 28;
+        let mut decryptor = ChunkDecryptor::for_push(&mk, f["file_id"].as_str().unwrap(), ExpectedChunkFormat::V2);
+        for frame in wire.chunks(stride).take(3) {
+            decryptor.push_frame(frame).unwrap();
+        }
+        let dir = std::env::temp_dir().join(format!("bb-finish-2173-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out_path = dir.join("out.bin");
+        let rolled_back = Arc::new(AtomicU64::new(0));
+        let overall = Overall {
+            rolled_back: rolled_back.clone(),
+        };
+        let partial = Output {
+            writer: AtomicFile::create(&out_path).unwrap(),
+            progress: Box::new(OneFile),
+            plaintext_bytes: 3,
+            encrypted_bytes: 3 * stride as u64,
+        };
+        match finish(decryptor, Some(partial), false, &overall) {
+            Err(DownloadError::Unreadable(message)) => assert!(message.contains("download incomplete"), "{message}"),
+            Err(other) => panic!("expected Unreadable, got {other:?}"),
+            Ok(_) => panic!("a file without its last frame was published"),
+        }
+        assert_eq!(rolled_back.load(Ordering::SeqCst), 3 * stride as u64);
+        assert!(!out_path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

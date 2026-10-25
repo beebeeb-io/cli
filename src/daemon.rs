@@ -206,13 +206,21 @@ fn account_home() -> Option<PathBuf> {
     None
 }
 
-/// `Err` when `home` is provably not the account's home. When either is unknown the answer is "fine":
-/// a real user in an odd environment must not be locked out, and every test redirects HOME to a
-/// directory that differs.
-fn check_home(home: Option<&Path>, account: Option<&Path>) -> Result<(), String> {
+/// Set to `1` to let a service be installed (or removed) from a HOME that is not the account's home.
+/// For a real user with an unusual but intended setup (`sudo -E`, a relocated home directory). Tests
+/// never set it.
+pub const CUSTOM_HOME_OVERRIDE: &str = "BB_SERVICE_INSTALL_ALLOW_CUSTOM_HOME";
+
+/// `Err` when `home` is provably not the account's home, unless `allow` (the override variable's value)
+/// is `1`. When either home is unknown the answer is "fine": a real user in an odd environment must not
+/// be locked out, and every test redirects HOME to a directory that differs.
+fn check_home(home: Option<&Path>, account: Option<&Path>, allow: Option<&str>) -> Result<(), String> {
     let (Some(home), Some(account)) = (home, account) else {
         return Ok(());
     };
+    if allow == Some("1") {
+        return Ok(());
+    }
     let same =
         home == account || matches!((fs::canonicalize(home), fs::canonicalize(account)), (Ok(a), Ok(b)) if a == b);
     if same {
@@ -221,7 +229,8 @@ fn check_home(home: Option<&Path>, account: Option<&Path>) -> Result<(), String>
         Err(format!(
             "refusing to touch the background-service manager: HOME is {} but this account's home is {}. \
              launchd and systemd run services with the account's home, so the service would use that \
-             home's config and session, not this one",
+             home's config and session, not this one. If this HOME is intended (`sudo -E`, a relocated \
+             home directory), run the command again with {CUSTOM_HOME_OVERRIDE}=1",
             home.display(),
             account.display()
         ))
@@ -229,7 +238,11 @@ fn check_home(home: Option<&Path>, account: Option<&Path>) -> Result<(), String>
 }
 
 fn ensure_real_home() -> Result<(), String> {
-    check_home(dirs::home_dir().as_deref(), account_home().as_deref())
+    check_home(
+        dirs::home_dir().as_deref(),
+        account_home().as_deref(),
+        std::env::var(CUSTOM_HOME_OVERRIDE).ok().as_deref(),
+    )
 }
 
 /// Run `program args…` (`launchctl` or `systemctl`) and wait for it, after checking HOME. The only
@@ -1073,16 +1086,32 @@ mod transport_tests {
     #[test]
     fn the_service_managers_are_only_spoken_to_from_the_accounts_home() {
         let account = Path::new("/Users/dev");
-        assert!(check_home(Some(account), Some(account)).is_ok());
-        let refused = check_home(Some(Path::new("/tmp/scratch/home")), Some(account)).unwrap_err();
+        let scratch = Path::new("/tmp/scratch/home");
+        assert!(check_home(Some(account), Some(account), None).is_ok());
+        let refused = check_home(Some(scratch), Some(account), None).unwrap_err();
         assert!(
             refused.contains("refusing") && refused.contains("/tmp/scratch/home") && refused.contains("/Users/dev"),
             "{refused}"
         );
+        // The refusal says how to proceed when the HOME is intended.
+        assert!(refused.contains("BB_SERVICE_INSTALL_ALLOW_CUSTOM_HOME=1"), "{refused}");
         // When either side is unknown there is nothing to compare: a real user is not locked out.
-        assert!(check_home(None, Some(account)).is_ok());
-        assert!(check_home(Some(account), None).is_ok());
-        assert!(check_home(None, None).is_ok());
+        assert!(check_home(None, Some(account), None).is_ok());
+        assert!(check_home(Some(account), None, None).is_ok());
+        assert!(check_home(None, None, None).is_ok());
+    }
+
+    #[test]
+    fn the_override_lets_an_intended_custom_home_through_and_only_the_value_one() {
+        let account = Path::new("/Users/dev");
+        let custom = Path::new("/srv/custom-home");
+        assert!(check_home(Some(custom), Some(account), Some("1")).is_ok());
+        for not_consent in [None, Some(""), Some("0"), Some("true"), Some("yes"), Some("11")] {
+            assert!(
+                check_home(Some(custom), Some(account), not_consent).is_err(),
+                "{not_consent:?}"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -1094,9 +1123,9 @@ mod transport_tests {
         let link = dir.join("link");
         let _ = std::fs::remove_file(&link);
         std::os::unix::fs::symlink(&real, &link).unwrap();
-        assert!(check_home(Some(&link), Some(&real)).is_ok());
+        assert!(check_home(Some(&link), Some(&real), None).is_ok());
         assert!(
-            check_home(Some(&dir), Some(&real)).is_err(),
+            check_home(Some(&dir), Some(&real), None).is_err(),
             "a parent directory is not the home"
         );
         let _ = std::fs::remove_dir_all(&dir);

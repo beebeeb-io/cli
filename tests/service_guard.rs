@@ -130,6 +130,10 @@ async fn a_scratch_home_never_reaches_launchctl_or_systemctl() {
             all.contains("refusing to touch the background-service manager"),
             "{all}"
         );
+        assert!(
+            all.contains("BB_SERVICE_INSTALL_ALLOW_CUSTOM_HOME=1"),
+            "the refusal says how to proceed: {all}"
+        );
         assert!(!out.status.success(), "{all}");
     }
 }
