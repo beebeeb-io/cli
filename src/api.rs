@@ -75,6 +75,9 @@ pub enum ConfirmMethod {
     LegacyPlaintext,
 }
 
+/// What a call that needs a login says when there is none.
+pub(crate) const NOT_LOGGED_IN_MESSAGE: &str = "Not logged in. Run `bb login` first.";
+
 pub(crate) const SESSION_EXPIRED_MESSAGE: &str =
     "Your session expired or was revoked. Run `bb login` to sign in again.";
 
@@ -299,28 +302,38 @@ impl ApiClient {
     /// header-setting path, not a hand-rolled stand-in.
     #[cfg(test)]
     pub(crate) fn new_for_test(base_url: String) -> Self {
-        Self::new_for_test_with_state(base_url, direct::DirectState::new(), Some("test-token".to_string()))
+        Self::new_for_test_with(
+            base_url,
+            Some("test-token"),
+            std::sync::Arc::new(direct::DirectState::new()),
+        )
     }
 
     /// [`new_for_test`](Self::new_for_test) with no session at all (`bb login` was never run).
     #[cfg(test)]
     pub(crate) fn new_for_test_logged_out(base_url: String) -> Self {
-        Self::new_for_test_with_state(base_url, direct::DirectState::new(), None)
+        Self::new_for_test_with(base_url, None, std::sync::Arc::new(direct::DirectState::new()))
     }
 
     /// [`new_for_test`](Self::new_for_test) with a shorter hold after a direct upload was given up, so a test can
     /// tell the per-file flag apart from the remembered failure.
     #[cfg(test)]
     pub(crate) fn new_for_test_with_failure_hold(base_url: String, hold: std::time::Duration) -> Self {
-        Self::new_for_test_with_state(
+        Self::new_for_test_with(
             base_url,
-            direct::DirectState::with_failure_hold(hold),
-            Some("test-token".to_string()),
+            Some("test-token"),
+            std::sync::Arc::new(direct::DirectState::with_holds(hold, direct::REFUSAL_HOLD)),
         )
     }
 
+    /// The general test constructor: any token (or none) and a direct state the test shares between clients, as the
+    /// production constructor does per API base. Keeps the loopback assertion.
     #[cfg(test)]
-    fn new_for_test_with_state(base_url: String, state: direct::DirectState, token: Option<String>) -> Self {
+    pub(crate) fn new_for_test_with(
+        base_url: String,
+        token: Option<&str>,
+        state: std::sync::Arc<direct::DirectState>,
+    ) -> Self {
         // Fail closed: a unit test never talks to anything but a server on this machine.
         assert!(
             crate::config::api_url_is_loopback(&base_url),
@@ -329,18 +342,16 @@ impl ApiClient {
         Self {
             client: build_client(std::time::Duration::from_secs(300)),
             base_url,
-            token,
+            token: token.map(str::to_string),
             refusal_account_state: tokio::sync::OnceCell::new(),
-            direct: std::sync::Arc::new(state),
+            direct: state,
             storage_client: std::sync::OnceLock::new(),
             upload_storage_client: std::sync::OnceLock::new(),
         }
     }
 
     pub fn require_auth(&self) -> Result<&str, String> {
-        self.token
-            .as_deref()
-            .ok_or_else(|| "Not logged in. Run `bb login` first.".to_string())
+        self.token.as_deref().ok_or_else(|| NOT_LOGGED_IN_MESSAGE.to_string())
     }
 
     fn url(&self, path: &str) -> String {

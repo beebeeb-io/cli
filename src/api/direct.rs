@@ -22,8 +22,9 @@ const CHUNK_API_TIMEOUT: Duration = Duration::from_secs(600);
 /// this long and the request fails (and the chunk is renewed or taken over by the API).
 const STORAGE_READ_TIMEOUT_RELEASE: Duration = Duration::from_secs(60);
 /// What the code uses: the release value, except in this crate's own tests, which compress the two storage budgets
-/// (this and [`STORAGE_PUT_BASE`]) so a test that must outlive them does not wait a minute. The release values are
-/// pinned by `the_storage_budgets_of_a_release_build_are_what_the_docs_say`.
+/// (this and [`STORAGE_PUT_BASE`]) so a test that must outlive them does not wait a minute. The `_RELEASE` constants
+/// are pinned by `the_storage_budgets_of_a_release_build_are_what_the_docs_say`; the arm that SHIPS, which a test build
+/// never takes, is pinned by the `const _` block below, which fails the build of anything that is not a test.
 const STORAGE_READ_TIMEOUT: Duration = if cfg!(test) {
     Duration::from_secs(3)
 } else {
@@ -254,11 +255,42 @@ pub(crate) enum DirectOffer {
     /// Nobody answered: a failed or timed-out lookup, a node without the route. Say nothing about the server; a
     /// new file goes through the API, but a recorded direct session must NOT be thrown away on this.
     Unknown,
-    /// The lookup was refused for want of a valid login: `None` = no session at all, `Some(status)` = the discovery
-    /// route answered 401 or 403. The server was not asked about its transports, and the way out is `bb login`,
-    /// not `--transport api` (which would end the recorded session and with it the chunks it already holds). A
-    /// new file goes through the API, whose own answer reports the same problem in its own words.
-    Unauthorized(Option<u16>),
+    /// The lookup was refused for want of a valid login (see [`Refusal`]). The server was not asked about its
+    /// transports, and `--transport api` is not the way out (it would end the recorded session and with it the
+    /// chunks it already holds). A new file goes through the API, whose own answer reports the same problem in its
+    /// own words.
+    Unauthorized(Refusal),
+}
+
+/// Why a lookup was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    /// No session at all.
+    NoSession,
+    /// The capabilities route answered 401 or 403; `code` is the server's error code when the body had one
+    /// (`account_suspended` is a 403, an expired session a 401).
+    Refused { status: u16, code: Option<String> },
+}
+
+impl Refusal {
+    /// What a resumed direct upload of `file` says when it cannot be continued for this reason: each case in the words
+    /// the rest of the CLI uses for it, and none of them advises the way out of a different problem.
+    pub(crate) fn resume_message(&self, file: &str) -> String {
+        match self {
+            Refusal::NoSession => super::NOT_LOGGED_IN_MESSAGE.to_string(),
+            Refusal::Refused { status: 401, .. } => super::SESSION_EXPIRED_MESSAGE.to_string(),
+            Refusal::Refused { status, code } => {
+                let what = match code {
+                    Some(code) => format!("{code}, HTTP {status}"),
+                    None => format!("HTTP {status}"),
+                };
+                format!(
+                    "{file}: the interrupted direct upload cannot be continued: the server refused to list its \
+                     transfer capabilities ({what}). Its progress is kept"
+                )
+            }
+        }
+    }
 }
 
 impl DirectOffer {
@@ -278,26 +310,36 @@ impl DirectOffer {
 pub(crate) struct DirectState {
     discovery: tokio::sync::Mutex<DiscoveryState>,
     /// When a direct upload last had to be given up, on the MONOTONIC clock (a wall-clock step or an NTP correction
-    /// neither ends the hold early nor stretches it; the clock does not count the time the machine slept, so a laptop
-    /// that slept keeps what remained of the hold, which only delays its next direct try). No new direct upload is
+    /// neither ends the hold early nor stretches it; on Linux and macOS that clock also stops while the machine
+    /// sleeps, so a laptop keeps what remained of the hold, which only delays its next direct try; other platforms
+    /// may differ). No new direct upload is
     /// started for [`failure_hold`](Self::failure_hold) after that: when direct is broken server-wide every file would
     /// otherwise pay an init, its tries, an abandon (which tells the user's other devices the file was deleted)
     /// and a second init. `tokio`'s instant so a paused test clock can move it.
     upload_failed_at: std::sync::Mutex<Option<tokio::time::Instant>>,
     /// How long that hold lasts: the discovery trust period, shorter only in a test.
     failure_hold: Duration,
+    /// How long a refused login is answered from memory ([`REFUSAL_HOLD`]), shorter only in a test.
+    refusal_hold: Duration,
 }
+
+/// How long a lookup refused for a login (a 401 or 403 on the capabilities route) is answered from memory instead of
+/// asking again. Long enough that a revoked session costs one request, not one per file; short enough that a
+/// transient refusal (a front proxy, a node out of step) does not park direct transfers for the trust period. Another
+/// login is never held by it.
+pub(crate) const REFUSAL_HOLD: Duration = Duration::from_secs(60);
 
 impl DirectState {
     pub(crate) fn new() -> Self {
-        Self::with_failure_hold(Duration::from_millis(dt::DISCOVERY_TTL_MS.unsigned_abs()))
+        Self::with_holds(Duration::from_millis(dt::DISCOVERY_TTL_MS.unsigned_abs()), REFUSAL_HOLD)
     }
 
-    pub(crate) fn with_failure_hold(failure_hold: Duration) -> Self {
+    pub(crate) fn with_holds(failure_hold: Duration, refusal_hold: Duration) -> Self {
         Self {
             discovery: tokio::sync::Mutex::new(DiscoveryState::new()),
             upload_failed_at: std::sync::Mutex::new(None),
             failure_hold,
+            refusal_hold,
         }
     }
 
@@ -330,20 +372,33 @@ impl DirectState {
 
 /// The discovery cache. Core's cache does what a long-running process needs (a sync daemon that runs for weeks
 /// and meets one bad quarter hour): it forgets a failed discovery AND a JSON 404 "no direct transport" once the
-/// trust period has passed (core 2aa1f39), so the CLI keeps no RULE of its own on top of it. It does keep one
-/// fact core's `Lookup::UseApi` does not carry: whether the cache gave up because the server SAID no, because
-/// asking failed, or because the LOGIN was refused. A resume needs the difference (see [`DirectOffer`]).
+/// trust period has passed (core 2aa1f39). The CLI keeps what core's `Lookup::UseApi` does not carry, in [`Said`]: why
+/// the cache gave up (the server SAID no, or asking failed). A resume needs the difference (see [`DirectOffer`]).
 ///
-/// That last one is the CLI's one rule of its own: core's cache counts a 401/403 as a failed lookup, so two of them
-/// park discovery (downloads too) for the whole trust period, whoever asks next. Here a refusal parks it for the
-/// LOGIN that was refused only: a request carrying another token (a `bb login` since) starts from a clean cache,
-/// and the same login is asked twice, not once per file.
+/// And it keeps ONE rule of its own on top of core's cache, which is a workaround and goes away with its cause: core
+/// counts a 401/403 on the lookup as a failed lookup, so two of them would park discovery (downloads too) for the whole
+/// trust period, whoever asks next, and a `bb login` could not undo it. Here a refusal is NOT given to core's cache; it
+/// is remembered for the LOGIN that was refused, for [`REFUSAL_HOLD`] (follow-up for core: an authorization answer
+/// is no evidence about the server, so the cache should not count it).
 pub(crate) struct DiscoveryState {
     cache: dt::DiscoveryCache,
-    /// The last answer recorded was the server's definite "no direct transport" (a JSON 404).
-    said_no: bool,
-    /// The last answer recorded was a refusal (status 401 or 403) of this login (see [`login_id`]).
-    refused: Option<(u64, u16)>,
+    said: Said,
+}
+
+/// What the last answer to a lookup was, beyond what core's cache keeps of it. One value, so that "the server said
+/// no" and "this login was refused" cannot both be true.
+#[derive(Debug, Clone)]
+enum Said {
+    /// A good answer, a failure to ask, a node without the route: nothing about the server's mind or the login.
+    Nothing,
+    /// The server's definite "no direct transport" (a JSON 404).
+    NoDirect,
+    /// A 401 or 403 for the login `login` (see [`login_id`]), answered at `at` on the monotonic clock.
+    Refused {
+        login: u64,
+        refusal: Refusal,
+        at: tokio::time::Instant,
+    },
 }
 
 /// Which login a request carries, comparable inside this process and never written anywhere: a hash of the token.
@@ -358,23 +413,31 @@ impl DiscoveryState {
     pub(crate) fn new() -> Self {
         Self {
             cache: dt::DiscoveryCache::new(),
-            said_no: false,
-            refused: None,
+            said: Said::Nothing,
         }
     }
 
-    /// A request is about to be made with `login`: what an earlier login was refused is no news about this one.
-    fn forget_other_logins(&mut self, login: u64) {
-        if self.refused.is_some_and(|(refused, _)| refused != login) {
-            *self = Self::new();
+    /// The last answer was the server's definite "no direct transport".
+    fn said_no(&self) -> bool {
+        matches!(self.said, Said::NoDirect)
+    }
+
+    /// `login` was refused less than `hold` before `now`: the refusal, to be answered without asking again. Another
+    /// login, or an old refusal, is none.
+    fn refusal_for(&self, login: u64, now: tokio::time::Instant, hold: Duration) -> Option<Refusal> {
+        match &self.said {
+            Said::Refused {
+                login: refused,
+                refusal,
+                at,
+            } if *refused == login && now.saturating_duration_since(*at) < hold => Some(refusal.clone()),
+            _ => None,
         }
     }
 
-    /// The lookup was refused (`status` 401 or 403) for `login`.
-    fn record_refusal(&mut self, login: u64, status: u16, outcome: &dt::Outcome, now_ms: i64) {
-        self.cache.record(outcome, None, now_ms);
-        self.said_no = false;
-        self.refused = Some((login, status));
+    /// The lookup was refused for `login` at `at`. Core's cache is not told: it would count a failed lookup.
+    fn record_refusal(&mut self, login: u64, refusal: Refusal, at: tokio::time::Instant) {
+        self.said = Said::Refused { login, refusal, at };
     }
 
     pub(crate) fn lookup(&self, now_ms: i64) -> dt::Lookup {
@@ -382,8 +445,11 @@ impl DiscoveryState {
     }
 
     pub(crate) fn record(&mut self, outcome: &dt::Outcome, discovery: Option<dt::Discovery>, now_ms: i64) {
-        self.said_no = matches!(outcome, dt::Outcome::NotSupported);
-        self.refused = None;
+        self.said = if matches!(outcome, dt::Outcome::NotSupported) {
+            Said::NoDirect
+        } else {
+            Said::Nothing
+        };
         self.cache.record(outcome, discovery, now_ms);
     }
 }
@@ -443,7 +509,7 @@ impl ApiClient {
             return DirectOffer::NotOffered;
         }
         let Ok(token) = self.require_auth() else {
-            return DirectOffer::Unauthorized(None);
+            return DirectOffer::Unauthorized(Refusal::NoSession);
         };
         let login = login_id(token);
         let verdict = |discovery: dt::Discovery| {
@@ -454,25 +520,29 @@ impl ApiClient {
             }
         };
         let mut state = self.direct.discovery.lock().await;
-        state.forget_other_logins(login);
+        // This login was refused a moment ago: say so without asking again (a revoked session must not cost one
+        // request per file), unless the hold is over or another login is asking.
+        if let Some(refusal) = state.refusal_for(login, tokio::time::Instant::now(), self.direct.refusal_hold) {
+            return DirectOffer::Unauthorized(refusal);
+        }
         match state.lookup(now_ms()) {
             dt::Lookup::Cached(discovery) => verdict(discovery),
-            // The cache gave up: because the server said no, because this login was refused, or because asking
-            // kept failing.
-            dt::Lookup::UseApi if state.said_no => DirectOffer::NotOffered,
-            dt::Lookup::UseApi => match state.refused {
-                Some((_, status)) => DirectOffer::Unauthorized(Some(status)),
-                None => DirectOffer::Unknown,
-            },
+            // The cache gave up: because the server said no, or because asking kept failing.
+            dt::Lookup::UseApi if state.said_no() => DirectOffer::NotOffered,
+            dt::Lookup::UseApi => DirectOffer::Unknown,
             dt::Lookup::Fetch => {
                 let (outcome, discovery) = self.fetch_discovery().await;
                 // A refusal for want of a valid login says nothing about the server: it is remembered for THIS login
-                // only (see [`DiscoveryState`]), so a `bb login` in the meantime is not parked by it.
+                // only, for a while (see [`DiscoveryState`]).
                 if let dt::Outcome::Terminal(t) = &outcome
                     && matches!(t.status, 401 | 403)
                 {
-                    state.record_refusal(login, t.status, &outcome, now_ms());
-                    return DirectOffer::Unauthorized(Some(t.status));
+                    let refusal = Refusal::Refused {
+                        status: t.status,
+                        code: t.error.clone(),
+                    };
+                    state.record_refusal(login, refusal.clone(), tokio::time::Instant::now());
+                    return DirectOffer::Unauthorized(refusal);
                 }
                 state.record(&outcome, discovery.clone(), now_ms());
                 match (outcome, discovery) {
@@ -720,8 +790,8 @@ const STORAGE_PUT_BASE: Duration = if cfg!(test) {
 /// test can see (and refuse) an edit of the other arm.
 #[cfg(not(test))]
 const _: () = {
-    assert!(STORAGE_READ_TIMEOUT.as_secs() == 60);
-    assert!(STORAGE_PUT_BASE.as_secs() == 60);
+    assert!(STORAGE_READ_TIMEOUT.as_millis() == 60_000);
+    assert!(STORAGE_PUT_BASE.as_millis() == 60_000);
 };
 const STORAGE_PUT_MIN_BYTES_PER_SEC: u64 = 128 * 1024;
 
@@ -829,9 +899,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        ChunkApiError, DirectState, DiscoveryState, GrantReply, PinnedRetry, STORAGE_PUT_BASE,
+        ChunkApiError, DirectState, DiscoveryState, GrantReply, PinnedRetry, REFUSAL_HOLD, Refusal, STORAGE_PUT_BASE,
         STORAGE_PUT_BASE_RELEASE, STORAGE_PUT_MIN_BYTES_PER_SEC, STORAGE_READ_TIMEOUT, STORAGE_READ_TIMEOUT_RELEASE,
-        build_storage_client, build_storage_client_with, dt, put_timeout,
+        Said, build_storage_client, build_storage_client_with, dt, put_timeout,
     };
     use crate::api::ApiClient;
 
@@ -996,7 +1066,7 @@ mod tests {
 
     #[test]
     fn a_hold_is_counted_from_when_the_direct_upload_was_given_up_not_from_when_it_is_asked() {
-        let state = DirectState::with_failure_hold(Duration::from_secs(10));
+        let state = DirectState::with_holds(Duration::from_secs(10), REFUSAL_HOLD);
         let t0 = tokio::time::Instant::now();
         assert!(!state.upload_failed_within_hold(t0), "never given up");
         state.note_upload_failed(t0);
@@ -1004,7 +1074,7 @@ mod tests {
         assert!(state.upload_failed_within_hold(t0 + Duration::from_millis(9_999)));
         assert!(!state.upload_failed_within_hold(t0 + Duration::from_secs(10)));
         // A zero hold never holds (the test constructor that tells the per-file bit from this memory).
-        let none = DirectState::with_failure_hold(Duration::ZERO);
+        let none = DirectState::with_holds(Duration::ZERO, REFUSAL_HOLD);
         none.note_upload_failed(t0);
         assert!(!none.upload_failed_within_hold(t0));
     }
@@ -1711,46 +1781,15 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_login_that_is_not_valid_is_told_apart_from_a_server_nobody_could_ask_and_is_asked_about_twice() {
-        use super::DirectOffer;
-        // No session at all: nothing is sent, and the answer is not "unknown".
-        let config = crate::config::Config {
-            api_url: "http://127.0.0.1:41011".to_string(),
-            ..crate::config::Config::default()
-        };
-        let api = ApiClient::with_config(config);
-        assert!(
-            matches!(api.direct_upload_offer().await, DirectOffer::Unauthorized(None)),
-            "not logged in"
-        );
-        // A 401 or a 403 on the capabilities route: the same, with its status. The server is asked twice (core's
-        // allowance for a login that keeps being refused), then the refusal is answered from memory: a session that is
-        // revoked must not cost one extra request per file.
-        for status in [401u16, 403] {
-            let (api, hits) = mock_discovery_answering(status, r#"{"error":"unauthorized"}"#).await;
-            for round in 1..=4 {
-                assert!(
-                    matches!(api.direct_upload_offer().await, DirectOffer::Unauthorized(Some(got)) if got == status),
-                    "{status}, round {round}"
-                );
-            }
-            assert_eq!(
-                hits.load(Ordering::SeqCst),
-                2,
-                "{status}: two attempts, then the cache gave up"
-            );
-            // Downloads do not care which kind of nothing it is.
-            assert!(api.direct_download_offer().await.is_none());
-        }
-    }
-
-    #[tokio::test]
-    async fn a_refusal_parks_discovery_for_the_login_that_was_refused_and_not_for_the_next_one() {
-        use super::DirectOffer;
-        // The same process, the same API base, the same discovery state: first one login is refused (more often than
-        // core's allowance), then the user has logged in again, which means another token.
-        let status = Arc::new(std::sync::atomic::AtomicU16::new(401));
+    /// A mock capabilities route whose status the test can change, counting its hits.
+    async fn mock_discovery_switch(
+        initial: u16,
+    ) -> (
+        std::net::SocketAddr,
+        Arc<std::sync::atomic::AtomicU16>,
+        Arc<AtomicUsize>,
+    ) {
+        let status = Arc::new(std::sync::atomic::AtomicU16::new(initial));
         let current = status.clone();
         let hits = Arc::new(AtomicUsize::new(0));
         let counter = hits.clone();
@@ -1770,7 +1809,7 @@ mod tests {
                         (
                             axum::http::StatusCode::from_u16(code).unwrap(),
                             [("content-type", "application/json")],
-                            r#"{"error":"unauthorized"}"#,
+                            r#"{"error":"account_suspended"}"#,
                         )
                     }
                 }
@@ -1781,40 +1820,166 @@ mod tests {
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
-        let client = |token: &str| {
-            ApiClient::with_config(crate::config::Config {
-                api_url: format!("http://{addr}"),
-                session_token: Some(token.to_string()),
-                ..crate::config::Config::default()
-            })
-        };
-        let old_login = client("revoked-token");
+        (addr, status, hits)
+    }
+
+    #[tokio::test]
+    async fn a_login_that_is_not_valid_is_told_apart_from_a_server_nobody_could_ask_and_is_asked_about_once() {
+        use super::DirectOffer;
+        // No session at all: nothing is sent, and the answer is not "unknown".
+        let api = ApiClient::new_for_test_logged_out("http://127.0.0.1:9".to_string());
+        assert!(
+            matches!(
+                api.direct_upload_offer().await,
+                DirectOffer::Unauthorized(Refusal::NoSession)
+            ),
+            "not logged in"
+        );
+        // A 401 or a 403 on the capabilities route: the same, with its status and the server's code. The server is
+        // asked once; the refusal is then answered from memory, so a revoked session does not cost one extra request
+        // per file.
+        for status in [401u16, 403] {
+            let (addr, _, hits) = mock_discovery_switch(status).await;
+            let api = ApiClient::new_for_test(format!("http://{addr}"));
+            for round in 1..=4 {
+                match api.direct_upload_offer().await {
+                    DirectOffer::Unauthorized(Refusal::Refused { status: got, code }) => {
+                        assert_eq!(
+                            (got, code.as_deref()),
+                            (status, Some("account_suspended")),
+                            "round {round}"
+                        );
+                    }
+                    other => panic!("{status}, round {round}: {other:?}"),
+                }
+            }
+            assert_eq!(
+                hits.load(Ordering::SeqCst),
+                1,
+                "{status}: asked once, then answered from memory"
+            );
+            // Downloads do not care which kind of nothing it is.
+            assert!(api.direct_download_offer().await.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refusal_is_remembered_for_that_login_and_for_the_hold_only() {
+        use super::DirectOffer;
+        let (addr, status, hits) = mock_discovery_switch(401).await;
+        let base = format!("http://{addr}");
+        // One state for every client of the base, as the production constructor shares it; a short hold.
+        let hold = Duration::from_millis(400);
+        let state = Arc::new(DirectState::with_holds(Duration::from_secs(600), hold));
+        let client = |token: &str| ApiClient::new_for_test_with(base.clone(), Some(token), state.clone());
+        let revoked = client("revoked-token");
         for round in 1..=3 {
             assert!(
-                matches!(
-                    old_login.direct_upload_offer().await,
-                    DirectOffer::Unauthorized(Some(401))
-                ),
+                matches!(revoked.direct_upload_offer().await, DirectOffer::Unauthorized(_)),
                 "round {round}"
             );
         }
-        assert_eq!(hits.load(Ordering::SeqCst), 2, "the third answer came from memory");
-        // The server is fine again, but the refused login stays parked ...
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "the second and third answers came from memory"
+        );
+        // The server is fine again; the refused login is still answered from memory, ...
         status.store(200, Ordering::SeqCst);
+        assert!(matches!(
+            revoked.direct_upload_offer().await,
+            DirectOffer::Unauthorized(_)
+        ));
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        // ... a login with another token (a `bb login` since) is asked at once and gets direct, ...
         assert!(
             matches!(
-                old_login.direct_upload_offer().await,
-                DirectOffer::Unauthorized(Some(401))
+                client("fresh-token").direct_upload_offer().await,
+                DirectOffer::Offered(_)
             ),
-            "the same login is not asked again within the trust period"
+            "the next login is not held by the last one's refusal"
         );
         assert_eq!(hits.load(Ordering::SeqCst), 2);
-        // ... and a client that carries another token (a `bb login` since) is asked at once and gets direct.
-        let new_login = client("fresh-token");
+        // ... and the first login is asked again once the hold is over: a transient refusal does not park it.
+        let (addr, status, hits) = mock_discovery_switch(403).await;
+        let state = Arc::new(DirectState::with_holds(Duration::from_secs(600), hold));
+        let api = ApiClient::new_for_test_with(format!("http://{addr}"), Some("t"), state);
+        assert!(matches!(api.direct_upload_offer().await, DirectOffer::Unauthorized(_)));
+        // refused again after the hold: twice is what would park core's cache for ten minutes, were it told
+        tokio::time::sleep(hold + Duration::from_millis(150)).await;
+        assert!(matches!(api.direct_upload_offer().await, DirectOffer::Unauthorized(_)));
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "asked again once the hold was over");
+        status.store(200, Ordering::SeqCst);
+        tokio::time::sleep(hold + Duration::from_millis(150)).await;
         assert!(
-            matches!(new_login.direct_upload_offer().await, DirectOffer::Offered(_)),
-            "the next login is not parked by the last one's refusals"
+            matches!(api.direct_upload_offer().await, DirectOffer::Offered(_)),
+            "asked again after the hold, and not parked by the two refusals before it"
         );
         assert_eq!(hits.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn a_refusal_the_server_said_no_and_asking_failed_are_one_state_not_three_flags() {
+        let now = tokio::time::Instant::now();
+        let refusal = Refusal::Refused {
+            status: 401,
+            code: None,
+        };
+        let mut state = DiscoveryState::new();
+        assert!(!state.said_no() && state.refusal_for(7, now, REFUSAL_HOLD).is_none());
+        // a refusal, then the server's JSON no: the no wins, the refusal is gone
+        state.record_refusal(7, refusal.clone(), now);
+        assert!(!state.said_no() && state.refusal_for(7, now, REFUSAL_HOLD).is_some());
+        state.record(&dt::Outcome::NotSupported, None, 0);
+        assert!(state.said_no() && state.refusal_for(7, now, REFUSAL_HOLD).is_none());
+        // the server's no, then a refusal of the login after the no expired: the no must not outlive it
+        state.record_refusal(7, refusal.clone(), now);
+        assert!(
+            !state.said_no(),
+            "a stale no must not turn a refusal into 'the server offers nothing'"
+        );
+        // a refusal, then a failure to ask: the failure says nothing about the login
+        state.record(&dt::Outcome::UseApiNow, None, 1);
+        assert!(!state.said_no() && state.refusal_for(7, now, REFUSAL_HOLD).is_none());
+        // a refusal, then a good answer
+        state.record_refusal(7, refusal.clone(), now);
+        state.record(&dt::Outcome::Proceed, Some(offers()), 2);
+        assert!(state.refusal_for(7, now, REFUSAL_HOLD).is_none());
+        // only the refused login, only inside the hold
+        state.record_refusal(7, refusal.clone(), now);
+        assert!(state.refusal_for(8, now, REFUSAL_HOLD).is_none(), "another login");
+        let before_end = now + REFUSAL_HOLD - Duration::from_millis(1);
+        assert!(state.refusal_for(7, before_end, REFUSAL_HOLD).is_some());
+        assert!(
+            state.refusal_for(7, now + REFUSAL_HOLD, REFUSAL_HOLD).is_none(),
+            "the hold is over"
+        );
+        let _ = Said::Nothing;
+    }
+
+    #[test]
+    fn a_refusal_says_what_it_was_in_the_words_the_cli_uses_for_it() {
+        let refused = |status: u16, code: Option<&str>| Refusal::Refused {
+            status,
+            code: code.map(str::to_string),
+        };
+        assert_eq!(
+            Refusal::NoSession.resume_message("a.bin"),
+            crate::api::NOT_LOGGED_IN_MESSAGE
+        );
+        assert_eq!(
+            refused(401, Some("unauthorized")).resume_message("a.bin"),
+            crate::api::SESSION_EXPIRED_MESSAGE
+        );
+        let forbidden = refused(403, Some("account_suspended")).resume_message("a.bin");
+        assert!(
+            forbidden.starts_with("a.bin:") && forbidden.contains("account_suspended, HTTP 403"),
+            "{forbidden}"
+        );
+        assert!(
+            !forbidden.contains("bb login") && !forbidden.contains("--transport"),
+            "{forbidden}"
+        );
+        assert!(refused(403, None).resume_message("a.bin").contains("(HTTP 403)"));
     }
 }

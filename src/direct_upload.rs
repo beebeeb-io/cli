@@ -1295,18 +1295,21 @@ mod tests {
         // A 403 is not an expired session (every other 403 in the CLI says its status): the real status, and no
         // advice to log in again.
         let err = kept_resume_error("resume-403", Discovery::Forbidden, false).await;
-        assert!(err.contains("HTTP 403") && err.contains("progress is kept"), "{err}");
+        assert!(
+            err.contains("forbidden, HTTP 403") && err.contains("progress is kept"),
+            "{err}"
+        );
         assert!(
             !err.contains("--transport") && !err.contains(crate::api::SESSION_EXPIRED_MESSAGE),
             "{err}"
         );
+        assert!(!err.contains("bb login"), "a 403 is not an expired session: {err}");
     }
 
     #[tokio::test]
     async fn a_resumed_direct_session_is_kept_and_says_not_logged_in_when_there_is_no_session_at_all() {
         let err = kept_resume_error("resume-logged-out", Discovery::Offers, true).await;
-        let api = crate::api::ApiClient::new_for_test_logged_out("http://127.0.0.1:9".to_string());
-        assert_eq!(err, api.require_auth().unwrap_err());
+        assert_eq!(err, crate::api::NOT_LOGGED_IN_MESSAGE);
         assert!(err.contains("Not logged in"), "{err}");
     }
 

@@ -337,9 +337,12 @@ fn unguarded_spawns(source: &str) -> Vec<String> {
                     }
                     if builder {
                         let outside = squeezed(&code[..start]) + &squeezed(&code[body_end..]);
-                        if outside.contains(".env_clear()") || outside.contains(".env_remove(\"BB_REFUSE_NON_LOOPBACK_API\"") {
+                        if outside.contains(".env_clear()")
+                            || outside.contains(".envs(")
+                            || outside.contains(".env_remove(\"BB_REFUSE_NON_LOOPBACK_API\"")
+                        {
                             problems.push(format!(
-                                "line {line} (in the code without comments): this command is built here and run elsewhere, and the file clears the environment or removes the variable: the guard may not reach the run"
+                                "line {line} (in the code without comments): this command is built here and run elsewhere, and the file clears the environment, adds a whole environment or removes the variable: the guard may not reach the run"
                             ));
                         }
                         if outside.matches(VARIABLE).count() > outside.matches(GUARD).count() {
@@ -362,6 +365,12 @@ fn unguarded_spawns(source: &str) -> Vec<String> {
     problems
 }
 
+/// A file below `tests/` (not a test target of its own): other test files can `mod` it and call into it, so a spawn
+/// there could be run, and unguarded, from a file the scan reads separately.
+fn is_helper_module(relative_path: &str) -> bool {
+    relative_path.contains('/') || relative_path.contains('\\')
+}
+
 /// Every `.rs` file under `dir`, recursively.
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).unwrap() {
@@ -379,6 +388,12 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
 /// #[ignore]d and takes its server from the environment on purpose.
 fn exempt(relative_path: &str) -> bool {
     ["api_guard.rs", "direct_real_server.rs"].contains(&relative_path)
+}
+
+#[test]
+fn a_spawn_in_a_helper_module_is_refused_because_its_callers_cannot_be_followed() {
+    assert!(is_helper_module("common/mod.rs") && is_helper_module("common/deeper/more.rs"));
+    assert!(!is_helper_module("auth_errors.rs") && !is_helper_module("zero_byte_files.rs"));
 }
 
 #[test]
@@ -404,6 +419,11 @@ fn every_test_that_runs_the_binary_sets_the_guard() {
         let text = std::fs::read_to_string(&path).unwrap();
         if !text.contains("CARGO_BIN_EXE_") {
             continue;
+        }
+        if is_helper_module(&relative) {
+            offenders.push(format!(
+                "{relative}: runs the binary from a helper module: its callers are in other files, which the scan cannot follow back to it"
+            ));
         }
         scanned += 1;
         spawns += without_comments(&text).matches("CARGO_BIN_EXE_").count();
@@ -529,6 +549,10 @@ fn run() {{ {caller} }}
         "a caller that only adds arguments"
     );
     for (what, caller) in [
+        (
+            "a caller that adds a whole environment",
+            "let out = command(&h).envs(std::env::vars()).output().unwrap();",
+        ),
         (
             "a caller that clears the environment",
             "let out = command(&h).env_clear().output().unwrap();",

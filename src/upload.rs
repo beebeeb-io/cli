@@ -787,16 +787,10 @@ async fn upload_attempt(
                 // `bb login`, not `--transport api`, and the session and its record are kept (a 50 GB push
                 // killed at 90 % would start again from 0). Each says what it was, in the words the rest of the
                 // CLI uses for it.
-                DirectOffer::Unauthorized(status) => {
-                    return Err(AttemptErr::Other(match status {
-                        None => api.require_auth().err().unwrap_or_default(),
-                        Some(401) => crate::api::SESSION_EXPIRED_MESSAGE.to_string(),
-                        Some(code) => format!(
-                            "{}: the interrupted direct upload cannot be continued: the server refused to list its \
-                             transfer capabilities (HTTP {code}). Its progress is kept: run the command again",
-                            display_name(&spec.file_name)
-                        ),
-                    }));
+                DirectOffer::Unauthorized(refusal) => {
+                    return Err(AttemptErr::Other(
+                        refusal.resume_message(&display_name(&spec.file_name)),
+                    ));
                 }
                 // Nobody answered. That says nothing about the server, and giving the session up throws away
                 // every chunk it already holds: keep the session and its record, fail this file for this run.
