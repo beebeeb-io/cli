@@ -55,7 +55,10 @@ pub(crate) enum ChunkApiError {
 struct PinnedRetry {
     /// Attempts in all, the first one included.
     attempts: u32,
-    /// The most the retries may wait in total; a wait that would pass it ends them.
+    /// The most the retries may wait in total; a wait that would pass it ends them. It must hold the
+    /// longest wait a server can state (`MAX_RETRY_AFTER`, 120 s) plus a margin: the server's real 429
+    /// on these routes says `Retry-After: 60`, and a budget of 60 s would give up on the first stated
+    /// wait that follows any earlier one, or on a second 429, restarting the whole file.
     budget: Duration,
     /// The wait before the second attempt when the server named none; it doubles each time.
     base: Duration,
@@ -66,10 +69,20 @@ struct PinnedRetry {
 
 const PINNED_RETRY: PinnedRetry = PinnedRetry {
     attempts: 4,
-    budget: Duration::from_secs(60),
+    budget: Duration::from_secs(150),
     base: Duration::from_secs(1),
     idle: Duration::from_secs(60),
 };
+
+/// Whether to wait `wait` and try again after attempt number `attempt` (1-based) failed, with `waited`
+/// already spent waiting: `None` when the attempts or the time budget are used up.
+fn next_wait(retry: PinnedRetry, attempt: u32, waited: Duration, wait: Duration) -> Option<Duration> {
+    if attempt >= retry.attempts || waited.saturating_add(wait) > retry.budget {
+        None
+    } else {
+        Some(wait)
+    }
+}
 
 /// One attempt of the pinned route that did not give the chunk.
 enum PinnedFailure {
@@ -384,9 +397,9 @@ impl ApiClient {
                     (wait.unwrap_or_else(|| retry.base.saturating_mul(doubling)), message)
                 }
             };
-            if attempt >= retry.attempts || waited.saturating_add(wait) > retry.budget {
+            let Some(wait) = next_wait(retry, attempt, waited, wait) else {
                 return Err(ChunkApiError::Failed(message));
-            }
+            };
             tokio::time::sleep(wait).await;
             waited += wait;
             attempt += 1;
@@ -709,11 +722,16 @@ mod tests {
         use axum::response::IntoResponse;
         match step {
             Reply::Status(code) => axum::http::StatusCode::from_u16(*code).unwrap().into_response(),
-            // The server's `server_busy`: a JSON body and a Retry-After.
+            // The server's real 429 on /api/v1/files/* (rate_limit.rs `too_many_requests`): the
+            // limiter's JSON body and a Retry-After (60 in practice).
             Reply::Status429(secs) => (
                 axum::http::StatusCode::TOO_MANY_REQUESTS,
                 [("retry-after", secs.to_string())],
-                axum::Json(serde_json::json!({ "error": "server_busy", "retry_after": secs })),
+                axum::Json(serde_json::json!({
+                    "error": "rate_limited",
+                    "message": format!("Too many requests. Try again in {secs} seconds."),
+                    "retry_after": secs,
+                })),
             )
                 .into_response(),
             Reply::StatusRetry(code, secs) => (
@@ -769,6 +787,32 @@ mod tests {
         base: Duration::from_millis(10),
         idle: Duration::from_millis(400),
     };
+
+    #[test]
+    fn the_real_budget_holds_the_servers_own_429_wait_and_a_ban() {
+        use super::{PINNED_RETRY, next_wait};
+        let s = Duration::from_secs;
+        // The server's real 429 says Retry-After: 60. First failure, nothing waited yet: wait it.
+        assert_eq!(next_wait(PINNED_RETRY, 1, s(0), s(60)), Some(s(60)));
+        // ... also when an earlier hiccup already cost a second (attempt 2, 1 s waited) ...
+        assert_eq!(next_wait(PINNED_RETRY, 2, s(1), s(60)), Some(s(60)));
+        // ... and a second 429 right after the first is waited for as well.
+        assert_eq!(next_wait(PINNED_RETRY, 2, s(60), s(60)), Some(s(60)));
+        // A ban is clamped to 120 s by core and is still waited for once.
+        assert_eq!(next_wait(PINNED_RETRY, 1, s(0), s(120)), Some(s(120)));
+        // What is not bounded away: the attempts, and the time budget, however the waits are named.
+        assert_eq!(
+            next_wait(PINNED_RETRY, 4, s(0), s(1)),
+            None,
+            "the fourth attempt was the last"
+        );
+        assert_eq!(
+            next_wait(PINNED_RETRY, 3, s(120), s(60)),
+            None,
+            "180 s is past the budget"
+        );
+        assert!(PINNED_RETRY.budget >= dt::classify::MAX_RETRY_AFTER + s(30));
+    }
 
     async fn pinned(api: &ApiClient, retry: PinnedRetry, len: u64) -> Result<Vec<u8>, ChunkApiError> {
         api.download_chunk_pinned_with(retry, "f", 3, "v", len).await
