@@ -59,12 +59,16 @@ struct PinnedRetry {
     budget: Duration,
     /// The wait before the second attempt when the server named none; it doubles each time.
     base: Duration,
+    /// An attempt that hears nothing for this long (no answer, or no body byte) has failed. Without
+    /// it a stalled connection would hold an attempt for the request's 600 s ceiling.
+    idle: Duration,
 }
 
 const PINNED_RETRY: PinnedRetry = PinnedRetry {
     attempts: 4,
     budget: Duration::from_secs(60),
     base: Duration::from_secs(1),
+    idle: Duration::from_secs(60),
 };
 
 /// One attempt of the pinned route that did not give the chunk.
@@ -97,13 +101,13 @@ enum Exact {
     Broken,
 }
 
-async fn read_exact_len(resp: &mut reqwest::Response, expected: u64) -> Exact {
+async fn read_exact_len(resp: &mut reqwest::Response, expected: u64, idle: Duration) -> Exact {
     let mut body = Vec::new();
     loop {
-        match resp.chunk().await {
-            Err(_) => return Exact::Broken,
-            Ok(None) => break,
-            Ok(Some(piece)) => {
+        match tokio::time::timeout(idle, resp.chunk()).await {
+            Err(_) | Ok(Err(_)) => return Exact::Broken,
+            Ok(Ok(None)) => break,
+            Ok(Ok(Some(piece))) => {
                 if (body.len() as u64).saturating_add(piece.len() as u64) > expected {
                     return Exact::WrongLength;
                 }
@@ -137,6 +141,7 @@ async fn answer_of(mut resp: reqwest::Response, max: usize) -> Seen {
         answer,
         body,
         retry_after_sent: retry_after.is_some(),
+        retry_after_secs: retry_after.as_deref().and_then(|v| v.trim().parse::<u64>().ok()),
     }
 }
 
@@ -146,6 +151,8 @@ struct Seen {
     body: Vec<u8>,
     /// Did the server send a `Retry-After` at all? (The classifier substitutes a default when not.)
     retry_after_sent: bool,
+    /// Its value when it is a number of seconds.
+    retry_after_secs: Option<u64>,
 }
 
 impl Seen {
@@ -154,6 +161,7 @@ impl Seen {
             answer: dt::ApiAnswer::no_answer(),
             body: Vec::new(),
             retry_after_sent: false,
+            retry_after_secs: None,
         }
     }
 }
@@ -352,7 +360,10 @@ impl ApiClient {
         let mut waited = Duration::ZERO;
         let mut attempt: u32 = 1;
         loop {
-            let (wait, message) = match self.pinned_attempt(file_id, index, version, expected_len).await {
+            let (wait, message) = match self
+                .pinned_attempt(retry.idle, file_id, index, version, expected_len)
+                .await
+            {
                 Ok(bytes) => return Ok(bytes),
                 Err(PinnedFailure::Final(e)) => return Err(e),
                 Err(PinnedFailure::Again { wait, message }) => {
@@ -371,6 +382,7 @@ impl ApiClient {
 
     async fn pinned_attempt(
         &self,
+        idle: Duration,
         file_id: &str,
         index: u32,
         version: &str,
@@ -379,18 +391,28 @@ impl ApiClient {
         let token = self
             .require_auth()
             .map_err(|m| PinnedFailure::Final(ChunkApiError::Terminal(m)))?;
-        let resp = self
+        let sending = self
             .client
             .get(self.url(&format!("/api/v1/files/{file_id}/chunks/{index}")))
             .query(&[("object_version_id", version)])
             .bearer_auth(token)
             .timeout(CHUNK_API_TIMEOUT)
-            .send()
-            .await
-            .map_err(|e| PinnedFailure::Again {
-                wait: None,
-                message: dt::scrub(&e.to_string()),
-            })?;
+            .send();
+        let resp = match tokio::time::timeout(idle, sending).await {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(e)) => {
+                return Err(PinnedFailure::Again {
+                    wait: None,
+                    message: dt::scrub(&e.to_string()),
+                });
+            }
+            Err(_) => {
+                return Err(PinnedFailure::Again {
+                    wait: None,
+                    message: format!("download chunk {index}: no answer within {} s", idle.as_secs()),
+                });
+            }
+        };
         let status = resp.status();
         if !status.is_success() {
             let seen = answer_of(resp, 64 * 1024).await;
@@ -421,8 +443,12 @@ impl ApiClient {
                     wait: Some(wait),
                     message: failed,
                 },
+                // A 5xx may carry its own `Retry-After` (the server's 503 sends 5): honour it, with
+                // the same bounds as any stated wait.
                 dt::Outcome::UseApiNow => PinnedFailure::Again {
-                    wait: None,
+                    wait: seen
+                        .retry_after_secs
+                        .map(|s| Duration::from_secs(s.clamp(1, dt::classify::MAX_RETRY_AFTER.as_secs()))),
                     message: failed,
                 },
                 _ => PinnedFailure::Final(ChunkApiError::Failed(failed)),
@@ -430,7 +456,7 @@ impl ApiClient {
         }
         // The body must be exactly the manifest's length: read at most that much and check it.
         let mut resp = resp;
-        match read_exact_len(&mut resp, expected_len).await {
+        match read_exact_len(&mut resp, expected_len, idle).await {
             Exact::Body(bytes) => Ok(bytes),
             Exact::WrongLength => Err(PinnedFailure::Final(ChunkApiError::Failed(format!(
                 "download chunk {index}: the body is not the manifest's length"
@@ -659,6 +685,8 @@ mod tests {
         /// A JSON error body, optionally with a `Retry-After` (seconds).
         Json(u16, &'static str, Option<u32>),
         Status429(u32),
+        /// A status with a `Retry-After` of this many seconds (the server's 503 sends 5).
+        StatusRetry(u16, u32),
         Body(Vec<u8>),
     }
 
@@ -671,6 +699,11 @@ mod tests {
                 axum::http::StatusCode::TOO_MANY_REQUESTS,
                 [("retry-after", secs.to_string())],
                 axum::Json(serde_json::json!({ "error": "server_busy", "retry_after": secs })),
+            )
+                .into_response(),
+            Reply::StatusRetry(code, secs) => (
+                axum::http::StatusCode::from_u16(*code).unwrap(),
+                [("retry-after", secs.to_string())],
             )
                 .into_response(),
             Reply::Json(code, error, retry) => {
@@ -719,6 +752,7 @@ mod tests {
         attempts: 4,
         budget: Duration::from_secs(5),
         base: Duration::from_millis(10),
+        idle: Duration::from_millis(400),
     };
 
     async fn pinned(api: &ApiClient, retry: PinnedRetry, len: u64) -> Result<Vec<u8>, ChunkApiError> {
@@ -758,6 +792,82 @@ mod tests {
         assert_eq!(pinned(&api, FAST, 5).await.ok(), Some(vec![9; 5]));
         assert!(started.elapsed() >= Duration::from_millis(900));
         assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_server_error_with_a_retry_after_is_waited_for_as_told() {
+        // The server's 503 says `Retry-After: 5` (error.rs): not "retry at once", not "retry whenever".
+        let (api, hits) = scripted_api(vec![Reply::StatusRetry(503, 1), Reply::Body(vec![9; 5])]).await;
+        let started = Instant::now();
+        assert_eq!(pinned(&api, FAST, 5).await.ok(), Some(vec![9; 5]));
+        assert!(
+            started.elapsed() >= Duration::from_millis(900),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        // Too long for the budget: not waited for, and not a hang either.
+        let (api, hits) = scripted_api(vec![Reply::StatusRetry(503, 90)]).await;
+        let started = Instant::now();
+        failed(pinned(&api, FAST, 5).await.unwrap_err());
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn an_attempt_that_hears_nothing_fails_after_the_idle_limit_and_is_tried_again() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let seen = connections.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let n = seen.fetch_add(1, Ordering::SeqCst);
+                std::thread::spawn(move || {
+                    let mut request = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while !request.ends_with(b"\r\n\r\n") {
+                        if stream.read(&mut byte).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        request.push(byte[0]);
+                    }
+                    match n {
+                        // Accepts the request and never answers.
+                        0 => std::thread::sleep(Duration::from_secs(30)),
+                        // Answers, sends two of five bytes, goes quiet.
+                        1 => {
+                            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n");
+                            let _ = stream.write_all(&[9, 9]);
+                            let _ = stream.flush();
+                            std::thread::sleep(Duration::from_secs(30));
+                        }
+                        _ => {
+                            let _ = write!(
+                                stream,
+                                "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\n"
+                            );
+                            let _ = stream.write_all(&[9; 5]);
+                        }
+                    }
+                });
+            }
+        });
+        let api = ApiClient::new_for_test(format!("http://{addr}"));
+        let started = Instant::now();
+        assert_eq!(pinned(&api, FAST, 5).await.ok(), Some(vec![9; 5]));
+        assert_eq!(connections.load(Ordering::SeqCst), 3);
+        let took = started.elapsed();
+        assert!(
+            took >= Duration::from_millis(700),
+            "two idle limits of 400 ms: {took:?}"
+        );
+        assert!(
+            took < Duration::from_secs(6),
+            "not the request's ten-minute ceiling: {took:?}"
+        );
     }
 
     #[tokio::test]

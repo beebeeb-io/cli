@@ -29,15 +29,27 @@ fn parse(value: &str) -> Result<Transport, ()> {
 
 fn from_env() -> Option<Transport> {
     let raw = std::env::var("BB_TRANSPORT").ok()?;
+    // `BB_TRANSPORT=` (empty) is how a shell unsets by assignment: treat it as unset.
+    if raw.trim().is_empty() {
+        return None;
+    }
     match parse(&raw) {
         Ok(t) => Some(t),
         Err(()) => {
             // A typo must not silently change how files travel in either direction: say so, once
-            // (this runs once per process), and use the default.
-            eprintln!("bb: ignoring BB_TRANSPORT={raw:?} (expected \"api\" or \"auto\"); using auto");
+            // (this runs once per process), unless --quiet, and use the default.
+            if !crate::ui::is_quiet() {
+                eprintln!("bb: ignoring BB_TRANSPORT={raw:?} (expected \"api\" or \"auto\"); using auto");
+            }
             None
         }
     }
+}
+
+/// The selected transport as its `BB_TRANSPORT` spelling (`api` or `auto`), for a child process or
+/// a service definition that must not inherit a different one from its environment.
+pub fn selected_name() -> &'static str {
+    if api_forced() { "api" } else { "auto" }
 }
 
 /// Call once from `main()`, after argument parsing.

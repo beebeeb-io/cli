@@ -349,6 +349,15 @@ pub(crate) async fn try_download(
                         return Ok(DirectResult::UseApi);
                     }
                 }
+                Err(_) if next == 0 => {
+                    // Frame 0 under the string-UUID key failed before any plaintext was written. That
+                    // is what a pre-`bb repair` file keyed by the BINARY uuid (or a JSON-blob file)
+                    // looks like, and only the API path's buffered fallback can read those: a
+                    // refetch would fail the same way and end as "corrupt". Index > 0 stays corrupt.
+                    trace(|| "chunk 0 did not authenticate; the API path's legacy readers take this file".to_string());
+                    discard(out, progress);
+                    return Ok(DirectResult::UseApi);
+                }
                 Err(_) => {
                     trace(|| format!("chunk {next} did not authenticate"));
                     if let Err(e) = planner.chunk_unauthentic(next) {
@@ -377,7 +386,9 @@ fn finish(
     };
     if let Err(e) = decryptor.finish() {
         out.discard(overall);
-        return Err(format!("download incomplete: {e}").into());
+        // The stream ended before the frame marked last: the remote copy is cut short or was
+        // tampered with. Like a chunk that does not authenticate, this client cannot read it now.
+        return Err(DownloadError::Unreadable(format!("download incomplete: {e}")));
     }
     let Output {
         writer,

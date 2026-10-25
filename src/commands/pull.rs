@@ -43,14 +43,16 @@ impl From<PullFailure> for String {
 }
 
 pub async fn run(file_id: String, output: Option<PathBuf>, zip: bool, force: bool) -> Result<(), String> {
-    match run_once(file_id.clone(), output.clone(), zip, force).await {
+    match run_once(file_id.clone(), output.clone(), zip, force, false).await {
         // Someone published a new version while this one was downloading. Nothing was written;
         // the new version's chunk count and read pin need a fresh look, so start over, once.
         Err(PullFailure::Changed(_)) => {
             if !crate::ui::is_quiet() {
                 eprintln!("The file changed while it was downloading; starting again from its new version.");
             }
-            run_once(file_id, output, zip, force).await.map_err(|e| match e {
+            // The overwrite question was answered in the first attempt (it is asked before any
+            // byte is fetched); the retry must not ask it again.
+            run_once(file_id, output, zip, force, true).await.map_err(|e| match e {
                 PullFailure::Changed(m) => format!("{m}. It changed again; run the command again"),
                 PullFailure::Other(m) => m,
             })
@@ -59,7 +61,13 @@ pub async fn run(file_id: String, output: Option<PathBuf>, zip: bool, force: boo
     }
 }
 
-async fn run_once(file_id: String, output: Option<PathBuf>, zip: bool, force: bool) -> Result<(), PullFailure> {
+async fn run_once(
+    file_id: String,
+    output: Option<PathBuf>,
+    zip: bool,
+    force: bool,
+    already_confirmed: bool,
+) -> Result<(), PullFailure> {
     let api = ApiClient::from_config();
     api.require_auth()?;
 
@@ -137,7 +145,7 @@ async fn run_once(file_id: String, output: Option<PathBuf>, zip: bool, force: bo
 
     // Never clobber a local file silently (flow "CLI end to end", issue 5):
     // checked before any bytes are downloaded, for both decrypt paths below.
-    guard_existing_output(&out_path, force)?;
+    ask_once(already_confirmed, &out_path, force, guard_existing_output)?;
 
     // The chunk format comes from the file's authenticated metadata, never a
     // server field (task 1943): core's reader opens a v2-pinned file only as v2.
@@ -291,6 +299,21 @@ pub(crate) async fn resolve_file_arg(api: &ApiClient, arg: &str) -> Result<(Stri
         // No match by prefix — fall through to path resolution.
     }
     resolve_as_path(api, arg).await
+}
+
+/// The overwrite question, asked unless it was already answered: a second attempt after a version
+/// change must not put the same question to the user again.
+fn ask_once(
+    already_confirmed: bool,
+    out_path: &std::path::Path,
+    force: bool,
+    guard: impl FnOnce(&std::path::Path, bool) -> Result<(), String>,
+) -> Result<(), String> {
+    if already_confirmed {
+        Ok(())
+    } else {
+        guard(out_path, force)
+    }
 }
 
 /// Refuse to overwrite an existing local path unless the user said so.
@@ -470,7 +493,17 @@ async fn pull_folder_inner(
                 skipped += 1;
                 continue;
             }
-            pull_single_file(api, item_id, &target, content_key).await?;
+            // A new version published while this file downloaded: nothing was written, so read
+            // THIS file again from fresh metadata, once, and carry on with the rest of the folder.
+            // (This used to abort the whole folder pull.)
+            if let Err(PullFailure::Changed(_)) = pull_single_file(api, item_id, &target, content_key.as_ref()).await {
+                eprintln!(
+                    "  {} {}: changed while it downloaded; reading it again",
+                    "!".custom_color(crate::colors::AMBER),
+                    target.display()
+                );
+                pull_single_file(api, item_id, &target, content_key.as_ref()).await?;
+            }
         }
     }
 
@@ -509,8 +542,8 @@ async fn pull_single_file(
     api: &ApiClient,
     file_id: &str,
     out_path: &std::path::Path,
-    request_content_key: Option<beebeeb_core::kdf::FileKey>,
-) -> Result<(), String> {
+    request_content_key: Option<&beebeeb_core::kdf::FileKey>,
+) -> Result<(), PullFailure> {
     let master_key = load_master_key()?;
 
     let file_meta = api.get_file(file_id).await?;
@@ -520,7 +553,7 @@ async fn pull_single_file(
         .and_then(|v| v.as_str())
         .ok_or("server response missing name_encrypted")?;
     // Read pin from the file's authenticated metadata (task 1943).
-    let pin = crate::crypto::file_row_pin(&master_key, file_id, name_encrypted, request_content_key.as_ref())?;
+    let pin = crate::crypto::file_row_pin(&master_key, file_id, name_encrypted, request_content_key)?;
 
     let name = out_path
         .file_name()
@@ -531,7 +564,7 @@ async fn pull_single_file(
     // File-request uploads are sealed under a per-file content key C, which the
     // streaming path (master-derived key) can't decrypt — use the buffered
     // request-key path and return early.
-    if let Some(c) = &request_content_key {
+    if let Some(c) = request_content_key {
         let dl_start = std::time::Instant::now();
         let encrypted_bytes = api.download_file(file_id).await?;
         let dl_elapsed = dl_start.elapsed();
@@ -1211,5 +1244,24 @@ mod failure_tests {
         }
         assert_eq!(String::from(PullFailure::Changed("c".into())), "c");
         assert_eq!(String::from(PullFailure::Other("o".into())), "o");
+    }
+
+    #[test]
+    fn the_overwrite_question_is_asked_once() {
+        let asked = std::cell::Cell::new(0u32);
+        let guard = |_: &std::path::Path, _: bool| {
+            asked.set(asked.get() + 1);
+            Ok(())
+        };
+        let out = std::path::Path::new("out.bin");
+        ask_once(false, out, false, guard).unwrap();
+        assert_eq!(asked.get(), 1, "the first attempt asks");
+        ask_once(true, out, false, |_: &std::path::Path, _: bool| -> Result<(), String> {
+            asked.set(asked.get() + 1);
+            Err("asked again".into())
+        })
+        .unwrap();
+        assert_eq!(asked.get(), 1, "the retry does not");
+        assert!(ask_once(false, out, true, |_: &std::path::Path, _: bool| Err("no".to_string())).is_err());
     }
 }

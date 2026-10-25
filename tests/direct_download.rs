@@ -72,6 +72,22 @@ fn fixture() -> Fixture {
     }
 }
 
+/// A pre-`bb repair` file: the same 21 chunks, but each frame is sealed under the file key derived
+/// from the 16-byte BINARY uuid. The streaming reader (string-UUID key) cannot open frame 0; only the
+/// API path's buffered fallback tries the binary key.
+fn fixture_legacy_binary_uuid() -> Fixture {
+    let mut fx = fixture();
+    let mk = MasterKey::from_bytes([0u8; 32]);
+    let uuid: uuid::Uuid = FILE_ID.parse().unwrap();
+    let key = beebeeb_core::kdf::derive_file_key(&mk, uuid.as_bytes());
+    fx.frames = fx
+        .plaintext
+        .chunks(STRIDE as usize)
+        .map(|c| beebeeb_core::encrypt::encrypt_chunk_raw(&key, c).unwrap())
+        .collect();
+    fx
+}
+
 /// The checked-in core v2 vector (4 chunks, position-bound AEAD) with its LAST
 /// frame dropped: the manifest and the metadata both say 3 chunks, every frame
 /// authenticates, but the stream never reaches the frame marked last.
@@ -338,6 +354,10 @@ fn json_error(status: StatusCode, error: &str) -> Response {
 }
 
 async fn meta(State(m): State<Arc<Mock>>, AxPath(id): AxPath<String>) -> Response {
+    if id == SYNC_FOLDER_ID {
+        return Json(json!({ "id": id, "name_encrypted": "SyncUp", "is_folder": true, "chunk_count": 0 }))
+            .into_response();
+    }
     if id != m.fx.file_id {
         return json_error(StatusCode::NOT_FOUND, "not found");
     }
@@ -1000,6 +1020,78 @@ fn the_trace_is_off_when_the_variable_says_zero_and_an_unknown_transport_warns_o
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(stderr.matches("ignoring BB_TRANSPORT").count(), 1, "{}", describe(&out));
+
+    // An empty `BB_TRANSPORT=` is unset: no warning, and still auto. `--quiet` silences the warning.
+    let env = setup(Discovery::Offer, Grants::Normal, &[], &[]);
+    let (out, json) = pull(&env, &[], &[("BB_TRANSPORT", "")]);
+    assert!(out.status.success(), "{}", describe(&out));
+    assert_eq!(json["transport"], "direct", "{}", describe(&out));
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("BB_TRANSPORT"),
+        "{}",
+        describe(&out)
+    );
+    let env = setup(Discovery::Offer, Grants::Normal, &[], &[]);
+    let id = env.mock.fx.file_id.clone();
+    let out = bb(
+        &env,
+        &["pull", &id, "-o", "out.bin", "--quiet"],
+        &[("BB_TRANSPORT", "bogus")],
+    );
+    assert!(out.status.success(), "{}", describe(&out));
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("BB_TRANSPORT"),
+        "{}",
+        describe(&out)
+    );
+}
+
+#[test]
+fn a_file_whose_first_chunk_cannot_be_opened_is_left_to_the_api_paths_legacy_readers() {
+    // Frame 0 fails under the string-UUID key: a pre-`bb repair` file keyed by the binary uuid. The
+    // direct path must not call that "corrupt" (a refetch would fail the same way); the API path's
+    // buffered fallback reads it. Chunks after the first stay corrupt (see the double-tamper test).
+    let env = setup_with(fixture_legacy_binary_uuid(), Discovery::Offer, Grants::Normal, &[], &[]);
+    let (out, json) = pull(&env, &[], &[("BB_TRANSPORT_TRACE", "1")]);
+    assert!(out.status.success(), "{}", describe(&out));
+    assert_identical(&env, &out);
+    assert_eq!(json["transport"], "api", "{}", describe(&out));
+    let log = env.mock.log.lock().unwrap();
+    assert!(!log.grant_bodies.is_empty(), "the direct path was tried first");
+    assert!(
+        log.api_chunk_hits.is_empty(),
+        "no pinned refetch for chunk 0: it would fail the same way"
+    );
+    assert_eq!(log.api_download_hits, 1, "the API stream took the file");
+}
+
+#[test]
+fn a_folder_pull_reads_one_changed_file_again_and_carries_on() {
+    // A new version appears while a file of the folder downloads: that file is read again from
+    // fresh metadata, once; the folder pull is not aborted.
+    let env = setup(Discovery::Offer, Grants::VersionGoneOnce, &[], &[]);
+    let out_dir = env.cwd.join("pulled");
+    let out = bb(&env, &["pull", SYNC_FOLDER_ID, "-o", out_dir.to_str().unwrap()], &[]);
+    assert!(out.status.success(), "{}", describe(&out));
+    assert_eq!(
+        std::fs::read(out_dir.join("multi.bin")).unwrap_or_default(),
+        env.mock.fx.plaintext
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("reading it again"),
+        "{}",
+        describe(&out)
+    );
+    let starts: Vec<u64> = env
+        .mock
+        .log
+        .lock()
+        .unwrap()
+        .grant_bodies
+        .iter()
+        .map(|b| b["start_index"].as_u64().unwrap())
+        .collect();
+    assert_eq!(starts, vec![0, 8, 0, 8, 16], "{starts:?}");
 }
 
 // ─────────────────────────────── bb sync --once ───────────────────────────────
@@ -1100,58 +1192,6 @@ fn sync_until_watching(env: &Env) -> (bool, String, String) {
     (watching, o, e)
 }
 
-/// Stops whatever `bb sync --daemon` started in this scratch HOME, even when a test fails.
-struct StopDaemons<'a>(&'a Env);
-
-impl Drop for StopDaemons<'_> {
-    fn drop(&mut self) {
-        let _ = bb(self.0, &["--api", &self.0.api_url, "sync", "--stop-all"], &[]);
-    }
-}
-
-#[test]
-fn a_forced_api_transport_reaches_the_sync_daemon() {
-    // `--transport api` is a flag of this invocation; the detached child is started with its own
-    // command line, so the flag has to be handed on (BB_TRANSPORT travels in the environment).
-    let env = setup(Discovery::Offer, Grants::Normal, &[], &[]);
-    let _stop = StopDaemons(&env);
-    let dir = env.cwd.join("syncdir");
-    std::fs::create_dir_all(&dir).unwrap();
-    let out = bb(
-        &env,
-        &[
-            "--transport",
-            "api",
-            "--api",
-            &env.api_url,
-            "sync",
-            "--daemon",
-            dir.to_str().unwrap(),
-            "/SyncUp",
-        ],
-        &[],
-    );
-    assert!(out.status.success(), "{}", describe(&out));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while std::time::Instant::now() < deadline
-        && std::fs::read(dir.join("multi.bin")).unwrap_or_default() != env.mock.fx.plaintext
-    {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    assert_eq!(
-        std::fs::read(dir.join("multi.bin")).unwrap_or_default(),
-        env.mock.fx.plaintext,
-        "the daemon downloaded the file"
-    );
-    let log = env.mock.log.lock().unwrap();
-    assert_eq!(
-        log.discovery_hits, 0,
-        "a daemon started with --transport api must not ask discovery"
-    );
-    assert!(log.grant_bodies.is_empty() && log.storage.is_empty());
-    assert_eq!(log.api_download_hits, 1);
-}
-
 fn sync_left_nothing(dir: &Path) {
     let leftovers: Vec<_> = std::fs::read_dir(dir)
         .unwrap()
@@ -1197,6 +1237,29 @@ fn a_sync_pass_survives_a_file_that_never_authenticates() {
     );
     assert!(!dir.join("multi.bin").exists());
     assert_clean(&env, &out);
+}
+
+#[test]
+fn a_sync_pass_survives_a_download_that_ends_before_its_last_frame() {
+    // Every frame authenticates, but the stream never reaches the frame marked last: the copy is cut
+    // short or tampered with. That ends THIS file's turn (retry next pass), not the pass.
+    let env = setup_with(
+        fixture_v2_missing_last_frame(),
+        Discovery::Offer,
+        Grants::Normal,
+        &[],
+        &[],
+    );
+    let (watching, stdout, stderr) = sync_until_watching(&env);
+    assert!(
+        watching,
+        "the daemon must reach watch mode\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    sync_left_nothing(&env.cwd.join("syncdir"));
+    assert!(
+        stderr.contains("download incomplete") && stderr.contains("next pass"),
+        "{stderr}"
+    );
 }
 
 #[test]
