@@ -216,16 +216,12 @@ impl ApiClient {
                 _ => ChunkApiError::Failed(format!("download chunk {index} failed ({status})")),
             });
         }
-        if resp.content_length() != Some(expected_len) {
-            return Err(ChunkApiError::Failed(format!(
-                "download chunk {index}: the server sent a different length than the manifest"
-            )));
-        }
+        // The body must be exactly the manifest's length: read at most that much and check it.
         let mut resp = resp;
         match read_capped(&mut resp, usize::try_from(expected_len).unwrap_or(usize::MAX)).await {
             Some(bytes) if bytes.len() as u64 == expected_len => Ok(bytes),
             _ => Err(ChunkApiError::Failed(format!(
-                "download chunk {index}: the body ended early or ran long"
+                "download chunk {index}: the body is not the manifest's length"
             ))),
         }
     }
