@@ -144,10 +144,14 @@ build only. Nothing to patch by hand.
 
    It waits until the plain `dist-manifest.json` download URL serves the published bytes (GitHub's
    release CDN keeps serving the old object for a while after a `--clobber` re-upload; 0.13.2 took
-   ~90 s) and `releases/latest` is `vX.Y.Z`, downloads the old binary for this host into a mktemp dir,
-   runs it with `HOME=<scratch>` on **every** invocation, and asserts the `Updating bb vOLD -> vX.Y.Z`
-   line, that `--version` reports the new version afterwards, and that the binary on disk is
-   byte-identical to the new release archive's `bb`. Never run a `bb` login/upload rung with the real
+   ~90 s) and `releases/latest` is `vX.Y.Z`, downloads the old binary for this host into a mktemp dir
+   as two fresh copies, each with its own `HOME=<scratch>` on **every** invocation. The automatic
+   path runs `bb completions zsh` (since 0.14.2 `--version`/`--help` exit before the update check, so
+   they never auto-update: task 2195) and asserts the `Updating bb vOLD -> vX.Y.Z` line; the manual
+   path runs `bb update` and asserts both the `Updating` and the `Updated bb vOLD -> vX.Y.Z` lines.
+   For both copies it asserts that `--version` reports the new version afterwards, that the binary on
+   disk is byte-identical to the new release archive's `bb`, and that the scratch `HOME` holds nothing
+   but `last_update_check`. Never run a `bb` login/upload rung with the real
    `HOME`: the global config holds a live session and master key.
 9. **Evidence.** Keep `release-local.log`, the draft download assertion, the `ota-rung.sh` output and
    the run list in the task's `verification-evidence/` folder.

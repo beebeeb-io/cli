@@ -16,10 +16,17 @@
 #   1. waits until the plain download URL of dist-manifest.json (the URL
 #      src/update.rs fetches) serves the same bytes as the release asset, and
 #      releases/latest reports <new-version> (the CDN lags after an upload);
-#   2. downloads the old release binary for THIS host into a mktemp dir;
-#   3. runs it once: must print "Updating bb v<old> -> v<new>";
-#   4. runs it again: `--version` must report <new-version>, and the binary on
-#      disk must be byte-identical to the new release archive's bb.
+#   2. downloads the old release binary for THIS host and extracts two fresh
+#      copies, each with its own scratch HOME;
+#   3. automatic path: copy A runs `bb completions zsh` (a local subcommand that
+#      reaches update::check_and_update; since 0.14.2 `--version`/`--help` exit in
+#      clap before it, so they never auto-update, task 2195) and must print
+#      "Updating bb v<old> -> v<new>";
+#   4. manual path: copy B runs `bb update` and must print both the Updating and
+#      the "Updated bb v<old> -> v<new>" lines;
+#   5. for both copies: `--version` must report <new-version>, the binary on disk
+#      must be byte-identical to the new release archive's bb, and the scratch
+#      HOME may hold nothing but last_update_check (no session, no account).
 #
 # Env: OTA_WAIT_TRIES (default 40), OTA_WAIT_SLEEP seconds (default 15),
 #      OTA_REPO (default beebeeb-io/cli).
@@ -53,17 +60,22 @@ ARCHIVE="beebeeb-cli-$TARGET.tar.xz"
 SCRATCH="$(mktemp -d)"
 cleanup() { case "${SCRATCH:-}" in */tmp.*|/tmp/*) rm -rf -- "$SCRATCH" ;; esac; }
 trap cleanup EXIT
-mkdir -p "$SCRATCH/home" "$SCRATCH/old" "$SCRATCH/new" "$SCRATCH/dl"
-echo "scratch: $SCRATCH (HOME for every bb run)"
+mkdir -p "$SCRATCH/h-auto" "$SCRATCH/h-manual" "$SCRATCH/old" "$SCRATCH/auto" "$SCRATCH/manual" "$SCRATCH/new" "$SCRATCH/dl"
+echo "scratch: $SCRATCH (h-auto / h-manual are the HOME of every bb run)"
 
 FAILS=0
 pass() { echo "PASS  $*"; }
 fail() { echo "FAIL  $*" >&2; FAILS=$((FAILS + 1)); }
 
-# Every bb invocation goes through here: scratch HOME, scratch XDG, updater on.
-run_bb() { # binary args...
-  local bin="$1"; shift
-  env -u BB_NO_UPDATE HOME="$SCRATCH/home" XDG_CONFIG_HOME="$SCRATCH/home/.config" XDG_DATA_HOME="$SCRATCH/home/.local/share" "$bin" "$@" 2>&1 | sed $'s/\033\\[[0-9;]*m//g'
+# Every bb invocation goes through here: its own scratch HOME, scratch XDG, updater on.
+# OUT=err keeps only stderr (the updater's lines) and drops stdout (completions output).
+run_bb() { # home binary args...
+  local home="$1" bin="$2"; shift 2
+  if [[ "${OUT:-all}" == err ]]; then
+    env -u BB_NO_UPDATE HOME="$home" XDG_CONFIG_HOME="$home/.config" XDG_DATA_HOME="$home/.local/share" "$bin" "$@" 2>&1 >/dev/null | sed $'s/\033\\[[0-9;]*m//g'
+  else
+    env -u BB_NO_UPDATE HOME="$home" XDG_CONFIG_HOME="$home/.config" XDG_DATA_HOME="$home/.local/share" "$bin" "$@" 2>&1 | sed $'s/\033\\[[0-9;]*m//g'
+  fi
 }
 
 # --- 1. wait for the published state to be what an installed bb will see -----
@@ -88,27 +100,37 @@ man_sha="$(jq -r --arg a "$ARCHIVE" '.artifacts[$a].checksums.sha256 // empty' "
 if [[ -n "$man_sha" ]]; then pass "manifest carries checksums.sha256 for $ARCHIVE"; else fail "manifest has NO checksums.sha256 for $ARCHIVE: src/update.rs will refuse to update, silently"; fi
 if [[ $FAILS -gt 0 ]]; then echo "RESULT: $FAILS precondition(s) FAILED -- OTA cannot work yet" >&2; exit 1; fi
 
-# --- 2. the old binary ----------------------------------------------------------
+# --- 2. the old binary, twice ------------------------------------------------------
 gh release download "v$OLD" -R "$REPO" -p "$ARCHIVE" -D "$SCRATCH/old" --clobber >/dev/null
-tar -xJf "$SCRATCH/old/$ARCHIVE" -C "$SCRATCH/old" --strip-components=1
-OLDBIN="$SCRATCH/old/bb"
-[[ -x "$OLDBIN" ]] || { echo "FAIL: no bb in v$OLD archive" >&2; exit 1; }
-before="$(BB_NO_UPDATE=1 HOME="$SCRATCH/home" "$OLDBIN" --version 2>&1)"
-if [[ "$before" == "bb $OLD" ]]; then pass "before: '$before'"; else fail "old binary reports '$before', expected 'bb $OLD'"; fi
-
-# --- 3. first run: must self-update ---------------------------------------------
-out1="$(run_bb "$OLDBIN" --version || true)"
-while IFS= read -r line; do printf '  run1| %s\n' "$line"; done <<<"$out1"
-if grep -Eq "Updating .*v$OLD -> v$NEW" <<<"$out1"; then pass "run1 printed 'Updating ... v$OLD -> v$NEW'"; else fail "run1 did not print the Updating line (OTA did not trigger)"; fi
-if grep -q "Updated" <<<"$out1"; then pass "run1 printed the Updated confirmation"; else fail "run1 did not print Updated"; fi
-
-# --- 4. second run + the bytes on disk ------------------------------------------
-after="$(run_bb "$OLDBIN" --version || true)"
-if [[ "$after" == "bb $NEW" ]]; then pass "after: '$after'"; else fail "after update the binary reports '$after', expected 'bb $NEW'"; fi
-
+for copy in auto manual; do tar -xJf "$SCRATCH/old/$ARCHIVE" -C "$SCRATCH/$copy" --strip-components=1; done
 gh release download "v$NEW" -R "$REPO" -p "$ARCHIVE" -D "$SCRATCH/new" --clobber >/dev/null
 tar -xJf "$SCRATCH/new/$ARCHIVE" -C "$SCRATCH/new" --strip-components=1
-if cmp -s "$OLDBIN" "$SCRATCH/new/bb"; then pass "binary on disk is byte-identical to the v$NEW release archive's bb"; else fail "binary on disk differs from the v$NEW archive's bb"; fi
+for copy in auto manual; do
+  bin="$SCRATCH/$copy/bb"
+  [[ -x "$bin" ]] || { echo "FAIL: no bb in v$OLD archive" >&2; exit 1; }
+  before="$(BB_NO_UPDATE=1 HOME="$SCRATCH/h-$copy" "$bin" --version 2>&1)"
+  if [[ "$before" == "bb $OLD" ]]; then pass "$copy before: '$before'"; else fail "$copy: old binary reports '$before', expected 'bb $OLD'"; fi
+done
+
+# --- 3. automatic path: a local subcommand that reaches check_and_update -------------
+out1="$(OUT=err run_bb "$SCRATCH/h-auto" "$SCRATCH/auto/bb" completions zsh || true)"
+while IFS= read -r line; do printf '  auto| %s\n' "$line"; done <<<"$out1"
+if grep -Eq "Updating .*v$OLD -> v$NEW" <<<"$out1"; then pass "auto: 'bb completions zsh' printed 'Updating ... v$OLD -> v$NEW'"; else fail "auto: no Updating line (the automatic update did not trigger)"; fi
+
+# --- 4. manual path: bb update ---------------------------------------------------
+out2="$(run_bb "$SCRATCH/h-manual" "$SCRATCH/manual/bb" update || true)"
+while IFS= read -r line; do printf '  manual| %s\n' "$line"; done <<<"$out2"
+if grep -Eq "Updating .*v$OLD -> v$NEW" <<<"$out2"; then pass "manual: 'bb update' printed 'Updating ... v$OLD -> v$NEW'"; else fail "manual: no Updating line"; fi
+if grep -Eq "Updated bb v$OLD -> v$NEW" <<<"$out2"; then pass "manual: printed 'Updated bb v$OLD -> v$NEW'"; else fail "manual: no 'Updated bb v$OLD -> v$NEW' line"; fi
+
+# --- 5. both copies: version, bytes on disk, nothing but last_update_check in HOME --
+for copy in auto manual; do
+  after="$(run_bb "$SCRATCH/h-$copy" "$SCRATCH/$copy/bb" --version || true)"
+  if [[ "$after" == "bb $NEW" ]]; then pass "$copy after: '$after'"; else fail "$copy: after the update the binary reports '$after', expected 'bb $NEW'"; fi
+  if cmp -s "$SCRATCH/$copy/bb" "$SCRATCH/new/bb"; then pass "$copy: binary on disk is byte-identical to the v$NEW archive's bb"; else fail "$copy: binary on disk differs from the v$NEW archive's bb"; fi
+  extra="$(cd "$SCRATCH/h-$copy" && find . -type f ! -name last_update_check | head -5)"
+  if [[ -z "$extra" ]]; then pass "$copy: scratch HOME holds only last_update_check (no session, no account)"; else fail "$copy: scratch HOME holds unexpected files: $extra"; fi
+done
 
 if [[ $FAILS -gt 0 ]]; then echo "RESULT: OTA rung FAILED ($FAILS)" >&2; exit 1; fi
-echo "RESULT: OTA rung passed v$OLD -> v$NEW on $TARGET"
+echo "RESULT: OTA rung passed v$OLD -> v$NEW on $TARGET (automatic + manual paths)"
