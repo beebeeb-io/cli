@@ -4,7 +4,12 @@ use serde_json::Value;
 use std::error::Error;
 use std::sync::atomic::{AtomicI64, Ordering};
 
+use beebeeb_core::direct_transfer as dt;
+
 use crate::config::load_config;
+
+mod direct;
+pub(crate) use direct::{ChunkApiError, GrantReply, now_ms};
 
 static RATE_REMAINING: AtomicI64 = AtomicI64::new(-1);
 static RATE_LIMIT: AtomicI64 = AtomicI64::new(-1);
@@ -154,6 +159,15 @@ pub struct ApiClient {
     /// one this client sees (`None`: the fetch failed). See
     /// `explain_account_refusal`.
     refusal_account_state: tokio::sync::OnceCell<Option<crate::account_state::AccountState>>,
+    /// Task 2173: what the server's direct-transfer discovery said, asked
+    /// lazily and at most once per 10 minutes per API base (see
+    /// `beebeeb_core::direct_transfer::DiscoveryCache` for the rules).
+    direct_discovery: tokio::sync::Mutex<dt::DiscoveryCache>,
+    /// Task 2173: the HTTP client for presigned storage links. A client of its
+    /// own, never `client`: no default headers (so no `X-Beebeeb-*`), no
+    /// cookies, no `Authorization`, redirects refused, https only (loopback
+    /// http in development).
+    storage_client: std::sync::OnceLock<Option<Client>>,
 }
 
 /// Parsed response from `POST /api/v1/uploads/init`. The session id keys the
@@ -253,6 +267,8 @@ impl ApiClient {
             base_url: config.api_url,
             token: config.session_token,
             refusal_account_state: tokio::sync::OnceCell::new(),
+            direct_discovery: tokio::sync::Mutex::new(dt::DiscoveryCache::new()),
+            storage_client: std::sync::OnceLock::new(),
         }
     }
 
@@ -267,6 +283,8 @@ impl ApiClient {
             base_url,
             token: Some("test-token".to_string()),
             refusal_account_state: tokio::sync::OnceCell::new(),
+            direct_discovery: tokio::sync::Mutex::new(dt::DiscoveryCache::new()),
+            storage_client: std::sync::OnceLock::new(),
         }
     }
 

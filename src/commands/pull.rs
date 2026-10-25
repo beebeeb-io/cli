@@ -188,6 +188,7 @@ pub async fn run(file_id: String, output: Option<PathBuf>, zip: bool, force: boo
                 "size_bytes": stats.plaintext_bytes,
                 "download_speed_bps": dl_speed as u64,
                 "elapsed_ms": elapsed.as_millis() as u64,
+                "transport": stats.transport,
                 "output": out_path.display().to_string(),
             }))
             .unwrap()

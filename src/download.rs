@@ -126,6 +126,9 @@ fn check_cap(c: FallbackCap, len: u64) -> Result<(), String> {
 pub struct DownloadStats {
     pub plaintext_bytes: u64,
     pub encrypted_bytes: u64,
+    /// `"api"` (the file came through the API) or `"direct"` (straight from
+    /// object storage through presigned links, task 2173).
+    pub transport: &'static str,
 }
 
 /// Download a file's raw encrypted body into memory together with the server's
@@ -192,6 +195,25 @@ async fn stream_download_decrypt_with(
     ceiling: u64,
 ) -> Result<DownloadStats, String> {
     let count = chunk_count.max(1);
+
+    // Task 2173: straight from object storage when the server offers it and the
+    // handshake succeeds. `UseApi` means nothing was published (and nothing is
+    // left on disk): this file goes through the API below, as it always did.
+    match crate::direct_download::try_download(
+        api,
+        master_key,
+        file_id,
+        pin,
+        chunk_count,
+        out_path,
+        progress,
+        display_name,
+    )
+    .await?
+    {
+        crate::direct_download::DirectResult::Done(stats) => return Ok(stats),
+        crate::direct_download::DirectResult::UseApi => {}
+    }
 
     let mut resp = api.download_stream(file_id).await?;
     let content_len = resp.content_length();
@@ -350,6 +372,7 @@ async fn stream_raw(
     Ok(DownloadStats {
         plaintext_bytes,
         encrypted_bytes,
+        transport: "api",
     })
 }
 
@@ -376,6 +399,7 @@ fn buffered_fallback(
     Ok(DownloadStats {
         plaintext_bytes: plaintext.len() as u64,
         encrypted_bytes: encrypted.len() as u64,
+        transport: "api",
     })
 }
 
@@ -410,7 +434,7 @@ fn header_u64(resp: &reqwest::Response, name: &str) -> Option<u64> {
 
 /// Write-to-`.tmp`-then-atomic-rename helper so an interrupted/failed download
 /// never leaves a corrupt file at `out_path`.
-struct AtomicFile {
+pub(crate) struct AtomicFile {
     writer: Option<std::io::BufWriter<std::fs::File>>,
     tmp: std::path::PathBuf,
     final_path: std::path::PathBuf,
@@ -418,7 +442,7 @@ struct AtomicFile {
 }
 
 impl AtomicFile {
-    fn create(out_path: &Path) -> Result<Self, String> {
+    pub(crate) fn create(out_path: &Path) -> Result<Self, String> {
         if let Some(parent) = out_path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
@@ -441,7 +465,7 @@ impl AtomicFile {
         })
     }
 
-    fn write_all(&mut self, data: &[u8]) -> Result<(), String> {
+    pub(crate) fn write_all(&mut self, data: &[u8]) -> Result<(), String> {
         self.writer
             .as_mut()
             .expect("writer present until commit/abort")
@@ -449,7 +473,7 @@ impl AtomicFile {
             .map_err(|e| format!("write {}: {e}", self.final_path.display()))
     }
 
-    fn commit(mut self) -> Result<(), String> {
+    pub(crate) fn commit(mut self) -> Result<(), String> {
         let mut w = self.writer.take().expect("writer present");
         w.flush().map_err(|e| format!("flush: {e}"))?;
         drop(w);
@@ -460,7 +484,7 @@ impl AtomicFile {
     }
 
     /// Explicitly abort before falling back to another writer for the same path.
-    fn abort(&mut self) {
+    pub(crate) fn abort(&mut self) {
         self.writer.take();
         let _ = std::fs::remove_file(&self.tmp);
         self.committed = true; // suppress Drop cleanup (already handled)
