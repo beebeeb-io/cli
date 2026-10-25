@@ -801,6 +801,9 @@ mod tests {
         // A ban is clamped to 120 s by core and is still waited for once.
         assert_eq!(next_wait(PINNED_RETRY, 1, s(0), s(120)), Some(s(120)));
         // What is not bounded away: the attempts, and the time budget, however the waits are named.
+        // The budget is taken up to and including its last second, not beyond.
+        assert_eq!(next_wait(PINNED_RETRY, 2, s(90), s(60)), Some(s(60)));
+        assert_eq!(next_wait(PINNED_RETRY, 2, s(91), s(60)), None);
         assert_eq!(
             next_wait(PINNED_RETRY, 4, s(0), s(1)),
             None,
