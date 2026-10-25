@@ -830,6 +830,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_stated_wait_is_core_clamped_and_only_a_server_error_has_one() {
+        // `Retry-After: 0` on a 503 means "at least a second", like a 429's.
+        let (api, hits) = scripted_api(vec![Reply::StatusRetry(503, 0), Reply::Body(vec![9; 5])]).await;
+        let started = Instant::now();
+        assert_eq!(pinned(&api, FAST, 5).await.ok(), Some(vec![9; 5]));
+        assert!(
+            started.elapsed() >= Duration::from_millis(900),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        // A 404 (a node without the route) that happens to carry a Retry-After is the client's own
+        // backoff, not a stated wait: the header is read for a server error only.
+        let (api, hits) = scripted_api(vec![Reply::StatusRetry(404, 3), Reply::Body(vec![9; 5])]).await;
+        let started = Instant::now();
+        assert_eq!(pinned(&api, FAST, 5).await.ok(), Some(vec![9; 5]));
+        assert!(
+            started.elapsed() < Duration::from_millis(900),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
     async fn an_attempt_that_hears_nothing_fails_after_the_idle_limit_and_is_tried_again() {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
