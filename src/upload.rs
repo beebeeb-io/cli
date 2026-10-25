@@ -594,10 +594,8 @@ pub async fn stream_encrypt_upload(
             is_recovery: false,
         },
     };
-    // Task 2173: set after a direct session had to be given up; the file then goes the API way.
-    let mut api_only = false;
     loop {
-        match upload_attempt(api, &master_key, &spec, size, mtime_ns, plan, api_only, progress).await {
+        match upload_attempt(api, &master_key, &spec, size, mtime_ns, plan, progress).await {
             Ok(outcome) => return Ok(outcome),
             Err(AttemptErr::SessionGone {
                 message: msg,
@@ -637,7 +635,8 @@ pub async fn stream_encrypt_upload(
             Err(AttemptErr::DirectUnavailable { bytes_confirmed }) => {
                 // The direct session takes no proxy PUT, and the init below would meet its live lease: end
                 // it first, like a session that cannot be continued (`RestartWithFreshSession`). Once per
-                // file per run: `api_only` keeps every later attempt off the direct route.
+                // file per run: `note_direct_upload_failed` below keeps every later NEW session (this file's
+                // re-init included) off the direct route for the trust period.
                 let (SessionPlan::Resume { file_id, .. } | SessionPlan::Init { file_id, .. }) = plan;
                 api.note_direct_upload_failed();
                 if bytes_confirmed > 0 {
@@ -660,7 +659,6 @@ pub async fn stream_encrypt_upload(
                         display_name(&spec.file_name)
                     );
                 }
-                api_only = true;
                 plan = SessionPlan::Init {
                     file_id,
                     fallback_file_id: (file_id != spec.file_id).then_some(spec.file_id),
@@ -683,7 +681,6 @@ pub async fn stream_encrypt_upload(
 /// session, stream every chunk, complete. Consumes nothing the retry needs —
 /// the encryptor is rebuilt per attempt because the file key derives from the
 /// file id.
-#[allow(clippy::too_many_arguments)]
 async fn upload_attempt(
     api: &ApiClient,
     master_key: &Arc<MasterKey>,
@@ -691,7 +688,6 @@ async fn upload_attempt(
     size: u64,
     mtime_ns: u128,
     plan: SessionPlan,
-    api_only: bool,
     progress: &dyn ChunkProgress,
 ) -> Result<UploadOutcome, AttemptErr> {
     let (file_id, resumed_session, resumed_direct) = match plan {
@@ -765,14 +761,10 @@ async fn upload_attempt(
     //    durable file id returned by init (equals `file_id` on replace).
     //
     //    Task 2173: when the server offers the direct upload (discovery says `object-upload-v1`; not forced
-    //    off with `BB_TRANSPORT=api`; not given up on earlier in this run), init asks for it with the
+    //    off with `BB_TRANSPORT=api`; no direct upload given up on this client within the trust period), init asks for it with the
     //    capability header, and the answer's `transport` says what the server chose. `direct` is the
     //    discovery answer the chunk loop checks every link against, `None` for an API session.
-    let offered = if api_only {
-        DirectOffer::NotOffered
-    } else {
-        api.direct_upload_offer().await
-    };
+    let offered = api.direct_upload_offer().await;
     let (upload_session_id, server_id, direct) = if let Some(sid) = resumed_session {
         if resumed_direct {
             match &offered {
