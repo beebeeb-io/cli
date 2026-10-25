@@ -571,6 +571,13 @@ fn run() {{ {caller} }}
     // a spawn the scan cannot follow: inside a macro, or with a name built at compile time
     let in_macro = r#"macro_rules! run_bb { () => { Command::new(env!("CARGO_BIN_EXE_bb")).output().unwrap() }; }"#;
     assert!(!unguarded_spawns(in_macro).is_empty(), "a macro body");
+    // ... and a macro body is refused even when it carries the guard: where its expansion runs (and what the caller adds
+    // around it) is not visible to a text scan. Without this case the refusal and the missing-guard report overlap.
+    let guarded_macro = r#"macro_rules! run_bb { () => { Command::new(env!("CARGO_BIN_EXE_bb")).env("BB_REFUSE_NON_LOOPBACK_API", "1").output().unwrap() }; }"#;
+    assert!(
+        !unguarded_spawns(guarded_macro).is_empty(),
+        "a macro body that carries the guard"
+    );
     let built_name = r#"fn run() { Command::new(env!(concat!("CARGO_BIN_EXE_", "bb"))).env("BB_REFUSE_NON_LOOPBACK_API", "1").output().unwrap(); }"#;
     assert!(!unguarded_spawns(built_name).is_empty(), "a name built with concat!");
     // clearing BEFORE the guard is how the two sites that were wrong are written now
