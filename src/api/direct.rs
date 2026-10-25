@@ -254,11 +254,11 @@ pub(crate) enum DirectOffer {
     /// Nobody answered: a failed or timed-out lookup, a node without the route. Say nothing about the server; a
     /// new file goes through the API, but a recorded direct session must NOT be thrown away on this.
     Unknown,
-    /// The lookup was refused for want of a valid login: no session at all, or the discovery route answered 401 or
-    /// 403. The server was not asked about its transports, and the way out is `bb login`, not `--transport api`
-    /// (which would end the recorded session and with it the chunks it already holds). A new file goes through
-    /// the API, whose own answer reports the same problem in its own words.
-    Unauthorized,
+    /// The lookup was refused for want of a valid login: `None` = no session at all, `Some(status)` = the discovery
+    /// route answered 401 or 403. The server was not asked about its transports, and the way out is `bb login`,
+    /// not `--transport api` (which would end the recorded session and with it the chunks it already holds). A
+    /// new file goes through the API, whose own answer reports the same problem in its own words.
+    Unauthorized(Option<u16>),
 }
 
 impl DirectOffer {
@@ -266,7 +266,7 @@ impl DirectOffer {
     pub(crate) fn discovery(self) -> Option<dt::Discovery> {
         match self {
             DirectOffer::Offered(d) => Some(d),
-            DirectOffer::NotOffered | DirectOffer::Unknown | DirectOffer::Unauthorized => None,
+            DirectOffer::NotOffered | DirectOffer::Unknown | DirectOffer::Unauthorized(_) => None,
         }
     }
 }
@@ -277,9 +277,10 @@ impl DirectOffer {
 /// uploading resync asked the capabilities route again.
 pub(crate) struct DirectState {
     discovery: tokio::sync::Mutex<DiscoveryState>,
-    /// When a direct upload last had to be given up, on the MONOTONIC clock (a wall-clock step, an NTP correction or a
-    /// laptop waking from sleep must neither end the hold early nor stretch it). No new direct upload is started
-    /// for [`failure_hold`](Self::failure_hold) after that: when direct is broken server-wide every file would
+    /// When a direct upload last had to be given up, on the MONOTONIC clock (a wall-clock step or an NTP correction
+    /// neither ends the hold early nor stretches it; the clock does not count the time the machine slept, so a laptop
+    /// that slept keeps what remained of the hold, which only delays its next direct try). No new direct upload is
+    /// started for [`failure_hold`](Self::failure_hold) after that: when direct is broken server-wide every file would
     /// otherwise pay an init, its tries, an abandon (which tells the user's other devices the file was deleted)
     /// and a second init. `tokio`'s instant so a paused test clock can move it.
     upload_failed_at: std::sync::Mutex<Option<tokio::time::Instant>>,
@@ -330,12 +331,27 @@ impl DirectState {
 /// The discovery cache. Core's cache does what a long-running process needs (a sync daemon that runs for weeks
 /// and meets one bad quarter hour): it forgets a failed discovery AND a JSON 404 "no direct transport" once the
 /// trust period has passed (core 2aa1f39), so the CLI keeps no RULE of its own on top of it. It does keep one
-/// fact core's `Lookup::UseApi` does not carry: whether the cache gave up because the server SAID no, or because
-/// asking failed. A resume needs the difference (see [`DirectOffer`]).
+/// fact core's `Lookup::UseApi` does not carry: whether the cache gave up because the server SAID no, because
+/// asking failed, or because the LOGIN was refused. A resume needs the difference (see [`DirectOffer`]).
+///
+/// That last one is the CLI's one rule of its own: core's cache counts a 401/403 as a failed lookup, so two of them
+/// park discovery (downloads too) for the whole trust period, whoever asks next. Here a refusal parks it for the
+/// LOGIN that was refused only: a request carrying another token (a `bb login` since) starts from a clean cache,
+/// and the same login is asked twice, not once per file.
 pub(crate) struct DiscoveryState {
     cache: dt::DiscoveryCache,
     /// The last answer recorded was the server's definite "no direct transport" (a JSON 404).
     said_no: bool,
+    /// The last answer recorded was a refusal (status 401 or 403) of this login (see [`login_id`]).
+    refused: Option<(u64, u16)>,
+}
+
+/// Which login a request carries, comparable inside this process and never written anywhere: a hash of the token.
+fn login_id(token: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    token.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl DiscoveryState {
@@ -343,7 +359,22 @@ impl DiscoveryState {
         Self {
             cache: dt::DiscoveryCache::new(),
             said_no: false,
+            refused: None,
         }
+    }
+
+    /// A request is about to be made with `login`: what an earlier login was refused is no news about this one.
+    fn forget_other_logins(&mut self, login: u64) {
+        if self.refused.is_some_and(|(refused, _)| refused != login) {
+            *self = Self::new();
+        }
+    }
+
+    /// The lookup was refused (`status` 401 or 403) for `login`.
+    fn record_refusal(&mut self, login: u64, status: u16, outcome: &dt::Outcome, now_ms: i64) {
+        self.cache.record(outcome, None, now_ms);
+        self.said_no = false;
+        self.refused = Some((login, status));
     }
 
     pub(crate) fn lookup(&self, now_ms: i64) -> dt::Lookup {
@@ -352,6 +383,7 @@ impl DiscoveryState {
 
     pub(crate) fn record(&mut self, outcome: &dt::Outcome, discovery: Option<dt::Discovery>, now_ms: i64) {
         self.said_no = matches!(outcome, dt::Outcome::NotSupported);
+        self.refused = None;
         self.cache.record(outcome, discovery, now_ms);
     }
 }
@@ -410,9 +442,10 @@ impl ApiClient {
         if crate::transport::api_forced() {
             return DirectOffer::NotOffered;
         }
-        if self.require_auth().is_err() {
-            return DirectOffer::Unauthorized;
-        }
+        let Ok(token) = self.require_auth() else {
+            return DirectOffer::Unauthorized(None);
+        };
+        let login = login_id(token);
         let verdict = |discovery: dt::Discovery| {
             if wanted(&discovery) {
                 DirectOffer::Offered(discovery)
@@ -421,20 +454,25 @@ impl ApiClient {
             }
         };
         let mut state = self.direct.discovery.lock().await;
+        state.forget_other_logins(login);
         match state.lookup(now_ms()) {
             dt::Lookup::Cached(discovery) => verdict(discovery),
-            // The cache gave up: because the server said no, or because asking kept failing.
+            // The cache gave up: because the server said no, because this login was refused, or because asking
+            // kept failing.
             dt::Lookup::UseApi if state.said_no => DirectOffer::NotOffered,
-            dt::Lookup::UseApi => DirectOffer::Unknown,
+            dt::Lookup::UseApi => match state.refused {
+                Some((_, status)) => DirectOffer::Unauthorized(Some(status)),
+                None => DirectOffer::Unknown,
+            },
             dt::Lookup::Fetch => {
                 let (outcome, discovery) = self.fetch_discovery().await;
-                // A refusal for want of a valid login says nothing about the server, so it is NOT recorded: core's
-                // cache would count it as a failed lookup, two of them would park discovery for the trust period
-                // (downloads too), and a `bb login` in the meantime could not undo it.
+                // A refusal for want of a valid login says nothing about the server: it is remembered for THIS login
+                // only (see [`DiscoveryState`]), so a `bb login` in the meantime is not parked by it.
                 if let dt::Outcome::Terminal(t) = &outcome
                     && matches!(t.status, 401 | 403)
                 {
-                    return DirectOffer::Unauthorized;
+                    state.record_refusal(login, t.status, &outcome, now_ms());
+                    return DirectOffer::Unauthorized(Some(t.status));
                 }
                 state.record(&outcome, discovery.clone(), now_ms());
                 match (outcome, discovery) {
@@ -677,6 +715,13 @@ const STORAGE_PUT_BASE: Duration = if cfg!(test) {
     Duration::from_secs(8)
 } else {
     STORAGE_PUT_BASE_RELEASE
+};
+/// What ships, pinned where it is built: a test build takes the compressed arms above, so only a build that is not a
+/// test can see (and refuse) an edit of the other arm.
+#[cfg(not(test))]
+const _: () = {
+    assert!(STORAGE_READ_TIMEOUT.as_secs() == 60);
+    assert!(STORAGE_PUT_BASE.as_secs() == 60);
 };
 const STORAGE_PUT_MIN_BYTES_PER_SEC: u64 = 128 * 1024;
 
@@ -1667,7 +1712,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_login_that_is_not_valid_is_told_apart_from_a_server_nobody_could_ask_and_is_never_parked() {
+    async fn a_login_that_is_not_valid_is_told_apart_from_a_server_nobody_could_ask_and_is_asked_about_twice() {
         use super::DirectOffer;
         // No session at all: nothing is sent, and the answer is not "unknown".
         let config = crate::config::Config {
@@ -1676,23 +1721,24 @@ mod tests {
         };
         let api = ApiClient::with_config(config);
         assert!(
-            matches!(api.direct_upload_offer().await, DirectOffer::Unauthorized),
+            matches!(api.direct_upload_offer().await, DirectOffer::Unauthorized(None)),
             "not logged in"
         );
-        // A 401 or a 403 on the capabilities route: the same, every time, because a refusal is not recorded
-        // (core would count two of them and park discovery for ten minutes).
+        // A 401 or a 403 on the capabilities route: the same, with its status. The server is asked twice (core's
+        // allowance for a login that keeps being refused), then the refusal is answered from memory: a session that is
+        // revoked must not cost one extra request per file.
         for status in [401u16, 403] {
             let (api, hits) = mock_discovery_answering(status, r#"{"error":"unauthorized"}"#).await;
             for round in 1..=4 {
                 assert!(
-                    matches!(api.direct_upload_offer().await, DirectOffer::Unauthorized),
+                    matches!(api.direct_upload_offer().await, DirectOffer::Unauthorized(Some(got)) if got == status),
                     "{status}, round {round}"
                 );
             }
             assert_eq!(
                 hits.load(Ordering::SeqCst),
-                4,
-                "{status}: asked every time, never parked"
+                2,
+                "{status}: two attempts, then the cache gave up"
             );
             // Downloads do not care which kind of nothing it is.
             assert!(api.direct_download_offer().await.is_none());
@@ -1700,16 +1746,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_refused_lookup_does_not_keep_the_next_login_from_getting_direct_transfers() {
+    async fn a_refusal_parks_discovery_for_the_login_that_was_refused_and_not_for_the_next_one() {
         use super::DirectOffer;
-        // The same process, the same API base, the same discovery state: first the session is refused (three times,
-        // more than core's allowance), then the user has logged in again.
+        // The same process, the same API base, the same discovery state: first one login is refused (more often than
+        // core's allowance), then the user has logged in again, which means another token.
         let status = Arc::new(std::sync::atomic::AtomicU16::new(401));
         let current = status.clone();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
         let app = axum::Router::new().route(
             "/api/v1/transfer/capabilities",
             axum::routing::get(move || {
                 let code = current.load(Ordering::SeqCst);
+                counter.fetch_add(1, Ordering::SeqCst);
                 async move {
                     if code == 200 {
                         (
@@ -1732,17 +1781,40 @@ mod tests {
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
-        let api = ApiClient::new_for_test(format!("http://{addr}"));
+        let client = |token: &str| {
+            ApiClient::with_config(crate::config::Config {
+                api_url: format!("http://{addr}"),
+                session_token: Some(token.to_string()),
+                ..crate::config::Config::default()
+            })
+        };
+        let old_login = client("revoked-token");
         for round in 1..=3 {
             assert!(
-                matches!(api.direct_upload_offer().await, DirectOffer::Unauthorized),
+                matches!(
+                    old_login.direct_upload_offer().await,
+                    DirectOffer::Unauthorized(Some(401))
+                ),
                 "round {round}"
             );
         }
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "the third answer came from memory");
+        // The server is fine again, but the refused login stays parked ...
         status.store(200, Ordering::SeqCst);
         assert!(
-            matches!(api.direct_upload_offer().await, DirectOffer::Offered(_)),
-            "the next valid answer is used at once, not after the trust period"
+            matches!(
+                old_login.direct_upload_offer().await,
+                DirectOffer::Unauthorized(Some(401))
+            ),
+            "the same login is not asked again within the trust period"
         );
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        // ... and a client that carries another token (a `bb login` since) is asked at once and gets direct.
+        let new_login = client("fresh-token");
+        assert!(
+            matches!(new_login.direct_upload_offer().await, DirectOffer::Offered(_)),
+            "the next login is not parked by the last one's refusals"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
     }
 }

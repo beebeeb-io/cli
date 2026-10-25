@@ -154,6 +154,8 @@ mod tests {
         NoDirect,
         /// The session is not valid: the route answers 401.
         Unauthorized,
+        /// The route answers 403.
+        Forbidden,
     }
 
     /// One scripted answer of the grant route.
@@ -273,6 +275,7 @@ mod tests {
                         Discovery::Fails => bare(503),
                         Discovery::NoDirect => reply(404, json!({"error": "not found"}), None),
                         Discovery::Unauthorized => reply(401, json!({"error": "unauthorized"}), None),
+                        Discovery::Forbidden => reply(403, json!({"error": "forbidden"}), None),
                         Discovery::UploadOff => reply(
                             200,
                             json!({"download": [], "upload": [], "storage_hosts": [], "storage_buckets": []}),
@@ -1248,17 +1251,23 @@ mod tests {
         });
     }
 
-    #[tokio::test]
-    async fn a_resumed_direct_session_is_kept_and_asks_for_a_login_when_the_login_is_not_valid() {
-        let scratch = Scratch::new("resume-401");
+    /// A resumed direct session, run once with `api` and the capabilities `offers`; returns the error and checks that
+    /// nothing was ended, sent or recorded away.
+    async fn kept_resume_error(tag: &str, offers: Discovery, logged_out: bool) -> String {
+        let scratch = Scratch::new(tag);
         let (path, size, mtime) = scratch.file(FILE_BYTES);
-        let state = shared(|m| m.offers = Some(Discovery::Unauthorized));
+        let state = shared(|m| m.offers = Some(offers));
         let (file_id, sid) = resumed_session(&state, &path, size, mtime, true, &[0]);
-        let err = run(&state, spec(&path, file_id)).await.unwrap_err();
-        // Exactly the words every other expired session uses (the exit code keys on them), and not the advice to
-        // leave the direct route: that would end the session and lose the chunks it holds.
-        assert_eq!(err, crate::api::SESSION_EXPIRED_MESSAGE);
-        assert!(!err.contains("--transport"), "{err}");
+        let base = spawn(state.clone()).await;
+        let api = if logged_out {
+            crate::api::ApiClient::new_for_test_logged_out(base)
+        } else {
+            crate::api::ApiClient::new_for_test(base)
+        };
+        let key = Arc::new(MasterKey::from_bytes([9u8; 32]));
+        let err = stream_encrypt_upload(&api, key, spec(&path, file_id), &NoopProgress)
+            .await
+            .unwrap_err();
         snapshot(&state, |m| {
             assert!(
                 m.abandons.is_empty(),
@@ -1269,6 +1278,36 @@ mod tests {
         });
         let record = crate::resume::resumable_upload_now(&path).expect("the record is kept");
         assert!(record.direct && record.session_id == sid, "{record:?}");
+        err
+    }
+
+    #[tokio::test]
+    async fn a_resumed_direct_session_is_kept_and_asks_for_a_login_when_the_session_is_not_valid() {
+        // A 401: exactly the words every other expired session uses, and not the advice to leave the direct route
+        // (that would end the session and lose the chunks it holds).
+        let err = kept_resume_error("resume-401", Discovery::Unauthorized, false).await;
+        assert_eq!(err, crate::api::SESSION_EXPIRED_MESSAGE);
+        assert!(!err.contains("--transport"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_resumed_direct_session_is_kept_and_reports_the_status_when_the_lookup_is_forbidden() {
+        // A 403 is not an expired session (every other 403 in the CLI says its status): the real status, and no
+        // advice to log in again.
+        let err = kept_resume_error("resume-403", Discovery::Forbidden, false).await;
+        assert!(err.contains("HTTP 403") && err.contains("progress is kept"), "{err}");
+        assert!(
+            !err.contains("--transport") && !err.contains(crate::api::SESSION_EXPIRED_MESSAGE),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_resumed_direct_session_is_kept_and_says_not_logged_in_when_there_is_no_session_at_all() {
+        let err = kept_resume_error("resume-logged-out", Discovery::Offers, true).await;
+        let api = crate::api::ApiClient::new_for_test_logged_out("http://127.0.0.1:9".to_string());
+        assert_eq!(err, api.require_auth().unwrap_err());
+        assert!(err.contains("Not logged in"), "{err}");
     }
 
     // ── review round (cli#105): direct broken server-wide costs one file, not every file ──

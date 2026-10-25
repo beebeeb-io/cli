@@ -299,18 +299,28 @@ impl ApiClient {
     /// header-setting path, not a hand-rolled stand-in.
     #[cfg(test)]
     pub(crate) fn new_for_test(base_url: String) -> Self {
-        Self::new_for_test_with_state(base_url, direct::DirectState::new())
+        Self::new_for_test_with_state(base_url, direct::DirectState::new(), Some("test-token".to_string()))
+    }
+
+    /// [`new_for_test`](Self::new_for_test) with no session at all (`bb login` was never run).
+    #[cfg(test)]
+    pub(crate) fn new_for_test_logged_out(base_url: String) -> Self {
+        Self::new_for_test_with_state(base_url, direct::DirectState::new(), None)
     }
 
     /// [`new_for_test`](Self::new_for_test) with a shorter hold after a direct upload was given up, so a test can
     /// tell the per-file flag apart from the remembered failure.
     #[cfg(test)]
     pub(crate) fn new_for_test_with_failure_hold(base_url: String, hold: std::time::Duration) -> Self {
-        Self::new_for_test_with_state(base_url, direct::DirectState::with_failure_hold(hold))
+        Self::new_for_test_with_state(
+            base_url,
+            direct::DirectState::with_failure_hold(hold),
+            Some("test-token".to_string()),
+        )
     }
 
     #[cfg(test)]
-    fn new_for_test_with_state(base_url: String, state: direct::DirectState) -> Self {
+    fn new_for_test_with_state(base_url: String, state: direct::DirectState, token: Option<String>) -> Self {
         // Fail closed: a unit test never talks to anything but a server on this machine.
         assert!(
             crate::config::api_url_is_loopback(&base_url),
@@ -319,7 +329,7 @@ impl ApiClient {
         Self {
             client: build_client(std::time::Duration::from_secs(300)),
             base_url,
-            token: Some("test-token".to_string()),
+            token,
             refusal_account_state: tokio::sync::OnceCell::new(),
             direct: std::sync::Arc::new(state),
             storage_client: std::sync::OnceLock::new(),

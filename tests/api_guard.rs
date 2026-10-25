@@ -254,7 +254,9 @@ fn unguarded_spawns(source: &str) -> Vec<String> {
     // `concat!` is still a mention of this prefix).
     const TOKEN: &str = "CARGO_BIN_EXE_";
     const SPAWN: &str = "Command::new(env!(\"CARGO_BIN_EXE_bb\"))";
-    // The guard, with the value the binary reads as "on".
+    const VARIABLE: &str = "BB_REFUSE_NON_LOOPBACK_API";
+    // The guard, with the one value the scan accepts (the binary reads any non-empty value but 0 as "on"; the scan does
+    // not depend on that rule).
     const GUARD: &str = ".env(\"BB_REFUSE_NON_LOOPBACK_API\",\"1\")";
     // What takes the guard away again, whenever it comes after the guard and before the run.
     const UNGUARDS: [&str; 3] = [".env_clear()", ".env_remove(\"BB_REFUSE_NON_LOOPBACK_API\"", ".envs("];
@@ -310,15 +312,39 @@ fn unguarded_spawns(source: &str) -> Vec<String> {
                 .min()
                 .unwrap_or(tail.len());
             let before_run = squeezed(&tail[..run_at]);
+            // No run in this fn: the command is built here and handed on (a builder). Whoever runs it can still take
+            // the guard away, so what the rest of the file does with the variable is part of the check.
+            let builder = run_at == tail.len();
             match before_run.rfind(GUARD) {
                 None => problems.push(format!(
                     "line {line} (in the code without comments): `{SPAWN}` is run without .env(\"BB_REFUSE_NON_LOOPBACK_API\", \"1\")"
                 )),
                 Some(guard_at) => {
+                    let after_guard = &before_run[guard_at + GUARD.len()..];
+                    let found = problems.len();
                     for ungard in UNGUARDS {
-                        if before_run[guard_at + GUARD.len()..].contains(ungard) {
+                        if after_guard.contains(ungard) {
                             problems.push(format!(
                                 "line {line} (in the code without comments): `{ungard}` after the guard takes it away again before the run"
+                            ));
+                        }
+                    }
+                    // the variable set again after the guard (to another value), when nothing above said so
+                    if problems.len() == found && after_guard.contains(VARIABLE) {
+                        problems.push(format!(
+                            "line {line} (in the code without comments): the variable is set or removed again after the guard"
+                        ));
+                    }
+                    if builder {
+                        let outside = squeezed(&code[..start]) + &squeezed(&code[body_end..]);
+                        if outside.contains(".env_clear()") || outside.contains(".env_remove(\"BB_REFUSE_NON_LOOPBACK_API\"") {
+                            problems.push(format!(
+                                "line {line} (in the code without comments): this command is built here and run elsewhere, and the file clears the environment or removes the variable: the guard may not reach the run"
+                            ));
+                        }
+                        if outside.matches(VARIABLE).count() > outside.matches(GUARD).count() {
+                            problems.push(format!(
+                                "line {line} (in the code without comments): this command is built here and run elsewhere, and the file sets the variable to something but 1 elsewhere"
                             ));
                         }
                     }
@@ -473,12 +499,50 @@ fn later(c: &mut Command) { c.env("BB_REFUSE_NON_LOOPBACK_API", "1"); }"#;
     );
     let envs_after = r#"fn run() { Command::new(env!("CARGO_BIN_EXE_bb")).env("BB_REFUSE_NON_LOOPBACK_API", "1").envs(std::env::vars()).output().unwrap(); }"#;
     assert_eq!(unguarded_spawns(envs_after).len(), 1, "envs after the guard");
-    // a guard with a value the binary reads as off
-    for off in ["0", "", "no"] {
+    // a guard with any value but a literal 1 (the binary reads 0 and empty as off and anything else as on; the scan does
+    // not rely on that rule, so "no" and "true" are refused too)
+    for off in ["0", "", "no", "true"] {
         let src = format!(
             r#"fn run() {{ Command::new(env!("CARGO_BIN_EXE_bb")).env("BB_REFUSE_NON_LOOPBACK_API", "{off}").output().unwrap(); }}"#
         );
         assert_eq!(unguarded_spawns(&src).len(), 1, "the value {off:?} is not the guard");
+    }
+    // the guard set, then the variable set again to something else before the run
+    let reset = r#"fn run() { Command::new(env!("CARGO_BIN_EXE_bb")).env("BB_REFUSE_NON_LOOPBACK_API", "1").env("BB_REFUSE_NON_LOOPBACK_API", "0").output().unwrap(); }"#;
+    assert_eq!(unguarded_spawns(reset).len(), 1, "the variable set again");
+    // a command built in one function and run in another: the caller can take the guard away
+    let builder = |caller: &str| {
+        format!(
+            r#"
+fn command(home: &Path) -> Command {{
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_bb"));
+    cmd.env("HOME", home);
+    cmd.env("BB_REFUSE_NON_LOOPBACK_API", "1");
+    cmd
+}}
+fn run() {{ {caller} }}
+"#
+        )
+    };
+    assert!(
+        unguarded_spawns(&builder("let out = command(&h).output().unwrap();")).is_empty(),
+        "a caller that only adds arguments"
+    );
+    for (what, caller) in [
+        (
+            "a caller that clears the environment",
+            "let out = command(&h).env_clear().output().unwrap();",
+        ),
+        (
+            "a caller that removes the variable",
+            r#"let out = command(&h).env_remove("BB_REFUSE_NON_LOOPBACK_API").output().unwrap();"#,
+        ),
+        (
+            "a caller that sets the variable to 0",
+            r#"let out = command(&h).env("BB_REFUSE_NON_LOOPBACK_API", "0").output().unwrap();"#,
+        ),
+    ] {
+        assert!(!unguarded_spawns(&builder(caller)).is_empty(), "{what}");
     }
     // a spawn the scan cannot follow: inside a macro, or with a name built at compile time
     let in_macro = r#"macro_rules! run_bb { () => { Command::new(env!("CARGO_BIN_EXE_bb")).output().unwrap() }; }"#;
