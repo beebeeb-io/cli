@@ -2906,6 +2906,14 @@ impl DownloadOutcome {
     }
 }
 
+/// Is this download error the API's answer that the file is still being uploaded (a 409 from
+/// `/download`, rendered by the API client as `download failed (409 Conflict): …`)? Matched on that
+/// exact prefix, never on a bare "409": error texts carry random ids, and about one run in a hundred a
+/// decrypt failure containing `…409…` in a uuid was reported as "still uploading" and the pass exited 0.
+fn is_still_uploading(e: &str) -> bool {
+    e.contains("still in progress") || e.starts_with("download failed (409")
+}
+
 /// Does this download error mean "could not decrypt" (as opposed to a network
 /// or server failure)? Both are reported and retried; neither trashes anything.
 fn is_decrypt_failure(e: &str) -> bool {
@@ -2975,7 +2983,7 @@ async fn do_download(
     }
     match downloaded.map_err(String::from) {
         Ok(()) => {}
-        Err(e) if e.contains("still in progress") || e.contains("409") => {
+        Err(e) if is_still_uploading(&e) => {
             // A partially-uploaded remote (this or another device still pushing).
             // Do NOT trash it - that throws away resumable progress and forces a
             // restart from byte 0. Leave the partial: the upload side resumes via
@@ -3833,6 +3841,22 @@ mod tests {
         assert!(is_decrypt_failure("key derivation failed"));
         assert!(!is_decrypt_failure("download failed (500): oops"));
         assert!(!is_decrypt_failure("download truncated: chunk 1/3"));
+    }
+
+    #[test]
+    fn a_409_is_a_file_still_being_uploaded_and_nothing_else_is() {
+        assert!(is_still_uploading(
+            "download failed (409 Conflict): replace_in_progress"
+        ));
+        assert!(is_still_uploading("upload is still in progress"));
+        // Random ids in an error text must not decide it (a uuid may contain "409").
+        assert!(!is_still_uploading(
+            "decrypt chunk 0 of 7b0c1a52-3f4e-4409-9c61-2f8e5a1d0b37: aead error"
+        ));
+        assert!(!is_still_uploading(
+            "download failed (500 Internal Server Error): 409 widgets"
+        ));
+        assert!(!is_still_uploading("download failed (403 Forbidden)"));
     }
 
     #[test]
