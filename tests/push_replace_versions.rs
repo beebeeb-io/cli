@@ -240,6 +240,7 @@ async fn bb(home: &Path, args: &[&str]) -> Output {
     let shown = args.join(" ");
     let out = tokio::task::spawn_blocking(move || {
         Command::new(env!("CARGO_BIN_EXE_bb"))
+            .env("BB_REFUSE_NON_LOOPBACK_API", "1")
             .args(&args)
             .current_dir(&home)
             .env("HOME", &home)

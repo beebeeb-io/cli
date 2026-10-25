@@ -182,6 +182,7 @@ async fn bb(home: &Path, args: &[&str]) -> Output {
     let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
     let out = tokio::task::spawn_blocking(move || {
         Command::new(env!("CARGO_BIN_EXE_bb"))
+            .env("BB_REFUSE_NON_LOOPBACK_API", "1")
             .args(&args)
             .current_dir(&home)
             .env("HOME", &home)
@@ -293,6 +294,32 @@ async fn empty_file_uploads_as_one_aead_chunk_when_the_server_accepts_it() {
         sizes.contains(&28),
         "the empty file's chunk is the 28-byte AEAD of b\"\": {sizes:?}"
     );
+}
+
+/// Task 2173: `bb push --json` says which route each file took (`"direct"` or `"api"`), like `bb pull --json`.
+/// This mock offers no direct upload, so every file went through the API.
+#[tokio::test(flavor = "multi_thread")]
+async fn push_json_reports_the_transport_of_every_file() {
+    let mock = Mock::default();
+    let api = start_mock(mock.clone()).await;
+    let home = scratch_home(&api);
+    make_folder2(&home);
+
+    let out = bb(&home, &["--api", &api, "--json", "push", "folder2"]).await;
+    let (stdout, _stderr) = text(&out);
+    assert!(out.status.success(), "{stdout}");
+    let v: Value = serde_json::from_str(&stdout).expect("stdout is one JSON document");
+    let files = v["files"].as_array().expect("files");
+    assert_eq!(files.len(), 3, "{v}");
+    for file in files {
+        assert_eq!(file["transport"], "api", "{file}");
+    }
+
+    let out = bb(&home, &["--api", &api, "--json", "push", "folder2/a.txt"]).await;
+    let (stdout, _stderr) = text(&out);
+    assert!(out.status.success(), "{stdout}");
+    let v: Value = serde_json::from_str(&stdout).expect("stdout is one JSON document");
+    assert_eq!(v["files"][0]["transport"], "api", "{v}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

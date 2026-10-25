@@ -292,6 +292,7 @@ fn scratch_home(api: &str) -> PathBuf {
 
 fn bb_command(home: &Path, args: &[String]) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_bb"));
+    cmd.env("BB_REFUSE_NON_LOOPBACK_API", "1");
     cmd.args(args)
         .current_dir(home)
         .env("HOME", home)

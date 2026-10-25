@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Direct uploads (task 2173): when the server offers `object-upload-v1`, `bb push` and `bb sync` send each chunk straight to object storage through a short-lived link the server grants and then commit it, instead of proxying the bytes through the API. Nothing changes for a server that does not offer it, and `--transport api` / `BB_TRANSPORT=api` force the API. A file whose direct upload cannot finish is sent again through the API.
+- `bb push --json` reports `transport` (`direct` or `api`) for every file, like `bb pull --json`.
+
+### Changed
+- A long-running process (`bb sync --daemon`) asks again, after ten minutes, whether a server that said it has no direct transport has gained one; before, it stayed on the API until restart.
+
+
 ## [0.14.2] - 2026-10-24
 
 ### Added

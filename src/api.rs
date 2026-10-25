@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use crate::config::load_config;
 
 mod direct;
-pub(crate) use direct::{ChunkApiError, GrantReply, now_ms};
+pub(crate) use direct::{ChunkApiError, GrantReply, UploadCall, now_ms};
 
 static RATE_REMAINING: AtomicI64 = AtomicI64::new(-1);
 static RATE_LIMIT: AtomicI64 = AtomicI64::new(-1);
@@ -179,6 +179,17 @@ pub struct UploadInit {
     pub file_id: String,
     pub chunk_size_bytes: u64,
     pub chunk_count: u64,
+    /// The `transport` field of the 201 body (task 2173): `object-upload-v1` when the server
+    /// opened a direct session, absent otherwise (today's chunk PUT route).
+    pub transport: Option<String>,
+}
+
+impl UploadInit {
+    /// Did the server select the direct upload for this session? Core decides what the field means
+    /// (`dt::upload_init_selects_direct`): any other value, or none, is today's route.
+    pub fn is_direct(&self) -> bool {
+        beebeeb_core::direct_transfer::upload_init_selects_direct(self.transport.as_deref())
+    }
 }
 
 impl UploadInit {
@@ -196,11 +207,13 @@ impl UploadInit {
             .to_string();
         let chunk_size_bytes = v.get("chunk_size_bytes").and_then(|x| x.as_u64()).unwrap_or(0);
         let chunk_count = v.get("chunk_count").and_then(|x| x.as_u64()).unwrap_or(0);
+        let transport = v.get("transport").and_then(|x| x.as_str()).map(str::to_string);
         Ok(Self {
             upload_session_id,
             file_id,
             chunk_size_bytes,
             chunk_count,
+            transport,
         })
     }
 }
@@ -276,6 +289,11 @@ impl ApiClient {
     /// header-setting path, not a hand-rolled stand-in.
     #[cfg(test)]
     pub(crate) fn new_for_test(base_url: String) -> Self {
+        // Fail closed: a unit test never talks to anything but a server on this machine.
+        assert!(
+            crate::config::api_url_is_loopback(&base_url),
+            "a test must point the client at a local server, not {base_url}"
+        );
         Self {
             client: build_client(std::time::Duration::from_secs(300)),
             base_url,
@@ -709,6 +727,37 @@ impl ApiClient {
         is_media: bool,
         base_version_number: Option<i32>,
     ) -> Result<UploadInit, ApiError> {
+        self.upload_init_for_transport(
+            file_id,
+            name_encrypted,
+            parent_id,
+            size_bytes,
+            chunk_size_bytes,
+            chunk_count,
+            is_media,
+            base_version_number,
+            false,
+        )
+        .await
+    }
+
+    /// [`upload_init_typed`](Self::upload_init_typed), optionally asking for the direct upload
+    /// (task 2173): with `direct` the request carries `X-Beebeeb-Capabilities: object-upload-v1`
+    /// (on this call only, never globally) and the answer's `transport` says what the server chose.
+    /// Without it the request is byte-identical to what it always was.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upload_init_for_transport(
+        &self,
+        file_id: Option<uuid::Uuid>,
+        name_encrypted: &str,
+        parent_id: Option<uuid::Uuid>,
+        size_bytes: i64,
+        chunk_size_bytes: i64,
+        chunk_count: i32,
+        is_media: bool,
+        base_version_number: Option<i32>,
+        direct: bool,
+    ) -> Result<UploadInit, ApiError> {
         let token = self.require_auth()?;
         // The v2 server (`routes/uploads.rs::parse_profile`) accepts only
         // web/mobile/desktop/backup_agent — there is no "cli" wire profile. The
@@ -730,14 +779,18 @@ impl ApiClient {
         });
         for _ in 0..3 {
             pace_if_needed().await;
-            let resp = self
+            let mut request = self
                 .client
                 .post(self.url("/api/v1/uploads/init"))
                 .bearer_auth(token)
-                .json(&body)
-                .send()
-                .await
-                .map_err(format_request_error)?;
+                .json(&body);
+            if direct {
+                request = request.header(
+                    beebeeb_core::direct_transfer::CAPABILITIES_HEADER,
+                    beebeeb_core::direct_transfer::CAP_OBJECT_UPLOAD_V1,
+                );
+            }
+            let resp = request.send().await.map_err(format_request_error)?;
             match parse_response_typed(resp).await {
                 Err(e) if e.message == "__rate_limited__" => continue,
                 Err(e) => return Err(self.explain_account_refusal(e).await),
@@ -3512,5 +3565,14 @@ mod move_request_tests {
         assert_eq!(body, json!({"name_encrypted": "encrypted-name"}));
         assert!(body.get("parent_id").is_none(), "rename-only must omit parent_id");
         server.abort();
+    }
+
+    /// The unit-test half of the "a test never reaches production" guard (the other half is
+    /// `BB_REFUSE_NON_LOOPBACK_API`, see `tests/api_guard.rs`): a test client cannot be built for a
+    /// server that is not on this machine.
+    #[test]
+    #[should_panic(expected = "a test must point the client at a local server")]
+    fn a_test_client_cannot_be_pointed_at_a_public_server() {
+        let _ = ApiClient::new_for_test("https://api.beebeeb.io".to_string());
     }
 }

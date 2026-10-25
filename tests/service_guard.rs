@@ -97,6 +97,7 @@ async fn a_scratch_home_never_reaches_launchctl_or_systemctl() {
     let (run_dir, run_home, run_path) = (dir.clone(), home.clone(), path.clone());
     let out = tokio::task::spawn_blocking(move || {
         Command::new(env!("CARGO_BIN_EXE_bb"))
+            .env("BB_REFUSE_NON_LOOPBACK_API", "1")
             // `--stop` with a folder is the legacy "remove the old LaunchAgent" path: it unloads and deletes
             // `io.beebeeb.sync.plist`, which is exactly what must never happen from a scratch HOME.
             .args(["--api", &api, "sync", "--stop", run_dir.to_str().unwrap()])
@@ -180,6 +181,7 @@ async fn a_stopped_session_never_unloads_or_deletes_a_service_from_a_scratch_hom
     let (run_dir, run_home, run_path) = (dir.clone(), home.clone(), path);
     let out = tokio::task::spawn_blocking(move || {
         Command::new(env!("CARGO_BIN_EXE_bb"))
+            .env("BB_REFUSE_NON_LOOPBACK_API", "1")
             .args(["--api", &api, "sync", "--stop-session", "zzguard"])
             .current_dir(&run_dir)
             .env("HOME", &run_home)
@@ -230,6 +232,7 @@ async fn removing_a_service_that_is_not_installed_is_not_a_refusal() {
     let (run_dir, run_home) = (dir.clone(), home.clone());
     let out = tokio::task::spawn_blocking(move || {
         Command::new(env!("CARGO_BIN_EXE_bb"))
+            .env("BB_REFUSE_NON_LOOPBACK_API", "1")
             .args(["--api", &api, "sync", "--stop", run_dir.to_str().unwrap()])
             .current_dir(&run_dir)
             .env("HOME", &run_home)

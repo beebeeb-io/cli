@@ -76,6 +76,7 @@ impl Fixture {
 
     fn run(&self, args: &[&str], app_url: Option<&str>) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_bb"));
+        command.env("BB_REFUSE_NON_LOOPBACK_API", "1");
         command
             .args(args)
             .env("HOME", &self.home)

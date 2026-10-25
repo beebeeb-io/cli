@@ -5,6 +5,7 @@ use std::process::{Command, Stdio};
 #[test]
 fn update_help_is_available_without_authentication() {
     let output = Command::new(env!("CARGO_BIN_EXE_bb"))
+        .env("BB_REFUSE_NON_LOOPBACK_API", "1")
         .args(["update", "--help"])
         .env("BB_NO_UPDATE", "1")
         .env("NO_COLOR", "1")
@@ -28,6 +29,7 @@ fn update_help_is_available_without_authentication() {
 #[cfg(debug_assertions)]
 fn explicit_update_is_not_silently_disabled_by_auto_update_opt_out() {
     let output = Command::new(env!("CARGO_BIN_EXE_bb"))
+        .env("BB_REFUSE_NON_LOOPBACK_API", "1")
         .arg("update")
         .env("BB_NO_UPDATE", "1")
         .env("NO_COLOR", "1")

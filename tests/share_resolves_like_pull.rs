@@ -126,6 +126,7 @@ fn scratch_home(tag: &str, api: &str) -> PathBuf {
 
 fn bb(home: &Path, api: &str, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_bb"))
+        .env("BB_REFUSE_NON_LOOPBACK_API", "1")
         .args(args)
         .arg("--api")
         .arg(api)

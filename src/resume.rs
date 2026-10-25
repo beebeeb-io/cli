@@ -59,6 +59,11 @@ struct PendingEntry {
     /// core's resume rule restart the upload.
     #[serde(default)]
     chunk_format: Option<u8>,
+    /// Task 2173: the session is a direct one (`object-upload-v1`). A direct session takes no proxy
+    /// chunk PUT and an API session takes no grant, so a resumed upload must continue on the
+    /// transport it began on. Absent on records from an older CLI, which only had the API route.
+    #[serde(default)]
+    direct: bool,
     size: u64,
     mtime_ns: u128,
 }
@@ -71,6 +76,8 @@ pub struct PendingUpload {
     /// The chunk format of the frames the session already holds, as recorded
     /// when it was opened; `None` = the record does not say (restart).
     pub chunk_format: Option<ChunkFormat>,
+    /// The session was opened as a direct upload (task 2173); see [`PendingEntry`].
+    pub direct: bool,
 }
 
 fn db_path() -> PathBuf {
@@ -136,6 +143,7 @@ pub fn resumable_upload(path: &Path, size: u64, mtime_ns: u128) -> Option<Pendin
                 file_id: e.file_id,
                 session_id,
                 chunk_format: e.chunk_format.and_then(|c| ChunkFormat::from_u8(c).ok()),
+                direct: e.direct,
             })
         })
 }
@@ -157,6 +165,7 @@ pub fn resumable_upload_now(path: &Path) -> Option<PendingUpload> {
 /// once the v2 session is open, before the chunk pipeline starts; idempotent
 /// (overwrites any prior entry). `chunk_format` is the session encryptor's
 /// `ChunkEncryptor::format`.
+#[cfg(test)]
 pub fn record(
     path: &Path,
     file_id: Uuid,
@@ -164,6 +173,19 @@ pub fn record(
     chunk_format: ChunkFormat,
     size: u64,
     mtime_ns: u128,
+) {
+    record_with_transport(path, file_id, upload_session_id, chunk_format, size, mtime_ns, false);
+}
+
+/// [`record`], saying whether the session is a direct upload (task 2173).
+pub fn record_with_transport(
+    path: &Path,
+    file_id: Uuid,
+    upload_session_id: Uuid,
+    chunk_format: ChunkFormat,
+    size: u64,
+    mtime_ns: u128,
+    direct: bool,
 ) {
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut db = load();
@@ -173,6 +195,7 @@ pub fn record(
             file_id,
             upload_session_id: Some(upload_session_id),
             chunk_format: Some(chunk_format.as_u8()),
+            direct,
             size,
             mtime_ns,
         },
@@ -222,12 +245,25 @@ mod tests {
             file_id,
             session_id,
             chunk_format,
+            direct: false,
         };
         record(&f, id, sid, ChunkFormat::V1Legacy, 5, 100);
         assert_eq!(
             resumable_upload(&f, 5, 100),
             Some(pending(id, sid, Some(ChunkFormat::V1Legacy)))
         );
+
+        // Task 2173: a direct session is remembered as one (a proxy PUT would be refused on it).
+        record_with_transport(&f, id, sid, ChunkFormat::V1Legacy, 5, 100, true);
+        assert_eq!(
+            resumable_upload(&f, 5, 100),
+            Some(PendingUpload {
+                direct: true,
+                ..pending(id, sid, Some(ChunkFormat::V1Legacy))
+            })
+        );
+        // (The older-record case, with no `direct` field at all, is the raw-JSON loop below: it reads as an API session.)
+        record(&f, id, sid, ChunkFormat::V1Legacy, 5, 100);
 
         // A changed size or mtime must NOT resume onto stale chunks.
         assert_eq!(resumable_upload(&f, 6, 100), None);

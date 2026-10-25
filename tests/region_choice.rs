@@ -257,6 +257,7 @@ fn scratch_home(api: &str, signed_in: bool) -> PathBuf {
 
 fn bb(home: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_bb"))
+        .env("BB_REFUSE_NON_LOOPBACK_API", "1")
         .args(args)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))

@@ -219,49 +219,13 @@ fn build_storage_client_with(api_base: &str, read_timeout: Duration) -> Option<C
         .ok()
 }
 
-/// The discovery cache, plus what a long-running process needs on top of it.
-///
-/// Core's cache stops asking after two failed attempts, for the life of the cache: right for a
-/// command that ends in seconds, wrong for a sync daemon that runs for weeks and meets one bad
-/// quarter hour. A cache that gave up because asking FAILED therefore starts afresh once the trust
-/// period has passed. One that gave up because the server said, in JSON, that it has no direct
-/// transport stays given up: that is an answer, not a failure.
-pub(crate) struct DiscoveryState {
-    cache: dt::DiscoveryCache,
-    /// When the cache first said "use the API" because asking failed.
-    parked_at_ms: Option<i64>,
-    /// The server answered that it has no direct transport.
-    refused: bool,
-}
-
-impl DiscoveryState {
-    pub(crate) fn new() -> Self {
-        Self {
-            cache: dt::DiscoveryCache::new(),
-            parked_at_ms: None,
-            refused: false,
-        }
-    }
-
-    pub(crate) fn lookup(&mut self, now_ms: i64) -> dt::Lookup {
-        let lookup = self.cache.lookup(now_ms);
-        if !matches!(lookup, dt::Lookup::UseApi) || self.refused {
-            return lookup;
-        }
-        let parked = *self.parked_at_ms.get_or_insert(now_ms);
-        // A clock that went backwards counts as time passed: better one request than none for ever.
-        if now_ms < parked || now_ms - parked >= dt::DISCOVERY_TTL_MS {
-            *self = Self::new();
-            return dt::Lookup::Fetch;
-        }
-        lookup
-    }
-
-    pub(crate) fn record(&mut self, outcome: &dt::Outcome, discovery: Option<dt::Discovery>, now_ms: i64) {
-        self.refused |= matches!(outcome, dt::Outcome::NotSupported);
-        self.cache.record(outcome, discovery, now_ms);
-    }
-}
+/// The discovery cache. Core's cache already does what a long-running process needs (a sync daemon
+/// that runs for weeks and meets one bad quarter hour): it forgets a failed discovery AND a JSON 404
+/// "no direct transport" once the trust period has passed (core 2aa1f39), so the CLI keeps no rule of
+/// its own on top of it. (Until the core pin moved past 3235dc15 this was a wrapper that re-implemented
+/// the failure half and pinned the 404 half forever; the 404 half is now core's decision, see the
+/// cache vectors in core's `test-vectors/direct_transfer.json`.)
+pub(crate) type DiscoveryState = dt::DiscoveryCache;
 
 impl ApiClient {
     /// The API origin this client talks to (the authority check needs it).
@@ -283,17 +247,27 @@ impl ApiClient {
     /// offers nothing. An authorization answer (401/403) is NOT handled here:
     /// the API path that follows reports it in its own words.
     pub(crate) async fn direct_download_offer(&self) -> Option<dt::Discovery> {
+        self.direct_offer(dt::Discovery::offers_download).await
+    }
+
+    /// [`direct_download_offer`](Self::direct_download_offer) for the upload direction (task 2173):
+    /// the same lazily asked, cached discovery, filtered on `object-upload-v1`.
+    pub(crate) async fn direct_upload_offer(&self) -> Option<dt::Discovery> {
+        self.direct_offer(dt::Discovery::offers_upload).await
+    }
+
+    async fn direct_offer(&self, wanted: fn(&dt::Discovery) -> bool) -> Option<dt::Discovery> {
         if crate::transport::api_forced() || self.require_auth().is_err() {
             return None;
         }
         let mut state = self.direct_discovery.lock().await;
         match state.lookup(now_ms()) {
-            dt::Lookup::Cached(discovery) => discovery.offers_download().then_some(discovery),
+            dt::Lookup::Cached(discovery) => wanted(&discovery).then_some(discovery),
             dt::Lookup::UseApi => None,
             dt::Lookup::Fetch => {
                 let (outcome, discovery) = self.fetch_discovery().await;
                 state.record(&outcome, discovery.clone(), now_ms());
-                discovery.filter(dt::Discovery::offers_download)
+                discovery.filter(|d| wanted(d))
             }
         }
     }
@@ -497,6 +471,122 @@ impl ApiClient {
     }
 }
 
+// ───────────────────────────── direct uploads (task 2173) ─────────────────────────────
+
+/// What a direct-upload request came to.
+pub(crate) enum UploadCall<T> {
+    /// A good answer, validated by core.
+    Ok(T),
+    /// The classifier's verdict on a failure. A 2xx whose body broke the contract is `ApiForThisFile`.
+    Failed(dt::Outcome),
+    /// The upload session is gone (a JSON 404, or a 400 "not writable: expired"): the caller's own
+    /// session recovery re-inits it, exactly as for a proxy chunk PUT.
+    SessionGone(String),
+}
+
+/// The text of the 400 the server sends for a session that expired (the same rule as the proxy route's,
+/// `is_upload_session_gone`).
+const SESSION_EXPIRED: &str = "upload session is not writable: expired";
+
+/// Is this failed answer "the session is gone"? A JSON 404 (the session is not the caller's, or was swept)
+/// and the expired-session 400; a BARE 404 is a node without the route, which is not that.
+fn upload_session_gone(seen: &Seen) -> bool {
+    match seen.answer.status {
+        404 => seen.answer.has_json_error(),
+        400 => seen.answer.error_code().is_some_and(|c| c.contains(SESSION_EXPIRED)),
+        _ => false,
+    }
+}
+
+/// A storage PUT may take as long as the link needs, but must keep moving: the budget is a minute plus the
+/// chunk at this speed. The server's own fence assumes a minimum uplink of the same order.
+const STORAGE_PUT_BASE: Duration = Duration::from_secs(60);
+const STORAGE_PUT_MIN_BYTES_PER_SEC: u64 = 128 * 1024;
+
+impl ApiClient {
+    /// `POST /api/v1/uploads/{session}/chunks/{index}/grant {"size"}`. Sends no capability header: the
+    /// session's transport was chosen at init and never changes.
+    pub(crate) async fn upload_grant(
+        &self,
+        session: &str,
+        index: u32,
+        size: u64,
+        discovery: &dt::Discovery,
+    ) -> UploadCall<dt::UploadGrant> {
+        let seen = self.upload_call(&dt::upload_grant_path(session, index), size).await;
+        match dt::classify(dt::Call::UploadGrant, &seen.answer) {
+            dt::Outcome::Proceed => match dt::UploadGrant::from_answer(&seen.body, index, discovery, &self.base_url) {
+                Ok(grant) => UploadCall::Ok(grant),
+                // The answer broke the contract (a link to a host nobody listed, a header we must not
+                // send): this session cannot go direct.
+                Err(_) => UploadCall::Failed(dt::Outcome::ApiForThisFile),
+            },
+            other => failed_upload_call(&seen, other),
+        }
+    }
+
+    /// `POST /api/v1/uploads/{session}/chunks/{index}/commit {"size"}`.
+    pub(crate) async fn upload_commit(&self, session: &str, index: u32, size: u64) -> UploadCall<dt::UploadCommitted> {
+        let seen = self.upload_call(&dt::upload_commit_path(session, index), size).await;
+        match dt::classify(dt::Call::UploadCommit, &seen.answer) {
+            dt::Outcome::Proceed => match dt::UploadCommitted::from_answer(&seen.body, index, size) {
+                Ok(done) => UploadCall::Ok(done),
+                Err(_) => UploadCall::Failed(dt::Outcome::ApiForThisFile),
+            },
+            other => failed_upload_call(&seen, other),
+        }
+    }
+
+    async fn upload_call(&self, path: &str, size: u64) -> Seen {
+        let Ok(token) = self.require_auth() else {
+            return Seen::no_answer();
+        };
+        super::pace_if_needed().await;
+        let sent = self
+            .client
+            .post(self.url(path))
+            .bearer_auth(token)
+            .json(&dt::UploadGrantRequest { size })
+            .timeout(GRANT_TIMEOUT)
+            .send()
+            .await;
+        match sent {
+            Ok(resp) => answer_of(resp, dt::wire::MAX_UPLOAD_BODY_BYTES).await,
+            Err(_) => Seen::no_answer(),
+        }
+    }
+
+    /// `PUT` one chunk's ciphertext to a granted link, on the storage client: the one header the grant
+    /// allows, no Authorization, no cookies, no redirects. Returns the HTTP status, 0 when there was no
+    /// answer (or no safe client). The link and the transport error (which can carry the link) never
+    /// leave this function.
+    pub(crate) async fn put_to_storage(&self, link: &dt::UploadLink, data: bytes::Bytes) -> u16 {
+        let Some(client) = self.storage_client() else {
+            return 0;
+        };
+        let len = data.len() as u64;
+        let timeout = STORAGE_PUT_BASE + Duration::from_secs(len / STORAGE_PUT_MIN_BYTES_PER_SEC);
+        let sent = client
+            .put(link.url.as_str())
+            .header(reqwest::header::CONTENT_TYPE, link.content_type())
+            .body(data)
+            .timeout(timeout)
+            .send()
+            .await;
+        match sent {
+            Ok(resp) => resp.status().as_u16(),
+            Err(_) => 0,
+        }
+    }
+}
+
+fn failed_upload_call<T>(seen: &Seen, outcome: dt::Outcome) -> UploadCall<T> {
+    if upload_session_gone(seen) {
+        return UploadCall::SessionGone(format!("upload session is gone (HTTP {})", seen.answer.status));
+    }
+    UploadCall::Failed(outcome)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -592,12 +682,12 @@ mod tests {
         assert_eq!(state.lookup(t0 + 1), dt::Lookup::Fetch, "one retry per command");
         state.record(&dt::Outcome::UseApiNow, None, t0 + 1);
         assert_eq!(state.lookup(t0 + 2), dt::Lookup::UseApi, "given up");
-        // Still given up just before the trust period ends ...
-        assert_eq!(state.lookup(t0 + 2 + TTL - 1), dt::Lookup::UseApi);
+        // Still given up just before the trust period (counted from the last failure) ends ...
+        assert_eq!(state.lookup(t0 + 1 + TTL - 1), dt::Lookup::UseApi);
         // ... and asking again once it has, with a fresh allowance.
-        assert_eq!(state.lookup(t0 + 2 + TTL), dt::Lookup::Fetch);
-        state.record(&dt::Outcome::Proceed, Some(offers()), t0 + 3 + TTL);
-        assert!(matches!(state.lookup(t0 + 4 + TTL), dt::Lookup::Cached(d) if d.offers_download()));
+        assert_eq!(state.lookup(t0 + 1 + TTL), dt::Lookup::Fetch);
+        state.record(&dt::Outcome::Proceed, Some(offers()), t0 + 2 + TTL);
+        assert!(matches!(state.lookup(t0 + 3 + TTL), dt::Lookup::Cached(d) if d.offers_download()));
 
         // The fresh start is a fresh allowance, not the old strike count: after the trust period
         // a failed answer is retried once more before the cache gives up again.
@@ -606,7 +696,7 @@ mod tests {
             state.record(&dt::Outcome::UseApiNow, None, t);
         }
         assert_eq!(state.lookup(t0 + 2), dt::Lookup::UseApi);
-        let later = t0 + 2 + TTL;
+        let later = t0 + 1 + TTL;
         assert_eq!(state.lookup(later), dt::Lookup::Fetch);
         state.record(&dt::Outcome::UseApiNow, None, later);
         assert_eq!(
@@ -617,11 +707,14 @@ mod tests {
     }
 
     #[test]
-    fn a_server_that_said_it_has_no_direct_transport_is_not_asked_again() {
+    fn a_server_that_said_it_has_no_direct_transport_is_asked_again_after_the_trust_period() {
+        // Core's rule (2aa1f39): the JSON 404 is remembered for the trust period, not for ever, so a
+        // daemon notices the day the server gains the transport (a deploy turns the flag on).
         let mut state = DiscoveryState::new();
         state.record(&dt::Outcome::NotSupported, None, 0);
         assert_eq!(state.lookup(1), dt::Lookup::UseApi);
-        assert_eq!(state.lookup(10 * TTL), dt::Lookup::UseApi, "an answer is not a failure");
+        assert_eq!(state.lookup(TTL - 1), dt::Lookup::UseApi, "an answer holds for the trust period");
+        assert_eq!(state.lookup(TTL), dt::Lookup::Fetch, "and is asked again after it");
     }
 
     #[test]

@@ -231,6 +231,7 @@ async fn bb(home: &Path, args: &[&str]) -> Output {
     let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
     let out = tokio::task::spawn_blocking(move || {
         Command::new(env!("CARGO_BIN_EXE_bb"))
+            .env("BB_REFUSE_NON_LOOPBACK_API", "1")
             .args(&args)
             .current_dir(&home)
             .env("HOME", &home)
@@ -561,6 +562,7 @@ async fn watch_resync_after_root_change_removes_nothing() {
     let log_path = home.join("watch.log");
     let log = std::fs::File::create(&log_path).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_bb"))
+        .env("BB_REFUSE_NON_LOOPBACK_API", "1")
         .args(["--api", &api, "sync", dir.to_str().unwrap(), "/SyncUp"])
         .current_dir(&home)
         .env("HOME", &home)

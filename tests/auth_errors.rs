@@ -60,6 +60,7 @@ fn bb(home: &Path, args: &[&str]) -> Output {
 /// so results do not depend on the host (systemd/GNOME set INVOCATION_ID).
 fn bb_env(home: &Path, args: &[&str], extra: &[(&str, &str)]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_bb"))
+        .env("BB_REFUSE_NON_LOOPBACK_API", "1")
         .args(args)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
@@ -166,7 +167,8 @@ fn revoked_session_status_fails_too() {
 fn logged_out_whoami_exits_nonzero_with_a_login_hint() {
     let home = scratch_home();
 
-    let out = bb(&home, &["whoami"]);
+    // Names a server on this machine: no test run relies on the built-in default (production).
+    let out = bb(&home, &["--api", "http://127.0.0.1:9", "whoami"]);
     let stderr = text(&out.stderr);
     assert_eq!(
         out.status.code(),

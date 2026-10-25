@@ -115,6 +115,7 @@ fn strip_ansi(s: &str) -> String {
 
 fn spawn_bb(home: &Path, args: &[&str]) -> Child {
     Command::new(env!("CARGO_BIN_EXE_bb"))
+        .env("BB_REFUSE_NON_LOOPBACK_API", "1")
         .args(args)
         .env_clear()
         .env("HOME", home)

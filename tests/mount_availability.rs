@@ -33,6 +33,7 @@ fn run_bb(home: &Path, args: &[&str]) -> Output {
     let empty_path = home.join("empty-path");
     std::fs::create_dir_all(&empty_path).expect("create empty PATH dir");
     Command::new(env!("CARGO_BIN_EXE_bb"))
+        .env("BB_REFUSE_NON_LOOPBACK_API", "1")
         .args(args)
         .env_clear()
         .env("HOME", home)
