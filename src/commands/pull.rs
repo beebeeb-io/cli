@@ -5,13 +5,75 @@ use std::path::PathBuf;
 use crate::api::ApiClient;
 use crate::commands::push::load_master_key;
 
+/// Why one attempt at `bb pull` ended without a file. Only a version change is a decision: the
+/// file is read again from fresh metadata, once.
+enum PullFailure {
+    /// The file's version changed while it was downloading (nothing was written).
+    Changed(String),
+    Other(String),
+}
+
+impl From<String> for PullFailure {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
+impl From<&str> for PullFailure {
+    fn from(message: &str) -> Self {
+        Self::Other(message.to_string())
+    }
+}
+
+impl From<crate::download::DownloadError> for PullFailure {
+    fn from(e: crate::download::DownloadError) -> Self {
+        match e {
+            crate::download::DownloadError::Changed(m) => Self::Changed(m),
+            other => Self::Other(other.into()),
+        }
+    }
+}
+
+impl From<PullFailure> for String {
+    fn from(e: PullFailure) -> String {
+        match e {
+            PullFailure::Changed(m) | PullFailure::Other(m) => m,
+        }
+    }
+}
+
 pub async fn run(file_id: String, output: Option<PathBuf>, zip: bool, force: bool) -> Result<(), String> {
+    match run_once(file_id.clone(), output.clone(), zip, force, false).await {
+        // Someone published a new version while this one was downloading. Nothing was written;
+        // the new version's chunk count and read pin need a fresh look, so start over, once.
+        Err(PullFailure::Changed(_)) => {
+            if !crate::ui::is_quiet() {
+                eprintln!("The file changed while it was downloading; starting again from its new version.");
+            }
+            // The overwrite question was answered in the first attempt (it is asked before any
+            // byte is fetched); the retry must not ask it again.
+            run_once(file_id, output, zip, force, true).await.map_err(|e| match e {
+                PullFailure::Changed(m) => format!("{m}. It changed again; run the command again"),
+                PullFailure::Other(m) => m,
+            })
+        }
+        other => other.map_err(String::from),
+    }
+}
+
+async fn run_once(
+    file_id: String,
+    output: Option<PathBuf>,
+    zip: bool,
+    force: bool,
+    already_confirmed: bool,
+) -> Result<(), PullFailure> {
     let api = ApiClient::from_config();
     api.require_auth()?;
 
     // --zip mode: resolve as folder and download as a zip archive
     if zip {
-        return run_zip(&api, &file_id, output, force).await;
+        return Ok(run_zip(&api, &file_id, output, force).await?);
     }
 
     let (file_id, resolved_name) = resolve_file_arg(&api, &file_id).await?;
@@ -68,7 +130,7 @@ pub async fn run(file_id: String, output: Option<PathBuf>, zip: bool, force: boo
             Some(o) => o,
             None => crate::safe_path::default_output_path(folder_name)?,
         };
-        return pull_folder(&api, &file_id, &out_dir, force).await;
+        return Ok(pull_folder(&api, &file_id, &out_dir, force).await?);
     }
 
     let display_name = decrypted_name.as_deref().unwrap_or(&file_id);
@@ -83,7 +145,7 @@ pub async fn run(file_id: String, output: Option<PathBuf>, zip: bool, force: boo
 
     // Never clobber a local file silently (flow "CLI end to end", issue 5):
     // checked before any bytes are downloaded, for both decrypt paths below.
-    guard_existing_output(&out_path, force)?;
+    ask_once(already_confirmed, &out_path, force, guard_existing_output)?;
 
     // The chunk format comes from the file's authenticated metadata, never a
     // server field (task 1943): core's reader opens a v2-pinned file only as v2.
@@ -188,6 +250,7 @@ pub async fn run(file_id: String, output: Option<PathBuf>, zip: bool, force: boo
                 "size_bytes": stats.plaintext_bytes,
                 "download_speed_bps": dl_speed as u64,
                 "elapsed_ms": elapsed.as_millis() as u64,
+                "transport": stats.transport,
                 "output": out_path.display().to_string(),
             }))
             .unwrap()
@@ -236,6 +299,21 @@ pub(crate) async fn resolve_file_arg(api: &ApiClient, arg: &str) -> Result<(Stri
         // No match by prefix — fall through to path resolution.
     }
     resolve_as_path(api, arg).await
+}
+
+/// The overwrite question, asked unless it was already answered: a second attempt after a version
+/// change must not put the same question to the user again.
+fn ask_once(
+    already_confirmed: bool,
+    out_path: &std::path::Path,
+    force: bool,
+    guard: impl FnOnce(&std::path::Path, bool) -> Result<(), String>,
+) -> Result<(), String> {
+    if already_confirmed {
+        Ok(())
+    } else {
+        guard(out_path, force)
+    }
 }
 
 /// Refuse to overwrite an existing local path unless the user said so.
@@ -415,7 +493,26 @@ async fn pull_folder_inner(
                 skipped += 1;
                 continue;
             }
-            pull_single_file(api, item_id, &target, content_key).await?;
+            // A new version published while this file downloaded: nothing was written, so read
+            // THIS file again from fresh metadata, once, and carry on with the rest of the folder.
+            // (This used to abort the whole folder pull.)
+            match pull_single_file(api, item_id, &target, content_key.as_ref()).await {
+                Ok(()) => {}
+                Err(PullFailure::Changed(_)) => {
+                    eprintln!(
+                        "  {} {}: changed while it downloaded; reading it again",
+                        "!".custom_color(crate::colors::AMBER),
+                        target.display()
+                    );
+                    pull_single_file(api, item_id, &target, content_key.as_ref())
+                        .await
+                        .map_err(|e| format!("{}: {}", target.display(), String::from(e)))?;
+                }
+                // Every other failure (an expired session, a server error, a full disk, a file that does
+                // not decrypt) stops the folder pull and names the file, as it always did: a pull that
+                // skipped it silently and exited 0 would look complete.
+                Err(other) => return Err(format!("{}: {}", target.display(), String::from(other))),
+            }
         }
     }
 
@@ -454,8 +551,8 @@ async fn pull_single_file(
     api: &ApiClient,
     file_id: &str,
     out_path: &std::path::Path,
-    request_content_key: Option<beebeeb_core::kdf::FileKey>,
-) -> Result<(), String> {
+    request_content_key: Option<&beebeeb_core::kdf::FileKey>,
+) -> Result<(), PullFailure> {
     let master_key = load_master_key()?;
 
     let file_meta = api.get_file(file_id).await?;
@@ -465,7 +562,7 @@ async fn pull_single_file(
         .and_then(|v| v.as_str())
         .ok_or("server response missing name_encrypted")?;
     // Read pin from the file's authenticated metadata (task 1943).
-    let pin = crate::crypto::file_row_pin(&master_key, file_id, name_encrypted, request_content_key.as_ref())?;
+    let pin = crate::crypto::file_row_pin(&master_key, file_id, name_encrypted, request_content_key)?;
 
     let name = out_path
         .file_name()
@@ -476,7 +573,7 @@ async fn pull_single_file(
     // File-request uploads are sealed under a per-file content key C, which the
     // streaming path (master-derived key) can't decrypt — use the buffered
     // request-key path and return early.
-    if let Some(c) = &request_content_key {
+    if let Some(c) = request_content_key {
         let dl_start = std::time::Instant::now();
         let encrypted_bytes = api.download_file(file_id).await?;
         let dl_elapsed = dl_start.elapsed();
@@ -1136,5 +1233,44 @@ mod tests {
         }
         assert_eq!(sink.written, 0);
         assert!(sink.add(0, "d/ok.txt", b"x", &on_progress).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+    use crate::download::DownloadError;
+
+    #[test]
+    fn only_a_version_change_is_retried() {
+        assert!(matches!(
+            PullFailure::from(DownloadError::Changed("m".into())),
+            PullFailure::Changed(m) if m == "m"
+        ));
+        for other in [DownloadError::Unreadable("u".into()), DownloadError::Other("o".into())] {
+            let text = other.to_string();
+            assert!(matches!(PullFailure::from(other), PullFailure::Other(m) if m == text));
+        }
+        assert_eq!(String::from(PullFailure::Changed("c".into())), "c");
+        assert_eq!(String::from(PullFailure::Other("o".into())), "o");
+    }
+
+    #[test]
+    fn the_overwrite_question_is_asked_once() {
+        let asked = std::cell::Cell::new(0u32);
+        let guard = |_: &std::path::Path, _: bool| {
+            asked.set(asked.get() + 1);
+            Ok(())
+        };
+        let out = std::path::Path::new("out.bin");
+        ask_once(false, out, false, guard).unwrap();
+        assert_eq!(asked.get(), 1, "the first attempt asks");
+        ask_once(true, out, false, |_: &std::path::Path, _: bool| -> Result<(), String> {
+            asked.set(asked.get() + 1);
+            Err("asked again".into())
+        })
+        .unwrap();
+        assert_eq!(asked.get(), 1, "the retry does not");
+        assert!(ask_once(false, out, true, |_: &std::path::Path, _: bool| Err("no".to_string())).is_err());
     }
 }

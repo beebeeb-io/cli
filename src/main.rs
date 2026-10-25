@@ -6,6 +6,7 @@ mod config;
 mod crypto;
 pub mod daemon;
 pub mod device;
+mod direct_download;
 mod download;
 mod env_detect;
 mod exit;
@@ -16,6 +17,7 @@ mod resume;
 mod safe_path;
 mod sync_safety;
 mod thumbnail;
+mod transport;
 mod tui;
 mod ui;
 mod update;
@@ -103,6 +105,11 @@ struct Cli {
     /// Disable colored output
     #[arg(long, global = true)]
     no_color: bool,
+
+    /// File-transfer transport: `auto` (default) or `api` to force the API (debugging).
+    /// Also settable with BB_TRANSPORT=api.
+    #[arg(long, global = true, value_enum, value_name = "MODE", hide = true)]
+    transport: Option<transport::Transport>,
 
     #[command(subcommand)]
     command: Commands,
@@ -913,6 +920,7 @@ async fn main() {
     let cli = Cli::parse();
 
     ui::init(cli.json, cli.quiet, cli.no_color);
+    transport::init(cli.transport);
 
     // Explicit updates bypass automatic opt-out/cooldown and report errors.
     if !matches!(cli.command, Commands::Update) {

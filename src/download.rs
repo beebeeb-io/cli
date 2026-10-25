@@ -122,10 +122,48 @@ fn check_cap(c: FallbackCap, len: u64) -> Result<(), String> {
     }
 }
 
+/// Why a streaming download did not produce a file. Nearly every failure is just a message; the two
+/// that callers must tell apart are typed, because a daemon that matched message text once
+/// crash-looped on a message nobody had listed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DownloadError {
+    /// The bytes could not be authenticated: this client cannot read the file right now. The
+    /// remote copy is untouched, and a later pass may read it (task 1916).
+    Unreadable(String),
+    /// The file's version changed while it was downloading; nothing was written. Only fresh
+    /// metadata (chunk count, read pin) can say what the file is now.
+    Changed(String),
+    /// Anything else (network, server, disk, an authorization answer).
+    Other(String),
+}
+
+impl std::fmt::Display for DownloadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (Self::Unreadable(m) | Self::Changed(m) | Self::Other(m)) = self;
+        f.write_str(m)
+    }
+}
+
+impl From<String> for DownloadError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
+impl From<DownloadError> for String {
+    fn from(e: DownloadError) -> String {
+        e.to_string()
+    }
+}
+
 /// Outcome of a streaming download.
 pub struct DownloadStats {
     pub plaintext_bytes: u64,
     pub encrypted_bytes: u64,
+    /// `"api"` (the file came through the API), `"direct"` (every chunk straight
+    /// from object storage through presigned links, task 2173) or `"mixed"`
+    /// (direct, with some chunks through the pinned per-chunk API route).
+    pub transport: &'static str,
 }
 
 /// Download a file's raw encrypted body into memory together with the server's
@@ -162,7 +200,7 @@ pub async fn stream_download_decrypt(
     out_path: &Path,
     progress: &dyn ChunkProgress,
     display_name: &str,
-) -> Result<DownloadStats, String> {
+) -> Result<DownloadStats, DownloadError> {
     stream_download_decrypt_with(
         api,
         master_key,
@@ -190,8 +228,27 @@ async fn stream_download_decrypt_with(
     progress: &dyn ChunkProgress,
     display_name: &str,
     ceiling: u64,
-) -> Result<DownloadStats, String> {
+) -> Result<DownloadStats, DownloadError> {
     let count = chunk_count.max(1);
+
+    // Task 2173: straight from object storage when the server offers it and the
+    // handshake succeeds. `UseApi` means nothing was published (and nothing is
+    // left on disk): this file goes through the API below, as it always did.
+    match crate::direct_download::try_download(
+        api,
+        master_key,
+        file_id,
+        pin,
+        chunk_count,
+        out_path,
+        progress,
+        display_name,
+    )
+    .await?
+    {
+        crate::direct_download::DirectResult::Done(stats) => return Ok(stats),
+        crate::direct_download::DirectResult::UseApi => {}
+    }
 
     let mut resp = api.download_stream(file_id).await?;
     let content_len = resp.content_length();
@@ -221,7 +278,7 @@ async fn stream_download_decrypt_with(
         }
     }
     if carry.is_empty() {
-        return Err("download returned an empty body".to_string());
+        return Err("download returned an empty body".to_string().into());
     }
 
     let prog = progress.begin_file(display_name, total);
@@ -263,7 +320,7 @@ async fn stream_raw(
     out_path: &Path,
     mut carry: Vec<u8>,
     prog: &dyn crate::upload::FileProgress,
-) -> Result<DownloadStats, String> {
+) -> Result<DownloadStats, DownloadError> {
     let n = count as usize;
     // Frame size for the first n-1 frames; the last frame takes the remainder.
     // When the server sends `X-Chunk-Size` (V2 files), each wire frame is the
@@ -302,13 +359,15 @@ async fn stream_raw(
                 writer.abort();
                 let mut full = std::mem::take(&mut carry);
                 drain_rest(resp, &mut full, fb_cap).await?;
-                return buffered_fallback(master_key, file_id, pin, &full, count, chunk_size, out_path, prog);
+                return buffered_fallback(master_key, file_id, pin, &full, count, chunk_size, out_path, prog)
+                    .map_err(DownloadError::from);
             }
             if carry.len() < frame_size {
                 return Err(format!(
                     "download truncated: chunk {i}/{n} wanted {frame_size} bytes, got {}",
                     carry.len()
-                ));
+                )
+                .into());
             }
             carry.drain(..frame_size).collect()
         };
@@ -331,11 +390,13 @@ async fn stream_raw(
                 // then drain the remainder under the fallback cap.
                 full.append(&mut carry);
                 drain_rest(resp, &mut full, fb_cap).await?;
-                return buffered_fallback(master_key, file_id, pin, &full, count, chunk_size, out_path, prog);
+                return buffered_fallback(master_key, file_id, pin, &full, count, chunk_size, out_path, prog)
+                    .map_err(DownloadError::from);
             }
             Err(e) => {
                 writer.abort();
-                return Err(format!("decrypt chunk {i}: {e}"));
+                // Frame i > 0 failed to authenticate: this client cannot read the file now.
+                return Err(DownloadError::Unreadable(format!("decrypt chunk {i}: {e}")));
             }
         }
     }
@@ -344,12 +405,14 @@ async fn stream_raw(
     // (truncation detection, task 1908). v1 has no last marker.
     if let Err(e) = decryptor.finish() {
         writer.abort();
-        return Err(format!("download incomplete: {e}"));
+        // The stream ended before the frame marked last: cut short or tampered with.
+        return Err(DownloadError::Unreadable(format!("download incomplete: {e}")));
     }
     writer.commit()?;
     Ok(DownloadStats {
         plaintext_bytes,
         encrypted_bytes,
+        transport: "api",
     })
 }
 
@@ -376,6 +439,7 @@ fn buffered_fallback(
     Ok(DownloadStats {
         plaintext_bytes: plaintext.len() as u64,
         encrypted_bytes: encrypted.len() as u64,
+        transport: "api",
     })
 }
 
@@ -410,7 +474,7 @@ fn header_u64(resp: &reqwest::Response, name: &str) -> Option<u64> {
 
 /// Write-to-`.tmp`-then-atomic-rename helper so an interrupted/failed download
 /// never leaves a corrupt file at `out_path`.
-struct AtomicFile {
+pub(crate) struct AtomicFile {
     writer: Option<std::io::BufWriter<std::fs::File>>,
     tmp: std::path::PathBuf,
     final_path: std::path::PathBuf,
@@ -418,7 +482,7 @@ struct AtomicFile {
 }
 
 impl AtomicFile {
-    fn create(out_path: &Path) -> Result<Self, String> {
+    pub(crate) fn create(out_path: &Path) -> Result<Self, String> {
         if let Some(parent) = out_path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
@@ -441,7 +505,7 @@ impl AtomicFile {
         })
     }
 
-    fn write_all(&mut self, data: &[u8]) -> Result<(), String> {
+    pub(crate) fn write_all(&mut self, data: &[u8]) -> Result<(), String> {
         self.writer
             .as_mut()
             .expect("writer present until commit/abort")
@@ -449,7 +513,7 @@ impl AtomicFile {
             .map_err(|e| format!("write {}: {e}", self.final_path.display()))
     }
 
-    fn commit(mut self) -> Result<(), String> {
+    pub(crate) fn commit(mut self) -> Result<(), String> {
         let mut w = self.writer.take().expect("writer present");
         w.flush().map_err(|e| format!("flush: {e}"))?;
         drop(w);
@@ -460,7 +524,7 @@ impl AtomicFile {
     }
 
     /// Explicitly abort before falling back to another writer for the same path.
-    fn abort(&mut self) {
+    pub(crate) fn abort(&mut self) {
         self.writer.take();
         let _ = std::fs::remove_file(&self.tmp);
         self.committed = true; // suppress Drop cleanup (already handled)
@@ -565,8 +629,7 @@ mod tests {
         (got.expect("download + decrypt succeeds"), confirmed)
     }
 
-    /// The real streaming path for any file id and read pin; returns the
-    /// decrypted file (or the error) and the number of progress confirmations.
+    /// [`download_inner_typed`] with the error as text, for the many tests that only read the message.
     async fn download_inner(
         body: Vec<u8>,
         chunk_size: Option<u64>,
@@ -576,6 +639,21 @@ mod tests {
         pin: ExpectedChunkFormat,
         ceiling: u64,
     ) -> (Result<Vec<u8>, String>, usize) {
+        let (got, confirmed) = download_inner_typed(body, chunk_size, chunk_count, m, file_id, pin, ceiling).await;
+        (got.map_err(String::from), confirmed)
+    }
+
+    /// The real streaming path for any file id and read pin; returns the
+    /// decrypted file (or the error) and the number of progress confirmations.
+    async fn download_inner_typed(
+        body: Vec<u8>,
+        chunk_size: Option<u64>,
+        chunk_count: u32,
+        m: &MasterKey,
+        file_id: &str,
+        pin: ExpectedChunkFormat,
+        ceiling: u64,
+    ) -> (Result<Vec<u8>, DownloadError>, usize) {
         let app = Router::new()
             .route("/api/v1/files/:id/download", get(serve))
             .with_state(Served {
@@ -604,7 +682,7 @@ mod tests {
             ceiling,
         )
         .await;
-        let got = r.and_then(|_| std::fs::read(&out).map_err(|e| e.to_string()));
+        let got = r.and_then(|_| std::fs::read(&out).map_err(|e| DownloadError::Other(e.to_string())));
         let _ = std::fs::remove_dir_all(&dir);
         (got, confirmed.load(Ordering::SeqCst))
     }
@@ -795,6 +873,19 @@ mod tests {
         m: &MasterKey,
         ceiling: u64,
     ) -> Result<Vec<u8>, String> {
+        run_chunked_with(body, headers, chunk_count, m, ceiling)
+            .await
+            .map(|(bytes, _)| bytes)
+    }
+
+    /// [`try_download_chunked_with`] that also returns the download's stats.
+    async fn run_chunked_with(
+        body: Vec<u8>,
+        headers: Vec<(&'static str, String)>,
+        chunk_count: u32,
+        m: &MasterKey,
+        ceiling: u64,
+    ) -> Result<(Vec<u8>, DownloadStats), String> {
         let body = Arc::new(body);
         let headers = Arc::new(headers);
         let app = Router::new().route(
@@ -836,9 +927,98 @@ mod tests {
             ceiling,
         )
         .await;
-        let got = r.map(|_| std::fs::read(&out).unwrap());
+        let got = r
+            .map(|stats| (std::fs::read(&out).unwrap(), stats))
+            .map_err(String::from);
         let _ = std::fs::remove_dir_all(&dir);
         got
+    }
+
+    #[test]
+    fn a_download_error_reads_as_its_message_and_text_errors_are_plain_failures() {
+        for e in [
+            DownloadError::Unreadable("a".into()),
+            DownloadError::Changed("a".into()),
+            DownloadError::Other("a".into()),
+        ] {
+            assert_eq!(e.to_string(), "a");
+            assert_eq!(String::from(e), "a");
+        }
+        assert_eq!(
+            DownloadError::from("boom".to_string()),
+            DownloadError::Other("boom".into())
+        );
+    }
+
+    /// The API path types what sync must not abort a pass for: a frame after the first that does not
+    /// authenticate, and a v2 stream cut before its last frame, are `Unreadable`; a plain network or
+    /// size problem is not.
+    #[tokio::test]
+    async fn the_api_path_types_an_unreadable_file() {
+        let (m, fid, wire, count, cs, _) = v2_file();
+        let frame = (cs + 28) as usize;
+        // Frame 1 flipped: frame 0 authenticates, so this is not a legacy file; it is damaged.
+        let mut tampered = wire.clone();
+        tampered[frame + 20] ^= 1;
+        let (got, _) = download_inner_typed(
+            tampered,
+            Some(cs),
+            count,
+            &m,
+            &fid,
+            ExpectedChunkFormat::V2,
+            FALLBACK_HARD_CEILING,
+        )
+        .await;
+        assert!(
+            matches!(got, Err(DownloadError::Unreadable(ref m)) if m.contains("decrypt chunk 1")),
+            "{got:?}"
+        );
+        // The last frame missing: every frame authenticates, the stream never reaches the one marked last.
+        let (got, _) = download_inner_typed(
+            wire[..(count as usize - 1) * frame].to_vec(),
+            Some(cs),
+            count - 1,
+            &m,
+            &fid,
+            ExpectedChunkFormat::V2,
+            FALLBACK_HARD_CEILING,
+        )
+        .await;
+        assert!(
+            matches!(got, Err(DownloadError::Unreadable(ref m)) if m.contains("download incomplete")),
+            "{got:?}"
+        );
+    }
+
+    /// Both API shapes (the raw stream and the buffered legacy decrypt) report `api`:
+    /// `"direct"` and `"mixed"` are only ever set by the direct driver.
+    #[tokio::test]
+    async fn the_api_paths_report_the_api_transport() {
+        let m = mk();
+        let pt = payload(2 * 4096 + 5);
+        let raw = raw_wire(&m, &pt, 4096, false);
+        let (got, stats) = run_chunked_with(
+            raw,
+            vec![("x-chunk-size", "4096".to_string())],
+            3,
+            &m,
+            FALLBACK_HARD_CEILING,
+        )
+        .await
+        .unwrap();
+        assert_eq!((got, stats.transport), (pt.clone(), "api"), "the streaming path");
+
+        let fk = derive_file_key(&m, FID.as_bytes());
+        let mut legacy = Vec::new();
+        for chunk in pt.chunks(300) {
+            legacy.extend(serde_json::to_vec(&encrypt_chunk(&fk, chunk).unwrap()).unwrap());
+        }
+        let count = pt.chunks(300).count() as u32;
+        let (got, stats) = run_chunked_with(legacy, vec![], count, &m, FALLBACK_HARD_CEILING)
+            .await
+            .unwrap();
+        assert_eq!((got, stats.transport), (pt, "api"), "the buffered legacy path");
     }
 
     /// Round 3 P2-1: a hostile X-Chunk-Size (2^40, u64::MAX) must be treated as

@@ -2892,6 +2892,28 @@ enum DownloadOutcome {
     Unreadable,
 }
 
+impl DownloadOutcome {
+    /// How a typed download failure ends one file's turn in a pass. `None`: not a decision for the
+    /// pass, the caller handles the failure as it always did (task 2173: a daemon must not die of a
+    /// file it cannot read, or of one that changed under it).
+    fn of_failure(e: &crate::download::DownloadError) -> Option<Self> {
+        use crate::download::DownloadError;
+        match e {
+            DownloadError::Unreadable(_) => Some(Self::Unreadable),
+            DownloadError::Changed(_) => Some(Self::Deferred),
+            DownloadError::Other(_) => None,
+        }
+    }
+}
+
+/// Is this download error the API's answer that the file is still being uploaded (a 409 from
+/// `/download`, rendered by the API client as `download failed (409 Conflict): …`)? Matched on that
+/// exact prefix, never on a bare "409": error texts carry random ids, and about one run in a hundred a
+/// decrypt failure containing `…409…` in a uuid was reported as "still uploading" and the pass exited 0.
+fn is_still_uploading(e: &str) -> bool {
+    e.contains("still in progress") || e.starts_with("download failed (409")
+}
+
 /// Does this download error mean "could not decrypt" (as opposed to a network
 /// or server failure)? Both are reported and retried; neither trashes anything.
 fn is_decrypt_failure(e: &str) -> bool {
@@ -2943,9 +2965,25 @@ async fn do_download(
             return Ok(DownloadOutcome::Deferred);
         }
     };
-    match download_to(api, master_key, remote.id, &remote.pin, remote.chunk_count, &out_path).await {
+    let downloaded = download_to(api, master_key, remote.id, &remote.pin, remote.chunk_count, &out_path).await;
+    // Typed failures first: no message text decides whether a daemon survives (task 2173).
+    if let Err(e) = &downloaded {
+        if let Some(outcome) = DownloadOutcome::of_failure(e) {
+            let then = match outcome {
+                DownloadOutcome::Deferred => "will pick up the new version next pass",
+                _ => "the remote copy is untouched; will retry next pass",
+            };
+            eprintln!(
+                "  {} {} \u{2014} {e}; {then}.",
+                "!".custom_color(crate::colors::RED_ERR),
+                rel.custom_color(crate::colors::INK),
+            );
+            return Ok(outcome);
+        }
+    }
+    match downloaded.map_err(String::from) {
         Ok(()) => {}
-        Err(e) if e.contains("still in progress") || e.contains("409") => {
+        Err(e) if is_still_uploading(&e) => {
             // A partially-uploaded remote (this or another device still pushing).
             // Do NOT trash it - that throws away resumable progress and forces a
             // restart from byte 0. Leave the partial: the upload side resumes via
@@ -3035,7 +3073,7 @@ async fn download_to(
     pin: &Result<beebeeb_core::chunk_stream::ExpectedChunkFormat, String>,
     chunk_count: u32,
     out_path: &Path,
-) -> Result<(), String> {
+) -> Result<(), crate::download::DownloadError> {
     let pin = pin.clone()?;
     let file_id_str = file_id.to_string();
     let name = out_path
@@ -3803,6 +3841,39 @@ mod tests {
         assert!(is_decrypt_failure("key derivation failed"));
         assert!(!is_decrypt_failure("download failed (500): oops"));
         assert!(!is_decrypt_failure("download truncated: chunk 1/3"));
+    }
+
+    #[test]
+    fn a_409_is_a_file_still_being_uploaded_and_nothing_else_is() {
+        assert!(is_still_uploading(
+            "download failed (409 Conflict): replace_in_progress"
+        ));
+        assert!(is_still_uploading("upload is still in progress"));
+        // Random ids in an error text must not decide it (a uuid may contain "409").
+        assert!(!is_still_uploading(
+            "decrypt chunk 0 of 7b0c1a52-3f4e-4409-9c61-2f8e5a1d0b37: aead error"
+        ));
+        assert!(!is_still_uploading(
+            "download failed (500 Internal Server Error): 409 widgets"
+        ));
+        assert!(!is_still_uploading("download failed (403 Forbidden)"));
+    }
+
+    #[test]
+    fn a_typed_download_failure_ends_one_files_turn_not_the_pass() {
+        use crate::download::DownloadError;
+        // A chunk that never authenticates: the same outcome as a decrypt failure on the API path.
+        assert_eq!(
+            DownloadOutcome::of_failure(&DownloadError::Unreadable("x".into())),
+            Some(DownloadOutcome::Unreadable)
+        );
+        // The version changed under the download: not this pass; the next one reads the new version.
+        assert_eq!(
+            DownloadOutcome::of_failure(&DownloadError::Changed("x".into())),
+            Some(DownloadOutcome::Deferred)
+        );
+        // Everything else is the caller's, as before (an expired session must still stop the pass).
+        assert_eq!(DownloadOutcome::of_failure(&DownloadError::Other("x".into())), None);
     }
 
     // ── walk_remote: what the listing could not show us ────────────────────

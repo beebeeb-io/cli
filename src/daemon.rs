@@ -172,6 +172,172 @@ pub fn kill_daemon(slug: &str) -> Result<bool, String> {
     }
 }
 
+// ── the background-service managers (launchd, systemd) ─────────────────────
+//
+// launchd and `systemd --user` run a job as the real user with the account's real home directory.
+// They know nothing of a HOME that a test, a wrapper or a container redirected. A service installed,
+// removed or migrated from such a process would be loaded into the REAL user's service domain while
+// its files sit under the fake home, and the job it loads reads the REAL config: a live session.
+// (A test once did exactly that: `bb sync --daemon` under a scratch HOME loaded a job that ran against
+// production with the developer's session.) So the managers are only ever spoken to when HOME is the
+// account's home. EVERY `launchctl` / `systemctl` call goes through [`service_manager`]; a source scan
+// in the tests fails if one does not.
+
+/// The account's home directory from the passwd database, not from `$HOME`.
+#[cfg(unix)]
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+fn account_home() -> Option<PathBuf> {
+    use std::ffi::{CStr, OsStr};
+    use std::os::unix::ffi::OsStrExt;
+    // 8 KiB, and more when the entry does not fit (ERANGE: a long group list or gecos field).
+    for size in [8 * 1024usize, 64 * 1024, 1024 * 1024] {
+        let mut buf = vec![0u8; size];
+        // SAFETY: `getpwuid_r` writes into the buffers we own and sets `out` to null or to `pwd`; the
+        // directory string it points into lives in `buf`, which outlives the copy below.
+        unsafe {
+            let mut pwd: libc::passwd = std::mem::zeroed();
+            let mut out: *mut libc::passwd = std::ptr::null_mut();
+            let rc = libc::getpwuid_r(libc::getuid(), &mut pwd, buf.as_mut_ptr().cast(), buf.len(), &mut out);
+            if rc == libc::ERANGE {
+                continue;
+            }
+            if rc != 0 || out.is_null() || pwd.pw_dir.is_null() {
+                return None;
+            }
+            // Bytes, not UTF-8: a home directory need not be valid UTF-8.
+            return Some(PathBuf::from(OsStr::from_bytes(CStr::from_ptr(pwd.pw_dir).to_bytes())));
+        }
+    }
+    None
+}
+
+#[cfg(not(unix))]
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+fn account_home() -> Option<PathBuf> {
+    None
+}
+
+/// Set to `1` to let a service be installed (or removed) from a HOME that is not the account's home.
+/// For a real user with an unusual but intended setup (`sudo -E`, a relocated home directory). Tests
+/// never set it.
+pub const CUSTOM_HOME_OVERRIDE: &str = "BB_SERVICE_INSTALL_ALLOW_CUSTOM_HOME";
+
+/// Is `a` the same directory as `b` (equal, or the same after resolving symlinks)?
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+fn same_dir(a: &Path, b: &Path) -> bool {
+    a == b || matches!((fs::canonicalize(a), fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y)
+}
+
+/// `Err` when `home` is not the account's home, unless `allow` (the override variable's value) is
+/// `1`. When the account's home cannot be determined at all (no passwd entry) it FAILS CLOSED: not
+/// knowing is not a reason to load a service into someone's launchd; the override says "I am sure".
+/// Only an unknown `home` (nothing to compare) passes.
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+fn check_home(home: Option<&Path>, account: Option<&Path>, allow: Option<&str>) -> Result<(), String> {
+    if allow == Some("1") {
+        return Ok(());
+    }
+    let Some(home) = home else {
+        return Ok(());
+    };
+    let Some(account) = account else {
+        return Err(format!(
+            "refusing to touch the background-service manager: HOME is {} but this account's home \
+             directory cannot be determined (no passwd entry). If you are sure, run the command again \
+             with {CUSTOM_HOME_OVERRIDE}=1",
+            home.display()
+        ));
+    };
+    if same_dir(home, account) {
+        Ok(())
+    } else {
+        Err(format!(
+            "refusing to touch the background-service manager: HOME is {} but this account's home is {}. \
+             launchd and systemd run services with the account's home, so the service would use that \
+             home's config and session, not this one. If this HOME is intended (`sudo -E`, a relocated \
+             home directory), run the command again with {CUSTOM_HOME_OVERRIDE}=1",
+            home.display(),
+            account.display()
+        ))
+    }
+}
+
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+/// The config directory the process uses must be the one the installed service would use. On Linux
+/// `dirs` reads it from `$XDG_CONFIG_HOME` (when absolute) before `$HOME/.config`, but a systemd user
+/// service gets neither: it reads `<account home>/.config`. So an `XDG_CONFIG_HOME` that points
+/// elsewhere with the real HOME would pass the HOME check and still install a unit that reads the
+/// real config (and a live session). (macOS ignores XDG; its config lives under HOME.)
+#[cfg(any(target_os = "linux", test))]
+fn check_config_dir(config: Option<&Path>, account: Option<&Path>, allow: Option<&str>) -> Result<(), String> {
+    if allow == Some("1") {
+        return Ok(());
+    }
+    let (Some(config), Some(account)) = (config, account) else {
+        return Ok(());
+    };
+    let expected = account.join(".config");
+    if same_dir(config, &expected) {
+        Ok(())
+    } else {
+        Err(format!(
+            "refusing to touch the background-service manager: this run reads its config from {} (is \
+             XDG_CONFIG_HOME set?) but the service would read {}. If this is intended, run the command \
+             again with {CUSTOM_HOME_OVERRIDE}=1",
+            config.display(),
+            expected.display()
+        ))
+    }
+}
+
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+fn ensure_real_home() -> Result<(), String> {
+    let allow = std::env::var(CUSTOM_HOME_OVERRIDE).ok();
+    let account = account_home();
+    check_home(dirs::home_dir().as_deref(), account.as_deref(), allow.as_deref())?;
+    #[cfg(target_os = "linux")]
+    check_config_dir(dirs::config_dir().as_deref(), account.as_deref(), allow.as_deref())?;
+    Ok(())
+}
+
+/// Run `program args…` (`launchctl` or `systemctl`) and wait for it, after checking HOME. The only
+/// way this crate starts a service manager (apart from a job removing itself in
+/// [`disarm_launchagent_if_managed`]).
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+fn service_manager(program: &str, args: &[&str]) -> Result<std::process::ExitStatus, String> {
+    ensure_real_home()?;
+    std::process::Command::new(program)
+        .args(args)
+        .status()
+        .map_err(|e| format!("{program}: {e}"))
+}
+
+/// The arguments of the detached child: the sync it runs, preceded by the transport this
+/// invocation forced. `BB_TRANSPORT` reaches the child through the environment; the flag does not,
+/// so it is passed on here.
+fn daemon_args(local_dir: &Path, remote_path: &str, api_forced: bool) -> Vec<String> {
+    let mut args = Vec::new();
+    if api_forced {
+        args.extend(["--transport".to_string(), "api".to_string()]);
+    }
+    args.extend([
+        "sync".to_string(),
+        local_dir.to_string_lossy().into_owned(),
+        remote_path.to_string(),
+    ]);
+    args
+}
+
+/// The command that starts the detached child, not yet started: its arguments, and the transport
+/// this invocation selected said explicitly in its environment, so `--transport auto` beats an
+/// inherited `BB_TRANSPORT=api` just as `--transport api` beats an inherited `auto`.
+fn daemon_command(exe: &Path, local_dir: &Path, remote_path: &str, api_forced: bool) -> std::process::Command {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(daemon_args(local_dir, remote_path, api_forced))
+        .env("BB_TRANSPORT", if api_forced { "api" } else { "auto" });
+    cmd
+}
+
 /// Spawn `bb sync <local> <remote>` as a detached daemon process.
 ///
 /// Stdout/stderr are redirected to log files. Returns the child PID.
@@ -193,8 +359,7 @@ pub fn spawn_daemon(local_dir: &Path, remote_path: &str, slug: &str) -> Result<u
     let stdout_file = fs::File::create(&stdout_path).map_err(|e| format!("create log file: {e}"))?;
     let stderr_file = fs::File::create(&stderr_path).map_err(|e| format!("create error log file: {e}"))?;
 
-    let child = std::process::Command::new(&exe)
-        .args(["sync", &local_dir.to_string_lossy(), remote_path])
+    let child = daemon_command(&exe, local_dir, remote_path, crate::transport::api_forced())
         .stdout(stdout_file)
         .stderr(stderr_file)
         // Detach from the parent process group
@@ -226,6 +391,8 @@ fn xml_escape(s: &str) -> String {
 /// concurrent sync sessions.
 #[cfg(target_os = "macos")]
 pub fn install_launchagent(local_dir: &Path, remote_path: &str, slug: &str) -> Result<(), String> {
+    // Before anything is written: a plist under a redirected HOME must not exist at all.
+    ensure_real_home()?;
     let plist_dir = dirs::home_dir()
         .ok_or("cannot find home directory")?
         .join("Library/LaunchAgents");
@@ -253,19 +420,17 @@ pub fn install_launchagent(local_dir: &Path, remote_path: &str, slug: &str) -> R
     let stdout_log = logs.join(format!("{slug}.log"));
     let stderr_log = logs.join(format!("{slug}.err"));
 
-    let plist = render_plist(
+    let plist = render_plist_with_env(
         &label,
         &args_xml,
         &stdout_log.to_string_lossy(),
         &stderr_log.to_string_lossy(),
+        &env_xml_with_transport(crate::transport::selected_name()),
     );
 
     fs::write(&plist_path, &plist).map_err(|e| format!("write plist: {e}"))?;
 
-    let status = std::process::Command::new("launchctl")
-        .args(["load", &plist_path.to_string_lossy()])
-        .status()
-        .map_err(|e| format!("launchctl load: {e}"))?;
+    let status = service_manager("launchctl", &["load", &plist_path.to_string_lossy()])?;
 
     if !status.success() {
         return Err("launchctl load failed".to_string());
@@ -276,6 +441,13 @@ pub fn install_launchagent(local_dir: &Path, remote_path: &str, slug: &str) -> R
 
 /// The `EnvironmentVariables` entry every managed sync plist carries.
 const MARKER_ENV_XML: &str = "        <key>BEEBEEB_SYNC_SERVICE</key>\n        <string>1</string>";
+
+/// The marker env plus the transport the installing invocation selected, so the service moves files
+/// the way the user asked and not the way a stray BB_TRANSPORT in launchd's environment says.
+#[cfg(any(target_os = "macos", test))]
+fn env_xml_with_transport(transport: &str) -> String {
+    format!("{MARKER_ENV_XML}\n        <key>BB_TRANSPORT</key>\n        <string>{transport}</string>")
+}
 
 /// Render the sync LaunchAgent plist.
 pub fn render_plist(label: &str, args_xml: &str, stdout_log: &str, stderr_log: &str) -> String {
@@ -323,6 +495,14 @@ fn render_plist_with_env(label: &str, args_xml: &str, stdout_log: &str, stderr_l
 
 /// Render the sync systemd user unit.
 pub fn render_systemd_unit(slug: &str, exe: &str, local: &str, remote: &str) -> String {
+    render_systemd_unit_with(slug, exe, local, remote, None)
+}
+
+/// [`render_systemd_unit`] with the transport the installing invocation selected (`api` or `auto`).
+pub fn render_systemd_unit_with(slug: &str, exe: &str, local: &str, remote: &str, transport: Option<&str>) -> String {
+    let transport_env = transport
+        .map(|t| format!("Environment=BB_TRANSPORT={t}\n"))
+        .unwrap_or_default();
     format!(
         r#"[Unit]
 Description=Beebeeb Sync - {slug}
@@ -333,7 +513,7 @@ Wants=network-online.target
 Type=simple
 ExecStart={exe} sync {local} {remote}
 Environment=BEEBEEB_SYNC_SERVICE=1
-Restart=on-failure
+{transport_env}Restart=on-failure
 RestartSec=30
 RestartPreventExitStatus=77
 
@@ -344,6 +524,7 @@ WantedBy=default.target
         exe = exe,
         local = local,
         remote = remote,
+        transport_env = transport_env,
     )
 }
 
@@ -562,9 +743,7 @@ pub fn migrate_sync_services() {
     }
     if !migrate_systemd_units_in(&home.join(".config/systemd/user")).is_empty() {
         #[cfg(target_os = "linux")]
-        let _ = std::process::Command::new("systemctl")
-            .args(["--user", "daemon-reload"])
-            .status();
+        let _ = service_manager("systemctl", &["--user", "daemon-reload"]);
         eprintln!("Updated the background sync service to stop restarting after sign-out.");
     }
 }
@@ -573,31 +752,24 @@ pub fn migrate_sync_services() {
 #[cfg(target_os = "macos")]
 pub fn uninstall_launchagent(slug: &str) -> Result<bool, String> {
     let label = format!("io.beebeeb.sync.{slug}");
-    let plist_path = dirs::home_dir()
+    let agents = dirs::home_dir()
         .ok_or("cannot find home directory")?
-        .join("Library/LaunchAgents")
-        .join(format!("{label}.plist"));
-
-    if !plist_path.exists() {
-        // Also try the legacy single-plist name
-        let legacy_path = dirs::home_dir()
-            .ok_or("cannot find home directory")?
-            .join("Library/LaunchAgents/io.beebeeb.sync.plist");
-        if legacy_path.exists() {
-            let _ = std::process::Command::new("launchctl")
-                .args(["unload", &legacy_path.to_string_lossy()])
-                .status();
-            let _ = fs::remove_file(&legacy_path);
-            return Ok(true);
-        }
+        .join("Library/LaunchAgents");
+    let plist_path = agents.join(format!("{label}.plist"));
+    // Also the legacy single-plist name.
+    let legacy_path = agents.join("io.beebeeb.sync.plist");
+    let target = if plist_path.exists() {
+        plist_path
+    } else if legacy_path.exists() {
+        legacy_path
+    } else {
+        // Nothing installed here, nothing to unload: not a reason to refuse (and a caller that
+        // loops over sessions must not stop at the first slug that has no service).
         return Ok(false);
-    }
-
-    let _ = std::process::Command::new("launchctl")
-        .args(["unload", &plist_path.to_string_lossy()])
-        .status();
-
-    fs::remove_file(&plist_path).map_err(|e| format!("remove plist: {e}"))?;
+    };
+    ensure_real_home()?;
+    let _ = service_manager("launchctl", &["unload", &target.to_string_lossy()]);
+    fs::remove_file(&target).map_err(|e| format!("remove plist: {e}"))?;
     Ok(true)
 }
 
@@ -616,6 +788,7 @@ pub fn uninstall_launchagent(_slug: &str) -> Result<bool, String> {
 /// Install a systemd user service unit for the given sync session.
 #[cfg(target_os = "linux")]
 pub fn install_systemd_unit(local_dir: &Path, remote_path: &str, slug: &str) -> Result<(), String> {
+    ensure_real_home()?;
     let unit_dir = dirs::home_dir()
         .ok_or("cannot find home directory")?
         .join(".config/systemd/user");
@@ -625,19 +798,20 @@ pub fn install_systemd_unit(local_dir: &Path, remote_path: &str, slug: &str) -> 
     let unit_name = format!("beebeeb-sync-{slug}.service");
     let unit_path = unit_dir.join(&unit_name);
 
-    let unit_content = render_systemd_unit(slug, &exe.to_string_lossy(), &local_dir.to_string_lossy(), remote_path);
+    let unit_content = render_systemd_unit_with(
+        slug,
+        &exe.to_string_lossy(),
+        &local_dir.to_string_lossy(),
+        remote_path,
+        Some(crate::transport::selected_name()),
+    );
 
     fs::write(&unit_path, &unit_content).map_err(|e| format!("write systemd unit: {e}"))?;
 
     // Reload and enable
-    let _ = std::process::Command::new("systemctl")
-        .args(["--user", "daemon-reload"])
-        .status();
+    let _ = service_manager("systemctl", &["--user", "daemon-reload"]);
 
-    let status = std::process::Command::new("systemctl")
-        .args(["--user", "enable", "--now", &unit_name])
-        .status()
-        .map_err(|e| format!("systemctl enable: {e}"))?;
+    let status = service_manager("systemctl", &["--user", "enable", "--now", &unit_name])?;
 
     if !status.success() {
         return Err(format!("systemctl enable --now {unit_name} failed"));
@@ -658,20 +832,14 @@ pub fn uninstall_systemd_unit(slug: &str) -> Result<bool, String> {
     if !unit_path.exists() {
         return Ok(false);
     }
+    ensure_real_home()?;
 
-    let _ = std::process::Command::new("systemctl")
-        .args(["--user", "stop", &unit_name])
-        .status();
-
-    let _ = std::process::Command::new("systemctl")
-        .args(["--user", "disable", &unit_name])
-        .status();
+    let _ = service_manager("systemctl", &["--user", "stop", &unit_name]);
+    let _ = service_manager("systemctl", &["--user", "disable", &unit_name]);
 
     fs::remove_file(&unit_path).map_err(|e| format!("remove systemd unit: {e}"))?;
 
-    let _ = std::process::Command::new("systemctl")
-        .args(["--user", "daemon-reload"])
-        .status();
+    let _ = service_manager("systemctl", &["--user", "daemon-reload"]);
 
     Ok(true)
 }
@@ -916,5 +1084,136 @@ mod restart_policy_tests {
         assert!(!running_as_service(Some("com.other"), None));
         assert!(!running_as_service(None, Some("")));
         assert!(!running_as_service(None, None));
+    }
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+
+    #[test]
+    fn the_daemon_child_inherits_a_forced_api_transport() {
+        let dir = Path::new("/tmp/photos");
+        assert_eq!(daemon_args(dir, "/photos", false), ["sync", "/tmp/photos", "/photos"]);
+        assert_eq!(
+            daemon_args(dir, "/photos", true),
+            ["--transport", "api", "sync", "/tmp/photos", "/photos"]
+        );
+    }
+
+    #[test]
+    fn the_daemon_child_is_told_its_transport_in_words_not_by_inheritance() {
+        let exe = Path::new("/usr/local/bin/bb");
+        let dir = Path::new("/tmp/photos");
+        for (forced, want) in [(true, "api"), (false, "auto")] {
+            let cmd = daemon_command(exe, dir, "/photos", forced);
+            let env: Vec<_> = cmd
+                .get_envs()
+                .filter(|(k, _)| *k == "BB_TRANSPORT")
+                .map(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+                .collect();
+            assert_eq!(env, vec![Some(want.to_string())], "forced={forced}");
+            let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+            assert_eq!(args.last().map(String::as_str), Some("/photos"));
+            assert_eq!(args.contains(&"--transport".to_string()), forced);
+        }
+    }
+
+    #[test]
+    fn a_service_definition_carries_the_transport_it_was_installed_with() {
+        let plist = env_xml_with_transport("api");
+        assert!(plist.contains("BEEBEEB_SYNC_SERVICE"), "the marker stays: {plist}");
+        assert!(
+            plist.contains("<key>BB_TRANSPORT</key>\n        <string>api</string>"),
+            "{plist}"
+        );
+        assert!(env_xml_with_transport("auto").contains("<string>auto</string>"));
+        let unit = render_systemd_unit_with("s", "/bin/bb", "/tmp/a", "/r", Some("api"));
+        assert!(unit.contains("Environment=BEEBEEB_SYNC_SERVICE=1\nEnvironment=BB_TRANSPORT=api\nRestart=on-failure"));
+        let plain = render_systemd_unit("s", "/bin/bb", "/tmp/a", "/r");
+        assert!(!plain.contains("BB_TRANSPORT") && plain.contains("Restart=on-failure"));
+    }
+
+    // ── the service managers are only spoken to from the account's own home ──
+
+    #[test]
+    fn the_service_managers_are_only_spoken_to_from_the_accounts_home() {
+        let account = Path::new("/Users/dev");
+        let scratch = Path::new("/tmp/scratch/home");
+        assert!(check_home(Some(account), Some(account), None).is_ok());
+        let refused = check_home(Some(scratch), Some(account), None).unwrap_err();
+        assert!(
+            refused.contains("refusing") && refused.contains("/tmp/scratch/home") && refused.contains("/Users/dev"),
+            "{refused}"
+        );
+        // The refusal says how to proceed when the HOME is intended.
+        assert!(refused.contains("BB_SERVICE_INSTALL_ALLOW_CUSTOM_HOME=1"), "{refused}");
+        // When either side is unknown there is nothing to compare: a real user is not locked out.
+        assert!(check_home(None, Some(account), None).is_ok());
+        assert!(check_home(None, None, None).is_ok());
+        // An unknown ACCOUNT home fails closed: not knowing is not consent. The override still works.
+        let unknown = check_home(Some(account), None, None).unwrap_err();
+        assert!(
+            unknown.contains("cannot be determined") && unknown.contains("=1"),
+            "{unknown}"
+        );
+        assert!(check_home(Some(account), None, Some("1")).is_ok());
+    }
+
+    #[test]
+    fn a_config_dir_that_is_not_the_services_is_refused() {
+        // XDG_CONFIG_HOME pointing elsewhere with the real HOME: the HOME check passes, this must not.
+        let account = Path::new("/home/dev");
+        assert!(check_config_dir(Some(Path::new("/home/dev/.config")), Some(account), None).is_ok());
+        let refused = check_config_dir(Some(Path::new("/tmp/scratch/xdg")), Some(account), None).unwrap_err();
+        assert!(
+            refused.contains("XDG_CONFIG_HOME")
+                && refused.contains("/tmp/scratch/xdg")
+                && refused.contains("/home/dev/.config"),
+            "{refused}"
+        );
+        assert!(refused.contains("BB_SERVICE_INSTALL_ALLOW_CUSTOM_HOME=1"), "{refused}");
+        assert!(check_config_dir(Some(Path::new("/tmp/scratch/xdg")), Some(account), Some("1")).is_ok());
+        assert!(check_config_dir(Some(Path::new("/tmp/scratch/xdg")), Some(account), Some("0")).is_err());
+        // Nothing to compare when either side is unknown (the HOME check has its own rule for that).
+        assert!(check_config_dir(None, Some(account), None).is_ok());
+        assert!(check_config_dir(Some(Path::new("/x")), None, None).is_ok());
+    }
+
+    #[test]
+    fn the_override_lets_an_intended_custom_home_through_and_only_the_value_one() {
+        let account = Path::new("/Users/dev");
+        let custom = Path::new("/srv/custom-home");
+        assert!(check_home(Some(custom), Some(account), Some("1")).is_ok());
+        for not_consent in [None, Some(""), Some("0"), Some("true"), Some("yes"), Some("11")] {
+            assert!(
+                check_home(Some(custom), Some(account), not_consent).is_err(),
+                "{not_consent:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_home_is_the_same_home() {
+        let dir = std::env::temp_dir().join(format!("bb-home-guard-{}", std::process::id()));
+        let real = dir.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = dir.join("link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(check_home(Some(&link), Some(&real), None).is_ok());
+        assert!(
+            check_home(Some(&dir), Some(&real), None).is_err(),
+            "a parent directory is not the home"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_accounts_home_comes_from_the_passwd_database() {
+        let home = account_home().expect("this account has a passwd entry");
+        assert!(home.is_absolute(), "{home:?}");
     }
 }
