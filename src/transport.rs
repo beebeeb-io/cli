@@ -18,11 +18,25 @@ pub enum Transport {
 
 static SELECTED: OnceLock<Transport> = OnceLock::new();
 
+/// What `BB_TRANSPORT` says. `Err` for a value that is neither `api` nor `auto`.
+fn parse(value: &str) -> Result<Transport, ()> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "api" => Ok(Transport::Api),
+        "auto" => Ok(Transport::Auto),
+        _ => Err(()),
+    }
+}
+
 fn from_env() -> Option<Transport> {
-    match std::env::var("BB_TRANSPORT").ok()?.trim().to_ascii_lowercase().as_str() {
-        "api" => Some(Transport::Api),
-        "auto" => Some(Transport::Auto),
-        _ => None,
+    let raw = std::env::var("BB_TRANSPORT").ok()?;
+    match parse(&raw) {
+        Ok(t) => Some(t),
+        Err(()) => {
+            // A typo must not silently change how files travel in either direction: say so, once
+            // (this runs once per process), and use the default.
+            eprintln!("bb: ignoring BB_TRANSPORT={raw:?} (expected \"api\" or \"auto\"); using auto");
+            None
+        }
     }
 }
 
@@ -34,4 +48,20 @@ pub fn init(flag: Option<Transport>) {
 /// `true` when the user forced the API transport.
 pub fn api_forced() -> bool {
     SELECTED.get().copied() == Some(Transport::Api)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_variable_accepts_api_and_auto_and_nothing_else() {
+        assert_eq!(parse("api"), Ok(Transport::Api));
+        assert_eq!(parse(" API "), Ok(Transport::Api));
+        assert_eq!(parse("auto"), Ok(Transport::Auto));
+        assert_eq!(parse("Auto"), Ok(Transport::Auto));
+        for bad in ["", "direct", "apii", "1", "off"] {
+            assert_eq!(parse(bad), Err(()), "{bad:?}");
+        }
+    }
 }

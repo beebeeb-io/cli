@@ -172,6 +172,22 @@ pub fn kill_daemon(slug: &str) -> Result<bool, String> {
     }
 }
 
+/// The arguments of the detached child: the sync it runs, preceded by the transport this
+/// invocation forced. `BB_TRANSPORT` reaches the child through the environment; the flag does not,
+/// so it is passed on here.
+fn daemon_args(local_dir: &Path, remote_path: &str, api_forced: bool) -> Vec<String> {
+    let mut args = Vec::new();
+    if api_forced {
+        args.extend(["--transport".to_string(), "api".to_string()]);
+    }
+    args.extend([
+        "sync".to_string(),
+        local_dir.to_string_lossy().into_owned(),
+        remote_path.to_string(),
+    ]);
+    args
+}
+
 /// Spawn `bb sync <local> <remote>` as a detached daemon process.
 ///
 /// Stdout/stderr are redirected to log files. Returns the child PID.
@@ -194,7 +210,7 @@ pub fn spawn_daemon(local_dir: &Path, remote_path: &str, slug: &str) -> Result<u
     let stderr_file = fs::File::create(&stderr_path).map_err(|e| format!("create error log file: {e}"))?;
 
     let child = std::process::Command::new(&exe)
-        .args(["sync", &local_dir.to_string_lossy(), remote_path])
+        .args(daemon_args(local_dir, remote_path, crate::transport::api_forced()))
         .stdout(stdout_file)
         .stderr(stderr_file)
         // Detach from the parent process group
@@ -916,5 +932,20 @@ mod restart_policy_tests {
         assert!(!running_as_service(Some("com.other"), None));
         assert!(!running_as_service(None, Some("")));
         assert!(!running_as_service(None, None));
+    }
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+
+    #[test]
+    fn the_daemon_child_inherits_a_forced_api_transport() {
+        let dir = Path::new("/tmp/photos");
+        assert_eq!(daemon_args(dir, "/photos", false), ["sync", "/tmp/photos", "/photos"]);
+        assert_eq!(
+            daemon_args(dir, "/photos", true),
+            ["--transport", "api", "sync", "/tmp/photos", "/photos"]
+        );
     }
 }

@@ -5,13 +5,67 @@ use std::path::PathBuf;
 use crate::api::ApiClient;
 use crate::commands::push::load_master_key;
 
+/// Why one attempt at `bb pull` ended without a file. Only a version change is a decision: the
+/// file is read again from fresh metadata, once.
+enum PullFailure {
+    /// The file's version changed while it was downloading (nothing was written).
+    Changed(String),
+    Other(String),
+}
+
+impl From<String> for PullFailure {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
+impl From<&str> for PullFailure {
+    fn from(message: &str) -> Self {
+        Self::Other(message.to_string())
+    }
+}
+
+impl From<crate::download::DownloadError> for PullFailure {
+    fn from(e: crate::download::DownloadError) -> Self {
+        match e {
+            crate::download::DownloadError::Changed(m) => Self::Changed(m),
+            other => Self::Other(other.into()),
+        }
+    }
+}
+
+impl From<PullFailure> for String {
+    fn from(e: PullFailure) -> String {
+        match e {
+            PullFailure::Changed(m) | PullFailure::Other(m) => m,
+        }
+    }
+}
+
 pub async fn run(file_id: String, output: Option<PathBuf>, zip: bool, force: bool) -> Result<(), String> {
+    match run_once(file_id.clone(), output.clone(), zip, force).await {
+        // Someone published a new version while this one was downloading. Nothing was written;
+        // the new version's chunk count and read pin need a fresh look, so start over, once.
+        Err(PullFailure::Changed(_)) => {
+            if !crate::ui::is_quiet() {
+                eprintln!("The file changed while it was downloading; starting again from its new version.");
+            }
+            run_once(file_id, output, zip, force).await.map_err(|e| match e {
+                PullFailure::Changed(m) => format!("{m}. It changed again; run the command again"),
+                PullFailure::Other(m) => m,
+            })
+        }
+        other => other.map_err(String::from),
+    }
+}
+
+async fn run_once(file_id: String, output: Option<PathBuf>, zip: bool, force: bool) -> Result<(), PullFailure> {
     let api = ApiClient::from_config();
     api.require_auth()?;
 
     // --zip mode: resolve as folder and download as a zip archive
     if zip {
-        return run_zip(&api, &file_id, output, force).await;
+        return Ok(run_zip(&api, &file_id, output, force).await?);
     }
 
     let (file_id, resolved_name) = resolve_file_arg(&api, &file_id).await?;
@@ -68,7 +122,7 @@ pub async fn run(file_id: String, output: Option<PathBuf>, zip: bool, force: boo
             Some(o) => o,
             None => crate::safe_path::default_output_path(folder_name)?,
         };
-        return pull_folder(&api, &file_id, &out_dir, force).await;
+        return Ok(pull_folder(&api, &file_id, &out_dir, force).await?);
     }
 
     let display_name = decrypted_name.as_deref().unwrap_or(&file_id);
@@ -1137,5 +1191,25 @@ mod tests {
         }
         assert_eq!(sink.written, 0);
         assert!(sink.add(0, "d/ok.txt", b"x", &on_progress).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+    use crate::download::DownloadError;
+
+    #[test]
+    fn only_a_version_change_is_retried() {
+        assert!(matches!(
+            PullFailure::from(DownloadError::Changed("m".into())),
+            PullFailure::Changed(m) if m == "m"
+        ));
+        for other in [DownloadError::Unreadable("u".into()), DownloadError::Other("o".into())] {
+            let text = other.to_string();
+            assert!(matches!(PullFailure::from(other), PullFailure::Other(m) if m == text));
+        }
+        assert_eq!(String::from(PullFailure::Changed("c".into())), "c");
+        assert_eq!(String::from(PullFailure::Other("o".into())), "o");
     }
 }

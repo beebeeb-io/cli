@@ -18,7 +18,9 @@ use super::ApiClient;
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
 const GRANT_TIMEOUT: Duration = Duration::from_secs(60);
 const CHUNK_API_TIMEOUT: Duration = Duration::from_secs(600);
-const STORAGE_TIMEOUT: Duration = Duration::from_secs(600);
+/// A storage transfer may take as long as the link needs, but it must keep moving: no byte for
+/// this long and the request fails (and the chunk is renewed or taken over by the API).
+const STORAGE_READ_TIMEOUT: Duration = Duration::from_secs(60);
 const STORAGE_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Unix milliseconds: the clock the planner and the discovery cache are given.
@@ -45,6 +47,35 @@ pub(crate) enum ChunkApiError {
     Failed(String),
 }
 
+/// How hard the pinned per-chunk route is tried before the chunk, and with it the file, goes to the
+/// API stream. Grants and this route share the per-user rate limiter server-side, and a download that
+/// has fallen back to it fetches four chunks at a time, so one 429 is likely and must not cost the
+/// whole transfer.
+#[derive(Clone, Copy)]
+struct PinnedRetry {
+    /// Attempts in all, the first one included.
+    attempts: u32,
+    /// The most the retries may wait in total; a wait that would pass it ends them.
+    budget: Duration,
+    /// The wait before the second attempt when the server named none; it doubles each time.
+    base: Duration,
+}
+
+const PINNED_RETRY: PinnedRetry = PinnedRetry {
+    attempts: 4,
+    budget: Duration::from_secs(60),
+    base: Duration::from_secs(1),
+};
+
+/// One attempt of the pinned route that did not give the chunk.
+enum PinnedFailure {
+    /// Not worth another try (an authorization answer, a gone version, a refusal that will repeat).
+    Final(ChunkApiError),
+    /// Could be gone in a moment: a 429, a 5xx, a held file, a network blip, a bad read.
+    /// `wait` is what the server asked for, if it did.
+    Again { wait: Option<Duration>, message: String },
+}
+
 /// Read a body incrementally, giving up (`None`) when it passes `max` bytes.
 async fn read_capped(resp: &mut reqwest::Response, max: usize) -> Option<Vec<u8>> {
     let mut body = Vec::new();
@@ -57,9 +88,39 @@ async fn read_capped(resp: &mut reqwest::Response, max: usize) -> Option<Vec<u8>
     Some(body)
 }
 
+/// What reading a body that must be exactly `expected` bytes long came to.
+enum Exact {
+    Body(Vec<u8>),
+    /// More or fewer bytes than the manifest states: asking again will not change that.
+    WrongLength,
+    /// The connection broke while reading: another try may well work.
+    Broken,
+}
+
+async fn read_exact_len(resp: &mut reqwest::Response, expected: u64) -> Exact {
+    let mut body = Vec::new();
+    loop {
+        match resp.chunk().await {
+            Err(_) => return Exact::Broken,
+            Ok(None) => break,
+            Ok(Some(piece)) => {
+                if (body.len() as u64).saturating_add(piece.len() as u64) > expected {
+                    return Exact::WrongLength;
+                }
+                body.extend_from_slice(&piece);
+            }
+        }
+    }
+    if body.len() as u64 == expected {
+        Exact::Body(body)
+    } else {
+        Exact::WrongLength
+    }
+}
+
 /// Turn a finished response into what the classifier needs, reading at most
 /// `max` body bytes.
-async fn answer_of(mut resp: reqwest::Response, max: usize) -> (dt::ApiAnswer, Vec<u8>) {
+async fn answer_of(mut resp: reqwest::Response, max: usize) -> Seen {
     super::update_rate_state(resp.headers());
     let status = resp.status().as_u16();
     let header = |name: &str| {
@@ -72,7 +133,29 @@ async fn answer_of(mut resp: reqwest::Response, max: usize) -> (dt::ApiAnswer, V
     let retry_after = header("retry-after");
     let body = read_capped(&mut resp, max).await.unwrap_or_default();
     let answer = dt::ApiAnswer::from_parts(status, content_type.as_deref(), &body, retry_after.as_deref());
-    (answer, body)
+    Seen {
+        answer,
+        body,
+        retry_after_sent: retry_after.is_some(),
+    }
+}
+
+/// An API answer as the classifier sees it, plus what it cannot tell us.
+struct Seen {
+    answer: dt::ApiAnswer,
+    body: Vec<u8>,
+    /// Did the server send a `Retry-After` at all? (The classifier substitutes a default when not.)
+    retry_after_sent: bool,
+}
+
+impl Seen {
+    fn no_answer() -> Self {
+        Self {
+            answer: dt::ApiAnswer::no_answer(),
+            body: Vec::new(),
+            retry_after_sent: false,
+        }
+    }
 }
 
 /// The client for presigned storage links (R1.11). Built once per `ApiClient`.
@@ -84,6 +167,12 @@ async fn answer_of(mut resp: reqwest::Response, max: usize) -> (dt::ApiAnswer, V
 /// (local development). `None` if the client cannot be built: the caller then
 /// stays on the API rather than use a less restricted client.
 fn build_storage_client(api_base: &str) -> Option<Client> {
+    build_storage_client_with(api_base, STORAGE_READ_TIMEOUT)
+}
+
+/// [`build_storage_client`] with an explicit idle (no-byte) timeout. There is no total timeout: a
+/// large chunk on a slow link is fine as long as bytes keep arriving.
+fn build_storage_client_with(api_base: &str, read_timeout: Duration) -> Option<Client> {
     let dev = reqwest::Url::parse(api_base)
         .map(|u| u.scheme() == "http" && matches!(u.host_str(), Some("127.0.0.1" | "localhost")))
         .unwrap_or(false);
@@ -91,9 +180,53 @@ fn build_storage_client(api_base: &str) -> Option<Client> {
         .redirect(reqwest::redirect::Policy::none())
         .https_only(!dev)
         .connect_timeout(STORAGE_CONNECT_TIMEOUT)
-        .timeout(STORAGE_TIMEOUT)
+        .read_timeout(read_timeout)
         .build()
         .ok()
+}
+
+/// The discovery cache, plus what a long-running process needs on top of it.
+///
+/// Core's cache stops asking after two failed attempts, for the life of the cache: right for a
+/// command that ends in seconds, wrong for a sync daemon that runs for weeks and meets one bad
+/// quarter hour. A cache that gave up because asking FAILED therefore starts afresh once the trust
+/// period has passed. One that gave up because the server said, in JSON, that it has no direct
+/// transport stays given up: that is an answer, not a failure.
+pub(crate) struct DiscoveryState {
+    cache: dt::DiscoveryCache,
+    /// When the cache first said "use the API" because asking failed.
+    parked_at_ms: Option<i64>,
+    /// The server answered that it has no direct transport.
+    refused: bool,
+}
+
+impl DiscoveryState {
+    pub(crate) fn new() -> Self {
+        Self {
+            cache: dt::DiscoveryCache::new(),
+            parked_at_ms: None,
+            refused: false,
+        }
+    }
+
+    pub(crate) fn lookup(&mut self, now_ms: i64) -> dt::Lookup {
+        let lookup = self.cache.lookup(now_ms);
+        if !matches!(lookup, dt::Lookup::UseApi) || self.refused {
+            return lookup;
+        }
+        let parked = *self.parked_at_ms.get_or_insert(now_ms);
+        // A clock that went backwards counts as time passed: better one request than none for ever.
+        if now_ms < parked || now_ms - parked >= dt::DISCOVERY_TTL_MS {
+            *self = Self::new();
+            return dt::Lookup::Fetch;
+        }
+        lookup
+    }
+
+    pub(crate) fn record(&mut self, outcome: &dt::Outcome, discovery: Option<dt::Discovery>, now_ms: i64) {
+        self.refused |= matches!(outcome, dt::Outcome::NotSupported);
+        self.cache.record(outcome, discovery, now_ms);
+    }
 }
 
 impl ApiClient {
@@ -119,13 +252,13 @@ impl ApiClient {
         if crate::transport::api_forced() || self.require_auth().is_err() {
             return None;
         }
-        let mut cache = self.direct_discovery.lock().await;
-        match cache.lookup(now_ms()) {
+        let mut state = self.direct_discovery.lock().await;
+        match state.lookup(now_ms()) {
             dt::Lookup::Cached(discovery) => discovery.offers_download().then_some(discovery),
             dt::Lookup::UseApi => None,
             dt::Lookup::Fetch => {
                 let (outcome, discovery) = self.fetch_discovery().await;
-                cache.record(&outcome, discovery.clone(), now_ms());
+                state.record(&outcome, discovery.clone(), now_ms());
                 discovery.filter(dt::Discovery::offers_download)
             }
         }
@@ -143,12 +276,12 @@ impl ApiClient {
             .timeout(DISCOVERY_TIMEOUT)
             .send()
             .await;
-        let (answer, body) = match sent {
+        let seen = match sent {
             Ok(resp) => answer_of(resp, dt::wire::MAX_DISCOVERY_BYTES).await,
-            Err(_) => (dt::ApiAnswer::no_answer(), Vec::new()),
+            Err(_) => Seen::no_answer(),
         };
-        match dt::classify(dt::Call::Discovery, &answer) {
-            dt::Outcome::Proceed => match dt::Discovery::from_json(&body) {
+        match dt::classify(dt::Call::Discovery, &seen.answer) {
+            dt::Outcome::Proceed => match dt::Discovery::from_json(&seen.body) {
                 Ok(discovery) => (dt::Outcome::Proceed, Some(discovery)),
                 Err(_) => (dt::Outcome::UseApiNow, None),
             },
@@ -170,15 +303,21 @@ impl ApiClient {
             .timeout(GRANT_TIMEOUT)
             .send()
             .await;
-        let (answer, body) = match sent {
+        let seen = match sent {
             Ok(resp) => answer_of(resp, dt::wire::MAX_GRANT_BODY_BYTES).await,
-            Err(_) => (dt::ApiAnswer::no_answer(), Vec::new()),
+            Err(_) => Seen::no_answer(),
         };
-        match dt::classify(dt::Call::DownloadGrant, &answer) {
-            dt::Outcome::Proceed => match dt::DownloadGrantResponse::from_json(&body) {
+        match dt::classify(dt::Call::DownloadGrant, &seen.answer) {
+            dt::Outcome::Proceed => match dt::DownloadGrantResponse::from_json(&seen.body) {
                 Ok(window) => GrantReply::Window(window),
                 Err(_) => GrantReply::Malformed,
             },
+            // A 409 "held" with no Retry-After is not a moment's hold: another device is still
+            // uploading this file. The API path answers that at once (a sync pass defers the
+            // file); waiting here would cost every such file 5 x 5 s in every pass.
+            dt::Outcome::Backoff(_) if seen.answer.status == 409 && !seen.retry_after_sent => {
+                GrantReply::Failed(dt::Outcome::ApiForThisFile)
+            }
             other => GrantReply::Failed(other),
         }
     }
@@ -188,6 +327,9 @@ impl ApiClient {
     /// storage could not give (and the re-fetch of one that failed to
     /// authenticate). `expected_len` is the stored length the grant manifest
     /// states for this chunk.
+    ///
+    /// A transient failure (429, 5xx, a held file, a network blip) is retried a few times, honouring
+    /// `Retry-After`; only when that is spent does the caller give the file to the API stream.
     pub(crate) async fn download_chunk_pinned(
         &self,
         file_id: &str,
@@ -195,7 +337,48 @@ impl ApiClient {
         version: &str,
         expected_len: u64,
     ) -> Result<Vec<u8>, ChunkApiError> {
-        let token = self.require_auth().map_err(ChunkApiError::Terminal)?;
+        self.download_chunk_pinned_with(PINNED_RETRY, file_id, index, version, expected_len)
+            .await
+    }
+
+    async fn download_chunk_pinned_with(
+        &self,
+        retry: PinnedRetry,
+        file_id: &str,
+        index: u32,
+        version: &str,
+        expected_len: u64,
+    ) -> Result<Vec<u8>, ChunkApiError> {
+        let mut waited = Duration::ZERO;
+        let mut attempt: u32 = 1;
+        loop {
+            let (wait, message) = match self.pinned_attempt(file_id, index, version, expected_len).await {
+                Ok(bytes) => return Ok(bytes),
+                Err(PinnedFailure::Final(e)) => return Err(e),
+                Err(PinnedFailure::Again { wait, message }) => {
+                    let doubling = 2u32.saturating_pow(attempt - 1);
+                    (wait.unwrap_or_else(|| retry.base.saturating_mul(doubling)), message)
+                }
+            };
+            if attempt >= retry.attempts || waited.saturating_add(wait) > retry.budget {
+                return Err(ChunkApiError::Failed(message));
+            }
+            tokio::time::sleep(wait).await;
+            waited += wait;
+            attempt += 1;
+        }
+    }
+
+    async fn pinned_attempt(
+        &self,
+        file_id: &str,
+        index: u32,
+        version: &str,
+        expected_len: u64,
+    ) -> Result<Vec<u8>, PinnedFailure> {
+        let token = self
+            .require_auth()
+            .map_err(|m| PinnedFailure::Final(ChunkApiError::Terminal(m)))?;
         let resp = self
             .client
             .get(self.url(&format!("/api/v1/files/{file_id}/chunks/{index}")))
@@ -204,25 +387,46 @@ impl ApiClient {
             .timeout(CHUNK_API_TIMEOUT)
             .send()
             .await
-            .map_err(|e| ChunkApiError::Failed(dt::scrub(&e.to_string())))?;
+            .map_err(|e| PinnedFailure::Again {
+                wait: None,
+                message: dt::scrub(&e.to_string()),
+            })?;
         let status = resp.status();
         if !status.is_success() {
-            let (answer, _) = answer_of(resp, 64 * 1024).await;
-            return Err(match (status.as_u16(), answer.error_code()) {
-                (401, _) => ChunkApiError::Terminal(super::SESSION_EXPIRED_MESSAGE.to_string()),
-                (403, _) => ChunkApiError::Terminal(format!("download failed ({status})")),
-                (404, Some(_)) => ChunkApiError::Terminal(format!("download failed ({status})")),
-                (409, Some("version_unavailable")) => ChunkApiError::Restart,
-                _ => ChunkApiError::Failed(format!("download chunk {index} failed ({status})")),
+            let seen = answer_of(resp, 64 * 1024).await;
+            // The same questions as for a grant: authorization is final, a vanished version
+            // restarts the file, "held" and rate limits wait, a server hiccup is tried again.
+            let failed = format!("download chunk {index} failed ({status})");
+            return Err(match dt::classify(dt::Call::DownloadGrant, &seen.answer) {
+                dt::Outcome::Terminal(t) if t.status == 401 => {
+                    PinnedFailure::Final(ChunkApiError::Terminal(super::SESSION_EXPIRED_MESSAGE.to_string()))
+                }
+                dt::Outcome::Terminal(_) => {
+                    PinnedFailure::Final(ChunkApiError::Terminal(format!("download failed ({status})")))
+                }
+                dt::Outcome::Restart => PinnedFailure::Final(ChunkApiError::Restart),
+                dt::Outcome::Backoff(wait) => PinnedFailure::Again {
+                    wait: Some(wait),
+                    message: failed,
+                },
+                dt::Outcome::UseApiNow => PinnedFailure::Again {
+                    wait: None,
+                    message: failed,
+                },
+                _ => PinnedFailure::Final(ChunkApiError::Failed(failed)),
             });
         }
         // The body must be exactly the manifest's length: read at most that much and check it.
         let mut resp = resp;
-        match read_capped(&mut resp, usize::try_from(expected_len).unwrap_or(usize::MAX)).await {
-            Some(bytes) if bytes.len() as u64 == expected_len => Ok(bytes),
-            _ => Err(ChunkApiError::Failed(format!(
+        match read_exact_len(&mut resp, expected_len).await {
+            Exact::Body(bytes) => Ok(bytes),
+            Exact::WrongLength => Err(PinnedFailure::Final(ChunkApiError::Failed(format!(
                 "download chunk {index}: the body is not the manifest's length"
-            ))),
+            )))),
+            Exact::Broken => Err(PinnedFailure::Again {
+                wait: None,
+                message: format!("download chunk {index}: the connection broke while reading"),
+            }),
         }
     }
 }
@@ -232,7 +436,11 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::build_storage_client;
+    use std::time::{Duration, Instant};
+
+    use super::{
+        ChunkApiError, DiscoveryState, GrantReply, PinnedRetry, build_storage_client, build_storage_client_with, dt,
+    };
     use crate::api::ApiClient;
 
     /// A mock API whose discovery route counts its hits and offers (or not) direct downloads.
@@ -295,5 +503,366 @@ mod tests {
         let fake = build_storage_client("http://localhost.evil.test:3001").expect("client");
         let err = fake.get("http://127.0.0.1:9/b/k").send().await.unwrap_err();
         assert!(err.is_builder(), "a look-alike API base must not enable plain http");
+    }
+
+    // ── the discovery state of a long-running process ──
+
+    const TTL: i64 = dt::DISCOVERY_TTL_MS;
+
+    fn offers() -> dt::Discovery {
+        dt::Discovery {
+            download: vec![dt::CAP_OBJECT_DOWNLOAD_V1.to_string()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_discovery_that_gave_up_asking_asks_again_once_the_trust_period_has_passed() {
+        let mut state = DiscoveryState::new();
+        let t0 = 1_000_000;
+        // Two failed attempts: core stops asking.
+        assert_eq!(state.lookup(t0), dt::Lookup::Fetch);
+        state.record(&dt::Outcome::UseApiNow, None, t0);
+        assert_eq!(state.lookup(t0 + 1), dt::Lookup::Fetch, "one retry per command");
+        state.record(&dt::Outcome::UseApiNow, None, t0 + 1);
+        assert_eq!(state.lookup(t0 + 2), dt::Lookup::UseApi, "given up");
+        // Still given up just before the trust period ends ...
+        assert_eq!(state.lookup(t0 + 2 + TTL - 1), dt::Lookup::UseApi);
+        // ... and asking again once it has, with a fresh allowance.
+        assert_eq!(state.lookup(t0 + 2 + TTL), dt::Lookup::Fetch);
+        state.record(&dt::Outcome::Proceed, Some(offers()), t0 + 3 + TTL);
+        assert!(matches!(state.lookup(t0 + 4 + TTL), dt::Lookup::Cached(d) if d.offers_download()));
+
+        // The fresh start is a fresh allowance, not the old strike count: after the trust period
+        // a failed answer is retried once more before the cache gives up again.
+        let mut state = DiscoveryState::new();
+        for t in [t0, t0 + 1] {
+            state.record(&dt::Outcome::UseApiNow, None, t);
+        }
+        assert_eq!(state.lookup(t0 + 2), dt::Lookup::UseApi);
+        let later = t0 + 2 + TTL;
+        assert_eq!(state.lookup(later), dt::Lookup::Fetch);
+        state.record(&dt::Outcome::UseApiNow, None, later);
+        assert_eq!(
+            state.lookup(later + 1),
+            dt::Lookup::Fetch,
+            "one more try, as for a new command"
+        );
+    }
+
+    #[test]
+    fn a_server_that_said_it_has_no_direct_transport_is_not_asked_again() {
+        let mut state = DiscoveryState::new();
+        state.record(&dt::Outcome::NotSupported, None, 0);
+        assert_eq!(state.lookup(1), dt::Lookup::UseApi);
+        assert_eq!(state.lookup(10 * TTL), dt::Lookup::UseApi, "an answer is not a failure");
+    }
+
+    #[test]
+    fn a_clock_that_goes_backwards_does_not_keep_a_discovery_parked() {
+        let mut state = DiscoveryState::new();
+        for t in [5_000_000, 5_000_001] {
+            assert_eq!(state.lookup(t), dt::Lookup::Fetch);
+            state.record(&dt::Outcome::UseApiNow, None, t);
+        }
+        assert_eq!(state.lookup(5_000_002), dt::Lookup::UseApi);
+        assert_eq!(state.lookup(4_000_000), dt::Lookup::Fetch);
+    }
+
+    // ── the storage client keeps moving, or stops ──
+
+    /// A storage server that answers `200` with `len` bytes, `pieces` pieces `gap` apart (the last
+    /// piece never comes when `stall` is set).
+    fn slow_storage(len: usize, pieces: usize, gap: Duration, stall: bool) -> std::net::SocketAddr {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut seen = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while !seen.ends_with(b"\r\n\r\n") {
+                        if stream.read(&mut byte).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        seen.push(byte[0]);
+                    }
+                    let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {len}\r\n\r\n");
+                    let piece = vec![7u8; len / pieces];
+                    for n in 0..pieces {
+                        if stall && n == pieces - 1 {
+                            std::thread::sleep(Duration::from_secs(30));
+                            return;
+                        }
+                        if stream.write_all(&piece).is_err() {
+                            return;
+                        }
+                        let _ = stream.flush();
+                        std::thread::sleep(gap);
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn a_storage_transfer_that_keeps_moving_is_never_cut_off_but_one_that_stalls_is() {
+        let idle = Duration::from_millis(400);
+        let client = build_storage_client_with("http://127.0.0.1:3001", idle).expect("client");
+        // Five pieces 200 ms apart: a second in all, far past the idle limit, but never idle for long.
+        let addr = slow_storage(5_000, 5, Duration::from_millis(200), false);
+        let started = Instant::now();
+        let body = client
+            .get(format!("http://{addr}/b/k"))
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .expect("a slow but steady body arrives");
+        assert_eq!(body.len(), 5_000);
+        assert!(started.elapsed() > idle, "the transfer outlived the idle limit");
+        // The last piece never comes: the request fails after the idle limit, not after minutes.
+        let addr = slow_storage(5_000, 5, Duration::from_millis(50), true);
+        let started = Instant::now();
+        let result = client
+            .get(format!("http://{addr}/b/k"))
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await;
+        assert!(result.is_err(), "a stalled body must fail");
+        assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+    }
+
+    // ── the pinned per-chunk route and the grant route, against a scripted API ──
+
+    #[derive(Clone)]
+    enum Reply {
+        Status(u16),
+        /// A JSON error body, optionally with a `Retry-After` (seconds).
+        Json(u16, &'static str, Option<u32>),
+        Status429(u32),
+        Body(Vec<u8>),
+    }
+
+    fn reply_of(step: &Reply) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        match step {
+            Reply::Status(code) => axum::http::StatusCode::from_u16(*code).unwrap().into_response(),
+            Reply::Status429(secs) => (
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                [("retry-after", secs.to_string())],
+            )
+                .into_response(),
+            Reply::Json(code, error, retry) => {
+                let mut r = (
+                    axum::http::StatusCode::from_u16(*code).unwrap(),
+                    axum::Json(serde_json::json!({ "error": error })),
+                )
+                    .into_response();
+                if let Some(secs) = retry {
+                    r.headers_mut().insert("retry-after", secs.to_string().parse().unwrap());
+                }
+                r
+            }
+            Reply::Body(bytes) => bytes.clone().into_response(),
+        }
+    }
+
+    /// A mock API that answers the chunk route (and the grant route) from a script, one entry per
+    /// request; the last entry repeats.
+    async fn scripted_api(script: Vec<Reply>) -> (ApiClient, Arc<AtomicUsize>) {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let (counter, steps) = (hits.clone(), Arc::new(script));
+        let handler = move || {
+            let (counter, steps) = (counter.clone(), steps.clone());
+            async move {
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+                reply_of(&steps[n.min(steps.len() - 1)])
+            }
+        };
+        let app = axum::Router::new()
+            .route("/api/v1/files/:id/chunks/:index", axum::routing::get(handler.clone()))
+            .route("/api/v1/files/:id/download-grants", axum::routing::post(handler));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (ApiClient::new_for_test(format!("http://{addr}")), hits)
+    }
+
+    const FAST: PinnedRetry = PinnedRetry {
+        attempts: 4,
+        budget: Duration::from_secs(5),
+        base: Duration::from_millis(10),
+    };
+
+    async fn pinned(api: &ApiClient, retry: PinnedRetry, len: u64) -> Result<Vec<u8>, ChunkApiError> {
+        api.download_chunk_pinned_with(retry, "f", 3, "v", len).await
+    }
+
+    fn failed(e: ChunkApiError) -> String {
+        match e {
+            ChunkApiError::Failed(m) => m,
+            ChunkApiError::Terminal(m) => panic!("terminal: {m}"),
+            ChunkApiError::Restart => panic!("restart"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_pinned_route_retries_what_may_pass_and_gives_the_chunk() {
+        // A 5xx, then a 5xx, then the chunk.
+        let (api, hits) = scripted_api(vec![Reply::Status(503), Reply::Status(500), Reply::Body(vec![9; 5])]).await;
+        assert_eq!(pinned(&api, FAST, 5).await.ok(), Some(vec![9; 5]));
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
+        // A 429 with Retry-After: 1 waits that second, then the chunk.
+        let (api, hits) = scripted_api(vec![Reply::Status429(1), Reply::Body(vec![9; 5])]).await;
+        let started = Instant::now();
+        assert_eq!(pinned(&api, FAST, 5).await.ok(), Some(vec![9; 5]));
+        assert!(
+            started.elapsed() >= Duration::from_millis(900),
+            "Retry-After was honoured"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        // A file held by another operation (409, Retry-After: 1) is waited for the same way.
+        let (api, hits) = scripted_api(vec![
+            Reply::Json(409, "replace_in_progress", Some(1)),
+            Reply::Body(vec![9; 5]),
+        ])
+        .await;
+        let started = Instant::now();
+        assert_eq!(pinned(&api, FAST, 5).await.ok(), Some(vec![9; 5]));
+        assert!(started.elapsed() >= Duration::from_millis(900));
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn the_pinned_route_gives_up_after_its_attempts_or_when_a_wait_passes_the_budget() {
+        // A server that keeps failing: exactly `attempts` requests, then the failure.
+        let (api, hits) = scripted_api(vec![Reply::Status(500)]).await;
+        let message = failed(pinned(&api, FAST, 5).await.unwrap_err());
+        assert!(message.contains("500"), "{message}");
+        assert_eq!(hits.load(Ordering::SeqCst), 4);
+        // With nothing named by the server the waits double: base, 2 x base, 4 x base.
+        let slow = PinnedRetry {
+            base: Duration::from_millis(100),
+            ..FAST
+        };
+        let (api, _) = scripted_api(vec![Reply::Status(500)]).await;
+        let started = Instant::now();
+        failed(pinned(&api, slow, 5).await.unwrap_err());
+        assert!(
+            started.elapsed() >= Duration::from_millis(650),
+            "{:?}",
+            started.elapsed()
+        );
+        // A Retry-After longer than the whole budget: one request, no waiting at all.
+        let (api, hits) = scripted_api(vec![Reply::Status429(30)]).await;
+        let started = Instant::now();
+        failed(pinned(&api, FAST, 5).await.unwrap_err());
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn the_pinned_route_does_not_retry_what_a_retry_cannot_change() {
+        for (reply, want) in [
+            (Reply::Status(401), "session"),
+            (Reply::Status(403), "403"),
+            (Reply::Json(404, "not found", None), "404"),
+        ] {
+            let (api, hits) = scripted_api(vec![reply]).await;
+            match pinned(&api, FAST, 5).await {
+                Err(ChunkApiError::Terminal(m)) => {
+                    assert!(m.to_lowercase().contains(want), "{m} should mention {want}")
+                }
+                other => panic!("expected terminal, got {:?}", other.err().map(failed)),
+            }
+            assert_eq!(hits.load(Ordering::SeqCst), 1, "{want}");
+        }
+        let (api, hits) = scripted_api(vec![Reply::Json(409, "version_unavailable", None)]).await;
+        assert!(matches!(pinned(&api, FAST, 5).await, Err(ChunkApiError::Restart)));
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        // A refusal that will repeat (a malformed request).
+        let (api, hits) = scripted_api(vec![Reply::Status(400)]).await;
+        failed(pinned(&api, FAST, 5).await.unwrap_err());
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        // A body of the wrong length (short or long) is a disagreement with the manifest.
+        for body in [vec![9u8; 4], vec![9u8; 6]] {
+            let (api, hits) = scripted_api(vec![Reply::Body(body)]).await;
+            let message = failed(pinned(&api, FAST, 5).await.unwrap_err());
+            assert!(message.contains("manifest"), "{message}");
+            assert_eq!(hits.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_connection_that_breaks_mid_body_is_tried_again() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let seen = connections.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let n = seen.fetch_add(1, Ordering::SeqCst);
+                let mut request = Vec::new();
+                let mut byte = [0u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    if stream.read(&mut byte).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    request.push(byte[0]);
+                }
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\n"
+                );
+                // The first connection dies after two of five bytes.
+                let _ = stream.write_all(if n == 0 { &[9, 9] } else { &[9, 9, 9, 9, 9] });
+            }
+        });
+        let api = ApiClient::new_for_test(format!("http://{addr}"));
+        assert_eq!(pinned(&api, FAST, 5).await.ok(), Some(vec![9; 5]));
+        assert_eq!(connections.load(Ordering::SeqCst), 2);
+    }
+
+    fn grant_request() -> dt::DownloadGrantRequest {
+        dt::DownloadGrantRequest {
+            object_version_id: None,
+            start_index: 0,
+            count: 8,
+            renewal: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_held_file_with_no_retry_after_goes_straight_to_the_api_but_a_stated_wait_is_kept() {
+        // Another device is still uploading it: no waiting, the API path answers at once.
+        let (api, hits) = scripted_api(vec![Reply::Json(409, "replace_in_progress", None)]).await;
+        assert!(matches!(
+            api.download_grants("f", &grant_request()).await,
+            GrantReply::Failed(dt::Outcome::ApiForThisFile)
+        ));
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        // The server named a wait: wait that long.
+        let (api, _) = scripted_api(vec![Reply::Json(409, "replace_in_progress", Some(7))]).await;
+        assert!(matches!(
+            api.download_grants("f", &grant_request()).await,
+            GrantReply::Failed(dt::Outcome::Backoff(d)) if d == Duration::from_secs(7)
+        ));
+        // A rate limit is a wait with or without a stated time.
+        let (api, _) = scripted_api(vec![Reply::Status(429)]).await;
+        assert!(matches!(
+            api.download_grants("f", &grant_request()).await,
+            GrantReply::Failed(dt::Outcome::Backoff(_))
+        ));
     }
 }

@@ -122,6 +122,40 @@ fn check_cap(c: FallbackCap, len: u64) -> Result<(), String> {
     }
 }
 
+/// Why a streaming download did not produce a file. Nearly every failure is just a message; the two
+/// that callers must tell apart are typed, because a daemon that matched message text once
+/// crash-looped on a message nobody had listed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DownloadError {
+    /// The bytes could not be authenticated: this client cannot read the file right now. The
+    /// remote copy is untouched, and a later pass may read it (task 1916).
+    Unreadable(String),
+    /// The file's version changed while it was downloading; nothing was written. Only fresh
+    /// metadata (chunk count, read pin) can say what the file is now.
+    Changed(String),
+    /// Anything else (network, server, disk, an authorization answer).
+    Other(String),
+}
+
+impl std::fmt::Display for DownloadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (Self::Unreadable(m) | Self::Changed(m) | Self::Other(m)) = self;
+        f.write_str(m)
+    }
+}
+
+impl From<String> for DownloadError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
+impl From<DownloadError> for String {
+    fn from(e: DownloadError) -> String {
+        e.to_string()
+    }
+}
+
 /// Outcome of a streaming download.
 pub struct DownloadStats {
     pub plaintext_bytes: u64,
@@ -166,7 +200,7 @@ pub async fn stream_download_decrypt(
     out_path: &Path,
     progress: &dyn ChunkProgress,
     display_name: &str,
-) -> Result<DownloadStats, String> {
+) -> Result<DownloadStats, DownloadError> {
     stream_download_decrypt_with(
         api,
         master_key,
@@ -194,7 +228,7 @@ async fn stream_download_decrypt_with(
     progress: &dyn ChunkProgress,
     display_name: &str,
     ceiling: u64,
-) -> Result<DownloadStats, String> {
+) -> Result<DownloadStats, DownloadError> {
     let count = chunk_count.max(1);
 
     // Task 2173: straight from object storage when the server offers it and the
@@ -244,7 +278,7 @@ async fn stream_download_decrypt_with(
         }
     }
     if carry.is_empty() {
-        return Err("download returned an empty body".to_string());
+        return Err("download returned an empty body".to_string().into());
     }
 
     let prog = progress.begin_file(display_name, total);
@@ -268,7 +302,7 @@ async fn stream_download_decrypt_with(
         Ok(_) => prog.finish(true),
         Err(_) => prog.finish(false),
     }
-    result
+    result.map_err(DownloadError::from)
 }
 
 /// Stream the modern raw format. On a first-frame key failure (binary-UUID
@@ -629,7 +663,9 @@ mod tests {
             ceiling,
         )
         .await;
-        let got = r.and_then(|_| std::fs::read(&out).map_err(|e| e.to_string()));
+        let got = r
+            .map_err(String::from)
+            .and_then(|_| std::fs::read(&out).map_err(|e| e.to_string()));
         let _ = std::fs::remove_dir_all(&dir);
         (got, confirmed.load(Ordering::SeqCst))
     }
@@ -874,9 +910,27 @@ mod tests {
             ceiling,
         )
         .await;
-        let got = r.map(|stats| (std::fs::read(&out).unwrap(), stats));
+        let got = r
+            .map(|stats| (std::fs::read(&out).unwrap(), stats))
+            .map_err(String::from);
         let _ = std::fs::remove_dir_all(&dir);
         got
+    }
+
+    #[test]
+    fn a_download_error_reads_as_its_message_and_text_errors_are_plain_failures() {
+        for e in [
+            DownloadError::Unreadable("a".into()),
+            DownloadError::Changed("a".into()),
+            DownloadError::Other("a".into()),
+        ] {
+            assert_eq!(e.to_string(), "a");
+            assert_eq!(String::from(e), "a");
+        }
+        assert_eq!(
+            DownloadError::from("boom".to_string()),
+            DownloadError::Other("boom".into())
+        );
     }
 
     /// Both API shapes (the raw stream and the buffered legacy decrypt) report `api`:

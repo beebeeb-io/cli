@@ -30,10 +30,11 @@ use std::time::Duration;
 use beebeeb_core::chunk_stream::{ChunkDecryptor, ExpectedChunkFormat};
 use beebeeb_core::direct_transfer as dt;
 use beebeeb_core::kdf::MasterKey;
+use bytes::Bytes;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 
 use crate::api::{ApiClient, ChunkApiError, GrantReply, now_ms};
-use crate::download::{AtomicFile, DownloadStats};
+use crate::download::{AtomicFile, DownloadError, DownloadStats};
 use crate::upload::{ChunkProgress, FileProgress};
 
 /// Result of an attempt to download over the direct transport.
@@ -45,10 +46,22 @@ pub(crate) enum DirectResult {
     UseApi,
 }
 
+/// Is `BB_TRANSPORT_TRACE` switched on? Set and not an explicit "off" (`0`, `false`, `off`, `no`,
+/// or empty): a variable that is merely present must not mean "on" when it says 0.
+fn trace_is_on(value: Option<&str>) -> bool {
+    match value {
+        None => false,
+        Some(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "off" | "no"
+        ),
+    }
+}
+
 /// Support aid: `BB_TRANSPORT_TRACE=1` prints one line per transport decision
 /// to stderr. Never a URL, never a header.
 fn trace(message: impl FnOnce() -> String) {
-    if std::env::var_os("BB_TRANSPORT_TRACE").is_some() {
+    if trace_is_on(std::env::var("BB_TRANSPORT_TRACE").ok().as_deref()) {
         eprintln!("bb: transport: {}", message());
     }
 }
@@ -58,7 +71,7 @@ enum Event {
     Storage {
         index: u32,
         /// `Err(status)`: the HTTP status when there was one (0: none).
-        result: Result<Vec<u8>, u16>,
+        result: Result<Bytes, u16>,
     },
     Api {
         index: u32,
@@ -70,7 +83,7 @@ type Task<'a> = Pin<Box<dyn Future<Output = Event> + Send + 'a>>;
 
 /// Fetch one chunk from its presigned link: `200` and a `Content-Length` equal
 /// to the grant's `length`, nothing else. The error carries at most a status.
-async fn fetch_from_storage(client: &reqwest::Client, grant: dt::ChunkGrant) -> Result<Vec<u8>, u16> {
+async fn fetch_from_storage(client: &reqwest::Client, grant: dt::ChunkGrant) -> Result<Bytes, u16> {
     let resp = client.get(&grant.url).send().await.map_err(|_| 0u16)?;
     let status = resp.status().as_u16();
     if status != 200 || resp.content_length() != Some(grant.length) {
@@ -80,8 +93,7 @@ async fn fetch_from_storage(client: &reqwest::Client, grant: dt::ChunkGrant) -> 
     // read error, a longer one never reaches us. Memory is bounded by the
     // grant's length, which the planner has already checked against the
     // manifest's geometry (at most core's MAX_CHUNK_SIZE + 28).
-    let body = resp.bytes().await.map_err(|_| 0u16)?;
-    Ok(body.to_vec())
+    resp.bytes().await.map_err(|_| 0u16)
 }
 
 /// The partly written output: exists only after the first chunk decrypted.
@@ -94,16 +106,20 @@ struct Output {
 
 impl Output {
     /// Throw the partial output away (temp file removed, progress closed as failed).
-    fn discard(self) {
+    ///
+    /// The bytes it already reported on the run-wide counter are taken back: the file starts over
+    /// (the API stream) or fails, and either way they would otherwise be counted twice.
+    fn discard(self, overall: &dyn ChunkProgress) {
         let mut writer = self.writer;
         writer.abort();
         self.progress.finish(false);
+        overall.rollback(self.encrypted_bytes);
     }
 }
 
-fn discard(out: Option<Output>) {
+fn discard(out: Option<Output>, overall: &dyn ChunkProgress) {
     if let Some(out) = out {
-        out.discard();
+        out.discard(overall);
     }
 }
 
@@ -123,7 +139,7 @@ pub(crate) async fn try_download(
     out_path: &Path,
     progress: &dyn ChunkProgress,
     display_name: &str,
-) -> Result<DirectResult, String> {
+) -> Result<DirectResult, DownloadError> {
     let Some(discovery) = api.direct_download_offer().await else {
         return Ok(DirectResult::UseApi);
     };
@@ -134,7 +150,7 @@ pub(crate) async fn try_download(
     let mut planner = dt::DownloadPlanner::new(config, discovery, api.api_base(), file_id);
     let mut decryptor = ChunkDecryptor::for_push(master_key, file_id, pin);
     let mut tasks: FuturesUnordered<Task<'_>> = FuturesUnordered::new();
-    let mut ready: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
+    let mut ready: BTreeMap<u32, Bytes> = BTreeMap::new();
     let mut out: Option<Output> = None;
     let mut geometry_checked = false;
     // Chunks that came through the pinned API route instead of storage.
@@ -164,7 +180,7 @@ pub(crate) async fn try_download(
                     object_version_id,
                 } => {
                     let Some(length) = planner.geometry().and_then(|g| g.chunk_length(index)) else {
-                        discard(out);
+                        discard(out, progress);
                         return Ok(DirectResult::UseApi);
                     };
                     trace(|| format!("chunk {index} via the pinned API route"));
@@ -179,24 +195,23 @@ pub(crate) async fn try_download(
                 }
                 dt::Poll::Wait { until_ms } => break until_ms,
                 dt::Poll::Done => {
-                    return finish(decryptor, out, api_chunks > 0);
+                    return finish(decryptor, out, api_chunks > 0, progress);
                 }
                 dt::Poll::Stop(verdict) => {
                     drop(tasks);
-                    discard(out);
+                    discard(out, progress);
                     return match verdict {
                         dt::Verdict::ApiForFile => {
                             trace(|| "falling back to the API for this file".to_string());
                             Ok(DirectResult::UseApi)
                         }
-                        dt::Verdict::Restart => Err("the file changed while it was downloading; nothing was \
-                                                     written. Run the command again"
-                            .to_string()),
-                        dt::Verdict::Terminal(t) => Err(terminal_message(&t)),
-                        dt::Verdict::Corrupt => Err("download failed: a chunk did not authenticate from storage or \
-                                                     from the API; the file is damaged or was tampered with, \
-                                                     nothing was written"
-                            .to_string()),
+                        dt::Verdict::Restart => Err(changed()),
+                        dt::Verdict::Terminal(t) => Err(terminal_message(&t).into()),
+                        dt::Verdict::Corrupt => Err(DownloadError::Unreadable(
+                            "download failed: a chunk did not authenticate from storage or from the API; the file \
+                             is damaged or was tampered with, nothing was written"
+                                .to_string(),
+                        )),
                     };
                 }
             }
@@ -213,7 +228,7 @@ pub(crate) async fn try_download(
                     // Nothing outstanding and nothing scheduled: the planner is stuck.
                     // Never hang a download on that; the API path is always correct.
                     trace(|| "planner stalled; falling back to the API".to_string());
-                    discard(out);
+                    discard(out, progress);
                     return Ok(DirectResult::UseApi);
                 }
             }
@@ -239,7 +254,7 @@ pub(crate) async fn try_download(
                             // The manifest and the file's metadata disagree: let the
                             // API path, which has its own checks, serve this file.
                             trace(|| "manifest chunk count differs from the metadata".to_string());
-                            discard(out);
+                            discard(out, progress);
                             return Ok(DirectResult::UseApi);
                         }
                     }
@@ -258,7 +273,7 @@ pub(crate) async fn try_download(
                 Ok(bytes) => {
                     if let Err(e) = planner.fetch_ok(index) {
                         trace(|| format!("planner error: {e}"));
-                        discard(out);
+                        discard(out, progress);
                         return Ok(DirectResult::UseApi);
                     }
                     ready.insert(index, bytes);
@@ -267,7 +282,7 @@ pub(crate) async fn try_download(
                     trace(|| format!("chunk {index} from storage failed (status {status})"));
                     if let Err(e) = planner.fetch_failed(index, now) {
                         trace(|| format!("planner error: {e}"));
-                        discard(out);
+                        discard(out, progress);
                         return Ok(DirectResult::UseApi);
                     }
                 }
@@ -276,23 +291,19 @@ pub(crate) async fn try_download(
                 Ok(bytes) => {
                     if let Err(e) = planner.fetch_ok(index) {
                         trace(|| format!("planner error: {e}"));
-                        discard(out);
+                        discard(out, progress);
                         return Ok(DirectResult::UseApi);
                     }
                     api_chunks += 1;
-                    ready.insert(index, bytes);
+                    ready.insert(index, Bytes::from(bytes));
                 }
                 Err(ChunkApiError::Restart) => {
-                    discard(out);
-                    return Err(
-                        "the file changed while it was downloading; nothing was written. Run the \
-                                command again"
-                            .to_string(),
-                    );
+                    discard(out, progress);
+                    return Err(changed());
                 }
                 Err(ChunkApiError::Terminal(message)) => {
-                    discard(out);
-                    return Err(message);
+                    discard(out, progress);
+                    return Err(message.into());
                 }
                 // The pinned route failed after its own retries: nothing per chunk is left to
                 // try. The planner ends the file and the API stream takes it from the start.
@@ -300,7 +311,7 @@ pub(crate) async fn try_download(
                     trace(|| format!("chunk {index} through the pinned API route failed: {message}"));
                     if let Err(e) = planner.api_fetch_failed(index) {
                         trace(|| format!("planner error: {e}"));
-                        discard(out);
+                        discard(out, progress);
                         return Ok(DirectResult::UseApi);
                     }
                 }
@@ -325,8 +336,8 @@ pub(crate) async fn try_download(
                 Ok(chunk) => {
                     if let Some(o) = out.as_mut() {
                         if let Err(e) = o.writer.write_all(&chunk.data) {
-                            discard(out);
-                            return Err(e);
+                            discard(out, progress);
+                            return Err(e.into());
                         }
                         o.plaintext_bytes += chunk.data.len() as u64;
                         o.encrypted_bytes += frame.len() as u64;
@@ -334,7 +345,7 @@ pub(crate) async fn try_download(
                     }
                     if let Err(e) = planner.consumed(next) {
                         trace(|| format!("planner error: {e}"));
-                        discard(out);
+                        discard(out, progress);
                         return Ok(DirectResult::UseApi);
                     }
                 }
@@ -342,7 +353,7 @@ pub(crate) async fn try_download(
                     trace(|| format!("chunk {next} did not authenticate"));
                     if let Err(e) = planner.chunk_unauthentic(next) {
                         trace(|| format!("planner error: {e}"));
-                        discard(out);
+                        discard(out, progress);
                         return Ok(DirectResult::UseApi);
                     }
                     break;
@@ -354,14 +365,19 @@ pub(crate) async fn try_download(
 
 /// Every chunk is written: the stream must end on the frame that authenticated
 /// as last (truncation, task 1908), then the temp file is published.
-fn finish(decryptor: ChunkDecryptor, out: Option<Output>, mixed: bool) -> Result<DirectResult, String> {
+fn finish(
+    decryptor: ChunkDecryptor,
+    out: Option<Output>,
+    mixed: bool,
+    overall: &dyn ChunkProgress,
+) -> Result<DirectResult, DownloadError> {
     let Some(out) = out else {
         // Done with nothing written cannot happen (every file has a chunk).
         return Ok(DirectResult::UseApi);
     };
     if let Err(e) = decryptor.finish() {
-        out.discard();
-        return Err(format!("download incomplete: {e}"));
+        out.discard(overall);
+        return Err(format!("download incomplete: {e}").into());
     }
     let Output {
         writer,
@@ -371,7 +387,7 @@ fn finish(decryptor: ChunkDecryptor, out: Option<Output>, mixed: bool) -> Result
     } = out;
     if let Err(e) = writer.commit() {
         progress.finish(false);
-        return Err(e);
+        return Err(e.into());
     }
     progress.finish(true);
     Ok(DirectResult::Done(DownloadStats {
@@ -383,11 +399,81 @@ fn finish(decryptor: ChunkDecryptor, out: Option<Output>, mixed: bool) -> Result
     }))
 }
 
+/// The pinned version went away: only fresh metadata can say what the file is now.
+fn changed() -> DownloadError {
+    DownloadError::Changed("the file changed while it was downloading; nothing was written".to_string())
+}
+
 /// What the user reads for an authorization answer.
 fn terminal_message(t: &dt::Terminal) -> String {
     match (t.status, t.error.as_deref()) {
         (401, _) => crate::api::SESSION_EXPIRED_MESSAGE.to_string(),
         (status, Some(code)) => format!("download failed ({status}): {code}"),
         (status, None) => format!("download failed ({status})"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+
+    #[test]
+    fn the_trace_is_on_only_when_the_variable_says_so() {
+        assert!(!trace_is_on(None));
+        for off in ["", "0", "false", "False", "off", "OFF", "no", " 0 "] {
+            assert!(!trace_is_on(Some(off)), "{off:?} must mean off");
+        }
+        for on in ["1", "true", "yes", "on", "anything"] {
+            assert!(trace_is_on(Some(on)), "{on:?} must mean on");
+        }
+    }
+
+    /// A run-wide progress counter that records what was taken back.
+    struct Overall {
+        rolled_back: Arc<AtomicU64>,
+    }
+
+    impl ChunkProgress for Overall {
+        fn begin_file(&self, _: &str, _: u64) -> Box<dyn FileProgress> {
+            Box::new(OneFile)
+        }
+        fn rollback(&self, bytes: u64) {
+            self.rolled_back.fetch_add(bytes, Ordering::SeqCst);
+        }
+    }
+
+    struct OneFile;
+
+    impl FileProgress for OneFile {
+        fn chunk_confirmed(&self, _: u64) {}
+        fn finish(self: Box<Self>, _: bool) {}
+    }
+
+    #[test]
+    fn a_discarded_partial_file_takes_its_bytes_back_off_the_run_wide_counter() {
+        let dir = std::env::temp_dir().join(format!("bb-discard-2173-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("out.bin");
+        let rolled_back = Arc::new(AtomicU64::new(0));
+        let overall = Overall {
+            rolled_back: rolled_back.clone(),
+        };
+        let writer = AtomicFile::create(&out).unwrap();
+        let partial = Output {
+            writer,
+            progress: Box::new(OneFile),
+            plaintext_bytes: 1000,
+            encrypted_bytes: 1028,
+        };
+        discard(Some(partial), &overall);
+        assert_eq!(rolled_back.load(Ordering::SeqCst), 1028, "what the file had counted");
+        assert!(!out.exists(), "nothing was published");
+        // No partial output, nothing to take back.
+        discard(None, &overall);
+        assert_eq!(rolled_back.load(Ordering::SeqCst), 1028);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

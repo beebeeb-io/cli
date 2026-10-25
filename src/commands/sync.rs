@@ -2892,6 +2892,20 @@ enum DownloadOutcome {
     Unreadable,
 }
 
+impl DownloadOutcome {
+    /// How a typed download failure ends one file's turn in a pass. `None`: not a decision for the
+    /// pass, the caller handles the failure as it always did (task 2173: a daemon must not die of a
+    /// file it cannot read, or of one that changed under it).
+    fn of_failure(e: &crate::download::DownloadError) -> Option<Self> {
+        use crate::download::DownloadError;
+        match e {
+            DownloadError::Unreadable(_) => Some(Self::Unreadable),
+            DownloadError::Changed(_) => Some(Self::Deferred),
+            DownloadError::Other(_) => None,
+        }
+    }
+}
+
 /// Does this download error mean "could not decrypt" (as opposed to a network
 /// or server failure)? Both are reported and retried; neither trashes anything.
 fn is_decrypt_failure(e: &str) -> bool {
@@ -2943,7 +2957,23 @@ async fn do_download(
             return Ok(DownloadOutcome::Deferred);
         }
     };
-    match download_to(api, master_key, remote.id, &remote.pin, remote.chunk_count, &out_path).await {
+    let downloaded = download_to(api, master_key, remote.id, &remote.pin, remote.chunk_count, &out_path).await;
+    // Typed failures first: no message text decides whether a daemon survives (task 2173).
+    if let Err(e) = &downloaded {
+        if let Some(outcome) = DownloadOutcome::of_failure(e) {
+            let then = match outcome {
+                DownloadOutcome::Deferred => "will pick up the new version next pass",
+                _ => "the remote copy is untouched; will retry next pass",
+            };
+            eprintln!(
+                "  {} {} \u{2014} {e}; {then}.",
+                "!".custom_color(crate::colors::RED_ERR),
+                rel.custom_color(crate::colors::INK),
+            );
+            return Ok(outcome);
+        }
+    }
+    match downloaded.map_err(String::from) {
         Ok(()) => {}
         Err(e) if e.contains("still in progress") || e.contains("409") => {
             // A partially-uploaded remote (this or another device still pushing).
@@ -3035,7 +3065,7 @@ async fn download_to(
     pin: &Result<beebeeb_core::chunk_stream::ExpectedChunkFormat, String>,
     chunk_count: u32,
     out_path: &Path,
-) -> Result<(), String> {
+) -> Result<(), crate::download::DownloadError> {
     let pin = pin.clone()?;
     let file_id_str = file_id.to_string();
     let name = out_path
@@ -3803,6 +3833,23 @@ mod tests {
         assert!(is_decrypt_failure("key derivation failed"));
         assert!(!is_decrypt_failure("download failed (500): oops"));
         assert!(!is_decrypt_failure("download truncated: chunk 1/3"));
+    }
+
+    #[test]
+    fn a_typed_download_failure_ends_one_files_turn_not_the_pass() {
+        use crate::download::DownloadError;
+        // A chunk that never authenticates: the same outcome as a decrypt failure on the API path.
+        assert_eq!(
+            DownloadOutcome::of_failure(&DownloadError::Unreadable("x".into())),
+            Some(DownloadOutcome::Unreadable)
+        );
+        // The version changed under the download: not this pass; the next one reads the new version.
+        assert_eq!(
+            DownloadOutcome::of_failure(&DownloadError::Changed("x".into())),
+            Some(DownloadOutcome::Deferred)
+        );
+        // Everything else is the caller's, as before (an expired session must still stop the pass).
+        assert_eq!(DownloadOutcome::of_failure(&DownloadError::Other("x".into())), None);
     }
 
     // ── walk_remote: what the listing could not show us ────────────────────

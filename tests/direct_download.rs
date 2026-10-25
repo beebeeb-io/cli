@@ -131,6 +131,12 @@ enum Grants {
     GarbageAfterFirstWindow,
     /// The very first grant request answers 409 `replace_in_progress` with `Retry-After: 1`.
     ReplaceInProgressOnce,
+    /// Every grant request answers 409 `replace_in_progress` with no `Retry-After`: another device
+    /// is still uploading the file.
+    ReplaceInProgressNoRetryAfter,
+    /// The first window after the first is refused as `version_unavailable` (a new version was
+    /// published mid-download); every window after that is served normally.
+    VersionGoneOnce,
     Bare404,
     Forbidden,
     /// Links name a host the discovery did not list.
@@ -191,6 +197,7 @@ struct Mock {
     storage_addr: SocketAddr,
     serial: AtomicUsize,
     replace_served: std::sync::atomic::AtomicBool,
+    gone_served: std::sync::atomic::AtomicBool,
 }
 
 // ─────────────────────────────── storage mock (raw HTTP) ───────────────────────────────
@@ -345,6 +352,28 @@ async fn meta(State(m): State<Arc<Mock>>, AxPath(id): AxPath<String>) -> Respons
     .into_response()
 }
 
+const SYNC_FOLDER_ID: &str = "22222222-2222-4222-8222-222222222222";
+
+/// `GET /api/v1/files`: the account root holds the folder `SyncUp`; it holds the fixture file.
+async fn list(State(m): State<Arc<Mock>>, Query(q): Query<HashMap<String, String>>) -> Response {
+    match q.get("parent_id").map(String::as_str) {
+        None => Json(json!({ "files": [
+            { "id": SYNC_FOLDER_ID, "is_folder": true, "name_encrypted": "SyncUp" }
+        ] }))
+        .into_response(),
+        Some(SYNC_FOLDER_ID) => Json(json!({ "files": [{
+            "id": m.fx.file_id,
+            "name_encrypted": m.fx.name_encrypted,
+            "is_folder": false,
+            "size_bytes": m.fx.plaintext.len(),
+            "chunk_count": m.fx.frames.len(),
+            "updated_at": "2020-01-01T00:00:00+00:00",
+        }] }))
+        .into_response(),
+        Some(_) => Json(json!({ "files": [] })).into_response(),
+    }
+}
+
 async fn download(State(m): State<Arc<Mock>>, AxPath(_id): AxPath<String>) -> Response {
     m.log.lock().unwrap().api_download_hits += 1;
     let body: Vec<u8> = m.fx.frames.concat();
@@ -436,6 +465,12 @@ async fn h_grants(
                 Json(json!({ "error": "replace_in_progress" })),
             )
                 .into_response();
+        }
+        Grants::ReplaceInProgressNoRetryAfter => {
+            return json_error(StatusCode::CONFLICT, "replace_in_progress");
+        }
+        Grants::VersionGoneOnce if start > 0 && !m.gone_served.swap(true, Ordering::SeqCst) => {
+            return json_error(StatusCode::CONFLICT, "version_unavailable");
         }
         Grants::UnavailableAfterFirstWindow if start > 0 => {
             return (
@@ -565,6 +600,7 @@ fn setup_with(
         storage_addr,
         serial: AtomicUsize::new(0),
         replace_served: std::sync::atomic::AtomicBool::new(false),
+        gone_served: std::sync::atomic::AtomicBool::new(false),
     });
     *mock_cell.lock().unwrap() = Some(mock.clone());
 
@@ -575,6 +611,7 @@ fn setup_with(
         rt.block_on(async move {
             let app = Router::new()
                 .route("/api/v1/transfer/capabilities", get(h_discovery))
+                .route("/api/v1/files", get(list))
                 .route("/api/v1/files/:id", get(meta))
                 .route("/api/v1/files/:id/download", get(download))
                 .route("/api/v1/files/:id/download-grants", post(h_grants))
@@ -874,11 +911,301 @@ fn a_version_that_goes_away_mid_transfer_restarts_and_publishes_nothing() {
     assert!(!out.status.success(), "{}", describe(&out));
     assert_nothing_written(&env, &out);
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("changed"),
+        String::from_utf8_lossy(&out.stderr).contains("changed again"),
         "{}",
         describe(&out)
     );
     assert_eq!(env.mock.log.lock().unwrap().api_download_hits, 0, "never mix versions");
+}
+
+#[test]
+fn a_version_published_mid_download_is_read_again_from_fresh_metadata_once() {
+    let env = setup(Discovery::Offer, Grants::VersionGoneOnce, &[], &[]);
+    let (out, json) = pull(&env, &[], &[]);
+    assert!(out.status.success(), "{}", describe(&out));
+    assert_identical(&env, &out);
+    assert_eq!(json["transport"], "direct", "{}", describe(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("starting again"),
+        "{}",
+        describe(&out)
+    );
+    let starts: Vec<u64> = env
+        .mock
+        .log
+        .lock()
+        .unwrap()
+        .grant_bodies
+        .iter()
+        .map(|b| b["start_index"].as_u64().unwrap())
+        .collect();
+    // The first attempt: window 0, window 8 (refused: the version is gone). The second starts over.
+    assert_eq!(starts, vec![0, 8, 0, 8, 16], "{starts:?}");
+}
+
+#[test]
+fn a_file_another_device_is_still_uploading_goes_straight_to_the_api() {
+    // 409 replace_in_progress with no Retry-After: not a moment's hold. The API path answers it at
+    // once; five waits of five seconds per file would make every sync pass slower.
+    let env = setup(Discovery::Offer, Grants::ReplaceInProgressNoRetryAfter, &[], &[]);
+    let started = std::time::Instant::now();
+    let (out, json) = pull(&env, &[], &[]);
+    assert!(out.status.success(), "{}", describe(&out));
+    assert!(started.elapsed() < std::time::Duration::from_secs(4), "it did not wait");
+    assert_identical(&env, &out);
+    assert_eq!(json["transport"], "api", "{}", describe(&out));
+    let log = env.mock.log.lock().unwrap();
+    assert_eq!(log.grant_bodies.len(), 1, "one grant request, then the API");
+    assert_eq!(log.api_download_hits, 1);
+}
+
+#[test]
+fn the_trace_is_off_when_the_variable_says_zero_and_an_unknown_transport_warns_once() {
+    let env = setup(Discovery::Offer, Grants::Normal, &[], &[]);
+    let (out, _) = pull(&env, &[], &[("BB_TRANSPORT_TRACE", "0")]);
+    assert!(out.status.success(), "{}", describe(&out));
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("transport:"),
+        "{}",
+        describe(&out)
+    );
+    let env = setup(Discovery::Offer, Grants::Normal, &[], &[]);
+    let (out, _) = pull(&env, &[], &[("BB_TRANSPORT_TRACE", "1")]);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("transport:"),
+        "{}",
+        describe(&out)
+    );
+
+    let env = setup(Discovery::Offer, Grants::Normal, &[], &[]);
+    let (out, json) = pull(&env, &[], &[("BB_TRANSPORT", "bogus")]);
+    assert!(out.status.success(), "{}", describe(&out));
+    assert_eq!(
+        json["transport"],
+        "direct",
+        "an unknown value means auto: {}",
+        describe(&out)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(stderr.matches("ignoring BB_TRANSPORT").count(), 1, "{}", describe(&out));
+}
+
+// ─────────────────────────────── bb sync --once ───────────────────────────────
+
+/// `bb sync --once <cwd>/syncdir /SyncUp`: the remote folder holds the fixture file.
+fn sync_once(env: &Env, extra_env: &[(&str, &str)]) -> (Output, PathBuf) {
+    let dir = env.cwd.join("syncdir");
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = bb(
+        env,
+        &[
+            "--api",
+            &env.api_url,
+            "sync",
+            "--once",
+            dir.to_str().unwrap(),
+            "/SyncUp",
+        ],
+        extra_env,
+    );
+    (out, dir)
+}
+
+#[test]
+fn a_sync_pass_downloads_over_the_direct_transport() {
+    let env = setup(Discovery::Offer, Grants::Normal, &[], &[]);
+    let (out, dir) = sync_once(&env, &[]);
+    assert!(out.status.success(), "{}", describe(&out));
+    assert_eq!(
+        std::fs::read(dir.join("multi.bin")).unwrap_or_default(),
+        env.mock.fx.plaintext
+    );
+    let log = env.mock.log.lock().unwrap();
+    assert!(
+        !log.grant_bodies.is_empty() && log.api_download_hits == 0,
+        "it went direct"
+    );
+}
+
+/// Run `bb sync <cwd>/syncdir /SyncUp` the way a daemon does (no `--once`) until it reaches watch
+/// mode, then stop it. Returns (reached watch mode, stdout, stderr). The child is the one process
+/// this starts, and it is the only one stopped.
+fn sync_until_watching(env: &Env) -> (bool, String, String) {
+    use std::io::{BufRead, BufReader};
+    let dir = env.cwd.join("syncdir");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_bb"))
+        .args(["--api", &env.api_url, "sync", dir.to_str().unwrap(), "/SyncUp"])
+        .current_dir(&env.cwd)
+        .env("HOME", &env.home)
+        .env("XDG_CONFIG_HOME", env.home.join(".config"))
+        .env("BB_NO_UPDATE", "1")
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn bb sync");
+    let out = Arc::new(Mutex::new(String::new()));
+    let err = Arc::new(Mutex::new(String::new()));
+    let mut readers = Vec::new();
+    for (pipe, sink) in [
+        (
+            Box::new(child.stdout.take().unwrap()) as Box<dyn Read + Send>,
+            out.clone(),
+        ),
+        (
+            Box::new(child.stderr.take().unwrap()) as Box<dyn Read + Send>,
+            err.clone(),
+        ),
+    ] {
+        readers.push(std::thread::spawn(move || {
+            for line in BufReader::new(pipe).lines().map_while(Result::ok) {
+                let mut sink = sink.lock().unwrap();
+                sink.push_str(&line);
+                sink.push('\n');
+            }
+        }));
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut watching = false;
+    while std::time::Instant::now() < deadline {
+        if out.lock().unwrap().contains("synced \u{00b7} watching") {
+            watching = true;
+            break;
+        }
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    for r in readers {
+        let _ = r.join();
+    }
+    let (o, e) = (out.lock().unwrap().clone(), err.lock().unwrap().clone());
+    (watching, o, e)
+}
+
+/// Stops whatever `bb sync --daemon` started in this scratch HOME, even when a test fails.
+struct StopDaemons<'a>(&'a Env);
+
+impl Drop for StopDaemons<'_> {
+    fn drop(&mut self) {
+        let _ = bb(self.0, &["--api", &self.0.api_url, "sync", "--stop-all"], &[]);
+    }
+}
+
+#[test]
+fn a_forced_api_transport_reaches_the_sync_daemon() {
+    // `--transport api` is a flag of this invocation; the detached child is started with its own
+    // command line, so the flag has to be handed on (BB_TRANSPORT travels in the environment).
+    let env = setup(Discovery::Offer, Grants::Normal, &[], &[]);
+    let _stop = StopDaemons(&env);
+    let dir = env.cwd.join("syncdir");
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = bb(
+        &env,
+        &[
+            "--transport",
+            "api",
+            "--api",
+            &env.api_url,
+            "sync",
+            "--daemon",
+            dir.to_str().unwrap(),
+            "/SyncUp",
+        ],
+        &[],
+    );
+    assert!(out.status.success(), "{}", describe(&out));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline
+        && std::fs::read(dir.join("multi.bin")).unwrap_or_default() != env.mock.fx.plaintext
+    {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(
+        std::fs::read(dir.join("multi.bin")).unwrap_or_default(),
+        env.mock.fx.plaintext,
+        "the daemon downloaded the file"
+    );
+    let log = env.mock.log.lock().unwrap();
+    assert_eq!(
+        log.discovery_hits, 0,
+        "a daemon started with --transport api must not ask discovery"
+    );
+    assert!(log.grant_bodies.is_empty() && log.storage.is_empty());
+    assert_eq!(log.api_download_hits, 1);
+}
+
+fn sync_left_nothing(dir: &Path) {
+    let leftovers: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n != ".bb-sync.json")
+        .collect();
+    assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
+}
+
+#[test]
+fn a_sync_pass_survives_a_file_that_never_authenticates() {
+    // The chunk fails AEAD from storage and again from the pinned API route: the direct driver's
+    // `Corrupt`. The API path treats a file it cannot decrypt as "unreadable, retry next pass"
+    // (task 1916); the direct path must too. If this ended the pass, launchd and systemd would
+    // restart the daemon every 30 s for ever and the files after it would never arrive.
+    let env = setup(Discovery::Offer, Grants::Normal, &[(2, Fault::Tamper)], &[2]);
+    let (watching, stdout, stderr) = sync_until_watching(&env);
+    assert!(
+        watching,
+        "the daemon must reach watch mode\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let dir = env.cwd.join("syncdir");
+    assert!(
+        !dir.join("multi.bin").exists(),
+        "nothing is published for a file that did not authenticate"
+    );
+    sync_left_nothing(&dir);
+    assert!(
+        stderr.contains("did not authenticate") && stderr.contains("next pass"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("sync incomplete"), "{stderr}");
+
+    // The one-shot form reports the incomplete pass with its own exit code (3), not as an error (1).
+    let env = setup(Discovery::Offer, Grants::Normal, &[(2, Fault::Tamper)], &[2]);
+    let (out, dir) = sync_once(&env, &[]);
+    assert_eq!(out.status.code(), Some(3), "{}", describe(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("1 failed"),
+        "{}",
+        describe(&out)
+    );
+    assert!(!dir.join("multi.bin").exists());
+    assert_clean(&env, &out);
+}
+
+#[test]
+fn a_sync_pass_defers_a_file_whose_version_changed_under_it() {
+    let env = setup(Discovery::Offer, Grants::VersionGoneAfterFirstWindow, &[], &[]);
+    let (watching, stdout, stderr) = sync_until_watching(&env);
+    assert!(
+        watching,
+        "the daemon must reach watch mode\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let dir = env.cwd.join("syncdir");
+    assert!(!dir.join("multi.bin").exists());
+    sync_left_nothing(&dir);
+    assert!(stderr.contains("changed") && stderr.contains("next pass"), "{stderr}");
+    assert_eq!(env.mock.log.lock().unwrap().api_download_hits, 0, "never mix versions");
+
+    // Deferred is not a failure: a one-shot pass that only deferred it is complete.
+    let env = setup(Discovery::Offer, Grants::VersionGoneAfterFirstWindow, &[], &[]);
+    let (out, dir) = sync_once(&env, &[]);
+    assert!(out.status.success(), "{}", describe(&out));
+    assert!(!dir.join("multi.bin").exists());
 }
 
 #[test]
