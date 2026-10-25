@@ -29,7 +29,14 @@ fn bb(home: &Path, args: &[&str], guard: Option<&str>) -> Output {
         .env("NO_COLOR", "1")
         .env_remove("BB_TRANSPORT")
         .stdin(Stdio::null());
-    for var in ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"] {
+    for var in [
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "all_proxy",
+    ] {
         cmd.env(var, "http://127.0.0.1:9");
     }
     cmd.env_remove("NO_PROXY").env_remove("no_proxy");
@@ -64,7 +71,11 @@ fn a_run_that_names_another_public_server_is_refused_too() {
     let home = scratch_home("named");
     let out = bb(&home, &["--api", "https://api.example.org", "ls"], Some("1"));
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
-    assert!(stderr(&out).contains("Refusing to contact api.example.org"), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("Refusing to contact api.example.org"),
+        "{}",
+        stderr(&out)
+    );
 }
 
 #[test]
@@ -84,7 +95,11 @@ fn without_the_variable_nothing_changes_for_a_user() {
     // "0" and an empty value mean off as well.
     for value in ["0", "", "  "] {
         let out = bb(&home, &["--api", "https://api.example.org", "ls"], Some(value));
-        assert!(!stderr(&out).contains("Refusing to contact"), "{value:?}: {}", stderr(&out));
+        assert!(
+            !stderr(&out).contains("Refusing to contact"),
+            "{value:?}: {}",
+            stderr(&out)
+        );
     }
 }
 
@@ -116,5 +131,8 @@ fn every_test_that_runs_the_binary_sets_the_guard() {
         }
     }
     assert!(scanned >= 10, "the scan found only {scanned} files that run the binary");
-    assert!(offenders.is_empty(), "set BB_REFUSE_NON_LOOPBACK_API=1 on every run of the binary: {offenders:#?}");
+    assert!(
+        offenders.is_empty(),
+        "set BB_REFUSE_NON_LOOPBACK_API=1 on every run of the binary: {offenders:#?}"
+    );
 }

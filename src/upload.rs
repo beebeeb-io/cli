@@ -439,9 +439,7 @@ impl AttemptErr {
             AttemptErr::SessionGone { message, .. }
             | AttemptErr::InitRefused { message, .. }
             | AttemptErr::Other(message) => message,
-            AttemptErr::DirectUnavailable { .. } => {
-                "the direct upload is unavailable for this file".to_string()
-            }
+            AttemptErr::DirectUnavailable { .. } => "the direct upload is unavailable for this file".to_string(),
         }
     }
 }
@@ -684,6 +682,7 @@ pub async fn stream_encrypt_upload(
 /// session, stream every chunk, complete. Consumes nothing the retry needs —
 /// the encryptor is rebuilt per attempt because the file key derives from the
 /// file id.
+#[allow(clippy::too_many_arguments)]
 async fn upload_attempt(
     api: &ApiClient,
     master_key: &Arc<MasterKey>,
@@ -932,6 +931,7 @@ enum ProducerErr {
 
 /// The producer/consumer core. Returns `Ok(())` only when every planned chunk
 /// was emitted, server-confirmed, and the byte totals reconcile.
+#[allow(clippy::too_many_arguments)]
 async fn run_pipeline(
     api: &ApiClient,
     upload_session_id: &str,

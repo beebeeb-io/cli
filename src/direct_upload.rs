@@ -573,20 +573,38 @@ mod tests {
         let progress = Counting::default();
         let outcome = run_with(&state, spec(&path, Uuid::new_v4()), &progress).await.unwrap();
         snapshot(&state, |m| {
-            assert_eq!(m.init_headers, vec![Some(CAP.to_string())], "init asks for the direct upload");
+            assert_eq!(
+                m.init_headers,
+                vec![Some(CAP.to_string())],
+                "init asks for the direct upload"
+            );
             assert_eq!(m.grants.len() as u32, chunks);
             assert_eq!(m.storage_puts.len() as u32, chunks);
             assert_eq!(m.commits.len() as u32, chunks);
-            assert!(m.proxy_puts.is_empty(), "no chunk goes through the API: {:?}", m.proxy_puts);
+            assert!(
+                m.proxy_puts.is_empty(),
+                "no chunk goes through the API: {:?}",
+                m.proxy_puts
+            );
             assert_eq!(m.completed.len(), 1);
             // Exactly the chunk lengths the grant was asked for were sent to storage and committed.
             let granted: u64 = m.grants.iter().map(|g| g.2).sum();
             let stored: u64 = m.storage_puts.iter().map(|p| p.len as u64).sum();
             let committed: u64 = m.commits.iter().map(|c| c.2).sum();
-            assert_eq!((granted, stored, committed), (outcome.ciphertext_bytes, outcome.ciphertext_bytes, outcome.ciphertext_bytes));
+            assert_eq!(
+                (granted, stored, committed),
+                (
+                    outcome.ciphertext_bytes,
+                    outcome.ciphertext_bytes,
+                    outcome.ciphertext_bytes
+                )
+            );
             for put in &m.storage_puts {
                 assert_eq!(put.content_type.as_deref(), Some("application/octet-stream"));
-                assert!(!put.had_authorization && !put.had_cookie, "storage learns nothing about the account");
+                assert!(
+                    !put.had_authorization && !put.had_cookie,
+                    "storage learns nothing about the account"
+                );
             }
             // Every chunk index reached storage, under the session it belongs to (the mock's link path is
             // `<session>/<index>/<n>.bin`).
@@ -598,8 +616,15 @@ mod tests {
             assert_eq!(indexes, (0..chunks).collect());
         });
         assert_eq!(*progress.0.lock().unwrap() as u64, outcome.ciphertext_bytes);
-        assert_eq!(outcome.transport, "direct", "the outcome (and `bb push --json`) says so");
-        assert_eq!(crate::resume::resumable_upload_now(&path), None, "a finished upload leaves no record");
+        assert_eq!(
+            outcome.transport, "direct",
+            "the outcome (and `bb push --json`) says so"
+        );
+        assert_eq!(
+            crate::resume::resumable_upload_now(&path),
+            None,
+            "a finished upload leaves no record"
+        );
     }
 
     // ───────────────────────────── compatibility ─────────────────────────────
@@ -641,7 +666,11 @@ mod tests {
         let outcome = run(&state, spec(&path, Uuid::new_v4())).await.unwrap();
         assert_eq!(outcome.transport, "api");
         snapshot(&state, |m| {
-            assert_eq!(m.init_headers, vec![Some(CAP.to_string())], "asked, and answered without a transport");
+            assert_eq!(
+                m.init_headers,
+                vec![Some(CAP.to_string())],
+                "asked, and answered without a transport"
+            );
             assert!(m.grants.is_empty() && m.storage_puts.is_empty());
             assert_eq!(m.proxy_puts.len() as u32, chunk_count(size));
             assert_eq!(m.completed.len(), 1);
@@ -658,7 +687,11 @@ mod tests {
         let state = shared(|m| m.storage_script = VecDeque::from([403]));
         run(&state, spec(&path, Uuid::new_v4())).await.unwrap();
         snapshot(&state, |m| {
-            assert_eq!(m.grants.len() as u32, chunks + 1, "one extra link for the chunk whose PUT failed");
+            assert_eq!(
+                m.grants.len() as u32,
+                chunks + 1,
+                "one extra link for the chunk whose PUT failed"
+            );
             assert_eq!(m.storage_puts.len() as u32, chunks + 1);
             assert_eq!(m.commits.len() as u32, chunks, "only the PUT that worked was committed");
             assert!(m.proxy_puts.is_empty());
@@ -693,9 +726,16 @@ mod tests {
         });
         let started = Instant::now();
         run(&state, spec(&path, Uuid::new_v4())).await.unwrap();
-        assert!(started.elapsed() >= std::time::Duration::from_secs(1), "it waited the stated second");
+        assert!(
+            started.elapsed() >= std::time::Duration::from_secs(1),
+            "it waited the stated second"
+        );
         snapshot(&state, |m| {
-            assert_eq!(m.grants.len() as u32, chunks, "no new link: the staged chunk is still there");
+            assert_eq!(
+                m.grants.len() as u32,
+                chunks,
+                "no new link: the staged chunk is still there"
+            );
             assert_eq!(m.storage_puts.len() as u32, chunks);
             assert_eq!(m.commits.len() as u32, chunks + 1);
         });
@@ -706,13 +746,18 @@ mod tests {
         let scratch = Scratch::new("429");
         let (path, size, _) = scratch.file(FILE_BYTES);
         let chunks = chunk_count(size);
-        let limited = json!({"error": "rate_limited", "message": "Too many requests. Try again in 1 seconds.", "retry_after": 1});
+        let limited =
+            json!({"error": "rate_limited", "message": "Too many requests. Try again in 1 seconds.", "retry_after": 1});
         let state = shared(|m| m.grant_script = VecDeque::from([Grant::Reply(429, limited, Some("1"))]));
         let started = Instant::now();
         run(&state, spec(&path, Uuid::new_v4())).await.unwrap();
         assert!(started.elapsed() >= std::time::Duration::from_secs(1));
         snapshot(&state, |m| {
-            assert_eq!(m.grants.len() as u32, chunks + 1, "the refused grant is asked for again");
+            assert_eq!(
+                m.grants.len() as u32,
+                chunks + 1,
+                "the refused grant is asked for again"
+            );
             assert_eq!(m.storage_puts.len() as u32, chunks);
             assert!(m.abandons.is_empty());
         });
@@ -743,7 +788,11 @@ mod tests {
         let started = Instant::now();
         let result = run(&state, spec).await;
         // The stated wait is 30 s; an interrupt must not sit it out (Ctrl-C has to feel immediate).
-        assert!(started.elapsed() < std::time::Duration::from_secs(10), "waited {:?}", started.elapsed());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "waited {:?}",
+            started.elapsed()
+        );
         assert_eq!(result.unwrap_err(), crate::upload::INTERRUPTED);
         snapshot(&state, |m| {
             assert_eq!(m.grants.len(), 1, "one grant, refused, then the wait");
@@ -764,8 +813,15 @@ mod tests {
             assert_eq!(m.abandons.len(), 1, "the direct session was ended once");
             assert_eq!(m.init_headers.len(), 2);
             assert_eq!(m.init_headers[0].as_deref(), Some(CAP));
-            assert_eq!(m.init_headers[1], None, "the second init does not ask for the direct upload");
-            assert_eq!(m.proxy_puts.len() as u32, chunk_count(size), "every chunk goes through the API");
+            assert_eq!(
+                m.init_headers[1], None,
+                "the second init does not ask for the direct upload"
+            );
+            assert_eq!(
+                m.proxy_puts.len() as u32,
+                chunk_count(size),
+                "every chunk goes through the API"
+            );
             assert_eq!(m.completed.len(), 1);
         });
         assert_eq!(
@@ -773,7 +829,10 @@ mod tests {
             outcome.ciphertext_bytes,
             "the progress counts the file once, not twice"
         );
-        assert_eq!(outcome.transport, "api", "the route that finished the file is the one reported");
+        assert_eq!(
+            outcome.transport, "api",
+            "the route that finished the file is the one reported"
+        );
     }
 
     #[tokio::test]
@@ -810,7 +869,11 @@ mod tests {
             "1 s + 2 s + 4 s of waiting, not more"
         );
         snapshot(&state, |m| {
-            assert_eq!(m.grants.len(), 4, "the server issues four links per chunk and the client asks for no fifth");
+            assert_eq!(
+                m.grants.len(),
+                4,
+                "the server issues four links per chunk and the client asks for no fifth"
+            );
             assert_eq!(m.storage_puts.len(), 4);
             assert!(m.commits.is_empty());
         });
@@ -843,7 +906,10 @@ mod tests {
         });
         let error = run(&state, spec(&path, Uuid::new_v4())).await.unwrap_err();
         assert!(error.contains("forbidden"), "{error}");
-        assert!(!error.contains("X-Amz") && !error.contains("SIGSECRET") && !error.contains("127.0.0.1"), "{error}");
+        assert!(
+            !error.contains("X-Amz") && !error.contains("SIGSECRET") && !error.contains("127.0.0.1"),
+            "{error}"
+        );
         snapshot(&state, |m| {
             assert!(m.abandons.is_empty(), "no fallback after an authorization answer");
             assert!(m.proxy_puts.is_empty());
@@ -854,13 +920,22 @@ mod tests {
     // ───────────────────────────── resume ─────────────────────────────
 
     /// A session this run did not open: in the mock, and in the resume sidecar.
-    fn resumed_session(state: &Shared, path: &std::path::Path, size: u64, mtime: u128, direct: bool, committed: &[u32]) -> (Uuid, Uuid) {
+    fn resumed_session(
+        state: &Shared,
+        path: &std::path::Path,
+        size: u64,
+        mtime: u128,
+        direct: bool,
+        committed: &[u32],
+    ) -> (Uuid, Uuid) {
         let file_id = Uuid::new_v4();
         let sid = Uuid::new_v4();
         {
             let mut m = state.lock().unwrap();
-            m.sessions
-                .insert(sid.to_string(), (file_id.to_string(), direct, committed.iter().copied().collect()));
+            m.sessions.insert(
+                sid.to_string(),
+                (file_id.to_string(), direct, committed.iter().copied().collect()),
+            );
             m.live.insert(sid.to_string());
         }
         crate::resume::record_with_transport(
@@ -886,7 +961,11 @@ mod tests {
         snapshot(&state, |m| {
             assert!(m.inits.is_empty(), "the recorded session is reused, not re-opened");
             assert_eq!(m.grants.len() as u32, chunks, "every chunk asks for a grant");
-            assert_eq!(m.storage_puts.len() as u32, chunks - 1, "chunk 0 is skipped: nothing is sent for it");
+            assert_eq!(
+                m.storage_puts.len() as u32,
+                chunks - 1,
+                "chunk 0 is skipped: nothing is sent for it"
+            );
             assert_eq!(m.commits.len() as u32, chunks - 1);
             assert!(m.proxy_puts.is_empty() && m.abandons.is_empty());
             assert_eq!(m.completed.len(), 1);
@@ -902,7 +981,10 @@ mod tests {
         run(&state, spec(&path, file_id)).await.unwrap();
         snapshot(&state, |m| {
             assert!(m.inits.is_empty());
-            assert!(m.grants.is_empty() && m.storage_puts.is_empty(), "an API session takes no grant");
+            assert!(
+                m.grants.is_empty() && m.storage_puts.is_empty(),
+                "an API session takes no grant"
+            );
             assert_eq!(m.proxy_puts.len() as u32, chunk_count(size));
             assert_eq!(m.completed.len(), 1);
         });
@@ -917,7 +999,11 @@ mod tests {
         let progress = Counting::default();
         let outcome = run_with(&state, spec(&path, file_id), &progress).await.unwrap();
         snapshot(&state, |m| {
-            assert_eq!(m.abandons, vec![file_id.to_string()], "the direct session is ended, not PUT to");
+            assert_eq!(
+                m.abandons,
+                vec![file_id.to_string()],
+                "the direct session is ended, not PUT to"
+            );
             assert_eq!(m.inits.len(), 1, "a fresh API session is opened");
             assert_eq!(m.init_headers, vec![None]);
             assert!(m.proxy_puts.iter().all(|(sid, _, _)| *sid != old_sid.to_string()));
@@ -947,14 +1033,26 @@ mod tests {
         assert_eq!(outcome.transport, "direct");
         snapshot(&state, |m| {
             assert_eq!(m.inits.len(), 1, "one new session for the file");
-            assert_eq!(m.init_headers, vec![Some(CAP.to_string())], "and it asks for the direct upload again");
-            assert_eq!(m.grants.len() as u32, chunks + 1, "the refused grant, then one per chunk");
+            assert_eq!(
+                m.init_headers,
+                vec![Some(CAP.to_string())],
+                "and it asks for the direct upload again"
+            );
+            assert_eq!(
+                m.grants.len() as u32,
+                chunks + 1,
+                "the refused grant, then one per chunk"
+            );
             assert_eq!(m.storage_puts.len() as u32, chunks);
             assert_eq!(m.commits.len() as u32, chunks);
             assert!(m.proxy_puts.is_empty() && m.abandons.is_empty());
             assert_eq!(m.completed.len(), 1);
         });
-        assert_eq!(*progress.0.lock().unwrap() as u64, outcome.ciphertext_bytes, "the file is counted once");
+        assert_eq!(
+            *progress.0.lock().unwrap() as u64,
+            outcome.ciphertext_bytes,
+            "the file is counted once"
+        );
     }
 
     #[tokio::test]
@@ -969,12 +1067,24 @@ mod tests {
         let outcome = run_with(&state, spec(&path, file_id), &progress).await.unwrap();
         assert_eq!(outcome.transport, "direct");
         snapshot(&state, |m| {
-            assert_eq!(m.inits.len(), 1, "a gone session is not committed to again: the file starts over");
+            assert_eq!(
+                m.inits.len(),
+                1,
+                "a gone session is not committed to again: the file starts over"
+            );
             assert_eq!(m.storage_puts.len() as u32, chunks + 1, "chunk 0 went to storage twice");
-            assert_eq!(m.commits.len() as u32, chunks + 1, "the refused commit, then one per chunk");
+            assert_eq!(
+                m.commits.len() as u32,
+                chunks + 1,
+                "the refused commit, then one per chunk"
+            );
             assert_eq!(m.completed.len(), 1);
         });
-        assert_eq!(*progress.0.lock().unwrap() as u64, outcome.ciphertext_bytes, "the file is counted once");
+        assert_eq!(
+            *progress.0.lock().unwrap() as u64,
+            outcome.ciphertext_bytes,
+            "the file is counted once"
+        );
     }
 
     #[tokio::test]
@@ -1023,7 +1133,9 @@ mod tests {
         });
         let result = run(&state, spec(&path, Uuid::new_v4())).await;
         assert!(result.is_err(), "the second init is refused");
-        snapshot(&state, |m| assert_eq!(m.abandons.len(), 1, "the direct session was ended first"));
+        snapshot(&state, |m| {
+            assert_eq!(m.abandons.len(), 1, "the direct session was ended first")
+        });
         assert_eq!(
             crate::resume::resumable_upload_now(&path),
             None,

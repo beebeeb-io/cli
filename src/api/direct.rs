@@ -267,7 +267,7 @@ impl ApiClient {
             dt::Lookup::Fetch => {
                 let (outcome, discovery) = self.fetch_discovery().await;
                 state.record(&outcome, discovery.clone(), now_ms());
-                discovery.filter(|d| wanted(d))
+                discovery.filter(wanted)
             }
         }
     }
@@ -713,7 +713,11 @@ mod tests {
         let mut state = DiscoveryState::new();
         state.record(&dt::Outcome::NotSupported, None, 0);
         assert_eq!(state.lookup(1), dt::Lookup::UseApi);
-        assert_eq!(state.lookup(TTL - 1), dt::Lookup::UseApi, "an answer holds for the trust period");
+        assert_eq!(
+            state.lookup(TTL - 1),
+            dt::Lookup::UseApi,
+            "an answer holds for the trust period"
+        );
         assert_eq!(state.lookup(TTL), dt::Lookup::Fetch, "and is asked again after it");
     }
 
