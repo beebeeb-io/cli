@@ -29,6 +29,8 @@ pub(crate) fn now_ms() -> i64 {
 /// The answer to a grant request.
 pub(crate) enum GrantReply {
     Window(dt::DownloadGrantResponse),
+    /// A 2xx whose body is not the contract's JSON.
+    Malformed,
     /// Anything but a window: the classifier's verdict on the answer.
     Failed(dt::Outcome),
 }
@@ -119,7 +121,7 @@ impl ApiClient {
         }
         let mut cache = self.direct_discovery.lock().await;
         match cache.lookup(now_ms()) {
-            dt::Lookup::Cached(discovery) => discovery.offers_download().then(|| discovery.clone()),
+            dt::Lookup::Cached(discovery) => discovery.offers_download().then_some(discovery),
             dt::Lookup::UseApi => None,
             dt::Lookup::Fetch => {
                 let (outcome, discovery) = self.fetch_discovery().await;
@@ -175,7 +177,7 @@ impl ApiClient {
         match dt::classify(dt::Call::DownloadGrant, &answer) {
             dt::Outcome::Proceed => match dt::DownloadGrantResponse::from_json(&body) {
                 Ok(window) => GrantReply::Window(window),
-                Err(_) => GrantReply::Failed(dt::Outcome::UseApiNow),
+                Err(_) => GrantReply::Malformed,
             },
             other => GrantReply::Failed(other),
         }
@@ -231,7 +233,55 @@ impl ApiClient {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::build_storage_client;
+    use crate::api::ApiClient;
+
+    /// A mock API whose discovery route counts its hits and offers (or not) direct downloads.
+    async fn mock_discovery(offers: bool) -> (ApiClient, Arc<AtomicUsize>) {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let app = axum::Router::new().route(
+            "/api/v1/transfer/capabilities",
+            axum::routing::get(move || {
+                let counter = counter.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(serde_json::json!({
+                        "download": if offers { vec!["object-download-v1"] } else { vec![] },
+                        "upload": [],
+                        "storage_hosts": [],
+                        "storage_buckets": [],
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (ApiClient::new_for_test(format!("http://{addr}")), hits)
+    }
+
+    #[tokio::test]
+    async fn discovery_is_asked_once_and_its_answer_is_honoured_every_time() {
+        // A server that offers nothing: no direct transport, from the cache as from the wire.
+        let (api, hits) = mock_discovery(false).await;
+        for round in 1..=3 {
+            assert!(api.direct_download_offer().await.is_none(), "round {round}");
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "one request, then the cache");
+        // A server that offers it: the same, and the answer is the offer.
+        let (api, hits) = mock_discovery(true).await;
+        for round in 1..=3 {
+            let offer = api.direct_download_offer().await.expect("offered");
+            assert!(offer.offers_download(), "round {round}");
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
 
     #[tokio::test]
     async fn the_storage_client_is_https_only_unless_the_api_is_loopback_http() {

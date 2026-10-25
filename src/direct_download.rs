@@ -71,24 +71,17 @@ type Task<'a> = Pin<Box<dyn Future<Output = Event> + Send + 'a>>;
 /// Fetch one chunk from its presigned link: `200` and a `Content-Length` equal
 /// to the grant's `length`, nothing else. The error carries at most a status.
 async fn fetch_from_storage(client: &reqwest::Client, grant: dt::ChunkGrant) -> Result<Vec<u8>, u16> {
-    let mut resp = client.get(&grant.url).send().await.map_err(|_| 0u16)?;
+    let resp = client.get(&grant.url).send().await.map_err(|_| 0u16)?;
     let status = resp.status().as_u16();
-    if status != 200 {
+    if status != 200 || resp.content_length() != Some(grant.length) {
         return Err(status);
     }
-    if resp.content_length() != Some(grant.length) {
-        return Err(status);
-    }
-    let want = usize::try_from(grant.length).map_err(|_| status)?;
-    // Do not trust the length for the allocation up front; grow as bytes arrive.
-    let mut body = Vec::with_capacity(want.min(8 * 1024 * 1024));
-    while let Some(piece) = resp.chunk().await.map_err(|_| 0u16)? {
-        if body.len() + piece.len() > want {
-            return Err(status);
-        }
-        body.extend_from_slice(&piece);
-    }
-    if body.len() == want { Ok(body) } else { Err(status) }
+    // The HTTP stack frames the body by that Content-Length: a short body is a
+    // read error, a longer one never reaches us. Memory is bounded by the
+    // grant's length, which the planner has already checked against the
+    // manifest's geometry (at most core's MAX_CHUNK_SIZE + 28).
+    let body = resp.bytes().await.map_err(|_| 0u16)?;
+    Ok(body.to_vec())
 }
 
 /// The partly written output: exists only after the first chunk decrypted.
@@ -144,6 +137,8 @@ pub(crate) async fn try_download(
     let mut ready: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
     let mut out: Option<Output> = None;
     let mut geometry_checked = false;
+    // Chunks that came through the pinned API route instead of storage.
+    let mut api_chunks: u32 = 0;
     let expected_chunks = chunk_count.max(1);
 
     loop {
@@ -168,11 +163,10 @@ pub(crate) async fn try_download(
                     index,
                     object_version_id,
                 } => {
-                    let Some(geometry) = planner.geometry() else {
+                    let Some(length) = planner.geometry().and_then(|g| g.chunk_length(index)) else {
                         discard(out);
                         return Ok(DirectResult::UseApi);
                     };
-                    let length = geometry.chunk_length(index);
                     trace(|| format!("chunk {index} via the pinned API route"));
                     tasks.push(Box::pin(async move {
                         Event::Api {
@@ -185,7 +179,7 @@ pub(crate) async fn try_download(
                 }
                 dt::Poll::Wait { until_ms } => break until_ms,
                 dt::Poll::Done => {
-                    return finish(decryptor, out, planner.geometry());
+                    return finish(decryptor, out, api_chunks > 0);
                 }
                 dt::Poll::Stop(verdict) => {
                     drop(tasks);
@@ -252,13 +246,18 @@ pub(crate) async fn try_download(
                 }
                 Err(violation) => trace(|| format!("window refused: {violation}")),
             },
+            Some(Event::Window(GrantReply::Malformed)) => {
+                trace(|| "window answer could not be decoded".to_string());
+                planner.window_malformed();
+            }
             Some(Event::Window(GrantReply::Failed(outcome))) => {
                 trace(|| format!("window failed: {outcome:?}"));
                 planner.window_failed(outcome, now);
             }
             Some(Event::Storage { index, result }) => match result {
                 Ok(bytes) => {
-                    if planner.fetch_ok(index).is_err() {
+                    if let Err(e) = planner.fetch_ok(index) {
+                        trace(|| format!("planner error: {e}"));
                         discard(out);
                         return Ok(DirectResult::UseApi);
                     }
@@ -266,7 +265,8 @@ pub(crate) async fn try_download(
                 }
                 Err(status) => {
                     trace(|| format!("chunk {index} from storage failed (status {status})"));
-                    if planner.fetch_failed(index, now).is_err() {
+                    if let Err(e) = planner.fetch_failed(index, now) {
+                        trace(|| format!("planner error: {e}"));
                         discard(out);
                         return Ok(DirectResult::UseApi);
                     }
@@ -274,10 +274,12 @@ pub(crate) async fn try_download(
             },
             Some(Event::Api { index, result }) => match result {
                 Ok(bytes) => {
-                    if planner.fetch_ok(index).is_err() {
+                    if let Err(e) = planner.fetch_ok(index) {
+                        trace(|| format!("planner error: {e}"));
                         discard(out);
                         return Ok(DirectResult::UseApi);
                     }
+                    api_chunks += 1;
                     ready.insert(index, bytes);
                 }
                 Err(ChunkApiError::Restart) => {
@@ -288,9 +290,19 @@ pub(crate) async fn try_download(
                             .to_string(),
                     );
                 }
-                Err(ChunkApiError::Terminal(message) | ChunkApiError::Failed(message)) => {
+                Err(ChunkApiError::Terminal(message)) => {
                     discard(out);
                     return Err(message);
+                }
+                // The pinned route failed after its own retries: nothing per chunk is left to
+                // try. The planner ends the file and the API stream takes it from the start.
+                Err(ChunkApiError::Failed(message)) => {
+                    trace(|| format!("chunk {index} through the pinned API route failed: {message}"));
+                    if let Err(e) = planner.api_fetch_failed(index) {
+                        trace(|| format!("planner error: {e}"));
+                        discard(out);
+                        return Ok(DirectResult::UseApi);
+                    }
                 }
             },
         }
@@ -320,14 +332,16 @@ pub(crate) async fn try_download(
                         o.encrypted_bytes += frame.len() as u64;
                         o.progress.chunk_confirmed(frame.len() as u64);
                     }
-                    if planner.consumed(next).is_err() {
+                    if let Err(e) = planner.consumed(next) {
+                        trace(|| format!("planner error: {e}"));
                         discard(out);
                         return Ok(DirectResult::UseApi);
                     }
                 }
                 Err(_) => {
                     trace(|| format!("chunk {next} did not authenticate"));
-                    if planner.chunk_unauthentic(next).is_err() {
+                    if let Err(e) = planner.chunk_unauthentic(next) {
+                        trace(|| format!("planner error: {e}"));
                         discard(out);
                         return Ok(DirectResult::UseApi);
                     }
@@ -340,11 +354,7 @@ pub(crate) async fn try_download(
 
 /// Every chunk is written: the stream must end on the frame that authenticated
 /// as last (truncation, task 1908), then the temp file is published.
-fn finish(
-    decryptor: ChunkDecryptor,
-    out: Option<Output>,
-    geometry: Option<dt::Geometry>,
-) -> Result<DirectResult, String> {
+fn finish(decryptor: ChunkDecryptor, out: Option<Output>, mixed: bool) -> Result<DirectResult, String> {
     let Some(out) = out else {
         // Done with nothing written cannot happen (every file has a chunk).
         return Ok(DirectResult::UseApi);
@@ -359,9 +369,6 @@ fn finish(
         plaintext_bytes,
         encrypted_bytes,
     } = out;
-    if let Some(g) = geometry {
-        debug_assert_eq!(g.encrypted_size, encrypted_bytes);
-    }
     if let Err(e) = writer.commit() {
         progress.finish(false);
         return Err(e);
@@ -370,7 +377,9 @@ fn finish(
     Ok(DirectResult::Done(DownloadStats {
         plaintext_bytes,
         encrypted_bytes,
-        transport: "direct",
+        // "mixed": some chunks came through the pinned API route (a link storage would
+        // not serve, a window the server could not give); the file is still one version.
+        transport: if mixed { "mixed" } else { "direct" },
     }))
 }
 

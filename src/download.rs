@@ -126,8 +126,9 @@ fn check_cap(c: FallbackCap, len: u64) -> Result<(), String> {
 pub struct DownloadStats {
     pub plaintext_bytes: u64,
     pub encrypted_bytes: u64,
-    /// `"api"` (the file came through the API) or `"direct"` (straight from
-    /// object storage through presigned links, task 2173).
+    /// `"api"` (the file came through the API), `"direct"` (every chunk straight
+    /// from object storage through presigned links, task 2173) or `"mixed"`
+    /// (direct, with some chunks through the pinned per-chunk API route).
     pub transport: &'static str,
 }
 
@@ -819,6 +820,19 @@ mod tests {
         m: &MasterKey,
         ceiling: u64,
     ) -> Result<Vec<u8>, String> {
+        run_chunked_with(body, headers, chunk_count, m, ceiling)
+            .await
+            .map(|(bytes, _)| bytes)
+    }
+
+    /// [`try_download_chunked_with`] that also returns the download's stats.
+    async fn run_chunked_with(
+        body: Vec<u8>,
+        headers: Vec<(&'static str, String)>,
+        chunk_count: u32,
+        m: &MasterKey,
+        ceiling: u64,
+    ) -> Result<(Vec<u8>, DownloadStats), String> {
         let body = Arc::new(body);
         let headers = Arc::new(headers);
         let app = Router::new().route(
@@ -860,9 +874,39 @@ mod tests {
             ceiling,
         )
         .await;
-        let got = r.map(|_| std::fs::read(&out).unwrap());
+        let got = r.map(|stats| (std::fs::read(&out).unwrap(), stats));
         let _ = std::fs::remove_dir_all(&dir);
         got
+    }
+
+    /// Both API shapes (the raw stream and the buffered legacy decrypt) report `api`:
+    /// `"direct"` and `"mixed"` are only ever set by the direct driver.
+    #[tokio::test]
+    async fn the_api_paths_report_the_api_transport() {
+        let m = mk();
+        let pt = payload(2 * 4096 + 5);
+        let raw = raw_wire(&m, &pt, 4096, false);
+        let (got, stats) = run_chunked_with(
+            raw,
+            vec![("x-chunk-size", "4096".to_string())],
+            3,
+            &m,
+            FALLBACK_HARD_CEILING,
+        )
+        .await
+        .unwrap();
+        assert_eq!((got, stats.transport), (pt.clone(), "api"), "the streaming path");
+
+        let fk = derive_file_key(&m, FID.as_bytes());
+        let mut legacy = Vec::new();
+        for chunk in pt.chunks(300) {
+            legacy.extend(serde_json::to_vec(&encrypt_chunk(&fk, chunk).unwrap()).unwrap());
+        }
+        let count = pt.chunks(300).count() as u32;
+        let (got, stats) = run_chunked_with(legacy, vec![], count, &m, FALLBACK_HARD_CEILING)
+            .await
+            .unwrap();
+        assert_eq!((got, stats.transport), (pt, "api"), "the buffered legacy path");
     }
 
     /// Round 3 P2-1: a hostile X-Chunk-Size (2^40, u64::MAX) must be treated as

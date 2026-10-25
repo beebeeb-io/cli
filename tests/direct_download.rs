@@ -127,6 +127,10 @@ enum Grants {
     VersionGoneAfterFirstWindow,
     /// The first window is served, every later one is refused as ineligible.
     UnavailableAfterFirstWindow,
+    /// The first window is served, every later one is a 200 whose body is not the contract's JSON.
+    GarbageAfterFirstWindow,
+    /// The very first grant request answers 409 `replace_in_progress` with `Retry-After: 1`.
+    ReplaceInProgressOnce,
     Bare404,
     Forbidden,
     /// Links name a host the discovery did not list.
@@ -186,6 +190,7 @@ struct Mock {
     log: Mutex<Log>,
     storage_addr: SocketAddr,
     serial: AtomicUsize,
+    replace_served: std::sync::atomic::AtomicBool,
 }
 
 // ─────────────────────────────── storage mock (raw HTTP) ───────────────────────────────
@@ -421,6 +426,17 @@ async fn h_grants(
         Grants::VersionGoneAfterFirstWindow if start > 0 => {
             return json_error(StatusCode::CONFLICT, "version_unavailable");
         }
+        Grants::GarbageAfterFirstWindow if start > 0 => {
+            return Json(json!({ "nope": true })).into_response();
+        }
+        Grants::ReplaceInProgressOnce if !m.replace_served.swap(true, Ordering::SeqCst) => {
+            return (
+                StatusCode::CONFLICT,
+                [(header::RETRY_AFTER, "1")],
+                Json(json!({ "error": "replace_in_progress" })),
+            )
+                .into_response();
+        }
         Grants::UnavailableAfterFirstWindow if start > 0 => {
             return (
                 StatusCode::CONFLICT,
@@ -548,6 +564,7 @@ fn setup_with(
         log: Mutex::default(),
         storage_addr,
         serial: AtomicUsize::new(0),
+        replace_served: std::sync::atomic::AtomicBool::new(false),
     });
     *mock_cell.lock().unwrap() = Some(mock.clone());
 
@@ -629,6 +646,11 @@ fn describe(out: &Output) -> String {
 /// Nothing a run printed may contain a signed link or any part of its signature.
 fn assert_clean(env: &Env, out: &Output) {
     let all = describe(out);
+    // With BB_TRANSPORT_TRACE on, the planner must never have stalled or erred: a safety net
+    // that quietly falls back to the API would otherwise hide a missing planner call.
+    for needle in ["planner stalled", "planner error"] {
+        assert!(!all.contains(needle), "the planner lost track of a request:\n{all}");
+    }
     for needle in ["X-Amz-Signature", "x-amz-signature", SIG, "X-Amz-Expires"] {
         assert!(!all.contains(needle), "output leaks {needle}:\n{all}");
     }
@@ -885,7 +907,7 @@ fn a_chunk_storage_never_serves_goes_to_the_pinned_api_route() {
     let (out, json) = pull(&env, &[], &[]);
     assert!(out.status.success(), "{}", describe(&out));
     assert_identical(&env, &out);
-    assert_eq!(json["transport"], "direct", "{}", describe(&out));
+    assert_eq!(json["transport"], "mixed", "{}", describe(&out));
     assert_clean(&env, &out);
     assert_eq!(storage_hits(&env, 5), 4, "the first attempt plus three renewals");
     let log = env.mock.log.lock().unwrap();
@@ -911,7 +933,7 @@ fn broken_storage_responses_are_handled_like_any_storage_failure() {
     let (out, json) = pull(&env, &[], &[]);
     assert!(out.status.success(), "{}", describe(&out));
     assert_identical(&env, &out);
-    assert_eq!(json["transport"], "direct", "{}", describe(&out));
+    assert_eq!(json["transport"], "mixed", "{}", describe(&out));
     assert_clean(&env, &out);
     let mut api = env.mock.log.lock().unwrap().api_chunk_hits.clone();
     api.sort_unstable();
@@ -924,7 +946,7 @@ fn a_tampered_storage_chunk_is_refetched_through_the_api_and_a_double_tamper_is_
     let (out, json) = pull(&env, &[], &[]);
     assert!(out.status.success(), "{}", describe(&out));
     assert_identical(&env, &out);
-    assert_eq!(json["transport"], "direct", "{}", describe(&out));
+    assert_eq!(json["transport"], "mixed", "{}", describe(&out));
     assert_eq!(env.mock.log.lock().unwrap().api_chunk_hits, vec![2]);
 
     let env = setup(Discovery::Offer, Grants::Normal, &[(2, Fault::Tamper)], &[2]);
@@ -945,7 +967,7 @@ fn a_storage_redirect_is_never_followed() {
     let (out, json) = pull(&env, &[], &[("BB_TRANSPORT_TRACE", "1")]);
     assert!(out.status.success(), "{}", describe(&out));
     assert_identical(&env, &out);
-    assert_eq!(json["transport"], "direct", "{}", describe(&out));
+    assert_eq!(json["transport"], "mixed", "{}", describe(&out));
     assert_clean(&env, &out);
     let log = env.mock.log.lock().unwrap();
     assert_eq!(log.leak_hits, 0, "the client followed a redirect off the storage host");
@@ -969,29 +991,72 @@ fn the_pull_json_and_help_stay_compatible() {
         assert!(json.get(key).is_some(), "missing {key} in {json}");
     }
     assert_eq!(json["size_bytes"], PLAIN_LEN);
-    let help = bb(&env, &["--help"], &[]);
+    let help = bb(&env, &["pull", "--help"], &[]);
+    assert!(help.status.success(), "{}", describe(&help));
     assert!(
         !String::from_utf8_lossy(&help.stdout).contains("--transport"),
-        "the debug switch is hidden from --help"
+        "the debug switch is hidden from --help:\n{}",
+        describe(&help)
     );
     let _ = &env.api_url;
 }
 
 #[test]
-fn a_fallback_after_chunks_were_written_restarts_the_file_on_the_api_cleanly() {
+fn a_window_the_server_refuses_after_the_first_moves_the_rest_to_the_pinned_api_route() {
+    // The mixed-node rollout case (R1.6): the first window came from a node with the route, a later
+    // one from a node without it. What was written stays; the chunks without a grant come through
+    // the pinned per-chunk route; the full-file stream is never used and no transport is mixed
+    // WITHIN a chunk.
     let env = setup(Discovery::Offer, Grants::UnavailableAfterFirstWindow, &[], &[]);
     let (out, json) = pull(&env, &[], &[("BB_TRANSPORT_TRACE", "1")]);
     assert!(out.status.success(), "{}", describe(&out));
     assert_identical(&env, &out);
-    assert_eq!(json["transport"], "api", "{}", describe(&out));
+    assert_eq!(json["transport"], "mixed", "{}", describe(&out));
     assert_clean(&env, &out);
     let log = env.mock.log.lock().unwrap();
-    assert!(!log.storage.is_empty(), "the first window was used before the refusal");
-    assert_eq!(log.api_download_hits, 1, "the whole file came through the API");
-    assert!(
-        log.api_chunk_hits.is_empty(),
-        "never a mix of transports within one output"
+    assert_eq!(log.api_download_hits, 0, "no full-file stream");
+    let mut api = log.api_chunk_hits.clone();
+    api.sort_unstable();
+    assert_eq!(
+        api,
+        (8..21).collect::<Vec<u32>>(),
+        "exactly the chunks the first window did not cover"
     );
+    let storage: std::collections::BTreeSet<u32> = log.storage.iter().map(|(i, _)| *i).collect();
+    assert_eq!(storage, (0..8).collect(), "storage served exactly the granted chunks");
+}
+
+#[test]
+fn an_undecodable_window_after_the_first_is_handled_like_any_window_that_cannot_be_served() {
+    let env = setup(Discovery::Offer, Grants::GarbageAfterFirstWindow, &[], &[]);
+    let (out, json) = pull(&env, &[], &[]);
+    assert!(out.status.success(), "{}", describe(&out));
+    assert_identical(&env, &out);
+    assert_eq!(json["transport"], "mixed", "{}", describe(&out));
+    let log = env.mock.log.lock().unwrap();
+    assert_eq!(log.api_download_hits, 0);
+    assert_eq!(log.api_chunk_hits.len(), 13, "chunks 8..=20 through the pinned route");
+}
+
+#[test]
+fn a_file_held_by_another_operation_is_waited_for_and_stays_direct() {
+    // 409 replace_in_progress with Retry-After: 1 on the first grant request (R1.13): wait, ask again.
+    let env = setup(Discovery::Offer, Grants::ReplaceInProgressOnce, &[], &[]);
+    let started = std::time::Instant::now();
+    let (out, json) = pull(&env, &[], &[]);
+    assert!(out.status.success(), "{}", describe(&out));
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(900),
+        "it waited for Retry-After"
+    );
+    assert_identical(&env, &out);
+    assert_eq!(json["transport"], "direct", "{}", describe(&out));
+    let log = env.mock.log.lock().unwrap();
+    assert_eq!(
+        log.grant_bodies[0], log.grant_bodies[1],
+        "the same first window was asked for again"
+    );
+    assert_eq!(log.api_download_hits, 0);
 }
 
 #[test]
@@ -1019,19 +1084,27 @@ fn a_v2_stream_that_ends_before_its_last_frame_is_never_published() {
 
 #[test]
 fn the_api_fallback_route_is_held_to_the_manifest_length_and_the_version_pin() {
-    // Storage never serves chunk 5, so it goes through the pinned API route.
-    // A body one byte short there is a failure, not a chunk.
+    // Storage never serves chunk 5, so it goes through the pinned API route. A body one byte
+    // short there is a failure, not a chunk: nothing per chunk is left to try, so the file
+    // ends on the full API stream, from the start, with the partial output discarded.
     let env = setup(Discovery::Offer, Grants::Normal, &[(5, Fault::Forbidden(99))], &[]);
     env.mock.cfg.lock().unwrap().api_chunk_short.push(5);
-    let (out, _) = pull(&env, &[], &[]);
-    assert!(!out.status.success(), "{}", describe(&out));
-    assert_nothing_written(&env, &out);
+    let (out, json) = pull(&env, &[], &[("BB_TRANSPORT_TRACE", "1")]);
+    assert!(out.status.success(), "{}", describe(&out));
+    assert_identical(&env, &out);
+    assert_eq!(json["transport"], "api", "{}", describe(&out));
     assert_clean(&env, &out);
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("manifest"),
-        "{}",
-        describe(&out)
-    );
+    {
+        let log = env.mock.log.lock().unwrap();
+        assert!(
+            log.api_chunk_hits.contains(&5),
+            "the pinned route was tried for chunk 5"
+        );
+        assert_eq!(
+            log.api_download_hits, 1,
+            "then the whole file came through the API stream"
+        );
+    }
 
     // The pinned version gone on that route: abort, nothing written, no full-file stream.
     let env = setup(Discovery::Offer, Grants::Normal, &[(5, Fault::Forbidden(99))], &[]);
