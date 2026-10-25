@@ -129,7 +129,8 @@ enum Grants {
     UnavailableAfterFirstWindow,
     /// The first window is served, every later one is a 200 whose body is not the contract's JSON.
     GarbageAfterFirstWindow,
-    /// The very first grant request answers 409 `replace_in_progress` with `Retry-After: 1`.
+    /// The very first grant request answers 409 `replace_in_progress` with `Retry-After: 1`. The
+    /// contract allows a stated wait; today's server sends none (see `ReplaceInProgressNoRetryAfter`).
     ReplaceInProgressOnce,
     /// Every grant request answers 409 `replace_in_progress` with no `Retry-After`: another device
     /// is still uploading the file.
@@ -354,6 +355,9 @@ async fn meta(State(m): State<Arc<Mock>>, AxPath(id): AxPath<String>) -> Respons
 
 const SYNC_FOLDER_ID: &str = "22222222-2222-4222-8222-222222222222";
 
+/// The body of the server's pinned per-chunk route for a version that is gone.
+const GONE_VERSION: &str = "download version unavailable; restart download from fresh metadata";
+
 /// `GET /api/v1/files`: the account root holds the folder `SyncUp`; it holds the fixture file.
 async fn list(State(m): State<Arc<Mock>>, Query(q): Query<HashMap<String, String>>) -> Response {
     match q.get("parent_id").map(String::as_str) {
@@ -420,7 +424,7 @@ async fn h_discovery(State(m): State<Arc<Mock>>, headers: HeaderMap) -> Response
         .into_response(),
         Discovery::Bare404 => StatusCode::NOT_FOUND.into_response(),
         Discovery::Json404 => json_error(StatusCode::NOT_FOUND, "not found"),
-        Discovery::ServerError => json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal"),
+        Discovery::ServerError => json_error(StatusCode::INTERNAL_SERVER_ERROR, "Something went wrong."),
     }
 }
 
@@ -538,16 +542,24 @@ async fn api_chunk(
         return json_error(StatusCode::NOT_FOUND, "not found");
     }
     m.log.lock().unwrap().api_chunk_hits.push(index);
+    // The real server (routes/version_download.rs): a version that is gone is a 409 whose body
+    // is this sentence, NOT the grant route's `version_unavailable` code.
     if q.get("object_version_id").map(String::as_str) != Some(VERSION) {
-        return json_error(StatusCode::CONFLICT, "version_unavailable");
+        return json_error(StatusCode::CONFLICT, GONE_VERSION);
     }
     let Some(frame) = m.fx.frames.get(index as usize) else {
-        return json_error(StatusCode::BAD_REQUEST, "out of range");
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "chunk index {index} out of range (version has {} chunk(s))",
+                m.fx.frames.len()
+            ),
+        );
     };
     let mut body = frame.clone();
     let cfg = m.cfg.lock().unwrap();
     if cfg.api_chunk_gone.contains(&index) {
-        return json_error(StatusCode::CONFLICT, "version_unavailable");
+        return json_error(StatusCode::CONFLICT, GONE_VERSION);
     }
     if cfg.api_chunk_tamper.contains(&index) {
         body[20] ^= 0x01;

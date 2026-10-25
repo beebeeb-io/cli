@@ -394,8 +394,20 @@ impl ApiClient {
         let status = resp.status();
         if !status.is_success() {
             let seen = answer_of(resp, 64 * 1024).await;
-            // The same questions as for a grant: authorization is final, a vanished version
-            // restarts the file, "held" and rate limits wait, a server hiccup is tried again.
+            // On this route a 409 means the pinned version is gone. The server's body is the
+            // sentence "download version unavailable; restart download from fresh metadata" (not
+            // the grant route's `version_unavailable` code), so the status decides, whatever the
+            // text says. Only "another operation holds the file" is a wait.
+            if seen.answer.status == 409
+                && !matches!(
+                    seen.answer.error_code(),
+                    Some("replace_in_progress" | "commit_in_progress")
+                )
+            {
+                return Err(PinnedFailure::Final(ChunkApiError::Restart));
+            }
+            // Otherwise the same questions as for a grant: authorization is final, "held" and
+            // rate limits wait, a server hiccup is tried again.
             let failed = format!("download chunk {index} failed ({status})");
             return Err(match dt::classify(dt::Call::DownloadGrant, &seen.answer) {
                 dt::Outcome::Terminal(t) if t.status == 401 => {
@@ -654,9 +666,11 @@ mod tests {
         use axum::response::IntoResponse;
         match step {
             Reply::Status(code) => axum::http::StatusCode::from_u16(*code).unwrap().into_response(),
+            // The server's `server_busy`: a JSON body and a Retry-After.
             Reply::Status429(secs) => (
                 axum::http::StatusCode::TOO_MANY_REQUESTS,
                 [("retry-after", secs.to_string())],
+                axum::Json(serde_json::json!({ "error": "server_busy", "retry_after": secs })),
             )
                 .into_response(),
             Reply::Json(code, error, retry) => {
@@ -696,6 +710,10 @@ mod tests {
         });
         (ApiClient::new_for_test(format!("http://{addr}")), hits)
     }
+
+    /// What the server's pinned chunk route says for a version that is gone (its
+    /// `version_download.rs::unavailable`), as `{"error": <this>}`.
+    const GONE_VERSION: &str = "download version unavailable; restart download from fresh metadata";
 
     const FAST: PinnedRetry = PinnedRetry {
         attempts: 4,
@@ -786,9 +804,17 @@ mod tests {
             }
             assert_eq!(hits.load(Ordering::SeqCst), 1, "{want}");
         }
-        let (api, hits) = scripted_api(vec![Reply::Json(409, "version_unavailable", None)]).await;
-        assert!(matches!(pinned(&api, FAST, 5).await, Err(ChunkApiError::Restart)));
-        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        // A gone pin: the server's real body (`routes/version_download.rs`), a bare 409, and any
+        // other 409 text all restart the file. `version_unavailable` is the GRANT route's code.
+        for reply in [
+            Reply::Json(409, GONE_VERSION, None),
+            Reply::Status(409),
+            Reply::Json(409, "something the server may say tomorrow", None),
+        ] {
+            let (api, hits) = scripted_api(vec![reply]).await;
+            assert!(matches!(pinned(&api, FAST, 5).await, Err(ChunkApiError::Restart)));
+            assert_eq!(hits.load(Ordering::SeqCst), 1);
+        }
         // A refusal that will repeat (a malformed request).
         let (api, hits) = scripted_api(vec![Reply::Status(400)]).await;
         failed(pinned(&api, FAST, 5).await.unwrap_err());
