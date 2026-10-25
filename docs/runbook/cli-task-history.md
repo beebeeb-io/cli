@@ -279,3 +279,5 @@ Review round 3 (PR #102): **no test and no `bb` run under a redirected HOME may 
 
 Known and accepted: a file deferred (`Changed`) or left unreadable by a sync pass is retried only at the next daemon start, because watch mode never downloads. The CLI-local retry, classification and discovery policies in this PR go away at the core pin bump that carries `Call::PinnedChunk`, `PinnedRetry` and the expiring `DiscoveryCache`.
 
+Service guard, round 4: on Linux the guard also compares the config directory the process uses (`$XDG_CONFIG_HOME` when absolute, else `$HOME/.config`) with the one a systemd user service would use (`<account home>/.config`), because `XDG_CONFIG_HOME=<scratch>` with the real HOME would otherwise pass. An account home that cannot be determined fails closed (the override still works). Removing a service that is not installed is `Ok(false)` and is never refused. A folder pull reads a changed file again once and stops on every other failure, naming the file.
+
