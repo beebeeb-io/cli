@@ -271,7 +271,11 @@ fn build_client(timeout: std::time::Duration) -> Client {
 
 impl ApiClient {
     pub fn from_config() -> Self {
-        let config = load_config();
+        Self::with_config(load_config())
+    }
+
+    /// [`from_config`](Self::from_config) for a config already in hand.
+    fn with_config(config: crate::config::Config) -> Self {
         // 300s per-request timeout, matching beebeeb-upload, so a stalled chunk
         // PUT fails instead of hanging forever. Long-lived calls that need more
         // (the SSE sync stream) override this per-request with their own

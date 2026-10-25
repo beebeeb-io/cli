@@ -1333,6 +1333,21 @@ mod tests {
             !std::sync::Arc::ptr_eq(&a, &super::DirectState::shared("http://127.0.0.1:41002")),
             "another base, another state"
         );
+        // The production constructor shares it: a daemon's per-resync clients are one client as far as discovery goes.
+        let config = |url: &str| crate::config::Config {
+            api_url: url.to_string(),
+            ..crate::config::Config::default()
+        };
+        let one = ApiClient::with_config(config("http://127.0.0.1:41003"));
+        let two = ApiClient::with_config(config("http://127.0.0.1:41003"));
+        assert!(
+            std::sync::Arc::ptr_eq(&one.direct, &two.direct),
+            "two clients of one process and base share it"
+        );
+        assert!(!std::sync::Arc::ptr_eq(
+            &one.direct,
+            &ApiClient::with_config(config("http://127.0.0.1:41004")).direct
+        ));
         // A test client has a state of its own: tests on different mock servers must not share a cache.
         let x = ApiClient::new_for_test("http://127.0.0.1:41001".to_string());
         let y = ApiClient::new_for_test("http://127.0.0.1:41001".to_string());

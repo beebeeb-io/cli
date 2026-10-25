@@ -426,7 +426,31 @@ fn run() { Command::new(env!("CARGO_BIN_EXE_bb")).output().unwrap(); }"#;
     assert_eq!(unguarded_spawns(after).len(), 1, "after the run");
     let removed = r#"fn run() { Command::new(env!("CARGO_BIN_EXE_bb")).env_remove("BB_REFUSE_NON_LOOPBACK_API").output().unwrap(); }"#;
     assert_eq!(unguarded_spawns(removed).len(), 1, "env_remove is not the guard");
+    // a command that is only built here, with the guard set in a LATER function: not the same command's guard
+    let built_only = r#"fn build() -> Command { Command::new(env!("CARGO_BIN_EXE_bb")) }
+fn later(c: &mut Command) { c.env("BB_REFUSE_NON_LOOPBACK_API", "1"); }"#;
+    assert_eq!(unguarded_spawns(built_only).len(), 1, "a guard in a later function");
     // one guarded and one unguarded spawn in one file: the second is found
     let two = format!("{GUARDED}\nfn other() {{ Command::new(env!(\"CARGO_BIN_EXE_bb\")).output().unwrap(); }}");
     assert_eq!(unguarded_spawns(&two).len(), 1, "one of two");
+}
+
+#[test]
+fn the_scan_reads_nested_directories() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("api-guard-nested-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("common/deeper")).unwrap();
+    std::fs::write(dir.join("top.rs"), "// a").unwrap();
+    std::fs::write(dir.join("common/helper.rs"), "// b").unwrap();
+    std::fs::write(dir.join("common/deeper/more.rs"), "// c").unwrap();
+    std::fs::write(dir.join("common/notes.txt"), "not rust").unwrap();
+    let mut found = Vec::new();
+    rust_files(&dir, &mut found);
+    let mut names: Vec<String> = found
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["helper.rs", "more.rs", "top.rs"]);
+    let _ = std::fs::remove_dir_all(&dir);
 }
