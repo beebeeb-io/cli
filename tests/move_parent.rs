@@ -77,6 +77,7 @@ async fn run_with_target(args: &[&str], target_id: Value, success: bool) -> Vec<
         let home = home.clone();
         move || {
             Command::new(env!("CARGO_BIN_EXE_bb"))
+                .env("BB_REFUSE_NON_LOOPBACK_API", "1")
                 .args(["--json", "mv"])
                 .args(argv)
                 .env("HOME", &home)

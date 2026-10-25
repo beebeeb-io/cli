@@ -60,6 +60,7 @@ fn write_logged_in_config(home: &Path, api_url: &str) {
 
 fn bb(home: &Path, cwd: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_bb"))
+        .env("BB_REFUSE_NON_LOOPBACK_API", "1")
         .args(args)
         .current_dir(cwd)
         .env("HOME", home)

@@ -447,6 +447,7 @@ impl Scratch {
 
     fn bb(&self, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_bb"))
+            .env("BB_REFUSE_NON_LOOPBACK_API", "1")
             .args(args)
             .current_dir(&self.cwd)
             .env("HOME", &self.home)
@@ -462,6 +463,7 @@ impl Scratch {
     /// `None` = it did not finish in time.
     fn bb_timeout(&self, args: &[&str], secs: u64) -> Option<Output> {
         let mut child = Command::new(env!("CARGO_BIN_EXE_bb"))
+            .env("BB_REFUSE_NON_LOOPBACK_API", "1")
             .args(args)
             .current_dir(&self.cwd)
             .env("HOME", &self.home)

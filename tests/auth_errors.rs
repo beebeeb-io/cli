@@ -69,6 +69,8 @@ fn bb_env(home: &Path, args: &[&str], extra: &[(&str, &str)]) -> Output {
         .env_remove("XPC_SERVICE_NAME")
         .env_remove("BEEBEEB_SYNC_SERVICE")
         .envs(extra.iter().copied())
+        // Last, so that nothing in `extra` can switch it off.
+        .env("BB_REFUSE_NON_LOOPBACK_API", "1")
         .output()
         .expect("run bb")
 }
@@ -166,7 +168,8 @@ fn revoked_session_status_fails_too() {
 fn logged_out_whoami_exits_nonzero_with_a_login_hint() {
     let home = scratch_home();
 
-    let out = bb(&home, &["whoami"]);
+    // Names a server on this machine: no test run relies on the built-in default (production).
+    let out = bb(&home, &["--api", "http://127.0.0.1:9", "whoami"]);
     let stderr = text(&out.stderr);
     assert_eq!(
         out.status.code(),

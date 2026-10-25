@@ -204,6 +204,7 @@ pub async fn run(
                         "size_bytes": ur.size_bytes,
                         "speed_bps": speed as u64,
                         "duration_ms": ur.duration.as_millis() as u64,
+                        "transport": ur.transport,
                     }],
                     "total_files": 1,
                     "total_bytes": ur.encrypted_bytes,
@@ -300,6 +301,8 @@ struct UploadResult {
     id: String,
     size_bytes: u64,
     encrypted_bytes: u64,
+    /// `"direct"` or `"api"` (additive `--json` key `transport`, as for `bb pull`).
+    transport: &'static str,
     duration: std::time::Duration,
 }
 
@@ -510,6 +513,7 @@ async fn push_single_file(
         id: server_id.clone(),
         size_bytes: outcome.plaintext_bytes,
         encrypted_bytes: outcome.ciphertext_bytes,
+        transport: outcome.transport,
         duration: file_elapsed,
     };
 
@@ -682,6 +686,7 @@ async fn push_directory(
                     "size_bytes": r.size_bytes,
                     "speed_bps": r.speed_bps() as u64,
                     "duration_ms": r.duration.as_millis() as u64,
+                    "transport": r.transport,
                 })
             })
             .collect();

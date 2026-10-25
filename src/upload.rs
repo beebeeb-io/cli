@@ -54,7 +54,7 @@ use beebeeb_types::ChunkProfile;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use uuid::Uuid;
 
-use crate::api::ApiClient;
+use crate::api::{ApiClient, DirectOffer};
 
 /// Sentinel error returned when an upload is cancelled (Ctrl-C / shutdown
 /// flag). Callers compare against this to count "remaining" rather than
@@ -128,6 +128,10 @@ pub struct UploadOutcome {
     pub plaintext_bytes: u64,
     /// Total ciphertext uploaded (`plaintext + 28 * chunk_count`).
     pub ciphertext_bytes: u64,
+    /// How the chunks reached the server (task 2173): `"direct"` (grant -> object storage -> commit) or
+    /// `"api"` (the chunk PUT route). A direct session that was given up reports the route that finished
+    /// the file, `"api"`.
+    pub transport: &'static str,
 }
 
 /// Progress sink. One instance per sync/push run; [`begin_file`] is called once
@@ -379,8 +383,13 @@ mod bar_progress_rollback_race {
 /// How one upload attempt obtains its v2 session.
 #[derive(Clone, Copy, Debug)]
 enum SessionPlan {
-    /// Reuse a session recorded by an interrupted earlier run (skip init).
-    Resume { file_id: Uuid, session_id: Uuid },
+    /// Reuse a session recorded by an interrupted earlier run (skip init). `direct`: the session was
+    /// opened as a direct upload (task 2173) and must be continued as one.
+    Resume {
+        file_id: Uuid,
+        session_id: Uuid,
+        direct: bool,
+    },
     /// Open a new session for `file_id`.
     Init {
         file_id: Uuid,
@@ -415,6 +424,11 @@ enum AttemptErr {
     /// The init for the stored `file_id` was refused in a way a fresh id can
     /// fix. Carries the fresh id to try (at most once).
     InitRefused { message: String, fresh_file_id: Uuid },
+    /// Task 2173: the session was opened as a direct upload and cannot finish as one (the server turned
+    /// the direction off, a node has no direct routes, a link was refused, storage kept failing). Its
+    /// transport cannot change, so the driver abandons it and inits again WITHOUT the capability token,
+    /// once per file per run. `bytes_confirmed` is rolled back like for [`AttemptErr::SessionGone`].
+    DirectUnavailable { bytes_confirmed: u64 },
     /// Anything else — surfaced to the caller unchanged.
     Other(String),
 }
@@ -425,6 +439,7 @@ impl AttemptErr {
             AttemptErr::SessionGone { message, .. }
             | AttemptErr::InitRefused { message, .. }
             | AttemptErr::Other(message) => message,
+            AttemptErr::DirectUnavailable { .. } => "the direct upload is unavailable for this file".to_string(),
         }
     }
 }
@@ -544,6 +559,7 @@ pub async fn stream_encrypt_upload(
             SessionResume::ContinueSession => SessionPlan::Resume {
                 file_id: pending.file_id,
                 session_id: pending.session_id,
+                direct: pending.direct,
             },
             SessionResume::RestartWithFreshSession => {
                 crate::resume::clear(&spec.path);
@@ -578,8 +594,12 @@ pub async fn stream_encrypt_upload(
             is_recovery: false,
         },
     };
+    // This file's direct upload was given up in this run: its re-init (and nothing after it) asks for the API.
+    // `note_direct_upload_failed` remembers the same fact for every LATER file for the trust period, but a
+    // memory with an expiry cannot be what bounds this loop, so the file keeps its own bit.
+    let mut direct_given_up = false;
     loop {
-        match upload_attempt(api, &master_key, &spec, size, mtime_ns, plan, progress).await {
+        match upload_attempt(api, &master_key, &spec, size, mtime_ns, plan, direct_given_up, progress).await {
             Ok(outcome) => return Ok(outcome),
             Err(AttemptErr::SessionGone {
                 message: msg,
@@ -616,6 +636,40 @@ pub async fn stream_encrypt_upload(
                     is_recovery: true,
                 };
             }
+            Err(AttemptErr::DirectUnavailable { bytes_confirmed }) => {
+                // The direct session takes no proxy PUT, and the init below would meet its live lease: end
+                // it first, like a session that cannot be continued (`RestartWithFreshSession`). Once per
+                // file per run: `direct_given_up` keeps this file's re-init off the direct route, and
+                // `note_direct_upload_failed` keeps every later NEW session off it for the trust period.
+                let (SessionPlan::Resume { file_id, .. } | SessionPlan::Init { file_id, .. }) = plan;
+                direct_given_up = true;
+                api.note_direct_upload_failed();
+                if bytes_confirmed > 0 {
+                    progress.rollback(bytes_confirmed);
+                }
+                crate::resume::clear(&spec.path);
+                if let Err(e) = api.upload_abandon(&file_id.to_string()).await
+                    && e.status != 404
+                    && !crate::ui::is_quiet()
+                {
+                    eprintln!(
+                        "  {}: could not end the direct upload session ({})",
+                        display_name(&spec.file_name),
+                        e.message
+                    );
+                }
+                if !crate::ui::is_quiet() {
+                    eprintln!(
+                        "  {}: the direct upload is unavailable for this file; sending it through the API",
+                        display_name(&spec.file_name)
+                    );
+                }
+                plan = SessionPlan::Init {
+                    file_id,
+                    fallback_file_id: (file_id != spec.file_id).then_some(spec.file_id),
+                    is_recovery: true,
+                };
+            }
             Err(AttemptErr::InitRefused { fresh_file_id, .. }) => {
                 plan = SessionPlan::Init {
                     file_id: fresh_file_id,
@@ -631,7 +685,9 @@ pub async fn stream_encrypt_upload(
 /// One attempt: build the encryptor for `plan`'s file id, open (or reuse) the
 /// session, stream every chunk, complete. Consumes nothing the retry needs —
 /// the encryptor is rebuilt per attempt because the file key derives from the
-/// file id.
+/// file id. `direct_given_up`: a direct upload of THIS file already had to be given up in this run, so a new
+/// session must not ask for one again.
+#[allow(clippy::too_many_arguments)]
 async fn upload_attempt(
     api: &ApiClient,
     master_key: &Arc<MasterKey>,
@@ -639,11 +695,16 @@ async fn upload_attempt(
     size: u64,
     mtime_ns: u128,
     plan: SessionPlan,
+    direct_given_up: bool,
     progress: &dyn ChunkProgress,
 ) -> Result<UploadOutcome, AttemptErr> {
-    let (file_id, resumed_session) = match plan {
-        SessionPlan::Resume { file_id, session_id } => (file_id, Some(session_id)),
-        SessionPlan::Init { file_id, .. } => (file_id, None),
+    let (file_id, resumed_session, resumed_direct) = match plan {
+        SessionPlan::Resume {
+            file_id,
+            session_id,
+            direct,
+        } => (file_id, Some(session_id), direct),
+        SessionPlan::Init { file_id, .. } => (file_id, None, false),
     };
     let file_id_str = file_id.to_string();
 
@@ -706,8 +767,46 @@ async fn upload_attempt(
     //
     //    `upload_session_id` keys the chunk PUTs + complete; `server_id` is the
     //    durable file id returned by init (equals `file_id` on replace).
-    let (upload_session_id, server_id) = if let Some(sid) = resumed_session {
-        (sid.to_string(), file_id_str.clone())
+    //
+    //    Task 2173: when the server offers the direct upload (discovery says `object-upload-v1`; not forced
+    //    off with `BB_TRANSPORT=api`; none given up for this file in this run or in this process within the
+    //    trust period), init asks for it with the capability header, and the answer's `transport` says what
+    //    the server chose. `direct` is the discovery answer the chunk loop checks every link against, `None`
+    //    for an API session.
+    //
+    //    The capabilities are asked only when the answer is used: a resumed API session has no use for it (and a
+    //    slow capabilities route costs up to 15 s a try).
+    let (upload_session_id, server_id, direct) = if let Some(sid) = resumed_session {
+        let direct = if resumed_direct {
+            match api.direct_upload_offer().await {
+                DirectOffer::Offered(discovery) => Some(discovery),
+                // A definite no (forced off, or the server does not offer the direction any more): a direct
+                // session takes no proxy PUT, so it is given up.
+                DirectOffer::NotOffered => return Err(AttemptErr::DirectUnavailable { bytes_confirmed: 0 }),
+                // The login is not valid (no session, or the lookup was refused with a 401/403): the way out is
+                // `bb login`, not `--transport api`, and the session and its record are kept (a 50 GB push
+                // killed at 90 % would start again from 0). Each says what it was, in the words the rest of the
+                // CLI uses for it.
+                DirectOffer::Unauthorized(refusal) => {
+                    return Err(AttemptErr::Other(
+                        refusal.resume_message(&display_name(&spec.file_name)),
+                    ));
+                }
+                // Nobody answered. That says nothing about the server, and giving the session up throws away
+                // every chunk it already holds: keep the session and its record, fail this file for this run.
+                DirectOffer::Unknown => {
+                    return Err(AttemptErr::Other(format!(
+                        "{}: the interrupted direct upload cannot be continued right now, because the server's \
+                         transfer capabilities could not be read. Its progress is kept: run the command again, \
+                         or use --transport api to send the file through the API instead",
+                        display_name(&spec.file_name)
+                    )));
+                }
+            }
+        } else {
+            None
+        };
+        (sid.to_string(), file_id_str.clone(), direct)
     } else {
         // The STORED-id recovery init (a re-init after a swept session) gets a
         // bounded, backed-off retry on a `5xx` before anything else runs: a
@@ -720,11 +819,20 @@ async fn upload_attempt(
         // this retry (Codex thread #1 follow-up on 3cb4daf). An ordinary
         // (non-recovery) init is unaffected: it still fails on the first
         // error, unchanged from before this fix.
+        // A NEW session asks for the direct upload only when it is offered, this file's own direct upload was not
+        // already given up in this run, and none was given up in this process within the trust period: when direct
+        // is broken server-wide, each further file would pay an init, its tries, an abandon and a second init. (A
+        // file already in flight when the first one gives up still pays it: the bound is the files in flight.)
+        let offer = if direct_given_up || api.direct_upload_failed_recently() {
+            None
+        } else {
+            api.direct_upload_offer().await.discovery()
+        };
         let is_stored_id_recovery = matches!(plan, SessionPlan::Init { is_recovery: true, .. });
         let mut retries_used = 0u32;
         let init = loop {
             match api
-                .upload_init_typed(
+                .upload_init_for_transport(
                     Some(file_id),
                     &name_encrypted,
                     spec.parent_id,
@@ -733,6 +841,7 @@ async fn upload_attempt(
                     chunk_count as i32,
                     is_media,
                     spec.base_version_number,
+                    offer.is_some(),
                 )
                 .await
             {
@@ -775,10 +884,12 @@ async fn upload_attempt(
         // Record this upload as resumable now that the session exists, BEFORE
         // any chunk goes out, so an interrupt mid-stream leaves a record the
         // next run can pick up.
+        let session_direct = init.is_direct();
         if let Ok(sid) = init.upload_session_id.parse::<Uuid>() {
-            crate::resume::record(&spec.path, file_id, sid, format, size, mtime_ns);
+            crate::resume::record_with_transport(&spec.path, file_id, sid, format, size, mtime_ns, session_direct);
         }
-        (init.upload_session_id, init.file_id)
+        let direct = if session_direct { offer } else { None };
+        (init.upload_session_id, init.file_id, direct)
     };
 
     // 6. Run the look-ahead pipeline. Every chunk is PUT to the session; on a
@@ -788,6 +899,7 @@ async fn upload_attempt(
     let result = run_pipeline(
         api,
         &upload_session_id,
+        direct.as_ref(),
         encryptor,
         chunk_count,
         expected_total,
@@ -833,6 +945,7 @@ async fn upload_attempt(
         server_id: parsed,
         plaintext_bytes: size,
         ciphertext_bytes: expected_total,
+        transport: if direct.is_some() { "direct" } else { "api" },
     })
 }
 
@@ -851,9 +964,11 @@ enum ProducerErr {
 
 /// The producer/consumer core. Returns `Ok(())` only when every planned chunk
 /// was emitted, server-confirmed, and the byte totals reconcile.
+#[allow(clippy::too_many_arguments)]
 async fn run_pipeline(
     api: &ApiClient,
     upload_session_id: &str,
+    direct: Option<&beebeeb_core::direct_transfer::Discovery>,
     encryptor: ChunkEncryptor,
     chunk_count: u32,
     expected_total: u64,
@@ -912,11 +1027,55 @@ async fn run_pipeline(
         // server already holds returns `{skipped:true}` cheaply (the blob isn't
         // re-written). So we always PUT and count the 200 either way — no
         // client-side "present" set needed.
-        match api
-            .upload_chunk_typed(upload_session_id, index, Bytes::from(chunk.data))
-            .await
-        {
-            Ok(_) => {
+        // Task 2173: a direct session sends the chunk grant -> PUT to storage -> commit; an API session
+        // PUTs it to the API as it always did. Either way the chunk counts only once the server holds it.
+        let stored = match direct {
+            Some(discovery) => {
+                match crate::direct_upload::upload_chunk(
+                    api,
+                    discovery,
+                    upload_session_id,
+                    index,
+                    Bytes::from(chunk.data),
+                    shutdown,
+                )
+                .await
+                {
+                    Ok(()) => Ok(()),
+                    Err(crate::direct_upload::DirectUploadError::UseApi) => {
+                        consumer_err = Some(AttemptErr::DirectUnavailable {
+                            bytes_confirmed: confirmed_bytes,
+                        });
+                        break;
+                    }
+                    Err(crate::direct_upload::DirectUploadError::Interrupted) => {
+                        consumer_err = Some(AttemptErr::Other(INTERRUPTED.to_string()));
+                        break;
+                    }
+                    Err(crate::direct_upload::DirectUploadError::SessionGone(message)) => {
+                        // The same recovery as a swept session on the proxy route (task 1589).
+                        consumer_err = Some(AttemptErr::SessionGone {
+                            message: format!("chunk {index} upload: {message}"),
+                            bytes_confirmed: confirmed_bytes,
+                        });
+                        break;
+                    }
+                    Err(crate::direct_upload::DirectUploadError::Terminal { status, message }) => {
+                        Err(crate::api::ApiError {
+                            code: None,
+                            message,
+                            status,
+                        })
+                    }
+                }
+            }
+            None => api
+                .upload_chunk_typed(upload_session_id, index, Bytes::from(chunk.data))
+                .await
+                .map(|_| ()),
+        };
+        match stored {
+            Ok(()) => {
                 confirmed_bytes += len;
                 confirmed_chunks += 1;
                 file_prog.chunk_confirmed(len);

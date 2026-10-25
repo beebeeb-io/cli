@@ -7,6 +7,7 @@ mod crypto;
 pub mod daemon;
 pub mod device;
 mod direct_download;
+mod direct_upload;
 mod download;
 mod env_detect;
 mod exit;

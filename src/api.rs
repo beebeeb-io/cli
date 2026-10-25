@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use crate::config::load_config;
 
 mod direct;
-pub(crate) use direct::{ChunkApiError, GrantReply, now_ms};
+pub(crate) use direct::{ChunkApiError, DirectOffer, GrantReply, UploadCall, now_ms};
 
 static RATE_REMAINING: AtomicI64 = AtomicI64::new(-1);
 static RATE_LIMIT: AtomicI64 = AtomicI64::new(-1);
@@ -74,6 +74,9 @@ pub enum ConfirmMethod {
     /// from the legacy plaintext `POST /auth/confirm`.
     LegacyPlaintext,
 }
+
+/// What a call that needs a login says when there is none.
+pub(crate) const NOT_LOGGED_IN_MESSAGE: &str = "Not logged in. Run `bb login` first.";
 
 pub(crate) const SESSION_EXPIRED_MESSAGE: &str =
     "Your session expired or was revoked. Run `bb login` to sign in again.";
@@ -160,12 +163,16 @@ pub struct ApiClient {
     /// Task 2173: what the server's direct-transfer discovery said, asked
     /// lazily and at most once per 10 minutes per API base (see
     /// `beebeeb_core::direct_transfer::DiscoveryCache` for the rules).
-    direct_discovery: tokio::sync::Mutex<direct::DiscoveryState>,
+    direct: std::sync::Arc<direct::DirectState>,
     /// Task 2173: the HTTP client for presigned storage links. A client of its
     /// own, never `client`: no default headers (so no `X-Beebeeb-*`), no
     /// cookies, no `Authorization`, redirects refused, https only (loopback
     /// http in development).
     storage_client: std::sync::OnceLock<Option<Client>>,
+    /// Task 2173: the same, for storage PUTs. A client of its own again, because a PUT sends a body of up to
+    /// 128 MiB and the download client's read timeout is not reset while a request body goes out (see
+    /// `build_upload_storage_client`).
+    upload_storage_client: std::sync::OnceLock<Option<Client>>,
 }
 
 /// Parsed response from `POST /api/v1/uploads/init`. The session id keys the
@@ -179,9 +186,18 @@ pub struct UploadInit {
     pub file_id: String,
     pub chunk_size_bytes: u64,
     pub chunk_count: u64,
+    /// The `transport` field of the 201 body (task 2173): `object-upload-v1` when the server
+    /// opened a direct session, absent otherwise (today's chunk PUT route).
+    pub transport: Option<String>,
 }
 
 impl UploadInit {
+    /// Did the server select the direct upload for this session? Core decides what the field means
+    /// (`dt::upload_init_selects_direct`): any other value, or none, is today's route.
+    pub fn is_direct(&self) -> bool {
+        beebeeb_core::direct_transfer::upload_init_selects_direct(self.transport.as_deref())
+    }
+
     fn from_value(v: &Value) -> Result<Self, String> {
         let upload_session_id = v
             .get("upload_session_id")
@@ -196,11 +212,13 @@ impl UploadInit {
             .to_string();
         let chunk_size_bytes = v.get("chunk_size_bytes").and_then(|x| x.as_u64()).unwrap_or(0);
         let chunk_count = v.get("chunk_count").and_then(|x| x.as_u64()).unwrap_or(0);
+        let transport = v.get("transport").and_then(|x| x.as_str()).map(str::to_string);
         Ok(Self {
             upload_session_id,
             file_id,
             chunk_size_bytes,
             chunk_count,
+            transport,
         })
     }
 }
@@ -254,19 +272,27 @@ fn build_client(timeout: std::time::Duration) -> Client {
 
 impl ApiClient {
     pub fn from_config() -> Self {
-        let config = load_config();
+        Self::with_config(load_config())
+    }
+
+    /// [`from_config`](Self::from_config) for a config already in hand.
+    fn with_config(config: crate::config::Config) -> Self {
         // 300s per-request timeout, matching beebeeb-upload, so a stalled chunk
         // PUT fails instead of hanging forever. Long-lived calls that need more
         // (the SSE sync stream) override this per-request with their own
         // `.timeout(...)`, so this default is safe for them.
         let client = build_client(std::time::Duration::from_secs(300));
+        // The direct-transfer state is the process's, per API base: a daemon builds a new client for every resync,
+        // and what discovery said (and that a direct upload was given up on) must outlive each of them.
+        let direct = direct::DirectState::shared(&config.api_url);
         Self {
             client,
             base_url: config.api_url,
             token: config.session_token,
             refusal_account_state: tokio::sync::OnceCell::new(),
-            direct_discovery: tokio::sync::Mutex::new(direct::DiscoveryState::new()),
+            direct,
             storage_client: std::sync::OnceLock::new(),
+            upload_storage_client: std::sync::OnceLock::new(),
         }
     }
 
@@ -276,20 +302,56 @@ impl ApiClient {
     /// header-setting path, not a hand-rolled stand-in.
     #[cfg(test)]
     pub(crate) fn new_for_test(base_url: String) -> Self {
+        Self::new_for_test_with(
+            base_url,
+            Some("test-token"),
+            std::sync::Arc::new(direct::DirectState::new()),
+        )
+    }
+
+    /// [`new_for_test`](Self::new_for_test) with no session at all (`bb login` was never run).
+    #[cfg(test)]
+    pub(crate) fn new_for_test_logged_out(base_url: String) -> Self {
+        Self::new_for_test_with(base_url, None, std::sync::Arc::new(direct::DirectState::new()))
+    }
+
+    /// [`new_for_test`](Self::new_for_test) with a shorter hold after a direct upload was given up, so a test can
+    /// tell the per-file flag apart from the remembered failure.
+    #[cfg(test)]
+    pub(crate) fn new_for_test_with_failure_hold(base_url: String, hold: std::time::Duration) -> Self {
+        Self::new_for_test_with(
+            base_url,
+            Some("test-token"),
+            std::sync::Arc::new(direct::DirectState::with_holds(hold, direct::REFUSAL_HOLD)),
+        )
+    }
+
+    /// The general test constructor: any token (or none) and a direct state the test shares between clients, as the
+    /// production constructor does per API base. Keeps the loopback assertion.
+    #[cfg(test)]
+    pub(crate) fn new_for_test_with(
+        base_url: String,
+        token: Option<&str>,
+        state: std::sync::Arc<direct::DirectState>,
+    ) -> Self {
+        // Fail closed: a unit test never talks to anything but a server on this machine.
+        assert!(
+            crate::config::api_url_is_loopback(&base_url),
+            "a test must point the client at a local server, not {base_url}"
+        );
         Self {
             client: build_client(std::time::Duration::from_secs(300)),
             base_url,
-            token: Some("test-token".to_string()),
+            token: token.map(str::to_string),
             refusal_account_state: tokio::sync::OnceCell::new(),
-            direct_discovery: tokio::sync::Mutex::new(direct::DiscoveryState::new()),
+            direct: state,
             storage_client: std::sync::OnceLock::new(),
+            upload_storage_client: std::sync::OnceLock::new(),
         }
     }
 
     pub fn require_auth(&self) -> Result<&str, String> {
-        self.token
-            .as_deref()
-            .ok_or_else(|| "Not logged in. Run `bb login` first.".to_string())
+        self.token.as_deref().ok_or_else(|| NOT_LOGGED_IN_MESSAGE.to_string())
     }
 
     fn url(&self, path: &str) -> String {
@@ -709,6 +771,37 @@ impl ApiClient {
         is_media: bool,
         base_version_number: Option<i32>,
     ) -> Result<UploadInit, ApiError> {
+        self.upload_init_for_transport(
+            file_id,
+            name_encrypted,
+            parent_id,
+            size_bytes,
+            chunk_size_bytes,
+            chunk_count,
+            is_media,
+            base_version_number,
+            false,
+        )
+        .await
+    }
+
+    /// [`upload_init_typed`](Self::upload_init_typed), optionally asking for the direct upload
+    /// (task 2173): with `direct` the request carries `X-Beebeeb-Capabilities: object-upload-v1`
+    /// (on this call only, never globally) and the answer's `transport` says what the server chose.
+    /// Without it the request is byte-identical to what it always was.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upload_init_for_transport(
+        &self,
+        file_id: Option<uuid::Uuid>,
+        name_encrypted: &str,
+        parent_id: Option<uuid::Uuid>,
+        size_bytes: i64,
+        chunk_size_bytes: i64,
+        chunk_count: i32,
+        is_media: bool,
+        base_version_number: Option<i32>,
+        direct: bool,
+    ) -> Result<UploadInit, ApiError> {
         let token = self.require_auth()?;
         // The v2 server (`routes/uploads.rs::parse_profile`) accepts only
         // web/mobile/desktop/backup_agent — there is no "cli" wire profile. The
@@ -730,14 +823,18 @@ impl ApiClient {
         });
         for _ in 0..3 {
             pace_if_needed().await;
-            let resp = self
+            let mut request = self
                 .client
                 .post(self.url("/api/v1/uploads/init"))
                 .bearer_auth(token)
-                .json(&body)
-                .send()
-                .await
-                .map_err(format_request_error)?;
+                .json(&body);
+            if direct {
+                request = request.header(
+                    beebeeb_core::direct_transfer::CAPABILITIES_HEADER,
+                    beebeeb_core::direct_transfer::CAP_OBJECT_UPLOAD_V1,
+                );
+            }
+            let resp = request.send().await.map_err(format_request_error)?;
             match parse_response_typed(resp).await {
                 Err(e) if e.message == "__rate_limited__" => continue,
                 Err(e) => return Err(self.explain_account_refusal(e).await),
@@ -2324,11 +2421,19 @@ impl From<String> for ApiError {
 /// here too. Nothing else counts: a 409, a quota error or a 5xx is a real
 /// failure the caller must surface, never a reason to re-init.
 pub(crate) fn is_upload_session_gone(e: &ApiError) -> bool {
-    match e.status {
-        404 => true,
-        // The server sends `{ error: <text> }` for this 400; `message` carries
-        // it (it falls back to `error` when the body has no `message`).
-        400 => e.message.contains("upload session is not writable: expired"),
+    // The server sends `{ error: <text> }` for the 400; `message` carries
+    // it (it falls back to `error` when the body has no `message`). On the
+    // proxy routes every 404 is the session.
+    upload_session_gone(e.status, true, &e.message)
+}
+
+/// The rule behind [`is_upload_session_gone`] and the direct routes' own check, in one place so the two cannot
+/// drift apart if the server rewords the 400. `a_404_counts`: whether a 404 means "the session is gone" (always,
+/// on the proxy routes; only a JSON-bodied one on the direct routes, where a bare 404 is a node without the route).
+pub(crate) fn upload_session_gone(status: u16, a_404_counts: bool, text: &str) -> bool {
+    match status {
+        404 => a_404_counts,
+        400 => text.contains("upload session is not writable: expired"),
         _ => false,
     }
 }
@@ -3512,5 +3617,14 @@ mod move_request_tests {
         assert_eq!(body, json!({"name_encrypted": "encrypted-name"}));
         assert!(body.get("parent_id").is_none(), "rename-only must omit parent_id");
         server.abort();
+    }
+
+    /// The unit-test half of the "a test never reaches production" guard (the other half is
+    /// `BB_REFUSE_NON_LOOPBACK_API`, see `tests/api_guard.rs`): a test client cannot be built for a
+    /// server that is not on this machine.
+    #[test]
+    #[should_panic(expected = "a test must point the client at a local server")]
+    fn a_test_client_cannot_be_pointed_at_a_public_server() {
+        let _ = ApiClient::new_for_test("https://api.beebeeb.io".to_string());
     }
 }

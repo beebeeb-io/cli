@@ -222,6 +222,7 @@ fn bb_with_typed_password(home: &Path, args: &[&str], typed: &str) -> Run {
     };
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_bb"));
+    cmd.env("BB_REFUSE_NON_LOOPBACK_API", "1");
     cmd.args(args)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))

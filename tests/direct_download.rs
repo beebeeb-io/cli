@@ -690,6 +690,7 @@ fn setup_with(
 
 fn bb(env: &Env, args: &[&str], extra_env: &[(&str, &str)]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_bb"));
+    cmd.env("BB_REFUSE_NON_LOOPBACK_API", "1");
     cmd.args(args)
         .current_dir(&env.cwd)
         .env("HOME", &env.home)
@@ -1179,6 +1180,7 @@ fn sync_until_watching(env: &Env) -> (bool, String, String) {
     let dir = env.cwd.join("syncdir");
     std::fs::create_dir_all(&dir).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_bb"))
+        .env("BB_REFUSE_NON_LOOPBACK_API", "1")
         .args(["--api", &env.api_url, "sync", dir.to_str().unwrap(), "/SyncUp"])
         .current_dir(&env.cwd)
         .env("HOME", &env.home)

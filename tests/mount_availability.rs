@@ -35,6 +35,8 @@ fn run_bb(home: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_bb"))
         .args(args)
         .env_clear()
+        // After env_clear: it would wipe the guard. The scan in api_guard.rs refuses a clear after it.
+        .env("BB_REFUSE_NON_LOOPBACK_API", "1")
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("PATH", &empty_path)

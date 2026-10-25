@@ -15,8 +15,8 @@ name = "bb"
 path = "src/main.rs"
 
 [dependencies]
-beebeeb-core = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-core", rev = "3235dc15a5de705d388d7af79266013d83f9290a" }
-beebeeb-types = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-types", rev = "3235dc15a5de705d388d7af79266013d83f9290a" }
+beebeeb-core = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-core", rev = "55d23a89bd0baa6ce78e8c43e7208a81f1971f1d" }
+beebeeb-types = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-types", rev = "55d23a89bd0baa6ce78e8c43e7208a81f1971f1d" }
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 tokio = { version = "1", features = ["full"] }
@@ -67,6 +67,9 @@ ratatui = { version = "0.29", features = ["crossterm"] }
 # `share_key_wrap` KAT vector (core's public API has no fixed-nonce encrypt).
 # Production crypto stays in beebeeb-core.
 aes-gcm = "0.10"
+# Test-only: `tokio::time::pause`/`advance`, so the hold after a given-up direct upload is tested against a clock
+# that only moves when the test moves it (a wall-clock implementation would never see it advance).
+tokio = { version = "1", features = ["test-util"] }
 
 [features]
 # Enable the FUSE filesystem mount command.
