@@ -1094,6 +1094,46 @@ fn a_folder_pull_reads_one_changed_file_again_and_carries_on() {
     assert_eq!(starts, vec![0, 8, 0, 8, 16], "{starts:?}");
 }
 
+#[test]
+fn a_folder_pull_does_not_swallow_a_failure_that_is_not_a_version_change() {
+    // The grant route refuses (403): that is not "the version changed". The folder pull must fail,
+    // exit non-zero and name the file, as it always did; skipping it silently and exiting 0 would
+    // make an incomplete folder look complete.
+    let env = setup(Discovery::Offer, Grants::Forbidden, &[], &[]);
+    let out_dir = env.cwd.join("pulled");
+    let out = bb(&env, &["pull", SYNC_FOLDER_ID, "-o", out_dir.to_str().unwrap()], &[]);
+    assert!(!out.status.success(), "{}", describe(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("403") && stderr.contains("multi.bin"),
+        "{}",
+        describe(&out)
+    );
+    assert!(!out_dir.join("multi.bin").exists());
+}
+
+#[test]
+fn a_tampered_first_chunk_of_a_v2_file_is_corrupt_and_not_handed_to_the_legacy_readers() {
+    // A V2 pin has no legacy form: its reader tries only the string-UUID key. A first chunk that fails
+    // there is damaged or tampered with, so it must NOT go to the API stream (where a large file would
+    // end in a confusing "legacy-format file" error and, in sync, abort the pass).
+    let env = setup_with(
+        fixture_v2_missing_last_frame(),
+        Discovery::Offer,
+        Grants::Normal,
+        &[(0, Fault::Tamper)],
+        &[0],
+    );
+    let (out, _) = pull(&env, &[], &[]);
+    assert!(!out.status.success(), "{}", describe(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("authenticate"),
+        "{}",
+        describe(&out)
+    );
+    assert_eq!(env.mock.log.lock().unwrap().api_download_hits, 0, "not routed around");
+}
+
 // ─────────────────────────────── bb sync --once ───────────────────────────────
 
 /// `bb sync --once <cwd>/syncdir /SyncUp`: the remote folder holds the fixture file.

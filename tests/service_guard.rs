@@ -138,34 +138,186 @@ async fn a_scratch_home_never_reaches_launchctl_or_systemctl() {
     }
 }
 
-/// Every `launchctl` / `systemctl` the crate starts goes through `service_manager`. The one exception
-/// is a job removing ITSELF (`disarm_launchagent_if_managed`, which only runs when launchd started it).
+/// An API that lists one sync session named `zzguard` and answers everything else `200 {}`.
+async fn api_with_a_session() -> String {
+    let app = axum::Router::new()
+        .route(
+            "/api/v1/clients/sessions",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({ "sessions": [{ "id": "s1", "name": "zzguard" }] }))
+            }),
+        )
+        .fallback(|| async { axum::Json(serde_json::json!({})) });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
+/// `bb sync --stop-session zzguard` stops a session's local service: it unloads the LaunchAgent (macOS)
+/// or stops, disables and deletes the systemd unit (Linux). Under a scratch HOME it must do none of
+/// it, on either platform: the stubs record nothing and the service files are untouched. (The Linux
+/// half is what CI runs; the macOS half is `a_scratch_home_never_reaches_launchctl_or_systemctl`.)
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stopped_session_never_unloads_or_deletes_a_service_from_a_scratch_home() {
+    let api = api_with_a_session().await;
+    let dir = scratch("session");
+    let log = dir.join("calls.log");
+    let bin = stub_tools(&dir, &log);
+    std::fs::write(&log, "").unwrap();
+    let home = scratch_home(&dir);
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+
+    let plist = home.join("Library/LaunchAgents/io.beebeeb.sync.zzguard.plist");
+    let unit = home.join(".config/systemd/user/beebeeb-sync-zzguard.service");
+    for f in [&plist, &unit] {
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(f, "service definition").unwrap();
+    }
+    let (run_dir, run_home, run_path) = (dir.clone(), home.clone(), path);
+    let out = tokio::task::spawn_blocking(move || {
+        Command::new(env!("CARGO_BIN_EXE_bb"))
+            .args(["--api", &api, "sync", "--stop-session", "zzguard"])
+            .current_dir(&run_dir)
+            .env("HOME", &run_home)
+            .env("XDG_CONFIG_HOME", run_home.join(".config"))
+            .env("XDG_DATA_HOME", run_home.join(".local/share"))
+            .env("XDG_STATE_HOME", run_home.join(".local/state"))
+            .env("PATH", &run_path)
+            .env("BB_NO_UPDATE", "1")
+            .env("NO_COLOR", "1")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    let all = format!(
+        "rc={:?}\nstdout:\n{}\nstderr:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "stopping the session itself works: {all}");
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        calls.is_empty(),
+        "a service manager was started under a scratch HOME: {calls:?}\n{all}"
+    );
+    let (plist_kept, unit_kept) = (plist.exists(), unit.exists());
+    if cfg!(target_os = "macos") {
+        assert!(plist_kept, "the plist was deleted\n{all}");
+    } else {
+        assert!(unit_kept, "the systemd unit was deleted\n{all}");
+    }
+}
+
+/// With nothing installed there is nothing to refuse: removing a service that does not exist is
+/// `Ok(false)`, not an error, so a loop over sessions does not stop at the first slug without a service.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn removing_a_service_that_is_not_installed_is_not_a_refusal() {
+    let api = any_api().await;
+    let dir = scratch("none");
+    let log = dir.join("calls.log");
+    let bin = stub_tools(&dir, &log);
+    std::fs::write(&log, "").unwrap();
+    let home = scratch_home(&dir);
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+    let (run_dir, run_home) = (dir.clone(), home.clone());
+    let out = tokio::task::spawn_blocking(move || {
+        Command::new(env!("CARGO_BIN_EXE_bb"))
+            .args(["--api", &api, "sync", "--stop", run_dir.to_str().unwrap()])
+            .current_dir(&run_dir)
+            .env("HOME", &run_home)
+            .env("XDG_CONFIG_HOME", run_home.join(".config"))
+            .env("XDG_DATA_HOME", run_home.join(".local/share"))
+            .env("PATH", &path)
+            .env("BB_NO_UPDATE", "1")
+            .env("NO_COLOR", "1")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    let all = format!(
+        "rc={:?}\nstdout:\n{}\nstderr:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{all}");
+    assert!(!all.contains("refusing"), "{all}");
+    assert!(std::fs::read_to_string(&log).unwrap().is_empty(), "{all}");
+}
+
+/// Every `launchctl` / `systemctl` the code names is behind the guard. A line that names either tool is
+/// accepted only if it (a) calls `service_manager(`, the one door that checks HOME before it starts
+/// anything, (b) is message text (an error, a print), (c) lives in `tests/service_guard.rs`, whose
+/// stubs are the point, or (d) is inside `disarm_launchagent_if_managed`: a job removing ITSELF, which
+/// only runs when launchd started the process. That exception is tied to the function by name and may
+/// name the tool exactly once. Scans `src/`, `tests/` and `build.rs`, so a multi-line `Command::new(`,
+/// a constant or a `sh -c` string is caught too.
 #[test]
-fn no_source_file_starts_a_service_manager_except_through_the_guard() {
-    fn walk(dir: &Path, hits: &mut Vec<String>) {
+fn no_source_file_names_a_service_manager_except_through_the_guard() {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         for entry in std::fs::read_dir(dir).unwrap().flatten() {
             let path = entry.path();
             if path.is_dir() {
-                walk(&path, hits);
+                walk(&path, out);
             } else if path.extension().is_some_and(|e| e == "rs") {
-                for (n, line) in std::fs::read_to_string(&path).unwrap().lines().enumerate() {
-                    let starts_a_process = line.contains("Command::new(");
-                    if starts_a_process && (line.contains("launchctl") || line.contains("systemctl")) {
-                        hits.push(format!("{}:{}: {}", path.display(), n + 1, line.trim()));
-                    }
-                }
+                out.push(path);
             }
         }
     }
-    let mut hits = Vec::new();
-    walk(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut hits);
-    assert_eq!(hits.len(), 1, "unguarded service-manager calls: {hits:#?}");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    walk(&root.join("src"), &mut files);
+    walk(&root.join("tests"), &mut files);
+    if root.join("build.rs").exists() {
+        files.push(root.join("build.rs"));
+    }
+    let mut violations = Vec::new();
+    let mut disarm_lines = 0;
+    for path in &files {
+        let name = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+        let text = std::fs::read_to_string(path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        // The range of `disarm_launchagent_if_managed`: from its `fn` line to the first line that is just `}`.
+        let disarm = lines
+            .iter()
+            .position(|l| l.contains("fn disarm_launchagent_if_managed"))
+            .map(|start| (start, start + lines[start..].iter().position(|l| *l == "}").unwrap()));
+        for (n, line) in lines.iter().enumerate() {
+            let code = line.trim_start();
+            let names_a_tool = code.contains("launchctl") || code.contains("systemctl");
+            if !names_a_tool || code.starts_with("//") || code.starts_with('*') || name == "tests/service_guard.rs" {
+                continue;
+            }
+            let is_message = ["Err(", "format!(", "println!(", "eprintln!(", "panic!(", "assert"]
+                .iter()
+                .any(|t| code.contains(t));
+            let in_disarm = name == "src/daemon.rs" && disarm.is_some_and(|(a, b)| (a..=b).contains(&n));
+            if in_disarm {
+                disarm_lines += 1;
+            }
+            if !(code.contains("service_manager(") || is_message || in_disarm) {
+                violations.push(format!("{name}:{}: {}", n + 1, code));
+            }
+        }
+    }
     assert!(
-        hits[0].contains("src/daemon.rs") && hits[0].contains("launchctl"),
-        "{hits:?}"
+        violations.is_empty(),
+        "unguarded service-manager names: {violations:#?}"
     );
-    // And the guard itself is the only door: `service_manager` starts the program it is given.
-    let daemon = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/daemon.rs")).unwrap();
+    assert_eq!(disarm_lines, 1, "the one exception must name the tool exactly once");
+
+    // And the door itself: `service_manager` checks HOME before it starts the program it is given.
+    let daemon = std::fs::read_to_string(root.join("src/daemon.rs")).unwrap();
     let door = daemon
         .split("fn service_manager")
         .nth(1)

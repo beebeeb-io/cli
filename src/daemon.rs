@@ -185,23 +185,34 @@ pub fn kill_daemon(slug: &str) -> Result<bool, String> {
 
 /// The account's home directory from the passwd database, not from `$HOME`.
 #[cfg(unix)]
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 fn account_home() -> Option<PathBuf> {
-    use std::ffi::CStr;
-    // SAFETY: `getpwuid_r` writes into the buffers we own and sets `out` to null or to `pwd`; the
-    // directory string it points into lives in `buf`, which outlives the copy below.
-    unsafe {
-        let mut buf = vec![0u8; 8192];
-        let mut pwd: libc::passwd = std::mem::zeroed();
-        let mut out: *mut libc::passwd = std::ptr::null_mut();
-        let rc = libc::getpwuid_r(libc::getuid(), &mut pwd, buf.as_mut_ptr().cast(), buf.len(), &mut out);
-        if rc != 0 || out.is_null() || pwd.pw_dir.is_null() {
-            return None;
+    use std::ffi::{CStr, OsStr};
+    use std::os::unix::ffi::OsStrExt;
+    // 8 KiB, and more when the entry does not fit (ERANGE: a long group list or gecos field).
+    for size in [8 * 1024usize, 64 * 1024, 1024 * 1024] {
+        let mut buf = vec![0u8; size];
+        // SAFETY: `getpwuid_r` writes into the buffers we own and sets `out` to null or to `pwd`; the
+        // directory string it points into lives in `buf`, which outlives the copy below.
+        unsafe {
+            let mut pwd: libc::passwd = std::mem::zeroed();
+            let mut out: *mut libc::passwd = std::ptr::null_mut();
+            let rc = libc::getpwuid_r(libc::getuid(), &mut pwd, buf.as_mut_ptr().cast(), buf.len(), &mut out);
+            if rc == libc::ERANGE {
+                continue;
+            }
+            if rc != 0 || out.is_null() || pwd.pw_dir.is_null() {
+                return None;
+            }
+            // Bytes, not UTF-8: a home directory need not be valid UTF-8.
+            return Some(PathBuf::from(OsStr::from_bytes(CStr::from_ptr(pwd.pw_dir).to_bytes())));
         }
-        CStr::from_ptr(pwd.pw_dir).to_str().ok().map(PathBuf::from)
     }
+    None
 }
 
 #[cfg(not(unix))]
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 fn account_home() -> Option<PathBuf> {
     None
 }
@@ -211,19 +222,33 @@ fn account_home() -> Option<PathBuf> {
 /// never set it.
 pub const CUSTOM_HOME_OVERRIDE: &str = "BB_SERVICE_INSTALL_ALLOW_CUSTOM_HOME";
 
-/// `Err` when `home` is provably not the account's home, unless `allow` (the override variable's value)
-/// is `1`. When either home is unknown the answer is "fine": a real user in an odd environment must not
-/// be locked out, and every test redirects HOME to a directory that differs.
+/// Is `a` the same directory as `b` (equal, or the same after resolving symlinks)?
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+fn same_dir(a: &Path, b: &Path) -> bool {
+    a == b || matches!((fs::canonicalize(a), fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y)
+}
+
+/// `Err` when `home` is not the account's home, unless `allow` (the override variable's value) is
+/// `1`. When the account's home cannot be determined at all (no passwd entry) it FAILS CLOSED: not
+/// knowing is not a reason to load a service into someone's launchd; the override says "I am sure".
+/// Only an unknown `home` (nothing to compare) passes.
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 fn check_home(home: Option<&Path>, account: Option<&Path>, allow: Option<&str>) -> Result<(), String> {
-    let (Some(home), Some(account)) = (home, account) else {
-        return Ok(());
-    };
     if allow == Some("1") {
         return Ok(());
     }
-    let same =
-        home == account || matches!((fs::canonicalize(home), fs::canonicalize(account)), (Ok(a), Ok(b)) if a == b);
-    if same {
+    let Some(home) = home else {
+        return Ok(());
+    };
+    let Some(account) = account else {
+        return Err(format!(
+            "refusing to touch the background-service manager: HOME is {} but this account's home \
+             directory cannot be determined (no passwd entry). If you are sure, run the command again \
+             with {CUSTOM_HOME_OVERRIDE}=1",
+            home.display()
+        ));
+    };
+    if same_dir(home, account) {
         Ok(())
     } else {
         Err(format!(
@@ -237,17 +262,48 @@ fn check_home(home: Option<&Path>, account: Option<&Path>, allow: Option<&str>) 
     }
 }
 
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+/// The config directory the process uses must be the one the installed service would use. On Linux
+/// `dirs` reads it from `$XDG_CONFIG_HOME` (when absolute) before `$HOME/.config`, but a systemd user
+/// service gets neither: it reads `<account home>/.config`. So an `XDG_CONFIG_HOME` that points
+/// elsewhere with the real HOME would pass the HOME check and still install a unit that reads the
+/// real config (and a live session). (macOS ignores XDG; its config lives under HOME.)
+#[cfg(any(target_os = "linux", test))]
+fn check_config_dir(config: Option<&Path>, account: Option<&Path>, allow: Option<&str>) -> Result<(), String> {
+    if allow == Some("1") {
+        return Ok(());
+    }
+    let (Some(config), Some(account)) = (config, account) else {
+        return Ok(());
+    };
+    let expected = account.join(".config");
+    if same_dir(config, &expected) {
+        Ok(())
+    } else {
+        Err(format!(
+            "refusing to touch the background-service manager: this run reads its config from {} (is \
+             XDG_CONFIG_HOME set?) but the service would read {}. If this is intended, run the command \
+             again with {CUSTOM_HOME_OVERRIDE}=1",
+            config.display(),
+            expected.display()
+        ))
+    }
+}
+
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 fn ensure_real_home() -> Result<(), String> {
-    check_home(
-        dirs::home_dir().as_deref(),
-        account_home().as_deref(),
-        std::env::var(CUSTOM_HOME_OVERRIDE).ok().as_deref(),
-    )
+    let allow = std::env::var(CUSTOM_HOME_OVERRIDE).ok();
+    let account = account_home();
+    check_home(dirs::home_dir().as_deref(), account.as_deref(), allow.as_deref())?;
+    #[cfg(target_os = "linux")]
+    check_config_dir(dirs::config_dir().as_deref(), account.as_deref(), allow.as_deref())?;
+    Ok(())
 }
 
 /// Run `program args…` (`launchctl` or `systemctl`) and wait for it, after checking HOME. The only
 /// way this crate starts a service manager (apart from a job removing itself in
 /// [`disarm_launchagent_if_managed`]).
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 fn service_manager(program: &str, args: &[&str]) -> Result<std::process::ExitStatus, String> {
     ensure_real_home()?;
     std::process::Command::new(program)
@@ -388,6 +444,7 @@ const MARKER_ENV_XML: &str = "        <key>BEEBEEB_SYNC_SERVICE</key>\n        <
 
 /// The marker env plus the transport the installing invocation selected, so the service moves files
 /// the way the user asked and not the way a stray BB_TRANSPORT in launchd's environment says.
+#[cfg(any(target_os = "macos", test))]
 fn env_xml_with_transport(transport: &str) -> String {
     format!("{MARKER_ENV_XML}\n        <key>BB_TRANSPORT</key>\n        <string>{transport}</string>")
 }
@@ -694,29 +751,25 @@ pub fn migrate_sync_services() {
 /// Unload and remove a macOS LaunchAgent plist for the given slug.
 #[cfg(target_os = "macos")]
 pub fn uninstall_launchagent(slug: &str) -> Result<bool, String> {
-    ensure_real_home()?;
     let label = format!("io.beebeeb.sync.{slug}");
-    let plist_path = dirs::home_dir()
+    let agents = dirs::home_dir()
         .ok_or("cannot find home directory")?
-        .join("Library/LaunchAgents")
-        .join(format!("{label}.plist"));
-
-    if !plist_path.exists() {
-        // Also try the legacy single-plist name
-        let legacy_path = dirs::home_dir()
-            .ok_or("cannot find home directory")?
-            .join("Library/LaunchAgents/io.beebeeb.sync.plist");
-        if legacy_path.exists() {
-            let _ = service_manager("launchctl", &["unload", &legacy_path.to_string_lossy()]);
-            let _ = fs::remove_file(&legacy_path);
-            return Ok(true);
-        }
+        .join("Library/LaunchAgents");
+    let plist_path = agents.join(format!("{label}.plist"));
+    // Also the legacy single-plist name.
+    let legacy_path = agents.join("io.beebeeb.sync.plist");
+    let target = if plist_path.exists() {
+        plist_path
+    } else if legacy_path.exists() {
+        legacy_path
+    } else {
+        // Nothing installed here, nothing to unload: not a reason to refuse (and a caller that
+        // loops over sessions must not stop at the first slug that has no service).
         return Ok(false);
-    }
-
-    let _ = service_manager("launchctl", &["unload", &plist_path.to_string_lossy()]);
-
-    fs::remove_file(&plist_path).map_err(|e| format!("remove plist: {e}"))?;
+    };
+    ensure_real_home()?;
+    let _ = service_manager("launchctl", &["unload", &target.to_string_lossy()]);
+    fs::remove_file(&target).map_err(|e| format!("remove plist: {e}"))?;
     Ok(true)
 }
 
@@ -770,7 +823,6 @@ pub fn install_systemd_unit(local_dir: &Path, remote_path: &str, slug: &str) -> 
 /// Stop and remove a systemd user service unit for the given slug.
 #[cfg(target_os = "linux")]
 pub fn uninstall_systemd_unit(slug: &str) -> Result<bool, String> {
-    ensure_real_home()?;
     let unit_name = format!("beebeeb-sync-{slug}.service");
     let unit_path = dirs::home_dir()
         .ok_or("cannot find home directory")?
@@ -780,6 +832,7 @@ pub fn uninstall_systemd_unit(slug: &str) -> Result<bool, String> {
     if !unit_path.exists() {
         return Ok(false);
     }
+    ensure_real_home()?;
 
     let _ = service_manager("systemctl", &["--user", "stop", &unit_name]);
     let _ = service_manager("systemctl", &["--user", "disable", &unit_name]);
@@ -1097,8 +1150,34 @@ mod transport_tests {
         assert!(refused.contains("BB_SERVICE_INSTALL_ALLOW_CUSTOM_HOME=1"), "{refused}");
         // When either side is unknown there is nothing to compare: a real user is not locked out.
         assert!(check_home(None, Some(account), None).is_ok());
-        assert!(check_home(Some(account), None, None).is_ok());
         assert!(check_home(None, None, None).is_ok());
+        // An unknown ACCOUNT home fails closed: not knowing is not consent. The override still works.
+        let unknown = check_home(Some(account), None, None).unwrap_err();
+        assert!(
+            unknown.contains("cannot be determined") && unknown.contains("=1"),
+            "{unknown}"
+        );
+        assert!(check_home(Some(account), None, Some("1")).is_ok());
+    }
+
+    #[test]
+    fn a_config_dir_that_is_not_the_services_is_refused() {
+        // XDG_CONFIG_HOME pointing elsewhere with the real HOME: the HOME check passes, this must not.
+        let account = Path::new("/home/dev");
+        assert!(check_config_dir(Some(Path::new("/home/dev/.config")), Some(account), None).is_ok());
+        let refused = check_config_dir(Some(Path::new("/tmp/scratch/xdg")), Some(account), None).unwrap_err();
+        assert!(
+            refused.contains("XDG_CONFIG_HOME")
+                && refused.contains("/tmp/scratch/xdg")
+                && refused.contains("/home/dev/.config"),
+            "{refused}"
+        );
+        assert!(refused.contains("BB_SERVICE_INSTALL_ALLOW_CUSTOM_HOME=1"), "{refused}");
+        assert!(check_config_dir(Some(Path::new("/tmp/scratch/xdg")), Some(account), Some("1")).is_ok());
+        assert!(check_config_dir(Some(Path::new("/tmp/scratch/xdg")), Some(account), Some("0")).is_err());
+        // Nothing to compare when either side is unknown (the HOME check has its own rule for that).
+        assert!(check_config_dir(None, Some(account), None).is_ok());
+        assert!(check_config_dir(Some(Path::new("/x")), None, None).is_ok());
     }
 
     #[test]

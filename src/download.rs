@@ -302,7 +302,7 @@ async fn stream_download_decrypt_with(
         Ok(_) => prog.finish(true),
         Err(_) => prog.finish(false),
     }
-    result.map_err(DownloadError::from)
+    result
 }
 
 /// Stream the modern raw format. On a first-frame key failure (binary-UUID
@@ -320,7 +320,7 @@ async fn stream_raw(
     out_path: &Path,
     mut carry: Vec<u8>,
     prog: &dyn crate::upload::FileProgress,
-) -> Result<DownloadStats, String> {
+) -> Result<DownloadStats, DownloadError> {
     let n = count as usize;
     // Frame size for the first n-1 frames; the last frame takes the remainder.
     // When the server sends `X-Chunk-Size` (V2 files), each wire frame is the
@@ -359,13 +359,15 @@ async fn stream_raw(
                 writer.abort();
                 let mut full = std::mem::take(&mut carry);
                 drain_rest(resp, &mut full, fb_cap).await?;
-                return buffered_fallback(master_key, file_id, pin, &full, count, chunk_size, out_path, prog);
+                return buffered_fallback(master_key, file_id, pin, &full, count, chunk_size, out_path, prog)
+                    .map_err(DownloadError::from);
             }
             if carry.len() < frame_size {
                 return Err(format!(
                     "download truncated: chunk {i}/{n} wanted {frame_size} bytes, got {}",
                     carry.len()
-                ));
+                )
+                .into());
             }
             carry.drain(..frame_size).collect()
         };
@@ -388,11 +390,13 @@ async fn stream_raw(
                 // then drain the remainder under the fallback cap.
                 full.append(&mut carry);
                 drain_rest(resp, &mut full, fb_cap).await?;
-                return buffered_fallback(master_key, file_id, pin, &full, count, chunk_size, out_path, prog);
+                return buffered_fallback(master_key, file_id, pin, &full, count, chunk_size, out_path, prog)
+                    .map_err(DownloadError::from);
             }
             Err(e) => {
                 writer.abort();
-                return Err(format!("decrypt chunk {i}: {e}"));
+                // Frame i > 0 failed to authenticate: this client cannot read the file now.
+                return Err(DownloadError::Unreadable(format!("decrypt chunk {i}: {e}")));
             }
         }
     }
@@ -401,7 +405,8 @@ async fn stream_raw(
     // (truncation detection, task 1908). v1 has no last marker.
     if let Err(e) = decryptor.finish() {
         writer.abort();
-        return Err(format!("download incomplete: {e}"));
+        // The stream ended before the frame marked last: cut short or tampered with.
+        return Err(DownloadError::Unreadable(format!("download incomplete: {e}")));
     }
     writer.commit()?;
     Ok(DownloadStats {
@@ -624,8 +629,7 @@ mod tests {
         (got.expect("download + decrypt succeeds"), confirmed)
     }
 
-    /// The real streaming path for any file id and read pin; returns the
-    /// decrypted file (or the error) and the number of progress confirmations.
+    /// [`download_inner_typed`] with the error as text, for the many tests that only read the message.
     async fn download_inner(
         body: Vec<u8>,
         chunk_size: Option<u64>,
@@ -635,6 +639,21 @@ mod tests {
         pin: ExpectedChunkFormat,
         ceiling: u64,
     ) -> (Result<Vec<u8>, String>, usize) {
+        let (got, confirmed) = download_inner_typed(body, chunk_size, chunk_count, m, file_id, pin, ceiling).await;
+        (got.map_err(String::from), confirmed)
+    }
+
+    /// The real streaming path for any file id and read pin; returns the
+    /// decrypted file (or the error) and the number of progress confirmations.
+    async fn download_inner_typed(
+        body: Vec<u8>,
+        chunk_size: Option<u64>,
+        chunk_count: u32,
+        m: &MasterKey,
+        file_id: &str,
+        pin: ExpectedChunkFormat,
+        ceiling: u64,
+    ) -> (Result<Vec<u8>, DownloadError>, usize) {
         let app = Router::new()
             .route("/api/v1/files/:id/download", get(serve))
             .with_state(Served {
@@ -663,9 +682,7 @@ mod tests {
             ceiling,
         )
         .await;
-        let got = r
-            .map_err(String::from)
-            .and_then(|_| std::fs::read(&out).map_err(|e| e.to_string()));
+        let got = r.and_then(|_| std::fs::read(&out).map_err(|e| DownloadError::Other(e.to_string())));
         let _ = std::fs::remove_dir_all(&dir);
         (got, confirmed.load(Ordering::SeqCst))
     }
@@ -930,6 +947,47 @@ mod tests {
         assert_eq!(
             DownloadError::from("boom".to_string()),
             DownloadError::Other("boom".into())
+        );
+    }
+
+    /// The API path types what sync must not abort a pass for: a frame after the first that does not
+    /// authenticate, and a v2 stream cut before its last frame, are `Unreadable`; a plain network or
+    /// size problem is not.
+    #[tokio::test]
+    async fn the_api_path_types_an_unreadable_file() {
+        let (m, fid, wire, count, cs, _) = v2_file();
+        let frame = (cs + 28) as usize;
+        // Frame 1 flipped: frame 0 authenticates, so this is not a legacy file; it is damaged.
+        let mut tampered = wire.clone();
+        tampered[frame + 20] ^= 1;
+        let (got, _) = download_inner_typed(
+            tampered,
+            Some(cs),
+            count,
+            &m,
+            &fid,
+            ExpectedChunkFormat::V2,
+            FALLBACK_HARD_CEILING,
+        )
+        .await;
+        assert!(
+            matches!(got, Err(DownloadError::Unreadable(ref m)) if m.contains("decrypt chunk 1")),
+            "{got:?}"
+        );
+        // The last frame missing: every frame authenticates, the stream never reaches the one marked last.
+        let (got, _) = download_inner_typed(
+            wire[..(count as usize - 1) * frame].to_vec(),
+            Some(cs),
+            count - 1,
+            &m,
+            &fid,
+            ExpectedChunkFormat::V2,
+            FALLBACK_HARD_CEILING,
+        )
+        .await;
+        assert!(
+            matches!(got, Err(DownloadError::Unreadable(ref m)) if m.contains("download incomplete")),
+            "{got:?}"
         );
     }
 

@@ -349,11 +349,13 @@ pub(crate) async fn try_download(
                         return Ok(DirectResult::UseApi);
                     }
                 }
-                Err(_) if next == 0 => {
+                Err(_) if next == 0 && pin != ExpectedChunkFormat::V2 => {
                     // Frame 0 under the string-UUID key failed before any plaintext was written. That
                     // is what a pre-`bb repair` file keyed by the BINARY uuid (or a JSON-blob file)
                     // looks like, and only the API path's buffered fallback can read those: a
                     // refetch would fail the same way and end as "corrupt". Index > 0 stays corrupt.
+                    // A V2 pin has no legacy form (its reader tries only the string-UUID key), so a
+                    // frame 0 that fails there IS corrupt or tampered, not a legacy file.
                     trace(|| "chunk 0 did not authenticate; the API path's legacy readers take this file".to_string());
                     discard(out, progress);
                     return Ok(DirectResult::UseApi);

@@ -80,6 +80,19 @@ enum PinnedFailure {
     Again { wait: Option<Duration>, message: String },
 }
 
+/// The wait a server names with `Retry-After: <seconds>`, clamped exactly like a 429's: core's
+/// classifier decides the bounds, asked about a 429 that carries this header.
+fn stated_wait(secs: Option<u64>) -> Option<Duration> {
+    let raw = secs?.to_string();
+    match dt::classify(
+        dt::Call::DownloadGrant,
+        &dt::ApiAnswer::from_parts(429, None, b"", Some(&raw)),
+    ) {
+        dt::Outcome::Backoff(wait) => Some(wait),
+        _ => None,
+    }
+}
+
 /// Read a body incrementally, giving up (`None`) when it passes `max` bytes.
 async fn read_capped(resp: &mut reqwest::Response, max: usize) -> Option<Vec<u8>> {
     let mut body = Vec::new();
@@ -446,9 +459,11 @@ impl ApiClient {
                 // A 5xx may carry its own `Retry-After` (the server's 503 sends 5): honour it, with
                 // the same bounds as any stated wait.
                 dt::Outcome::UseApiNow => PinnedFailure::Again {
-                    wait: seen
-                        .retry_after_secs
-                        .map(|s| Duration::from_secs(s.clamp(1, dt::classify::MAX_RETRY_AFTER.as_secs()))),
+                    wait: if (500..=599).contains(&seen.answer.status) {
+                        stated_wait(seen.retry_after_secs)
+                    } else {
+                        None
+                    },
                     message: failed,
                 },
                 _ => PinnedFailure::Final(ChunkApiError::Failed(failed)),

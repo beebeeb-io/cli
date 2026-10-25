@@ -496,13 +496,22 @@ async fn pull_folder_inner(
             // A new version published while this file downloaded: nothing was written, so read
             // THIS file again from fresh metadata, once, and carry on with the rest of the folder.
             // (This used to abort the whole folder pull.)
-            if let Err(PullFailure::Changed(_)) = pull_single_file(api, item_id, &target, content_key.as_ref()).await {
-                eprintln!(
-                    "  {} {}: changed while it downloaded; reading it again",
-                    "!".custom_color(crate::colors::AMBER),
-                    target.display()
-                );
-                pull_single_file(api, item_id, &target, content_key.as_ref()).await?;
+            match pull_single_file(api, item_id, &target, content_key.as_ref()).await {
+                Ok(()) => {}
+                Err(PullFailure::Changed(_)) => {
+                    eprintln!(
+                        "  {} {}: changed while it downloaded; reading it again",
+                        "!".custom_color(crate::colors::AMBER),
+                        target.display()
+                    );
+                    pull_single_file(api, item_id, &target, content_key.as_ref())
+                        .await
+                        .map_err(|e| format!("{}: {}", target.display(), String::from(e)))?;
+                }
+                // Every other failure (an expired session, a server error, a full disk, a file that does
+                // not decrypt) stops the folder pull and names the file, as it always did: a pull that
+                // skipped it silently and exited 0 would look complete.
+                Err(other) => return Err(format!("{}: {}", target.display(), String::from(other))),
             }
         }
     }
