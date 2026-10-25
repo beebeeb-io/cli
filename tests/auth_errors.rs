@@ -60,7 +60,6 @@ fn bb(home: &Path, args: &[&str]) -> Output {
 /// so results do not depend on the host (systemd/GNOME set INVOCATION_ID).
 fn bb_env(home: &Path, args: &[&str], extra: &[(&str, &str)]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_bb"))
-        .env("BB_REFUSE_NON_LOOPBACK_API", "1")
         .args(args)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
@@ -70,6 +69,8 @@ fn bb_env(home: &Path, args: &[&str], extra: &[(&str, &str)]) -> Output {
         .env_remove("XPC_SERVICE_NAME")
         .env_remove("BEEBEEB_SYNC_SERVICE")
         .envs(extra.iter().copied())
+        // Last, so that nothing in `extra` can switch it off.
+        .env("BB_REFUSE_NON_LOOPBACK_API", "1")
         .output()
         .expect("run bb")
 }

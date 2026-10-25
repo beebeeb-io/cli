@@ -250,9 +250,14 @@ fn enclosing_fn_body(code: &str, at: usize) -> Option<(usize, usize)> {
 
 /// What is wrong with the spawns of `bb` in one test file's source; empty when every one is on the guard.
 fn unguarded_spawns(source: &str) -> Vec<String> {
-    const TOKEN: &str = "CARGO_BIN_EXE_bb";
+    // Any mention of the cargo-provided binary path, however it is spelled (`CARGO_BIN_EXE_` + a name built with
+    // `concat!` is still a mention of this prefix).
+    const TOKEN: &str = "CARGO_BIN_EXE_";
     const SPAWN: &str = "Command::new(env!(\"CARGO_BIN_EXE_bb\"))";
-    const GUARD: &str = ".env(\"BB_REFUSE_NON_LOOPBACK_API\"";
+    // The guard, with the value the binary reads as "on".
+    const GUARD: &str = ".env(\"BB_REFUSE_NON_LOOPBACK_API\",\"1\")";
+    // What takes the guard away again, whenever it comes after the guard and before the run.
+    const UNGUARDS: [&str; 3] = [".env_clear()", ".env_remove(\"BB_REFUSE_NON_LOOPBACK_API\"", ".envs("];
     let code = without_comments(source);
     let mut problems = Vec::new();
     // every `Command::new(` and what it is given, whitespace-insensitively
@@ -285,24 +290,39 @@ fn unguarded_spawns(source: &str) -> Vec<String> {
         }
         let call = squeezed(&code[start..end]);
         if call.contains(TOKEN) {
-            if !call.ends_with(SPAWN) || !call.starts_with(SPAWN) && !call.starts_with("Command::new(env!(") {
+            if call != SPAWN {
                 problems.push(format!("a spawn of bb that is not the plain `{SPAWN}`: `{call}`"));
                 continue;
             }
             spawns += 1;
-            let (body_start, body_end) = enclosing_fn_body(&code, end).unwrap_or((end, code.len()));
+            let line = code[..start].matches('\n').count() + 1;
+            // A spawn outside any fn body (a macro_rules! body, a static, a const) cannot be followed to its run.
+            let Some((_, body_end)) = enclosing_fn_body(&code, end) else {
+                problems.push(format!(
+                    "line {line} (in the code without comments): `{SPAWN}` is outside any fn body (a macro or an item): the scan cannot see where it runs"
+                ));
+                continue;
+            };
             let tail = &code[end..body_end];
             let run_at = [".output(", ".spawn(", ".status("]
                 .iter()
                 .filter_map(|m| tail.find(m))
                 .min()
                 .unwrap_or(tail.len());
-            let _ = body_start;
-            if !squeezed(&tail[..run_at]).contains(GUARD) {
-                let line = code[..start].matches('\n').count() + 1;
-                problems.push(format!(
-                    "line {line} (in the code without comments): `{SPAWN}` is run without .env(\"BB_REFUSE_NON_LOOPBACK_API\", ..)"
-                ));
+            let before_run = squeezed(&tail[..run_at]);
+            match before_run.rfind(GUARD) {
+                None => problems.push(format!(
+                    "line {line} (in the code without comments): `{SPAWN}` is run without .env(\"BB_REFUSE_NON_LOOPBACK_API\", \"1\")"
+                )),
+                Some(guard_at) => {
+                    for ungard in UNGUARDS {
+                        if before_run[guard_at + GUARD.len()..].contains(ungard) {
+                            problems.push(format!(
+                                "line {line} (in the code without comments): `{ungard}` after the guard takes it away again before the run"
+                            ));
+                        }
+                    }
+                }
             }
         }
     }
@@ -328,27 +348,39 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// The two files the scan does not read, by PATH relative to `tests/` (a file of the same name elsewhere is read): this
+/// file's own helper sets the variable conditionally and its fixtures spell the spawns out; the real-server test is
+/// #[ignore]d and takes its server from the environment on purpose.
+fn exempt(relative_path: &str) -> bool {
+    ["api_guard.rs", "direct_real_server.rs"].contains(&relative_path)
+}
+
+#[test]
+fn the_exemptions_are_two_paths_not_two_names() {
+    assert!(exempt("api_guard.rs") && exempt("direct_real_server.rs"));
+    assert!(!exempt("common/api_guard.rs") && !exempt("sub/direct_real_server.rs") && !exempt("zero_byte_files.rs"));
+}
+
 #[test]
 fn every_test_that_runs_the_binary_sets_the_guard() {
     // This file's own helper sets the variable conditionally (and its fixtures spell the spawns out); the real-server test
     // is #[ignore]d and takes its server from the environment on purpose.
-    const EXEMPT: &[&str] = &["api_guard.rs", "direct_real_server.rs"];
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
     let mut files = Vec::new();
     rust_files(&dir, &mut files);
     let mut offenders = Vec::new();
     let (mut scanned, mut spawns) = (0, 0);
     for path in files {
-        let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        if EXEMPT.contains(&name.as_str()) {
+        let relative = path.strip_prefix(&dir).unwrap().to_string_lossy().into_owned();
+        if exempt(&relative) {
             continue;
         }
         let text = std::fs::read_to_string(&path).unwrap();
-        if !text.contains("CARGO_BIN_EXE_bb") {
+        if !text.contains("CARGO_BIN_EXE_") {
             continue;
         }
         scanned += 1;
-        spawns += without_comments(&text).matches("CARGO_BIN_EXE_bb").count();
+        spawns += without_comments(&text).matches("CARGO_BIN_EXE_").count();
         for problem in unguarded_spawns(&text) {
             offenders.push(format!("{}: {problem}", path.strip_prefix(&dir).unwrap().display()));
         }
@@ -430,6 +462,35 @@ fn run() { Command::new(env!("CARGO_BIN_EXE_bb")).output().unwrap(); }"#;
     let built_only = r#"fn build() -> Command { Command::new(env!("CARGO_BIN_EXE_bb")) }
 fn later(c: &mut Command) { c.env("BB_REFUSE_NON_LOOPBACK_API", "1"); }"#;
     assert_eq!(unguarded_spawns(built_only).len(), 1, "a guard in a later function");
+    // the guard set, then taken away again before the run (env_clear wipes it; env_remove / envs can too)
+    let cleared = r#"fn run() { Command::new(env!("CARGO_BIN_EXE_bb")).env("BB_REFUSE_NON_LOOPBACK_API", "1").env_clear().output().unwrap(); }"#;
+    assert_eq!(unguarded_spawns(cleared).len(), 1, "env_clear after the guard");
+    let removed_after = r#"fn run() { Command::new(env!("CARGO_BIN_EXE_bb")).env("BB_REFUSE_NON_LOOPBACK_API", "1").env_remove("BB_REFUSE_NON_LOOPBACK_API").output().unwrap(); }"#;
+    assert_eq!(
+        unguarded_spawns(removed_after).len(),
+        1,
+        "env_remove of the guard after it"
+    );
+    let envs_after = r#"fn run() { Command::new(env!("CARGO_BIN_EXE_bb")).env("BB_REFUSE_NON_LOOPBACK_API", "1").envs(std::env::vars()).output().unwrap(); }"#;
+    assert_eq!(unguarded_spawns(envs_after).len(), 1, "envs after the guard");
+    // a guard with a value the binary reads as off
+    for off in ["0", "", "no"] {
+        let src = format!(
+            r#"fn run() {{ Command::new(env!("CARGO_BIN_EXE_bb")).env("BB_REFUSE_NON_LOOPBACK_API", "{off}").output().unwrap(); }}"#
+        );
+        assert_eq!(unguarded_spawns(&src).len(), 1, "the value {off:?} is not the guard");
+    }
+    // a spawn the scan cannot follow: inside a macro, or with a name built at compile time
+    let in_macro = r#"macro_rules! run_bb { () => { Command::new(env!("CARGO_BIN_EXE_bb")).output().unwrap() }; }"#;
+    assert!(!unguarded_spawns(in_macro).is_empty(), "a macro body");
+    let built_name = r#"fn run() { Command::new(env!(concat!("CARGO_BIN_EXE_", "bb"))).env("BB_REFUSE_NON_LOOPBACK_API", "1").output().unwrap(); }"#;
+    assert!(!unguarded_spawns(built_name).is_empty(), "a name built with concat!");
+    // clearing BEFORE the guard is how the two sites that were wrong are written now
+    let clear_then_guard = r#"fn run() { Command::new(env!("CARGO_BIN_EXE_bb")).env_clear().env("HOME", h).env("BB_REFUSE_NON_LOOPBACK_API", "1").output().unwrap(); }"#;
+    assert!(
+        unguarded_spawns(clear_then_guard).is_empty(),
+        "env_clear first, then the guard"
+    );
     // one guarded and one unguarded spawn in one file: the second is found
     let two = format!("{GUARDED}\nfn other() {{ Command::new(env!(\"CARGO_BIN_EXE_bb\")).output().unwrap(); }}");
     assert_eq!(unguarded_spawns(&two).len(), 1, "one of two");

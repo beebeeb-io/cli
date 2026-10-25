@@ -152,6 +152,8 @@ mod tests {
         Fails,
         /// The server says, in JSON, that it has no direct transport (a JSON 404).
         NoDirect,
+        /// The session is not valid: the route answers 401.
+        Unauthorized,
     }
 
     /// One scripted answer of the grant route.
@@ -270,6 +272,7 @@ mod tests {
                         Discovery::Unknown => bare(404),
                         Discovery::Fails => bare(503),
                         Discovery::NoDirect => reply(404, json!({"error": "not found"}), None),
+                        Discovery::Unauthorized => reply(401, json!({"error": "unauthorized"}), None),
                         Discovery::UploadOff => reply(
                             200,
                             json!({"download": [], "upload": [], "storage_hosts": [], "storage_buckets": []}),
@@ -990,6 +993,10 @@ mod tests {
         run(&state, spec(&path, file_id)).await.unwrap();
         snapshot(&state, |m| {
             assert!(m.inits.is_empty());
+            assert_eq!(
+                m.discovery_hits, 0,
+                "an API session has no use for the capabilities, so the route is not asked"
+            );
             assert!(
                 m.grants.is_empty() && m.storage_puts.is_empty(),
                 "an API session takes no grant"
@@ -1241,6 +1248,29 @@ mod tests {
         });
     }
 
+    #[tokio::test]
+    async fn a_resumed_direct_session_is_kept_and_asks_for_a_login_when_the_login_is_not_valid() {
+        let scratch = Scratch::new("resume-401");
+        let (path, size, mtime) = scratch.file(FILE_BYTES);
+        let state = shared(|m| m.offers = Some(Discovery::Unauthorized));
+        let (file_id, sid) = resumed_session(&state, &path, size, mtime, true, &[0]);
+        let err = run(&state, spec(&path, file_id)).await.unwrap_err();
+        // Exactly the words every other expired session uses (the exit code keys on them), and not the advice to
+        // leave the direct route: that would end the session and lose the chunks it holds.
+        assert_eq!(err, crate::api::SESSION_EXPIRED_MESSAGE);
+        assert!(!err.contains("--transport"), "{err}");
+        snapshot(&state, |m| {
+            assert!(
+                m.abandons.is_empty(),
+                "the session is NOT ended: it holds committed chunks"
+            );
+            assert!(m.inits.is_empty() && m.grants.is_empty() && m.proxy_puts.is_empty());
+            assert!(m.completed.is_empty());
+        });
+        let record = crate::resume::resumable_upload_now(&path).expect("the record is kept");
+        assert!(record.direct && record.session_id == sid, "{record:?}");
+    }
+
     // ── review round (cli#105): direct broken server-wide costs one file, not every file ──
 
     #[tokio::test]
@@ -1275,6 +1305,69 @@ mod tests {
             );
             assert_eq!(m.proxy_puts.len() as u32, 2 * chunk_count(size));
             assert_eq!(m.completed.len(), 2);
+        });
+    }
+
+    // ── review round 3 (cli#105): the file's own bit and the remembered failure are two mechanisms ──
+
+    #[tokio::test]
+    async fn a_file_that_gave_up_the_direct_upload_does_not_ask_again_even_when_nothing_is_remembered() {
+        // A hold of zero never holds, so only the per-file bit can keep this file's re-init off the direct route
+        // (the remembered failure is a wall-clock-free memory with an expiry, and must not be what bounds the loop).
+        let scratch = Scratch::new("own-bit");
+        let (path, size, _) = scratch.file(FILE_BYTES);
+        let state = shared(|m| m.grant_script = VecDeque::from([Grant::Bare(404)]));
+        let base = spawn(state.clone()).await;
+        let api = crate::api::ApiClient::new_for_test_with_failure_hold(base, std::time::Duration::ZERO);
+        let key = Arc::new(MasterKey::from_bytes([9u8; 32]));
+        let outcome = stream_encrypt_upload(&api, key, spec(&path, Uuid::new_v4()), &NoopProgress)
+            .await
+            .unwrap();
+        assert_eq!(outcome.transport, "api");
+        snapshot(&state, |m| {
+            assert_eq!(
+                m.init_headers,
+                vec![Some(CAP.to_string()), None],
+                "asked once, refused, started again WITHOUT asking"
+            );
+            assert_eq!(m.abandons.len(), 1);
+            assert_eq!(m.proxy_puts.len() as u32, chunk_count(size));
+        });
+    }
+
+    #[tokio::test]
+    async fn a_direct_upload_that_was_given_up_is_tried_again_once_the_hold_has_passed() {
+        let scratch = Scratch::new("hold-over");
+        let (first, size, _) = scratch.file(FILE_BYTES);
+        let second = scratch.dir.join("second.bin");
+        std::fs::copy(&first, &second).unwrap();
+        let state = shared(|m| m.grant_script = VecDeque::from([Grant::Bare(404)]));
+        let base = spawn(state.clone()).await;
+        // The hold is over by the time the second file starts.
+        let api = crate::api::ApiClient::new_for_test_with_failure_hold(base, std::time::Duration::ZERO);
+        let key = Arc::new(MasterKey::from_bytes([9u8; 32]));
+        let one = stream_encrypt_upload(&api, key.clone(), spec(&first, Uuid::new_v4()), &NoopProgress)
+            .await
+            .unwrap();
+        assert_eq!(one.transport, "api");
+        let two = stream_encrypt_upload(&api, key, spec(&second, Uuid::new_v4()), &NoopProgress)
+            .await
+            .unwrap();
+        assert_eq!(
+            two.transport, "direct",
+            "the server is asked again, and this time it works"
+        );
+        snapshot(&state, |m| {
+            assert_eq!(
+                m.init_headers,
+                vec![Some(CAP.to_string()), None, Some(CAP.to_string())],
+                "the second file asks again once nothing is held"
+            );
+            assert_eq!(
+                m.proxy_puts.len() as u32,
+                chunk_count(size),
+                "only the first file went through the API"
+            );
         });
     }
 

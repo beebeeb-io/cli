@@ -8,7 +8,6 @@
 //! saw. Nothing here prints a URL: errors from the HTTP stack are run through
 //! `dt::scrub` before they leave this module.
 
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use beebeeb_core::direct_transfer as dt;
@@ -21,7 +20,15 @@ const GRANT_TIMEOUT: Duration = Duration::from_secs(60);
 const CHUNK_API_TIMEOUT: Duration = Duration::from_secs(600);
 /// A storage transfer may take as long as the link needs, but it must keep moving: no byte for
 /// this long and the request fails (and the chunk is renewed or taken over by the API).
-const STORAGE_READ_TIMEOUT: Duration = Duration::from_secs(60);
+const STORAGE_READ_TIMEOUT_RELEASE: Duration = Duration::from_secs(60);
+/// What the code uses: the release value, except in this crate's own tests, which compress the two storage budgets
+/// (this and [`STORAGE_PUT_BASE`]) so a test that must outlive them does not wait a minute. The release values are
+/// pinned by `the_storage_budgets_of_a_release_build_are_what_the_docs_say`.
+const STORAGE_READ_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_secs(3)
+} else {
+    STORAGE_READ_TIMEOUT_RELEASE
+};
 const STORAGE_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Unix milliseconds: the clock the planner and the discovery cache are given.
@@ -244,10 +251,14 @@ pub(crate) enum DirectOffer {
     /// A DEFINITE no: the user forced the API, the discovery lists no such capability, or the server said, in
     /// JSON, that it has no direct transport.
     NotOffered,
-    /// Nobody answered: a failed or timed-out lookup, a node without the route, an authorization problem. Say
-    /// nothing about the server; a new file goes through the API, but a recorded direct session must NOT be
-    /// thrown away on this.
+    /// Nobody answered: a failed or timed-out lookup, a node without the route. Say nothing about the server; a
+    /// new file goes through the API, but a recorded direct session must NOT be thrown away on this.
     Unknown,
+    /// The lookup was refused for want of a valid login: no session at all, or the discovery route answered 401 or
+    /// 403. The server was not asked about its transports, and the way out is `bb login`, not `--transport api`
+    /// (which would end the recorded session and with it the chunks it already holds). A new file goes through
+    /// the API, whose own answer reports the same problem in its own words.
+    Unauthorized,
 }
 
 impl DirectOffer {
@@ -255,34 +266,51 @@ impl DirectOffer {
     pub(crate) fn discovery(self) -> Option<dt::Discovery> {
         match self {
             DirectOffer::Offered(d) => Some(d),
-            DirectOffer::NotOffered | DirectOffer::Unknown => None,
+            DirectOffer::NotOffered | DirectOffer::Unknown | DirectOffer::Unauthorized => None,
         }
     }
 }
 
-/// The discovery cache. Core's cache does what a long-running process needs (a sync daemon that runs for weeks
-/// and meets one bad quarter hour): it forgets a failed discovery AND a JSON 404 "no direct transport" once the
-/// trust period has passed (core 2aa1f39), so the CLI keeps no RULE of its own on top of it. It does keep one
-/// fact core's `Lookup::UseApi` does not carry: whether the cache gave up because the server SAID no, or
-/// because asking failed. A resume needs the difference (see [`DirectOffer`]).
-/// What the CLI remembers about the server's direct transfer: what discovery said, and when a direct upload last had to
-/// be given up. One per API base per PROCESS (see [`DirectState::shared`]), not per [`ApiClient`]: the watch/daemon
-/// builds a new client for every resync, so a per-client cache never outlived one resync and every uploading resync
-/// asked the capabilities route again.
+/// What the CLI remembers about the server's direct transfer: what discovery said, and when a direct upload last
+/// had to be given up. One per API base per PROCESS (see [`DirectState::shared`]), not per [`ApiClient`]: the
+/// watch/daemon builds a new client for every resync, so a per-client cache never outlived one resync and every
+/// uploading resync asked the capabilities route again.
 pub(crate) struct DirectState {
     discovery: tokio::sync::Mutex<DiscoveryState>,
-    /// When (ms) a direct upload last had to be given up, 0 = never. No new direct upload is started for the trust
-    /// period after that: when direct is broken server-wide every file would otherwise pay an init, its tries, an
-    /// abandon (which tells the user's other devices the file was deleted) and a second init.
-    upload_failed_at: std::sync::atomic::AtomicI64,
+    /// When a direct upload last had to be given up, on the MONOTONIC clock (a wall-clock step, an NTP correction or a
+    /// laptop waking from sleep must neither end the hold early nor stretch it). No new direct upload is started
+    /// for [`failure_hold`](Self::failure_hold) after that: when direct is broken server-wide every file would
+    /// otherwise pay an init, its tries, an abandon (which tells the user's other devices the file was deleted)
+    /// and a second init. `tokio`'s instant so a paused test clock can move it.
+    upload_failed_at: std::sync::Mutex<Option<tokio::time::Instant>>,
+    /// How long that hold lasts: the discovery trust period, shorter only in a test.
+    failure_hold: Duration,
 }
 
 impl DirectState {
     pub(crate) fn new() -> Self {
+        Self::with_failure_hold(Duration::from_millis(dt::DISCOVERY_TTL_MS.unsigned_abs()))
+    }
+
+    pub(crate) fn with_failure_hold(failure_hold: Duration) -> Self {
         Self {
             discovery: tokio::sync::Mutex::new(DiscoveryState::new()),
-            upload_failed_at: std::sync::atomic::AtomicI64::new(0),
+            upload_failed_at: std::sync::Mutex::new(None),
+            failure_hold,
         }
+    }
+
+    /// A direct upload had to be given up at `now`.
+    fn note_upload_failed(&self, now: tokio::time::Instant) {
+        *self.upload_failed_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(now);
+    }
+
+    /// Is `now` still inside the hold that began when a direct upload was last given up?
+    fn upload_failed_within_hold(&self, now: tokio::time::Instant) -> bool {
+        self.upload_failed_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some_and(|at| now.saturating_duration_since(at) < self.failure_hold)
     }
 
     /// The process's state for this API base (the same `Arc` for the same base, however many clients are built).
@@ -299,6 +327,11 @@ impl DirectState {
     }
 }
 
+/// The discovery cache. Core's cache does what a long-running process needs (a sync daemon that runs for weeks
+/// and meets one bad quarter hour): it forgets a failed discovery AND a JSON 404 "no direct transport" once the
+/// trust period has passed (core 2aa1f39), so the CLI keeps no RULE of its own on top of it. It does keep one
+/// fact core's `Lookup::UseApi` does not carry: whether the cache gave up because the server SAID no, or because
+/// asking failed. A resume needs the difference (see [`DirectOffer`]).
 pub(crate) struct DiscoveryState {
     cache: dt::DiscoveryCache,
     /// The last answer recorded was the server's definite "no direct transport" (a JSON 404).
@@ -343,15 +376,16 @@ impl ApiClient {
             .as_ref()
     }
 
-    /// A direct upload had to be given up: start no new one until the trust period has passed.
+    /// A direct upload had to be given up: start no new one, in this process and for this API base, until the
+    /// trust period has passed (measured on the monotonic clock).
     pub(crate) fn note_direct_upload_failed(&self) {
-        self.direct.upload_failed_at.store(now_ms(), Ordering::Relaxed);
+        self.direct.note_upload_failed(tokio::time::Instant::now());
     }
 
-    /// Was a direct upload given up on this client within the trust period?
+    /// Was a direct upload given up in this process, for this API base, within the trust period? Shared by every
+    /// client of the base ([`DirectState::shared`]).
     pub(crate) fn direct_upload_failed_recently(&self) -> bool {
-        let at = self.direct.upload_failed_at.load(Ordering::Relaxed);
-        at != 0 && now_ms().saturating_sub(at) < dt::DISCOVERY_TTL_MS
+        self.direct.upload_failed_within_hold(tokio::time::Instant::now())
     }
 
     /// Does this server offer direct downloads right now? Asks the discovery
@@ -377,7 +411,7 @@ impl ApiClient {
             return DirectOffer::NotOffered;
         }
         if self.require_auth().is_err() {
-            return DirectOffer::Unknown;
+            return DirectOffer::Unauthorized;
         }
         let verdict = |discovery: dt::Discovery| {
             if wanted(&discovery) {
@@ -394,6 +428,14 @@ impl ApiClient {
             dt::Lookup::UseApi => DirectOffer::Unknown,
             dt::Lookup::Fetch => {
                 let (outcome, discovery) = self.fetch_discovery().await;
+                // A refusal for want of a valid login says nothing about the server, so it is NOT recorded: core's
+                // cache would count it as a failed lookup, two of them would park discovery for the trust period
+                // (downloads too), and a `bb login` in the meantime could not undo it.
+                if let dt::Outcome::Terminal(t) = &outcome
+                    && matches!(t.status, 401 | 403)
+                {
+                    return DirectOffer::Unauthorized;
+                }
                 state.record(&outcome, discovery.clone(), now_ms());
                 match (outcome, discovery) {
                     (_, Some(discovery)) => verdict(discovery),
@@ -630,8 +672,18 @@ fn upload_session_gone(seen: &Seen) -> bool {
 /// A storage PUT is bounded by one total timeout: a minute plus the chunk at this speed (about 1 Mbit/s). The
 /// server's own fence assumes a minimum uplink of the same order. The upload client has no read timeout (see
 /// [`build_upload_storage_client`]), so this is the only bound.
-const STORAGE_PUT_BASE: Duration = Duration::from_secs(60);
+const STORAGE_PUT_BASE_RELEASE: Duration = Duration::from_secs(60);
+const STORAGE_PUT_BASE: Duration = if cfg!(test) {
+    Duration::from_secs(8)
+} else {
+    STORAGE_PUT_BASE_RELEASE
+};
 const STORAGE_PUT_MIN_BYTES_PER_SEC: u64 = 128 * 1024;
+
+/// The total time one PUT of `len` bytes may take.
+fn put_timeout(base: Duration, len: u64) -> Duration {
+    base + Duration::from_secs(len / STORAGE_PUT_MIN_BYTES_PER_SEC)
+}
 
 impl ApiClient {
     /// `POST /api/v1/uploads/{session}/chunks/{index}/grant {"size"}`. Sends no capability header: the
@@ -643,7 +695,9 @@ impl ApiClient {
         size: u64,
         discovery: &dt::Discovery,
     ) -> UploadCall<dt::UploadGrant> {
-        let seen = self.upload_call(&dt::upload_grant_path(session, index), size).await;
+        let seen = self
+            .upload_call(&dt::upload_grant_path(session, index), &dt::UploadGrantRequest { size })
+            .await;
         match dt::classify(dt::Call::UploadGrant, &seen.answer) {
             dt::Outcome::Proceed => match dt::UploadGrant::from_answer(&seen.body, index, discovery, &self.base_url) {
                 Ok(grant) => UploadCall::Ok(grant),
@@ -657,7 +711,12 @@ impl ApiClient {
 
     /// `POST /api/v1/uploads/{session}/chunks/{index}/commit {"size"}`.
     pub(crate) async fn upload_commit(&self, session: &str, index: u32, size: u64) -> UploadCall<dt::UploadCommitted> {
-        let seen = self.upload_call(&dt::upload_commit_path(session, index), size).await;
+        let seen = self
+            .upload_call(
+                &dt::upload_commit_path(session, index),
+                &dt::UploadCommitRequest { size },
+            )
+            .await;
         match dt::classify(dt::Call::UploadCommit, &seen.answer) {
             dt::Outcome::Proceed => match dt::UploadCommitted::from_answer(&seen.body, index, size) {
                 Ok(done) => UploadCall::Ok(done),
@@ -667,7 +726,7 @@ impl ApiClient {
         }
     }
 
-    async fn upload_call(&self, path: &str, size: u64) -> Seen {
+    async fn upload_call(&self, path: &str, body: &impl serde::Serialize) -> Seen {
         let Ok(token) = self.require_auth() else {
             return Seen::no_answer();
         };
@@ -676,7 +735,7 @@ impl ApiClient {
             .client
             .post(self.url(path))
             .bearer_auth(token)
-            .json(&dt::UploadGrantRequest { size })
+            .json(body)
             .timeout(GRANT_TIMEOUT)
             .send()
             .await;
@@ -695,7 +754,7 @@ impl ApiClient {
             return 0;
         };
         let len = data.len() as u64;
-        let timeout = STORAGE_PUT_BASE + Duration::from_secs(len / STORAGE_PUT_MIN_BYTES_PER_SEC);
+        let timeout = put_timeout(STORAGE_PUT_BASE, len);
         let sent = client
             .put(link.url.as_str())
             .header(reqwest::header::CONTENT_TYPE, link.content_type())
@@ -725,7 +784,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        ChunkApiError, DiscoveryState, GrantReply, PinnedRetry, build_storage_client, build_storage_client_with, dt,
+        ChunkApiError, DirectState, DiscoveryState, GrantReply, PinnedRetry, STORAGE_PUT_BASE,
+        STORAGE_PUT_BASE_RELEASE, STORAGE_PUT_MIN_BYTES_PER_SEC, STORAGE_READ_TIMEOUT, STORAGE_READ_TIMEOUT_RELEASE,
+        build_storage_client, build_storage_client_with, dt, put_timeout,
     };
     use crate::api::ApiClient;
 
@@ -860,6 +921,47 @@ mod tests {
         }
         assert_eq!(state.lookup(5_000_002), dt::Lookup::UseApi);
         assert_eq!(state.lookup(4_000_000), dt::Lookup::Fetch);
+    }
+
+    // ── the hold after a direct upload was given up ──
+
+    #[tokio::test(start_paused = true)]
+    async fn a_given_up_direct_upload_holds_for_the_trust_period_on_the_monotonic_clock() {
+        // The tokio clock is paused, so only `advance` moves time: a hold read off the wall clock would never end
+        // here (and a wall-clock step in production must neither end it early nor stretch it).
+        let api = ApiClient::new_for_test("http://127.0.0.1:3001".to_string());
+        assert!(!api.direct_upload_failed_recently(), "nothing was given up yet");
+        api.note_direct_upload_failed();
+        assert!(api.direct_upload_failed_recently());
+        let ttl = Duration::from_millis(TTL as u64);
+        tokio::time::advance(ttl - Duration::from_millis(1)).await;
+        assert!(
+            api.direct_upload_failed_recently(),
+            "held until the trust period is over"
+        );
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(
+            !api.direct_upload_failed_recently(),
+            "and not a moment longer: direct is tried again"
+        );
+        // Giving up again starts a new hold.
+        api.note_direct_upload_failed();
+        assert!(api.direct_upload_failed_recently());
+    }
+
+    #[test]
+    fn a_hold_is_counted_from_when_the_direct_upload_was_given_up_not_from_when_it_is_asked() {
+        let state = DirectState::with_failure_hold(Duration::from_secs(10));
+        let t0 = tokio::time::Instant::now();
+        assert!(!state.upload_failed_within_hold(t0), "never given up");
+        state.note_upload_failed(t0);
+        assert!(state.upload_failed_within_hold(t0));
+        assert!(state.upload_failed_within_hold(t0 + Duration::from_millis(9_999)));
+        assert!(!state.upload_failed_within_hold(t0 + Duration::from_secs(10)));
+        // A zero hold never holds (the test constructor that tells the per-file bit from this memory).
+        let none = DirectState::with_failure_hold(Duration::ZERO);
+        none.note_upload_failed(t0);
+        assert!(!none.upload_failed_within_hold(t0));
     }
 
     // ── the storage client keeps moving, or stops ──
@@ -1354,9 +1456,8 @@ mod tests {
         assert!(!std::sync::Arc::ptr_eq(&x.direct, &y.direct));
     }
 
-    /// A storage server that reads a PUT body slowly (63 s in all: more than the 60 s read timeout the download client has)
-    /// and only then answers 200.
-    async fn slow_put_storage() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    /// A storage server that reads a PUT body slowly (`total` in all) and only then answers 200.
+    async fn slow_put_storage(total: Duration) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1391,8 +1492,8 @@ mod tests {
                         }
                         let n = n.min(left);
                         left -= n;
-                        // 63 s for the whole body, in proportion to what was read
-                        tokio::time::sleep(Duration::from_micros(63_000_000 * n as u64 / len as u64)).await;
+                        // `total` for the whole body, in proportion to what was read
+                        tokio::time::sleep(total.mul_f64(n as f64 / len as f64)).await;
                     }
                     let _ = sock.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n").await;
                 });
@@ -1421,16 +1522,33 @@ mod tests {
         }
     }
 
-    // These two run in real time (about a minute each, in parallel with the rest of the suite): reqwest's timers
-    // and real sockets do not mix with a paused clock, and the point is that a PUT outlives a 60 s timer.
+    // These two run in real time (seconds each, in parallel with the rest of the suite): reqwest's timers and real
+    // sockets do not mix with a paused clock. The test build compresses the two storage budgets (3 s read timeout,
+    // 8 s PUT base instead of 60 s), and the release values are pinned by their own test.
+
+    #[test]
+    fn the_storage_budgets_of_a_release_build_are_what_the_docs_say() {
+        assert_eq!(STORAGE_READ_TIMEOUT_RELEASE, Duration::from_secs(60));
+        assert_eq!(STORAGE_PUT_BASE_RELEASE, Duration::from_secs(60));
+        assert_eq!(STORAGE_PUT_MIN_BYTES_PER_SEC, 128 * 1024);
+        // A minute plus the chunk at 128 KiB/s: 92 s for a 4 MiB chunk, 60 s for nothing.
+        assert_eq!(
+            put_timeout(STORAGE_PUT_BASE_RELEASE, 4 * 1024 * 1024),
+            Duration::from_secs(92)
+        );
+        assert_eq!(put_timeout(STORAGE_PUT_BASE_RELEASE, 0), Duration::from_secs(60));
+        // The test build really is the compressed one (a test below is only meaningful if it is).
+        assert!(STORAGE_READ_TIMEOUT < STORAGE_READ_TIMEOUT_RELEASE && STORAGE_PUT_BASE < STORAGE_PUT_BASE_RELEASE);
+    }
 
     #[tokio::test]
-    async fn a_storage_put_that_takes_longer_than_a_minute_to_be_answered_still_succeeds() {
-        // A 4 MiB chunk on a slow uplink: the storage server takes 63 s to read it. reqwest's read timeout is one timer
-        // from the moment the request is sent, not reset while the request BODY goes out, so a client that has one
-        // (the download client, 60 s) fails this PUT. The upload client has none; the per-request total timeout
-        // (60 s + the chunk at 128 KiB/s = 92 s here) is the bound.
-        let (addr, server) = slow_put_storage().await;
+    async fn a_storage_put_that_takes_longer_than_the_read_timeout_to_be_answered_still_succeeds() {
+        // A 4 MiB chunk on a slow uplink: the storage server takes 4 s to read it, longer than the download client's
+        // read timeout (3 s in a test build, 60 s in a release). reqwest's read timeout is one timer from the moment
+        // the request is sent, not reset while the request BODY goes out, so a client that has one fails this PUT.
+        // The upload client has none; the per-request total timeout (the PUT base + the chunk at 128 KiB/s = 40 s
+        // here) is the bound.
+        let (addr, server) = slow_put_storage(STORAGE_READ_TIMEOUT + Duration::from_secs(1)).await;
         let link = link_to(addr);
         let data = bytes::Bytes::from(vec![7u8; 4 * 1024 * 1024]);
         let api = ApiClient::new_for_test("http://127.0.0.1:3001".to_string());
@@ -1440,18 +1558,18 @@ mod tests {
             download_client
                 .put(link.url.as_str())
                 .body(data)
-                .timeout(Duration::from_secs(92))
+                .timeout(put_timeout(STORAGE_PUT_BASE, 4 * 1024 * 1024))
                 .send()
         );
         assert_eq!(upload, 200, "the upload client waits for the answer");
-        let err = download.expect_err("the download client's 60 s read timer cuts the same PUT off");
+        let err = download.expect_err("the download client's read timer cuts the same PUT off");
         assert!(err.is_timeout(), "{err}");
         server.abort();
     }
 
     #[tokio::test]
     async fn a_storage_put_is_still_bounded_by_its_total_timeout() {
-        // A server that never answers: the PUT ends at 60 s + len / 128 KiB/s (60 s for 1 KiB), not never.
+        // A server that never answers: the PUT ends at the PUT base + len / 128 KiB/s (the base for 1 KiB), not never.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let hold = tokio::spawn(async move {
@@ -1464,7 +1582,7 @@ mod tests {
         let api = ApiClient::new_for_test("http://127.0.0.1:3001".to_string());
         let started = std::time::Instant::now();
         let status = tokio::time::timeout(
-            Duration::from_secs(100),
+            STORAGE_PUT_BASE * 3,
             api.put_to_storage(&link, bytes::Bytes::from(vec![7u8; 1024])),
         )
         .await
@@ -1472,7 +1590,7 @@ mod tests {
         assert_eq!(status, 0, "no answer is status 0");
         let waited = started.elapsed();
         assert!(
-            waited >= Duration::from_secs(59) && waited <= Duration::from_secs(70),
+            waited >= STORAGE_PUT_BASE - Duration::from_secs(1) && waited <= STORAGE_PUT_BASE + Duration::from_secs(10),
             "{waited:?}"
         );
         hold.abort();
@@ -1545,6 +1663,86 @@ mod tests {
         assert!(
             matches!(api.direct_upload_offer().await, DirectOffer::Unknown),
             "a bare 404"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_login_that_is_not_valid_is_told_apart_from_a_server_nobody_could_ask_and_is_never_parked() {
+        use super::DirectOffer;
+        // No session at all: nothing is sent, and the answer is not "unknown".
+        let config = crate::config::Config {
+            api_url: "http://127.0.0.1:41011".to_string(),
+            ..crate::config::Config::default()
+        };
+        let api = ApiClient::with_config(config);
+        assert!(
+            matches!(api.direct_upload_offer().await, DirectOffer::Unauthorized),
+            "not logged in"
+        );
+        // A 401 or a 403 on the capabilities route: the same, every time, because a refusal is not recorded
+        // (core would count two of them and park discovery for ten minutes).
+        for status in [401u16, 403] {
+            let (api, hits) = mock_discovery_answering(status, r#"{"error":"unauthorized"}"#).await;
+            for round in 1..=4 {
+                assert!(
+                    matches!(api.direct_upload_offer().await, DirectOffer::Unauthorized),
+                    "{status}, round {round}"
+                );
+            }
+            assert_eq!(
+                hits.load(Ordering::SeqCst),
+                4,
+                "{status}: asked every time, never parked"
+            );
+            // Downloads do not care which kind of nothing it is.
+            assert!(api.direct_download_offer().await.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_lookup_does_not_keep_the_next_login_from_getting_direct_transfers() {
+        use super::DirectOffer;
+        // The same process, the same API base, the same discovery state: first the session is refused (three times,
+        // more than core's allowance), then the user has logged in again.
+        let status = Arc::new(std::sync::atomic::AtomicU16::new(401));
+        let current = status.clone();
+        let app = axum::Router::new().route(
+            "/api/v1/transfer/capabilities",
+            axum::routing::get(move || {
+                let code = current.load(Ordering::SeqCst);
+                async move {
+                    if code == 200 {
+                        (
+                            axum::http::StatusCode::OK,
+                            [("content-type", "application/json")],
+                            r#"{"download":[],"upload":["object-upload-v1"],"storage_hosts":["127.0.0.1:1"],"storage_buckets":[{"host":"127.0.0.1:1","bucket":"b"}]}"#,
+                        )
+                    } else {
+                        (
+                            axum::http::StatusCode::from_u16(code).unwrap(),
+                            [("content-type", "application/json")],
+                            r#"{"error":"unauthorized"}"#,
+                        )
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let api = ApiClient::new_for_test(format!("http://{addr}"));
+        for round in 1..=3 {
+            assert!(
+                matches!(api.direct_upload_offer().await, DirectOffer::Unauthorized),
+                "round {round}"
+            );
+        }
+        status.store(200, Ordering::SeqCst);
+        assert!(
+            matches!(api.direct_upload_offer().await, DirectOffer::Offered(_)),
+            "the next valid answer is used at once, not after the trust period"
         );
     }
 }

@@ -594,8 +594,12 @@ pub async fn stream_encrypt_upload(
             is_recovery: false,
         },
     };
+    // This file's direct upload was given up in this run: its re-init (and nothing after it) asks for the API.
+    // `note_direct_upload_failed` remembers the same fact for every LATER file for the trust period, but a
+    // memory with an expiry cannot be what bounds this loop, so the file keeps its own bit.
+    let mut direct_given_up = false;
     loop {
-        match upload_attempt(api, &master_key, &spec, size, mtime_ns, plan, progress).await {
+        match upload_attempt(api, &master_key, &spec, size, mtime_ns, plan, direct_given_up, progress).await {
             Ok(outcome) => return Ok(outcome),
             Err(AttemptErr::SessionGone {
                 message: msg,
@@ -635,9 +639,10 @@ pub async fn stream_encrypt_upload(
             Err(AttemptErr::DirectUnavailable { bytes_confirmed }) => {
                 // The direct session takes no proxy PUT, and the init below would meet its live lease: end
                 // it first, like a session that cannot be continued (`RestartWithFreshSession`). Once per
-                // file per run: `note_direct_upload_failed` below keeps every later NEW session (this file's
-                // re-init included) off the direct route for the trust period.
+                // file per run: `direct_given_up` keeps this file's re-init off the direct route, and
+                // `note_direct_upload_failed` keeps every later NEW session off it for the trust period.
                 let (SessionPlan::Resume { file_id, .. } | SessionPlan::Init { file_id, .. }) = plan;
+                direct_given_up = true;
                 api.note_direct_upload_failed();
                 if bytes_confirmed > 0 {
                     progress.rollback(bytes_confirmed);
@@ -680,7 +685,9 @@ pub async fn stream_encrypt_upload(
 /// One attempt: build the encryptor for `plan`'s file id, open (or reuse) the
 /// session, stream every chunk, complete. Consumes nothing the retry needs —
 /// the encryptor is rebuilt per attempt because the file key derives from the
-/// file id.
+/// file id. `direct_given_up`: a direct upload of THIS file already had to be given up in this run, so a new
+/// session must not ask for one again.
+#[allow(clippy::too_many_arguments)]
 async fn upload_attempt(
     api: &ApiClient,
     master_key: &Arc<MasterKey>,
@@ -688,6 +695,7 @@ async fn upload_attempt(
     size: u64,
     mtime_ns: u128,
     plan: SessionPlan,
+    direct_given_up: bool,
     progress: &dyn ChunkProgress,
 ) -> Result<UploadOutcome, AttemptErr> {
     let (file_id, resumed_session, resumed_direct) = match plan {
@@ -761,10 +769,22 @@ async fn upload_attempt(
     //    durable file id returned by init (equals `file_id` on replace).
     //
     //    Task 2173: when the server offers the direct upload (discovery says `object-upload-v1`; not forced
-    //    off with `BB_TRANSPORT=api`; no direct upload given up on this client within the trust period), init asks for it with the
-    //    capability header, and the answer's `transport` says what the server chose. `direct` is the
-    //    discovery answer the chunk loop checks every link against, `None` for an API session.
-    let offered = api.direct_upload_offer().await;
+    //    off with `BB_TRANSPORT=api`; none given up for this file in this run or in this process within the
+    //    trust period), init asks for it with the capability header, and the answer's `transport` says what
+    //    the server chose. `direct` is the discovery answer the chunk loop checks every link against, `None`
+    //    for an API session.
+    //
+    //    Asked only when the answer can be used: a resumed API session, or a file whose direct upload was already
+    //    given up, would throw it away (and a slow capabilities route costs up to 15 s a try).
+    let wants_discovery = match resumed_session {
+        Some(_) => resumed_direct,
+        None => !(direct_given_up || api.direct_upload_failed_recently()),
+    };
+    let offered = if wants_discovery {
+        api.direct_upload_offer().await
+    } else {
+        DirectOffer::NotOffered
+    };
     let (upload_session_id, server_id, direct) = if let Some(sid) = resumed_session {
         if resumed_direct {
             match &offered {
@@ -772,9 +792,15 @@ async fn upload_attempt(
                 // A definite no (forced off, or the server does not offer the direction any more): a direct
                 // session takes no proxy PUT, so it is given up.
                 DirectOffer::NotOffered => return Err(AttemptErr::DirectUnavailable { bytes_confirmed: 0 }),
+                // The login is not valid (no session, or the lookup was refused with a 401/403): the way out is
+                // `bb login`, not `--transport api`, and the session and its record are kept (a 50 GB push
+                // killed at 90 % would start again from 0). The words every other 401 uses, so the exit code
+                // matches.
+                DirectOffer::Unauthorized => {
+                    return Err(AttemptErr::Other(crate::api::SESSION_EXPIRED_MESSAGE.to_string()));
+                }
                 // Nobody answered. That says nothing about the server, and giving the session up throws away
-                // every chunk it already holds (a 50 GB push killed at 90 % would start again from 0): keep
-                // the session and its record, fail this file for this run.
+                // every chunk it already holds: keep the session and its record, fail this file for this run.
                 DirectOffer::Unknown => {
                     return Err(AttemptErr::Other(format!(
                         "{}: the interrupted direct upload cannot be continued right now, because the server's \
@@ -802,14 +828,11 @@ async fn upload_attempt(
         // this retry (Codex thread #1 follow-up on 3cb4daf). An ordinary
         // (non-recovery) init is unaffected: it still fails on the first
         // error, unchanged from before this fix.
-        // A NEW session asks for the direct upload only when it is offered and no direct upload was given up on
-        // earlier on this client (the trust period): when direct is broken server-wide, each further file would
-        // pay an init, its tries, an abandon and a second init.
-        let offer = if api.direct_upload_failed_recently() {
-            None
-        } else {
-            offered.discovery()
-        };
+        // A NEW session asks for the direct upload only when it is offered, this file's own direct upload was not
+        // already given up in this run, and none was given up in this process within the trust period (above): when
+        // direct is broken server-wide, each further file would pay an init, its tries, an abandon and a second
+        // init.
+        let offer = offered.discovery();
         let is_stored_id_recovery = matches!(plan, SessionPlan::Init { is_recovery: true, .. });
         let mut retries_used = 0u32;
         let init = loop {

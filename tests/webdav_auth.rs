@@ -115,9 +115,10 @@ fn strip_ansi(s: &str) -> String {
 
 fn spawn_bb(home: &Path, args: &[&str]) -> Child {
     Command::new(env!("CARGO_BIN_EXE_bb"))
-        .env("BB_REFUSE_NON_LOOPBACK_API", "1")
         .args(args)
         .env_clear()
+        // After env_clear: it would wipe the guard. The scan in api_guard.rs refuses a clear after it.
+        .env("BB_REFUSE_NON_LOOPBACK_API", "1")
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("PATH", home.join("empty-path"))

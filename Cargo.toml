@@ -67,6 +67,9 @@ ratatui = { version = "0.29", features = ["crossterm"] }
 # `share_key_wrap` KAT vector (core's public API has no fixed-nonce encrypt).
 # Production crypto stays in beebeeb-core.
 aes-gcm = "0.10"
+# Test-only: `tokio::time::pause`/`advance`, so the hold after a given-up direct upload is tested against a clock
+# that only moves when the test moves it (a wall-clock implementation would never see it advance).
+tokio = { version = "1", features = ["test-util"] }
 
 [features]
 # Enable the FUSE filesystem mount command.
