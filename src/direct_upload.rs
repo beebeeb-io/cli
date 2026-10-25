@@ -59,7 +59,8 @@ pub(crate) async fn upload_chunk(
     shutdown: &Arc<AtomicBool>,
 ) -> Result<(), DirectUploadError> {
     let size = data.len() as u64;
-    let mut state = dt::UploadChunkState::new(dt::UploadChunkPolicy::default());
+    // One random seed per chunk: the equal jitter of its backoff, so chunks that fail together do not retry together.
+    let mut state = dt::UploadChunkState::with_seed(dt::UploadChunkPolicy::default(), rand::random());
     let mut call = dt::Call::UploadGrant;
     loop {
         if shutdown.load(Ordering::Relaxed) {
@@ -97,9 +98,11 @@ pub(crate) async fn upload_chunk(
             }
             dt::UploadNext::UseApi => return Err(DirectUploadError::UseApi),
             dt::UploadNext::Terminal(t) => {
-                let message = match &t.error {
-                    Some(code) => format!("{code} (HTTP {})", t.status),
-                    None => format!("HTTP {}", t.status),
+                // A dead session reads as it does on the proxy route and on a download: log in again.
+                let message = match (t.status, t.error.as_deref()) {
+                    (401, _) => crate::api::SESSION_EXPIRED_MESSAGE.to_string(),
+                    (status, Some(code)) => format!("{code} (HTTP {status})"),
+                    (status, None) => format!("HTTP {status}"),
                 };
                 return Err(DirectUploadError::Terminal {
                     status: t.status,
@@ -145,6 +148,10 @@ mod tests {
         Unknown,
         /// A new server with uploads off.
         UploadOff,
+        /// The capabilities route is down (a 503): nobody answers.
+        Fails,
+        /// The server says, in JSON, that it has no direct transport (a JSON 404).
+        NoDirect,
     }
 
     /// One scripted answer of the grant route.
@@ -261,6 +268,8 @@ mod tests {
                     let host = m.storage.clone();
                     match m.offers.unwrap_or(Discovery::Offers) {
                         Discovery::Unknown => bare(404),
+                        Discovery::Fails => bare(503),
+                        Discovery::NoDirect => reply(404, json!({"error": "not found"}), None),
                         Discovery::UploadOff => reply(
                             200,
                             json!({"download": [], "upload": [], "storage_hosts": [], "storage_buckets": []}),
@@ -1160,5 +1169,124 @@ mod tests {
             assert_eq!(m.proxy_puts.len() as u32, chunk_count(size));
             assert!(m.abandons.is_empty());
         });
+    }
+
+    #[tokio::test]
+    async fn a_commit_held_for_longer_than_the_failure_cap_is_waited_out_not_given_up() {
+        let scratch = Scratch::new("held");
+        let (path, size, _) = scratch.file(FILE_BYTES);
+        let chunks = chunk_count(size);
+        // After a copy that failed the server keeps the chunk's commit lock for minutes. Nine one-second holds are more
+        // than the eight failures the policy rides out: a hold is not a failure, so the chunk waits and commits.
+        let held = json!({"error": "commit_in_progress"});
+        let state = shared(|m| m.commit_script = (0..9).map(|_| Commit::Reply(409, held.clone(), Some("1"))).collect());
+        let started = Instant::now();
+        let outcome = run(&state, spec(&path, Uuid::new_v4())).await.unwrap();
+        assert!(
+            started.elapsed() >= std::time::Duration::from_secs(9),
+            "the nine holds were waited out"
+        );
+        assert_eq!(outcome.transport, "direct", "and the session stayed direct");
+        snapshot(&state, |m| {
+            assert_eq!(
+                m.commits.len() as u32,
+                chunks + 9,
+                "nine refused commits, then one per chunk"
+            );
+            assert_eq!(
+                m.storage_puts.len() as u32,
+                chunks,
+                "the staged chunk was not sent again"
+            );
+            assert!(m.abandons.is_empty() && m.proxy_puts.is_empty());
+            assert_eq!(m.completed.len(), 1);
+        });
+    }
+
+    // ── review round (cli#105): a resume is not given up on a lookup that nobody answered ──
+
+    #[tokio::test]
+    async fn a_resumed_direct_session_is_kept_when_the_servers_capabilities_cannot_be_read() {
+        let scratch = Scratch::new("resume-unknown");
+        let (path, size, mtime) = scratch.file(FILE_BYTES);
+        let state = shared(|m| m.offers = Some(Discovery::Fails));
+        let (file_id, sid) = resumed_session(&state, &path, size, mtime, true, &[0]);
+        let err = run(&state, spec(&path, file_id)).await.unwrap_err();
+        assert!(err.contains("capabilities") && err.contains("--transport api"), "{err}");
+        snapshot(&state, |m| {
+            assert!(
+                m.abandons.is_empty(),
+                "the session is NOT ended: it holds committed chunks"
+            );
+            assert!(m.inits.is_empty() && m.grants.is_empty() && m.proxy_puts.is_empty());
+            assert!(m.completed.is_empty());
+        });
+        let record = crate::resume::resumable_upload_now(&path).expect("the record is kept");
+        assert!(record.direct && record.session_id == sid, "{record:?}");
+    }
+
+    #[tokio::test]
+    async fn a_resumed_direct_session_is_given_up_when_the_server_says_it_has_no_direct_transport() {
+        let scratch = Scratch::new("resume-nodirect");
+        let (path, size, mtime) = scratch.file(FILE_BYTES);
+        let state = shared(|m| m.offers = Some(Discovery::NoDirect));
+        let (file_id, _) = resumed_session(&state, &path, size, mtime, true, &[0]);
+        let progress = Counting::default();
+        let outcome = run_with(&state, spec(&path, file_id), &progress).await.unwrap();
+        assert_eq!(outcome.transport, "api");
+        snapshot(&state, |m| {
+            assert_eq!(m.abandons.len(), 1, "a definite no ends the direct session");
+            assert_eq!(m.proxy_puts.len() as u32, chunk_count(size));
+            assert_eq!(m.completed.len(), 1);
+        });
+    }
+
+    // ── review round (cli#105): direct broken server-wide costs one file, not every file ──
+
+    #[tokio::test]
+    async fn after_one_file_gave_up_the_direct_upload_the_next_one_does_not_try() {
+        let scratch = Scratch::new("second-file");
+        let (first, size, _) = scratch.file(FILE_BYTES);
+        let second = scratch.dir.join("second.bin");
+        std::fs::copy(&first, &second).unwrap();
+        // The first grant is a bare 404: a node without the route. That file goes back to the API.
+        let state = shared(|m| m.grant_script = VecDeque::from([Grant::Bare(404)]));
+        let base = spawn(state.clone()).await;
+        let api = crate::api::ApiClient::new_for_test(base);
+        let key = Arc::new(MasterKey::from_bytes([9u8; 32]));
+        let one = stream_encrypt_upload(&api, key.clone(), spec(&first, Uuid::new_v4()), &NoopProgress)
+            .await
+            .unwrap();
+        assert_eq!(one.transport, "api");
+        let two = stream_encrypt_upload(&api, key, spec(&second, Uuid::new_v4()), &NoopProgress)
+            .await
+            .unwrap();
+        assert_eq!(two.transport, "api");
+        snapshot(&state, |m| {
+            assert_eq!(
+                m.init_headers,
+                vec![Some(CAP.to_string()), None, None],
+                "the first file asks, is refused and starts again; the second file does not ask"
+            );
+            assert_eq!(
+                m.abandons.len(),
+                1,
+                "one abandon (and one FileDeleted to the other devices), not one per file"
+            );
+            assert_eq!(m.proxy_puts.len() as u32, 2 * chunk_count(size));
+            assert_eq!(m.completed.len(), 2);
+        });
+    }
+
+    #[tokio::test]
+    async fn a_dead_session_on_a_direct_commit_says_to_log_in_again_like_the_proxy_route() {
+        let scratch = Scratch::new("401");
+        let (path, _, _) = scratch.file(FILE_BYTES);
+        let state = shared(|m| {
+            m.commit_script = VecDeque::from([Commit::Reply(401, json!({"error": "unauthorized"}), None)]);
+        });
+        let error = run(&state, spec(&path, Uuid::new_v4())).await.unwrap_err();
+        assert!(error.contains(crate::api::SESSION_EXPIRED_MESSAGE), "{error}");
+        snapshot(&state, |m| assert!(m.abandons.is_empty() && m.completed.is_empty()));
     }
 }

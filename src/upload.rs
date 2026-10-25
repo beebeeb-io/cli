@@ -54,7 +54,7 @@ use beebeeb_types::ChunkProfile;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use uuid::Uuid;
 
-use crate::api::ApiClient;
+use crate::api::{ApiClient, DirectOffer};
 
 /// Sentinel error returned when an upload is cancelled (Ctrl-C / shutdown
 /// flag). Callers compare against this to count "remaining" rather than
@@ -639,6 +639,7 @@ pub async fn stream_encrypt_upload(
                 // it first, like a session that cannot be continued (`RestartWithFreshSession`). Once per
                 // file per run: `api_only` keeps every later attempt off the direct route.
                 let (SessionPlan::Resume { file_id, .. } | SessionPlan::Init { file_id, .. }) = plan;
+                api.note_direct_upload_failed();
                 if bytes_confirmed > 0 {
                     progress.rollback(bytes_confirmed);
                 }
@@ -767,21 +768,35 @@ async fn upload_attempt(
     //    off with `BB_TRANSPORT=api`; not given up on earlier in this run), init asks for it with the
     //    capability header, and the answer's `transport` says what the server chose. `direct` is the
     //    discovery answer the chunk loop checks every link against, `None` for an API session.
-    let offer = if api_only {
-        None
+    let offered = if api_only {
+        DirectOffer::NotOffered
     } else {
         api.direct_upload_offer().await
     };
     let (upload_session_id, server_id, direct) = if let Some(sid) = resumed_session {
-        if resumed_direct && offer.is_none() {
-            // The recorded session is a direct one but this run cannot go direct (forced off, the server
-            // turned the direction off, discovery failed): a direct session takes no proxy PUT.
-            return Err(AttemptErr::DirectUnavailable { bytes_confirmed: 0 });
+        if resumed_direct {
+            match &offered {
+                DirectOffer::Offered(_) => {}
+                // A definite no (forced off, or the server does not offer the direction any more): a direct
+                // session takes no proxy PUT, so it is given up.
+                DirectOffer::NotOffered => return Err(AttemptErr::DirectUnavailable { bytes_confirmed: 0 }),
+                // Nobody answered. That says nothing about the server, and giving the session up throws away
+                // every chunk it already holds (a 50 GB push killed at 90 % would start again from 0): keep
+                // the session and its record, fail this file for this run.
+                DirectOffer::Unknown => {
+                    return Err(AttemptErr::Other(format!(
+                        "{}: the interrupted direct upload cannot be continued right now, because the server's \
+                         transfer capabilities could not be read. Its progress is kept: run the command again, \
+                         or use --transport api to send the file through the API instead",
+                        display_name(&spec.file_name)
+                    )));
+                }
+            }
         }
         (
             sid.to_string(),
             file_id_str.clone(),
-            if resumed_direct { offer.clone() } else { None },
+            if resumed_direct { offered.discovery() } else { None },
         )
     } else {
         // The STORED-id recovery init (a re-init after a swept session) gets a
@@ -795,6 +810,14 @@ async fn upload_attempt(
         // this retry (Codex thread #1 follow-up on 3cb4daf). An ordinary
         // (non-recovery) init is unaffected: it still fails on the first
         // error, unchanged from before this fix.
+        // A NEW session asks for the direct upload only when it is offered and no direct upload was given up on
+        // earlier on this client (the trust period): when direct is broken server-wide, each further file would
+        // pay an init, its tries, an abandon and a second init.
+        let offer = if api.direct_upload_failed_recently() {
+            None
+        } else {
+            offered.discovery()
+        };
         let is_stored_id_recovery = matches!(plan, SessionPlan::Init { is_recovery: true, .. });
         let mut retries_used = 0u32;
         let init = loop {

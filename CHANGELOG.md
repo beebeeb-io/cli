@@ -8,11 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Direct uploads (task 2173): when the server offers `object-upload-v1`, `bb push` and `bb sync` send each chunk straight to object storage through a short-lived link the server grants and then commit it, instead of proxying the bytes through the API. Nothing changes for a server that does not offer it, and `--transport api` / `BB_TRANSPORT=api` force the API. A file whose direct upload cannot finish is sent again through the API.
+- Direct uploads (task 2173): when the server offers `object-upload-v1`, `bb push` and `bb sync` send each chunk straight to object storage through a short-lived link the server grants and then commit it, instead of proxying the bytes through the API. Nothing changes for a server that does not offer it, and `--transport api` / `BB_TRANSPORT=api` force the API. A file whose direct upload cannot finish is sent again through the API, and no further direct upload is started on that run for ten minutes. An interrupted direct upload is continued on the next run; if the server cannot be asked at that moment, the upload and its progress are kept and the file fails for that run (it is given up only when the server says it offers no direct upload, or with `--transport api`). A chunk the server holds for minutes after a failed copy is waited out, not given up on.
 - `bb push --json` reports `transport` (`direct` or `api`) for every file, like `bb pull --json`.
 
 ### Changed
-- A long-running process (`bb sync --daemon`) asks again, after ten minutes, whether a server that said it has no direct transport has gained one; before, it stayed on the API until restart.
+- What the server said about direct transfer is now remembered per API base for the life of the process, for ten minutes: `bb sync --daemon` used to ask the capabilities route again on every resync (it built a new client each time), and a server that said it has no direct transport is asked again after ten minutes.
 
 
 ## [0.14.2] - 2026-10-24

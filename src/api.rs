@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use crate::config::load_config;
 
 mod direct;
-pub(crate) use direct::{ChunkApiError, GrantReply, UploadCall, now_ms};
+pub(crate) use direct::{ChunkApiError, DirectOffer, GrantReply, UploadCall, now_ms};
 
 static RATE_REMAINING: AtomicI64 = AtomicI64::new(-1);
 static RATE_LIMIT: AtomicI64 = AtomicI64::new(-1);
@@ -160,12 +160,16 @@ pub struct ApiClient {
     /// Task 2173: what the server's direct-transfer discovery said, asked
     /// lazily and at most once per 10 minutes per API base (see
     /// `beebeeb_core::direct_transfer::DiscoveryCache` for the rules).
-    direct_discovery: tokio::sync::Mutex<direct::DiscoveryState>,
+    direct: std::sync::Arc<direct::DirectState>,
     /// Task 2173: the HTTP client for presigned storage links. A client of its
     /// own, never `client`: no default headers (so no `X-Beebeeb-*`), no
     /// cookies, no `Authorization`, redirects refused, https only (loopback
     /// http in development).
     storage_client: std::sync::OnceLock<Option<Client>>,
+    /// Task 2173: the same, for storage PUTs. A client of its own again, because a PUT sends a body of up to
+    /// 128 MiB and the download client's read timeout is not reset while a request body goes out (see
+    /// `build_upload_storage_client`).
+    upload_storage_client: std::sync::OnceLock<Option<Client>>,
 }
 
 /// Parsed response from `POST /api/v1/uploads/init`. The session id keys the
@@ -273,13 +277,17 @@ impl ApiClient {
         // (the SSE sync stream) override this per-request with their own
         // `.timeout(...)`, so this default is safe for them.
         let client = build_client(std::time::Duration::from_secs(300));
+        // The direct-transfer state is the process's, per API base: a daemon builds a new client for every resync,
+        // and what discovery said (and that a direct upload was given up on) must outlive each of them.
+        let direct = direct::DirectState::shared(&config.api_url);
         Self {
             client,
             base_url: config.api_url,
             token: config.session_token,
             refusal_account_state: tokio::sync::OnceCell::new(),
-            direct_discovery: tokio::sync::Mutex::new(direct::DiscoveryState::new()),
+            direct,
             storage_client: std::sync::OnceLock::new(),
+            upload_storage_client: std::sync::OnceLock::new(),
         }
     }
 
@@ -299,8 +307,9 @@ impl ApiClient {
             base_url,
             token: Some("test-token".to_string()),
             refusal_account_state: tokio::sync::OnceCell::new(),
-            direct_discovery: tokio::sync::Mutex::new(direct::DiscoveryState::new()),
+            direct: std::sync::Arc::new(direct::DirectState::new()),
             storage_client: std::sync::OnceLock::new(),
+            upload_storage_client: std::sync::OnceLock::new(),
         }
     }
 
@@ -2377,11 +2386,19 @@ impl From<String> for ApiError {
 /// here too. Nothing else counts: a 409, a quota error or a 5xx is a real
 /// failure the caller must surface, never a reason to re-init.
 pub(crate) fn is_upload_session_gone(e: &ApiError) -> bool {
-    match e.status {
-        404 => true,
-        // The server sends `{ error: <text> }` for this 400; `message` carries
-        // it (it falls back to `error` when the body has no `message`).
-        400 => e.message.contains("upload session is not writable: expired"),
+    // The server sends `{ error: <text> }` for the 400; `message` carries
+    // it (it falls back to `error` when the body has no `message`). On the
+    // proxy routes every 404 is the session.
+    upload_session_gone(e.status, true, &e.message)
+}
+
+/// The rule behind [`is_upload_session_gone`] and the direct routes' own check, in one place so the two cannot
+/// drift apart if the server rewords the 400. `a_404_counts`: whether a 404 means "the session is gone" (always,
+/// on the proxy routes; only a JSON-bodied one on the direct routes, where a bare 404 is a node without the route).
+pub(crate) fn upload_session_gone(status: u16, a_404_counts: bool, text: &str) -> bool {
+    match status {
+        404 => a_404_counts,
+        400 => text.contains("upload session is not writable: expired"),
         _ => false,
     }
 }

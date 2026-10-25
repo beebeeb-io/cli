@@ -8,6 +8,7 @@
 //! saw. Nothing here prints a URL: errors from the HTTP stack are run through
 //! `dt::scrub` before they leave this module.
 
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use beebeeb_core::direct_transfer as dt;
@@ -207,6 +208,12 @@ fn build_storage_client(api_base: &str) -> Option<Client> {
 /// [`build_storage_client`] with an explicit idle (no-byte) timeout. There is no total timeout: a
 /// large chunk on a slow link is fine as long as bytes keep arriving.
 fn build_storage_client_with(api_base: &str, read_timeout: Duration) -> Option<Client> {
+    storage_client_builder(api_base).read_timeout(read_timeout).build().ok()
+}
+
+/// The part of the storage clients both share: nothing about the account, no redirect, https only unless the
+/// API itself is on loopback http (local development).
+fn storage_client_builder(api_base: &str) -> reqwest::ClientBuilder {
     let dev = reqwest::Url::parse(api_base)
         .map(|u| u.scheme() == "http" && matches!(u.host_str(), Some("127.0.0.1" | "localhost")))
         .unwrap_or(false);
@@ -214,18 +221,107 @@ fn build_storage_client_with(api_base: &str, read_timeout: Duration) -> Option<C
         .redirect(reqwest::redirect::Policy::none())
         .https_only(!dev)
         .connect_timeout(STORAGE_CONNECT_TIMEOUT)
-        .read_timeout(read_timeout)
-        .build()
-        .ok()
 }
 
-/// The discovery cache. Core's cache already does what a long-running process needs (a sync daemon
-/// that runs for weeks and meets one bad quarter hour): it forgets a failed discovery AND a JSON 404
-/// "no direct transport" once the trust period has passed (core 2aa1f39), so the CLI keeps no rule of
-/// its own on top of it. (Until the core pin moved past 3235dc15 this was a wrapper that re-implemented
-/// the failure half and pinned the 404 half forever; the 404 half is now core's decision, see the
-/// cache vectors in core's `test-vectors/direct_transfer.json`.)
-pub(crate) type DiscoveryState = dt::DiscoveryCache;
+/// The client for storage PUTs: [`build_storage_client`] WITHOUT the read timeout.
+///
+/// reqwest's `read_timeout` is one timer that starts when the request is sent and is not reset while the request
+/// BODY goes out; it only restarts per read once the response is arriving. A PUT of a 128 MiB chunk therefore
+/// died at 60 s on any uplink under about 18 Mbit/s, and the file went back to the API after four such links.
+/// A GET (the download client) sends no body, so its timer does what its name says: it resets per read, and a
+/// transfer that keeps moving is never cut off (pinned by
+/// `a_storage_transfer_that_keeps_moving_is_never_cut_off_but_one_that_stalls_is`). A PUT is bounded
+/// by the total timeout `put_to_storage` sets per request, sized to the chunk.
+fn build_upload_storage_client(api_base: &str) -> Option<Client> {
+    storage_client_builder(api_base).build().ok()
+}
+
+/// What the discovery route said about a direction, as far as a resume has to know it.
+#[derive(Debug, Clone)]
+pub(crate) enum DirectOffer {
+    /// The server offers it (the cached or fresh discovery lists the capability).
+    Offered(dt::Discovery),
+    /// A DEFINITE no: the user forced the API, the discovery lists no such capability, or the server said, in
+    /// JSON, that it has no direct transport.
+    NotOffered,
+    /// Nobody answered: a failed or timed-out lookup, a node without the route, an authorization problem. Say
+    /// nothing about the server; a new file goes through the API, but a recorded direct session must NOT be
+    /// thrown away on this.
+    Unknown,
+}
+
+impl DirectOffer {
+    /// The discovery when the direction is offered.
+    pub(crate) fn discovery(self) -> Option<dt::Discovery> {
+        match self {
+            DirectOffer::Offered(d) => Some(d),
+            DirectOffer::NotOffered | DirectOffer::Unknown => None,
+        }
+    }
+}
+
+/// The discovery cache. Core's cache does what a long-running process needs (a sync daemon that runs for weeks
+/// and meets one bad quarter hour): it forgets a failed discovery AND a JSON 404 "no direct transport" once the
+/// trust period has passed (core 2aa1f39), so the CLI keeps no RULE of its own on top of it. It does keep one
+/// fact core's `Lookup::UseApi` does not carry: whether the cache gave up because the server SAID no, or
+/// because asking failed. A resume needs the difference (see [`DirectOffer`]).
+/// What the CLI remembers about the server's direct transfer: what discovery said, and when a direct upload last had to
+/// be given up. One per API base per PROCESS (see [`DirectState::shared`]), not per [`ApiClient`]: the watch/daemon
+/// builds a new client for every resync, so a per-client cache never outlived one resync and every uploading resync
+/// asked the capabilities route again.
+pub(crate) struct DirectState {
+    discovery: tokio::sync::Mutex<DiscoveryState>,
+    /// When (ms) a direct upload last had to be given up, 0 = never. No new direct upload is started for the trust
+    /// period after that: when direct is broken server-wide every file would otherwise pay an init, its tries, an
+    /// abandon (which tells the user's other devices the file was deleted) and a second init.
+    upload_failed_at: std::sync::atomic::AtomicI64,
+}
+
+impl DirectState {
+    pub(crate) fn new() -> Self {
+        Self {
+            discovery: tokio::sync::Mutex::new(DiscoveryState::new()),
+            upload_failed_at: std::sync::atomic::AtomicI64::new(0),
+        }
+    }
+
+    /// The process's state for this API base (the same `Arc` for the same base, however many clients are built).
+    pub(crate) fn shared(api_base: &str) -> std::sync::Arc<Self> {
+        static STATES: std::sync::LazyLock<
+            std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<DirectState>>>,
+        > = std::sync::LazyLock::new(Default::default);
+        let mut states = STATES.lock().unwrap_or_else(|e| e.into_inner());
+        std::sync::Arc::clone(
+            states
+                .entry(api_base.trim_end_matches('/').to_string())
+                .or_insert_with(|| std::sync::Arc::new(DirectState::new())),
+        )
+    }
+}
+
+pub(crate) struct DiscoveryState {
+    cache: dt::DiscoveryCache,
+    /// The last answer recorded was the server's definite "no direct transport" (a JSON 404).
+    said_no: bool,
+}
+
+impl DiscoveryState {
+    pub(crate) fn new() -> Self {
+        Self {
+            cache: dt::DiscoveryCache::new(),
+            said_no: false,
+        }
+    }
+
+    pub(crate) fn lookup(&self, now_ms: i64) -> dt::Lookup {
+        self.cache.lookup(now_ms)
+    }
+
+    pub(crate) fn record(&mut self, outcome: &dt::Outcome, discovery: Option<dt::Discovery>, now_ms: i64) {
+        self.said_no = matches!(outcome, dt::Outcome::NotSupported);
+        self.cache.record(outcome, discovery, now_ms);
+    }
+}
 
 impl ApiClient {
     /// The API origin this client talks to (the authority check needs it).
@@ -240,6 +336,24 @@ impl ApiClient {
             .as_ref()
     }
 
+    /// The storage client for PUTs (no read timeout, see [`build_upload_storage_client`]).
+    pub(crate) fn upload_storage_client(&self) -> Option<&Client> {
+        self.upload_storage_client
+            .get_or_init(|| build_upload_storage_client(&self.base_url))
+            .as_ref()
+    }
+
+    /// A direct upload had to be given up: start no new one until the trust period has passed.
+    pub(crate) fn note_direct_upload_failed(&self) {
+        self.direct.upload_failed_at.store(now_ms(), Ordering::Relaxed);
+    }
+
+    /// Was a direct upload given up on this client within the trust period?
+    pub(crate) fn direct_upload_failed_recently(&self) -> bool {
+        let at = self.direct.upload_failed_at.load(Ordering::Relaxed);
+        at != 0 && now_ms().saturating_sub(at) < dt::DISCOVERY_TTL_MS
+    }
+
     /// Does this server offer direct downloads right now? Asks the discovery
     /// route lazily and remembers the answer (R1.6); `None` means "use the API
     /// for this file", for any reason: forced with `--transport api`, an old
@@ -247,27 +361,45 @@ impl ApiClient {
     /// offers nothing. An authorization answer (401/403) is NOT handled here:
     /// the API path that follows reports it in its own words.
     pub(crate) async fn direct_download_offer(&self) -> Option<dt::Discovery> {
-        self.direct_offer(dt::Discovery::offers_download).await
+        self.direct_offer(dt::Discovery::offers_download).await.discovery()
     }
 
     /// [`direct_download_offer`](Self::direct_download_offer) for the upload direction (task 2173):
-    /// the same lazily asked, cached discovery, filtered on `object-upload-v1`.
-    pub(crate) async fn direct_upload_offer(&self) -> Option<dt::Discovery> {
+    /// the same lazily asked, cached discovery, filtered on `object-upload-v1`. The answer keeps "the server said
+    /// no" apart from "nobody answered" ([`DirectOffer`]): a recorded direct session is given up on the first only.
+    pub(crate) async fn direct_upload_offer(&self) -> DirectOffer {
         self.direct_offer(dt::Discovery::offers_upload).await
     }
 
-    async fn direct_offer(&self, wanted: fn(&dt::Discovery) -> bool) -> Option<dt::Discovery> {
-        if crate::transport::api_forced() || self.require_auth().is_err() {
-            return None;
+    async fn direct_offer(&self, wanted: fn(&dt::Discovery) -> bool) -> DirectOffer {
+        // The user's choice is a definite answer.
+        if crate::transport::api_forced() {
+            return DirectOffer::NotOffered;
         }
-        let mut state = self.direct_discovery.lock().await;
+        if self.require_auth().is_err() {
+            return DirectOffer::Unknown;
+        }
+        let verdict = |discovery: dt::Discovery| {
+            if wanted(&discovery) {
+                DirectOffer::Offered(discovery)
+            } else {
+                DirectOffer::NotOffered
+            }
+        };
+        let mut state = self.direct.discovery.lock().await;
         match state.lookup(now_ms()) {
-            dt::Lookup::Cached(discovery) => wanted(&discovery).then_some(discovery),
-            dt::Lookup::UseApi => None,
+            dt::Lookup::Cached(discovery) => verdict(discovery),
+            // The cache gave up: because the server said no, or because asking kept failing.
+            dt::Lookup::UseApi if state.said_no => DirectOffer::NotOffered,
+            dt::Lookup::UseApi => DirectOffer::Unknown,
             dt::Lookup::Fetch => {
                 let (outcome, discovery) = self.fetch_discovery().await;
                 state.record(&outcome, discovery.clone(), now_ms());
-                discovery.filter(wanted)
+                match (outcome, discovery) {
+                    (_, Some(discovery)) => verdict(discovery),
+                    (dt::Outcome::NotSupported, None) => DirectOffer::NotOffered,
+                    _ => DirectOffer::Unknown,
+                }
             }
         }
     }
@@ -484,22 +616,20 @@ pub(crate) enum UploadCall<T> {
     SessionGone(String),
 }
 
-/// The text of the 400 the server sends for a session that expired (the same rule as the proxy route's,
-/// `is_upload_session_gone`).
-const SESSION_EXPIRED: &str = "upload session is not writable: expired";
-
-/// Is this failed answer "the session is gone"? A JSON 404 (the session is not the caller's, or was swept)
-/// and the expired-session 400; a BARE 404 is a node without the route, which is not that.
+/// Is this failed answer "the session is gone"? The one rule of the proxy routes
+/// ([`upload_session_gone`](crate::api::upload_session_gone)), with one difference that is a fact about the
+/// route: here a BARE 404 is a node without the route, not a swept session, so only a JSON 404 counts.
 fn upload_session_gone(seen: &Seen) -> bool {
-    match seen.answer.status {
-        404 => seen.answer.has_json_error(),
-        400 => seen.answer.error_code().is_some_and(|c| c.contains(SESSION_EXPIRED)),
-        _ => false,
-    }
+    crate::api::upload_session_gone(
+        seen.answer.status,
+        seen.answer.has_json_error(),
+        seen.answer.error_code().unwrap_or(""),
+    )
 }
 
-/// A storage PUT may take as long as the link needs, but must keep moving: the budget is a minute plus the
-/// chunk at this speed. The server's own fence assumes a minimum uplink of the same order.
+/// A storage PUT is bounded by one total timeout: a minute plus the chunk at this speed (about 1 Mbit/s). The
+/// server's own fence assumes a minimum uplink of the same order. The upload client has no read timeout (see
+/// [`build_upload_storage_client`]), so this is the only bound.
 const STORAGE_PUT_BASE: Duration = Duration::from_secs(60);
 const STORAGE_PUT_MIN_BYTES_PER_SEC: u64 = 128 * 1024;
 
@@ -561,7 +691,7 @@ impl ApiClient {
     /// answer (or no safe client). The link and the transport error (which can carry the link) never
     /// leave this function.
     pub(crate) async fn put_to_storage(&self, link: &dt::UploadLink, data: bytes::Bytes) -> u16 {
-        let Some(client) = self.storage_client() else {
+        let Some(client) = self.upload_storage_client() else {
             return 0;
         };
         let len = data.len() as u64;
@@ -1184,5 +1314,222 @@ mod tests {
             api.download_grants("f", &grant_request()).await,
             GrantReply::Failed(dt::Outcome::Backoff(_))
         ));
+    }
+
+    // ── review round: the PUT client, the process-wide direct state ──
+
+    #[test]
+    fn the_direct_state_is_one_per_api_base_for_the_whole_process() {
+        let a = super::DirectState::shared("http://127.0.0.1:41001");
+        assert!(
+            std::sync::Arc::ptr_eq(&a, &super::DirectState::shared("http://127.0.0.1:41001")),
+            "same base, same state"
+        );
+        assert!(
+            std::sync::Arc::ptr_eq(&a, &super::DirectState::shared("http://127.0.0.1:41001/")),
+            "a trailing slash is the same base"
+        );
+        assert!(
+            !std::sync::Arc::ptr_eq(&a, &super::DirectState::shared("http://127.0.0.1:41002")),
+            "another base, another state"
+        );
+        // A test client has a state of its own: tests on different mock servers must not share a cache.
+        let x = ApiClient::new_for_test("http://127.0.0.1:41001".to_string());
+        let y = ApiClient::new_for_test("http://127.0.0.1:41001".to_string());
+        assert!(!std::sync::Arc::ptr_eq(&x.direct, &y.direct));
+    }
+
+    /// A storage server that reads a PUT body slowly (63 s in all: more than the 60 s read timeout the download client has)
+    /// and only then answers 200.
+    async fn slow_put_storage() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while !head.ends_with(b"\r\n\r\n") {
+                        if sock.read(&mut byte).await.unwrap_or(0) == 0 {
+                            return;
+                        }
+                        head.push(byte[0]);
+                    }
+                    let text = String::from_utf8_lossy(&head).to_lowercase();
+                    let len: usize = text
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .unwrap()
+                        .trim()
+                        .parse()
+                        .unwrap();
+                    let mut buf = vec![0u8; 1 << 16];
+                    let mut left = len;
+                    while left > 0 {
+                        let n = sock.read(&mut buf).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        let n = n.min(left);
+                        left -= n;
+                        // 63 s for the whole body, in proportion to what was read
+                        tokio::time::sleep(Duration::from_micros(63_000_000 * n as u64 / len as u64)).await;
+                    }
+                    let _ = sock.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n").await;
+                });
+            }
+        });
+        (addr, task)
+    }
+
+    fn link_to(addr: std::net::SocketAddr) -> dt::UploadLink {
+        let discovery = dt::Discovery {
+            upload: vec![dt::CAP_OBJECT_UPLOAD_V1.to_string()],
+            storage_hosts: vec![format!("127.0.0.1:{}", addr.port())],
+            storage_buckets: vec![dt::StorageBucket {
+                host: format!("127.0.0.1:{}", addr.port()),
+                bucket: "bb".to_string(),
+            }],
+            ..Default::default()
+        };
+        let body = format!(
+            r#"{{"transport":"object-upload-v1","index":0,"method":"PUT","url":"http://127.0.0.1:{}/bb/k?X-Amz-Signature=SIG","headers":{{"content-type":"application/octet-stream"}},"expires_at":"2099-01-01T00:00:00Z"}}"#,
+            addr.port()
+        );
+        match dt::UploadGrant::from_answer(body.as_bytes(), 0, &discovery, "http://127.0.0.1:3001").expect("a grant") {
+            dt::UploadGrant::Link(link) => link,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // These two run in real time (about a minute each, in parallel with the rest of the suite): reqwest's timers
+    // and real sockets do not mix with a paused clock, and the point is that a PUT outlives a 60 s timer.
+
+    #[tokio::test]
+    async fn a_storage_put_that_takes_longer_than_a_minute_to_be_answered_still_succeeds() {
+        // A 4 MiB chunk on a slow uplink: the storage server takes 63 s to read it. reqwest's read timeout is one timer
+        // from the moment the request is sent, not reset while the request BODY goes out, so a client that has one
+        // (the download client, 60 s) fails this PUT. The upload client has none; the per-request total timeout
+        // (60 s + the chunk at 128 KiB/s = 92 s here) is the bound.
+        let (addr, server) = slow_put_storage().await;
+        let link = link_to(addr);
+        let data = bytes::Bytes::from(vec![7u8; 4 * 1024 * 1024]);
+        let api = ApiClient::new_for_test("http://127.0.0.1:3001".to_string());
+        let download_client = build_storage_client("http://127.0.0.1:3001").expect("client");
+        let (upload, download) = tokio::join!(
+            api.put_to_storage(&link, data.clone()),
+            download_client
+                .put(link.url.as_str())
+                .body(data)
+                .timeout(Duration::from_secs(92))
+                .send()
+        );
+        assert_eq!(upload, 200, "the upload client waits for the answer");
+        let err = download.expect_err("the download client's 60 s read timer cuts the same PUT off");
+        assert!(err.is_timeout(), "{err}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_storage_put_is_still_bounded_by_its_total_timeout() {
+        // A server that never answers: the PUT ends at 60 s + len / 128 KiB/s (60 s for 1 KiB), not never.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hold = tokio::spawn(async move {
+            let mut kept = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                kept.push(sock);
+            }
+        });
+        let link = link_to(addr);
+        let api = ApiClient::new_for_test("http://127.0.0.1:3001".to_string());
+        let started = std::time::Instant::now();
+        let status = tokio::time::timeout(
+            Duration::from_secs(100),
+            api.put_to_storage(&link, bytes::Bytes::from(vec![7u8; 1024])),
+        )
+        .await
+        .expect("the PUT must end by itself");
+        assert_eq!(status, 0, "no answer is status 0");
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_secs(59) && waited <= Duration::from_secs(70),
+            "{waited:?}"
+        );
+        hold.abort();
+    }
+
+    /// A mock API whose capabilities route always answers `status` with `body` and counts its hits.
+    async fn mock_discovery_answering(status: u16, body: &'static str) -> (ApiClient, Arc<AtomicUsize>) {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let app = axum::Router::new().route(
+            "/api/v1/transfer/capabilities",
+            axum::routing::get(move || {
+                let counter = counter.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    (
+                        axum::http::StatusCode::from_u16(status).unwrap(),
+                        [("content-type", "application/json")],
+                        body,
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (ApiClient::new_for_test(format!("http://{addr}")), hits)
+    }
+
+    #[tokio::test]
+    async fn a_servers_no_and_nobody_answering_are_told_apart_and_both_are_cached() {
+        use super::DirectOffer;
+        // The server says, in JSON, that it has no direct transport: a definite no, asked once, from the cache after.
+        let (api, hits) = mock_discovery_answering(404, r#"{"error":"not found"}"#).await;
+        for round in 1..=3 {
+            assert!(
+                matches!(api.direct_upload_offer().await, DirectOffer::NotOffered),
+                "round {round}"
+            );
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "one request, then the cache");
+
+        // A discovery that lists no upload capability: also a definite no.
+        let (api, _) = mock_discovery(true).await;
+        assert!(
+            matches!(api.direct_upload_offer().await, DirectOffer::NotOffered),
+            "downloads only"
+        );
+
+        // Nobody answers (a 503): not a no. Asked twice (core's allowance), then the cache stops asking, still not a no.
+        let (api, hits) = mock_discovery_answering(503, "{}").await;
+        for round in 1..=4 {
+            assert!(
+                matches!(api.direct_upload_offer().await, DirectOffer::Unknown),
+                "round {round}"
+            );
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "two attempts, then the cache gave up");
+
+        // A node without the route (a bare 404) is not a JSON no either.
+        let app = axum::Router::new();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let api = ApiClient::new_for_test(format!("http://{addr}"));
+        assert!(
+            matches!(api.direct_upload_offer().await, DirectOffer::Unknown),
+            "a bare 404"
+        );
     }
 }
