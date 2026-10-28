@@ -59,20 +59,21 @@ async fn downgrade(status: u16) {
     );
     assert!(!dir.join("guest.txt").exists());
     assert_eq!(std::fs::read(dir.join(".bb-sync.json")).unwrap(), before);
-    let f = h.state.lock().unwrap();
-    assert_eq!(f.requests.iter().filter(|(m, _, _)| m != "GET").count(), 0);
-    assert_eq!(
-        f.requests.iter().filter(|(_, p, _)| p.ends_with("/download")).count(),
-        0
-    );
-    assert_eq!(
-        f.requests
-            .iter()
-            .filter(|(_, p, _)| p.contains("/shares/invites/"))
-            .count(),
-        0
-    );
-    drop(f);
+    {
+        let f = h.state.lock().unwrap();
+        assert_eq!(f.requests.iter().filter(|(m, _, _)| m != "GET").count(), 0);
+        assert_eq!(
+            f.requests.iter().filter(|(_, p, _)| p.ends_with("/download")).count(),
+            0
+        );
+        assert_eq!(
+            f.requests
+                .iter()
+                .filter(|(_, p, _)| p.contains("/shares/invites/"))
+                .count(),
+            0
+        );
+    }
     h.close().await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

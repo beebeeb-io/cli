@@ -726,9 +726,10 @@ pub async fn run(
     let sync_start = Instant::now();
     let mut total_bytes: u64 = 0;
 
-    let mut keys = sync_keys(&state)?;
-    let resolved_root = resolve_remote_folder(&api, &master_key, &remote_path, dry_run, &mut keys).await;
-    persist_custody(&mut state, &keys, &state_path, dry_run)?;
+    let mut path_keys = OwnedKeyResolver::new();
+    path_keys.restore_custody(&state.custody_seen);
+    let resolved_root = resolve_remote_folder(&api, &master_key, &remote_path, dry_run, &mut path_keys).await;
+    persist_custody(&mut state, &path_keys, &state_path, dry_run)?;
     let remote_folder_id = resolved_root?;
     // `--rebind`: the user accepts the folder resolved now as this directory's
     // remote root. The old manifest describes the other tree, so it is dropped:
@@ -763,6 +764,8 @@ pub async fn run(
     }
     let local_folders = walk_local_folders(&local_dir)?;
 
+    let mut keys = sync_keys(&state)?;
+    keys.restore_custody(path_keys.custody_seen());
     let remote_spinner = make_scan_spinner(scan_active, "scanning remote", "entries");
     let mut remote_files: HashMap<String, RemoteFile> = HashMap::new();
     let mut remote_folders: HashMap<String, Uuid> = HashMap::new();
