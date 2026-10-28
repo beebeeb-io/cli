@@ -15,13 +15,13 @@ use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     path::PathBuf,
-    process::Output,
     sync::{Arc, Mutex},
 };
 pub const ROOT: &str = "22222222-2222-4222-8222-222222222222";
 pub const SUB: &str = "33333333-3333-4333-8333-333333333333";
 pub const FILE: &str = "11111111-1111-4111-8111-111111111111";
 pub const BAD: &str = "44444444-4444-4444-8444-444444444444";
+pub const ACCOUNT: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 pub const MASTER: [u8; 32] = [7; 32];
 pub fn master() -> MasterKey {
     MasterKey::from_bytes(MASTER)
@@ -201,7 +201,8 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
         .to_vec();
     let mut f = state.lock().unwrap();
     f.requests.push((method.clone(), uri.to_string(), body));
-    let value = if method == "GET" && path == "/api/v1/transfer/capabilities" {
+    let value = if method == "GET" && path == "/api/v1/auth/me" {json!({"id":ACCOUNT})}
+    else if method == "GET" && path == "/api/v1/transfer/capabilities" {
         json!({"download":if f.direct {vec!["object-download-v1"]} else {vec![]},"upload":[],"storage_hosts":[host],"storage_buckets":[{"host":host,"bucket":"fixture"}],"max_window":32,"url_ttl_seconds":300})
     } else if method == "POST" && path.ends_with("/download-grants") {
         if f.changed {

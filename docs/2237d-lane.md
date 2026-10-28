@@ -108,3 +108,9 @@ sync_never_deletes, API guard, resolver/transfers, Linux fmt/Clippy.
 The prior CI red was the API spawn safety scan: 9/1. Moved the fully guarded
 spawn into each integration test file, leaving fixture/server helpers shared.
 Resume safety green: API guard 10/0 plus resolver 6/0 and transfers 6/0.
+
+D-L1: sync_account_binding red 1 passed / 3 failed, green 4 passed / 0 failed
+(dl1-red.log, dl1-green.log). Account id comes only from authenticated auth/me.
+Mismatch returns the binding refusal before device/listing/transfer work;
+legacy root readability uses one canonical metadata call. Dry-run never binds.
+Both watch resync paths recheck the session identity before folder work.

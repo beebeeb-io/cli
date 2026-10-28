@@ -98,6 +98,8 @@ fn is_ignored_path(path: &Path) -> bool {
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 struct SyncState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    account_id: Option<String>,
     remote_path: Option<String>,
     remote_folder_id: Option<Uuid>,
     last_sync: Option<DateTime<Utc>>,
@@ -214,6 +216,25 @@ fn classify_remote_absent(local: Option<&LocalFile>, prior: Option<&FileEntry>, 
         (Some(_), None) => RemoteAbsent::NotADelete,
         (None, None) => RemoteAbsent::NotADelete,
     }
+}
+
+const ACCOUNT_REFUSAL: &str = "This folder was synced by a different account. Sign in as that account, or sync into a new folder.";
+
+/// D-L1: resolve session identity before any manifest-driven work. A legacy
+/// root must be readable by that session; email is never an account identity.
+async fn check_sync_account(api: &ApiClient, state: &SyncState) -> Result<String, String> {
+    let me = api.get_me().await?;
+    let id = me["id"].as_str().ok_or("session response missing user id")?;
+    uuid::Uuid::parse_str(id).map_err(|_| "session response has invalid user id")?;
+    if let Some(bound) = &state.account_id {
+        if bound != id { return Err(ACCOUNT_REFUSAL.into()); }
+    } else if let Some(root) = state.remote_folder_id {
+        let row = api.get_file(&root.to_string()).await.map_err(|_| ACCOUNT_REFUSAL)?;
+        if row["id"].as_str() != Some(root.to_string().as_str()) || row["is_folder"].as_bool() != Some(true) || row["is_trashed"].as_bool() == Some(true) {
+            return Err(ACCOUNT_REFUSAL.into());
+        }
+    }
+    Ok(id.to_string())
 }
 
 /// Is this directory bound to a different remote folder than the one resolved
@@ -575,24 +596,6 @@ pub async fn run(
     let api = ApiClient::from_config();
     api.require_auth()?;
 
-    // Register this device with the server (best-effort, non-fatal)
-    let device_info = crate::device::load_or_create();
-    let device_resp = match api
-        .register_device(&device_info.hostname, &device_info.platform, env!("CARGO_PKG_VERSION"))
-        .await
-    {
-        Ok(v) => Some(v),
-        // A 401 means the server no longer accepts our session: stop now with
-        // a distinct exit code so the service manager does not restart us.
-        Err(e) if e == crate::api::SESSION_EXPIRED_MESSAGE => return Err(crate::exit::sync_error(e)),
-        Err(_) => None,
-    };
-    let server_device_id = device_resp
-        .as_ref()
-        .and_then(|v| v.get("id"))
-        .and_then(|v| v.as_str())
-        .map(String::from);
-
     if !local_dir.exists() {
         return Err(format!("local directory not found: {}", local_dir.display()));
     }
@@ -609,6 +612,26 @@ pub async fn run(
     } else {
         SyncState::default()
     };
+
+    let account_id = check_sync_account(&api, &state).await?;
+
+    // Register this device with the server (best-effort, non-fatal)
+    let device_info = crate::device::load_or_create();
+    let device_resp = if dry_run { None } else { match api
+        .register_device(&device_info.hostname, &device_info.platform, env!("CARGO_PKG_VERSION"))
+        .await
+    {
+        Ok(v) => Some(v),
+        // A 401 means the server no longer accepts our session: stop now with
+        // a distinct exit code so the service manager does not restart us.
+        Err(e) if e == crate::api::SESSION_EXPIRED_MESSAGE => return Err(crate::exit::sync_error(e)),
+        Err(_) => None,
+    }};
+    let server_device_id = device_resp
+        .as_ref()
+        .and_then(|v| v.get("id"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
 
     let remote_path = match remote_path_arg.or_else(|| state.remote_path.clone()) {
         Some(p) => normalize_remote_path(&p),
@@ -1343,6 +1366,9 @@ pub async fn run(
     }
 
     state.last_sync = Some(Utc::now());
+    if !dry_run && failed == 0 && conflicts == 0 && held_back == 0 && !delete_refused {
+        state.account_id = Some(account_id);
+    }
     if !dry_run {
         let data = serde_json::to_vec_pretty(&state).map_err(|e| format!("serialize state: {e}"))?;
         std::fs::write(&state_path, data).map_err(|e| format!("write state file: {e}"))?;
@@ -1665,6 +1691,7 @@ async fn run_plain_watch(
 
                     // Re-run the sync to upload changes
                     let resync_api = ApiClient::from_config();
+                    check_sync_account(&resync_api, state).await?;
                     let resync_master = Arc::new(load_master_key()?);
                     let mut resync_local = walk_local_files(local_dir)?;
                     let resync_folders = walk_local_folders(local_dir)?;
@@ -1944,6 +1971,11 @@ async fn run_tui_watch(
 
             // Re-run the sync logic.
             let resync_api = ApiClient::from_config();
+            let binding_state = sync_shared_state.lock().await.clone();
+            if let Err(e) = check_sync_account(&resync_api, &binding_state).await {
+                let _ = sync_tx.send(TuiEvent::SyncError(e));
+                break;
+            }
             let resync_master = match load_master_key() {
                 Ok(k) => Arc::new(k),
                 Err(e) => {
