@@ -1753,7 +1753,7 @@ async fn run_plain_watch(
                     )
                     .await?;
 
-                    let blocked=refresh_watch_reads(&resync_api,&resync_master,local_dir,state,&mut resync_local,&resync_remote_files,&resync_health).await?;
+                    let blocked=refresh_watch_reads(&resync_api,&resync_master,local_dir,state,&mut resync_local,&resync_remote_files,&resync_health,remote_folder_id).await?;
                     // Ensure remote folders exist
                     let mut all_dirs: HashSet<String> = HashSet::new();
                     all_dirs.extend(resync_folders.iter().cloned());
@@ -2088,7 +2088,7 @@ async fn run_tui_watch(
 
             // Upload changed files.
             let mut sync_state = sync_shared_state.lock().await;
-            let blocked=match refresh_watch_reads(&resync_api,&resync_master,&sync_local_dir,&mut sync_state,&mut resync_local,&resync_remote_files,&resync_health).await {Ok(b)=>b,Err(e)=>{let _=sync_tx.send(TuiEvent::SyncError(e));continue;}};
+            let blocked=match refresh_watch_reads(&resync_api,&resync_master,&sync_local_dir,&mut sync_state,&mut resync_local,&resync_remote_files,&resync_health,remote_folder_id).await {Ok(b)=>b,Err(e)=>{let _=sync_tx.send(TuiEvent::SyncError(e));continue;}};
 
             // Reconcile remote deletions FIRST (shared helper — identical
             // decision to the one-shot path and the plain-watch loop): a
@@ -2755,7 +2755,8 @@ fn reconcile_moves(root:&Path,state:&mut SyncState,local:&HashMap<String,LocalFi
 }
 /// Apply incoming files through the same downloader during an existing watch
 /// resync. Local edits keep precedence until the existing conflict flow resolves.
-async fn refresh_watch_reads(api:&ApiClient,master:&beebeeb_core::kdf::MasterKey,root:&Path,state:&mut SyncState,local:&mut HashMap<String,LocalFile>,remote:&HashMap<String,RemoteFile>,health:&crate::sync_safety::ListingHealth)->Result<HashSet<String>,String>{
+async fn refresh_watch_reads(api:&ApiClient,master:&beebeeb_core::kdf::MasterKey,root:&Path,state:&mut SyncState,local:&mut HashMap<String,LocalFile>,remote:&HashMap<String,RemoteFile>,health:&crate::sync_safety::ListingHealth,remote_root:Uuid)->Result<HashSet<String>,String>{
+    if root_unreconciled(state,remote_root) {return Ok(state.files.keys().cloned().collect());}
     let mut blocked=reconcile_moves(root,state,local,remote,false)?;
     *local=walk_local_files(root)?;
     for (rel,r) in remote {

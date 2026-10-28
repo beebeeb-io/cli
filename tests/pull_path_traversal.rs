@@ -380,6 +380,7 @@ impl Fixture {
                     Json(s.requests.clone()).into_response()
                 }
                 let app = Router::new()
+        .route("/api/v1/auth/me",get(||async{Json(json!({"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}))}))
                     .route("/api/v1/files", get(list))
                     .route("/api/v1/files/:id", get(meta))
                     .route("/api/v1/files/:id/download", get(download))
