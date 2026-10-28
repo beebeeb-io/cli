@@ -188,3 +188,104 @@ impl Harness {
         .unwrap()
     }
 }
+
+/// Plan D: after a revoke (or a server that withdraws custody) the items that already carry owner envelopes keep
+/// syncing. L7c/L7d refuse the LEGACY reader, not whole syncs: no legacy invite and no key inventory may be read,
+/// and nothing is opened under a key that is not proven by its owner envelope.
+async fn adopted_tree() -> Harness {
+    let h = Harness::new(Fixture::transfer(false)).await;
+    let first = dir(&h);
+    ok(sync(&h, &first).await);
+    assert!(
+        !h.state.lock().unwrap().rows[1]["owner_wrapped_file_key"].is_null(),
+        "instrument: the first sync must have adopted the child"
+    );
+    assert_eq!(h.custody_state()["custody_seen"], json!([ROOT]));
+    h
+}
+/// A legacy invite exists for ROOT and its inventory holds a replayed, unbound wrap of the child's key: all of it
+/// would be readable if the CLI went there.
+fn withdraw_custody(f: &mut Fixture, status: u16) {
+    f.legacy_invite = true;
+    f.custody_status = Some(status);
+    f.inventory[0]["encrypted_file_key"] =
+        json!(B64.encode(beebeeb_core::encrypt::encrypt_chunk_raw(&folder_key(), item_key().as_bytes()).unwrap()));
+    f.requests.clear();
+}
+fn legacy_reads(h: &Harness) -> Vec<String> {
+    h.state
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .filter(|(_, p, _)| p.contains("/shares/invites") || p.contains(&format!("/shared-folders/{ROOT}/keys")))
+        .map(|(m, p, _)| format!("{m} {p}"))
+        .collect()
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_adopted_tree_keeps_syncing_after_a_custody_downgrade_with_zero_legacy_reads() {
+    for status in [404, 405, 501] {
+        let h = adopted_tree().await;
+        withdraw_custody(&mut h.state.lock().unwrap(), status);
+        let second = h.home.join("second");
+        std::fs::create_dir(&second).unwrap();
+        let out = sync(&h, &second).await;
+        assert!(
+            out.status.success(),
+            "status {status}: the adopted tree stopped syncing: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            std::fs::read(second.join("guest.txt")).unwrap(),
+            h.state.lock().unwrap().plaintext,
+            "status {status}"
+        );
+        assert_eq!(
+            legacy_reads(&h),
+            Vec::<String>::new(),
+            "status {status}: a legacy read happened"
+        );
+        h.close().await;
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_child_without_an_envelope_still_refuses_through_load_root_after_adoption() {
+    for status in [404, 405, 501] {
+        let h = adopted_tree().await;
+        {
+            let mut f = h.state.lock().unwrap();
+            withdraw_custody(&mut f, status);
+            // A child added after the adoption: no owner envelope, only the replayed legacy wrap.
+            let mut fresh = row(SUB, Some(ROOT), "new.txt", false, true);
+            fresh["owner_wrapped_file_key"] = Value::Null;
+            f.rows.push(fresh);
+            let replayed =
+                B64.encode(beebeeb_core::encrypt::encrypt_chunk_raw(&folder_key(), item_key().as_bytes()).unwrap());
+            f.inventory
+                .push(json!({"file_id": SUB, "encrypted_file_key": replayed}));
+        }
+        let second = h.home.join("second");
+        std::fs::create_dir(&second).unwrap();
+        let out = sync(&h, &second).await;
+        let case = format!("status {status}");
+        assert!(!out.status.success(), "{case}: the new child was opened");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("This folder's keys are unavailable"),
+            "{case}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!second.join("guest.txt").exists(), "{case}: a change was applied");
+        assert_eq!(legacy_reads(&h), Vec::<String>::new(), "{case}: a legacy read happened");
+        let writes: Vec<_> = h
+            .state
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .filter(|(m, _, _)| m != "GET")
+            .map(|(m, p, _)| format!("{m} {p}"))
+            .collect();
+        assert!(writes.is_empty(), "{case}: wrote {writes:?}");
+        h.close().await;
+    }
+}
