@@ -35,6 +35,13 @@ async fn nested_guest_and_member_names() {
     assert_eq!(v["files"][0]["name"], "guest.txt");
     assert_eq!(h.count("GET", &format!("/api/v1/shared-folders/{ROOT}/keys")), 1);
     h.close().await;
+    let mut legacy = Fixture::basic();
+    legacy.legacy_invite = true;
+    let h = Harness::new(legacy).await;
+    let v = h.json(&["ls", "Shared"]).await;
+    assert_eq!(v["files"][0]["name"], "guest.txt");
+    assert_eq!(h.count("PUT", "/api/v1/shared-folders"), 0);
+    h.close().await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn canonical_enrichment_wire_shapes() {
@@ -97,10 +104,18 @@ async fn legacy_and_request_compatibility() {
     legacy["id"] = json!(BAD);
     legacy["name_encrypted"] = json!(name(&binary, "binary.txt"));
     f.rows.push(legacy);
+    f.add_request();
     let h = Harness::new(f).await;
     let v = h.json(&["ls"]).await;
+    assert!(
+        v["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["name"] == "request.txt")
+    );
     assert_eq!(v["files"][0]["name"], "binary.txt");
-    assert_eq!(v["files"][1]["name"], "string.txt");
+    assert_eq!(v["files"][2]["name"], "string.txt");
     h.close().await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

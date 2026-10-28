@@ -31,6 +31,7 @@ pub struct OwnedKeyResolver {
     absent_roots: HashSet<String>,
     pending: HashMap<String, Vec<u8>>,
     requests: Option<RequestKeyResolver>,
+    sent_invites: Option<Vec<Value>>,
 }
 impl OwnedKeyResolver {
     pub fn new() -> Self {
@@ -208,7 +209,43 @@ impl OwnedKeyResolver {
         }
         let custody = api.get_shared_folder(id).await?;
         if custody.is_null() {
-            self.absent_roots.insert(id.into());
+            // An approved legacy invite permits its sender to read the existing
+            // inventory without registering custody (reads must not mutate).
+            if self.sent_invites.is_none() {
+                let sent = api.get_json("/api/v1/shares/invites/sent").await?;
+                self.sent_invites = Some(sent["invites"].as_array().cloned().unwrap_or_default());
+            }
+            if let Some(invite) = self.sent_invites.as_ref().unwrap().iter().find(|r| {
+                r["file_id"].as_str() == Some(id)
+                    && r["is_folder_share"].as_bool() == Some(true)
+                    && r["status"].as_str() == Some("approved")
+            }) {
+                let frame = normalize_wrap(&invite["encrypted_owner_folder_key"])?.ok_or("missing invite seed")?;
+                // L6 explicitly permits the named legacy invite reader only for
+                // this seed. Permanent custody never reaches this branch.
+                let key = owned_keys::unwrap_owner_key(master, id, &frame).map_err(|_| "invalid invite seed")?;
+                let invite_id = text(invite, "id")?;
+                let page = api
+                    .get_json(&format!("/api/v1/shares/invites/{invite_id}/folder-keys"))
+                    .await?;
+                let mut children = HashMap::new();
+                for row in page["keys"].as_array().ok_or("missing invite inventory")? {
+                    if let (Some(id), Ok(Some(frame))) =
+                        (row["file_id"].as_str(), normalize_wrap(&row["encrypted_file_key"]))
+                    {
+                        children.insert(id.into(), frame);
+                    }
+                }
+                self.roots.insert(
+                    id.into(),
+                    SharedRoot {
+                        key: Arc::new(key),
+                        children,
+                    },
+                );
+            } else {
+                self.absent_roots.insert(id.into());
+            }
             return Ok(());
         }
         if custody["folder_id"].as_str() != Some(id) || custody["role"].as_str() != Some("owner") {

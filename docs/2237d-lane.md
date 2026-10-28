@@ -41,3 +41,14 @@ Red t7-red-initial.log: 6 executed, 1 passed / 5 failed.
 Green t7-green-regressions.log: resolver 6 passed / 0 failed.
 Regression and final task completion details will follow.
 Initial green saved as WIP before extending compatibility coverage.
+
+Task 7 complete: resolver 6/0; path containment 22/0; share/path parity 1/0,
+t7-verified-green.log. Request-branch mutation 5/1, restored 6/0
+(t7-compat-red.log). Negative zero-test count fixture rejected 1/1.
+Decision: when L6 custody is absent, read an approved sent invite's legacy
+seed through core and GET its existing /shares/invites/:id/folder-keys
+inventory (server invites.rs get_folder_keys explicitly authorizes sender).
+This preserves the required read-only commands; no custody PUT from reads.
+Permanent custody uses L6 exclusively; child reads always L7.
+Log capture concatenates remote stderr then stdout after completion to avoid
+SSH stream interleaving breaking the plan's row-count guard.

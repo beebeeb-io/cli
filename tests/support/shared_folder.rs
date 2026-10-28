@@ -53,8 +53,23 @@ pub struct Fixture {
     pub inventory: Vec<Value>,
     pub requests: Vec<(String, String, Vec<u8>)>,
     pub cycle: bool,
+    pub requests_doc: Value,
+    pub legacy_invite: bool,
 }
 impl Fixture {
+    pub fn add_request(&mut self) {
+        let private = [31; 32];
+        let public = beebeeb_core::opaque::derive_x25519_public(&private);
+        let (wrapped, nonce) = beebeeb_core::file_request::wrap_request_private(&master(), b"", &private).unwrap();
+        self.requests_doc = json!({"file_requests":[{"id":SUB,"wrapped_private_key":B64.encode(wrapped),"wrap_nonce":B64.encode(nonce)}]});
+        let seal = beebeeb_core::file_request::seal_to_request(&public, b"", item_key().as_bytes()).unwrap();
+        let mut r = row(SUB, None, "request.txt", false, true);
+        r["acted_via_share_id"] = Value::Null;
+        r["file_request_id"] = json!(SUB);
+        r["sender_ephemeral_pubkey"] = json!(B64.encode(seal.e_pub));
+        r["wrapped_content_key"] = json!(B64.encode(seal.wrapped_key));
+        self.rows.push(r);
+    }
     pub fn basic() -> Self {
         Self {
             rows: vec![
@@ -162,7 +177,15 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
         .to_vec();
     let mut f = state.lock().unwrap();
     f.requests.push((method.clone(), uri.to_string(), body));
-    let value = if method == "GET" && path == "/api/v1/files" {
+    let value = if method == "GET" && path == "/api/v1/file-requests" {
+        f.requests_doc.clone()
+    } else if method == "GET" && path == "/api/v1/shares/invites/sent" {
+        json!({"invites":if f.legacy_invite {vec![json!({"id":BAD,"file_id":ROOT,"is_folder_share":true,"status":"approved","encrypted_owner_folder_key":B64.encode(owned_keys::wrap_key_to_owner(&master(),ROOT,&folder_key()).unwrap())})]} else {vec![]}})
+    } else if method == "GET" && path == format!("/api/v1/shares/invites/{BAD}/folder-keys") {
+        json!({"keys":f.inventory})
+    } else if f.legacy_invite && path == format!("/api/v1/shared-folders/{ROOT}") {
+        return StatusCode::NOT_FOUND.into_response();
+    } else if method == "GET" && path == "/api/v1/files" {
         json!({"files":f.rows.iter().filter(|r|r["parent_id"].as_str()==query.get("parent_id").map(String::as_str)).cloned().collect::<Vec<_>>()})
     } else if method == "GET" && path == "/api/v1/files/index" {
         json!({"files":f.rows})
