@@ -198,3 +198,43 @@ impl CustodyStore {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `ls`, `pull` and `sync` of one account run as separate processes and each read-union-writes the same
+    /// record. Threads that each open the lock file themselves hold separate descriptions of it, which is
+    /// what separate processes do, so a lost update here is a lost update there.
+    #[test]
+    fn concurrent_writers_never_lose_an_observation() {
+        let dir = std::env::temp_dir().join(format!("bb-custody-{}", Uuid::new_v4()));
+        let account = Uuid::new_v4();
+        std::fs::create_dir_all(&dir).unwrap();
+        atomic_write(&dir.join("active.json"), &serde_json::to_vec(&account).unwrap()).unwrap();
+        let ids: Vec<String> = (0..160).map(|_| Uuid::new_v4().to_string()).collect();
+        std::thread::scope(|scope| {
+            for chunk in ids.chunks(20) {
+                let directory = dir.clone();
+                scope.spawn(move || {
+                    let store = CustodyStore { account, directory };
+                    for id in chunk {
+                        store.remember(id).unwrap();
+                    }
+                });
+            }
+        });
+        let store = CustodyStore {
+            account,
+            directory: dir.clone(),
+        };
+        let lost = ids.iter().filter(|id| !store.seen(id).unwrap()).count();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            lost,
+            0,
+            "{lost} of {} observations were lost to a concurrent writer",
+            ids.len()
+        );
+    }
+}
