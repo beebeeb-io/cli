@@ -318,7 +318,7 @@ dependencies = [
 [[package]]
 name = "beebeeb-core"
 version = "0.1.0"
-source = "git+https://github.com/beebeeb-io/core?rev=c08defc70c35428926be6784d18ff091be6d004c#c08defc70c35428926be6784d18ff091be6d004c"
+source = "git+https://github.com/beebeeb-io/core?rev=3831a05acc228e510d6f4131cd5b586b1b102cde#3831a05acc228e510d6f4131cd5b586b1b102cde"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -340,6 +340,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
+ "subtle",
  "thiserror 2.0.18",
  "unicode-normalization",
  "uuid",
@@ -352,7 +353,7 @@ dependencies = [
 [[package]]
 name = "beebeeb-types"
 version = "0.1.0"
-source = "git+https://github.com/beebeeb-io/core?rev=c08defc70c35428926be6784d18ff091be6d004c#c08defc70c35428926be6784d18ff091be6d004c"
+source = "git+https://github.com/beebeeb-io/core?rev=3831a05acc228e510d6f4131cd5b586b1b102cde#3831a05acc228e510d6f4131cd5b586b1b102cde"
 dependencies = [
  "serde",
 ]
