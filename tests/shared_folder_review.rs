@@ -126,6 +126,47 @@ async fn explicit_replacement_discards_resume_for_a_different_identity() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn partial_index_repair_is_reported_without_blocking_content() {
+    let mut f = Fixture::transfer(true);
+    f.review_partial_repair_only = true;
+    let h = Harness::new(f).await;
+    let d = h.home.join("sync");
+    std::fs::create_dir(&d).unwrap();
+    let result = sync(&h, &d).await;
+    ok(&result);
+    assert_eq!(
+        std::fs::read(d.join("guest.txt")).unwrap(),
+        h.state.lock().unwrap().plaintext
+    );
+    assert_eq!(manifest(&d)["dirty_shared_roots"], json!([ROOT]));
+    assert_eq!(
+        h.count("PUT", &format!("/api/v1/shared-folders/{ROOT}/search-index")),
+        0
+    );
+    let notice = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        notice.contains("index") && notice.contains("partial") && notice.contains("deferred"),
+        "missing partial/deferred notice: {notice}"
+    );
+    let summary: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(summary["ok"], true);
+    assert_eq!(summary["failed"], 0);
+    assert_eq!(summary["downloaded"], 1);
+    assert_eq!(summary["index_partial"], true);
+    assert_eq!(summary["index_deferred"], 1);
+    assert!(summary["index_written"].as_u64().is_some());
+    h.state.lock().unwrap().review_partial_repair_only = false;
+    let result = sync(&h, &d).await;
+    ok(&result);
+    let summary: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(summary["index_partial"], false);
+    assert_eq!(summary["index_deferred"], 0);
+    assert_eq!(manifest(&d)["dirty_shared_roots"], json!([]));
+    assert_eq!(h.count("POST", "/api/v1/uploads/init"), 0);
+    h.close().await;
+}
+
 fn opened_with_pin(
     key: &beebeeb_core::kdf::FileKey,
     id: &str,

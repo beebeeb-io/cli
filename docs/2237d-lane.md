@@ -234,3 +234,13 @@ manifest identity, unrelated version unchanged, no stale-session requests.
 The first post-fix run was 1/1 because the test reused the mock's new session
 id for the stale record; distinct synthetic session ids corrected that probe.
 Evidence: review-p1-resume-red.log, review-p1-resume-green{-2,}.log.
+
+Review P2 partial-index reporting: RED 0/1, missing partial/deferred notice
+while content sync succeeded. finish_owned_sync now aggregates IndexRepairReport
+for owner/shared repairs, prints partial/deferred results, and returns the
+report for JSON fields index_written, index_deferred and index_partial. Errors
+count as deferred; content access remains successful and dirty roots persist.
+GREEN review binary 3/0 (partial case 1/0), including successful later repair
+clearing the dirty root and partial/deferred fields. Evidence:
+review-p2-index-{red,green}.log. These are additive summary fields; dry runs
+report zeros/false. Final full-suite gate will run in a fresh owned worktree.

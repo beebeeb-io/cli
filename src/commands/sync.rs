@@ -1466,11 +1466,14 @@ pub async fn run(
     if !dry_run && failed == 0 && conflicts == 0 && held_back == 0 && !delete_refused {
         state.account_id = Some(account_id);
     }
-    if !dry_run {
-        finish_owned_sync(&api, &master_key, &mut keys, &mut state, remote_folder_id, root_changed).await;
+    let index_report = if !dry_run {
+        let report = finish_owned_sync(&api, &master_key, &mut keys, &mut state, remote_folder_id, root_changed).await;
         let data = serde_json::to_vec_pretty(&state).map_err(|e| format!("serialize state: {e}"))?;
         std::fs::write(&state_path, data).map_err(|e| format!("write state file: {e}"))?;
-    }
+        report
+    } else {
+        crate::shared_folder_index::IndexRepairReport::default()
+    };
 
     // Send a final heartbeat for --once mode
     if once {
@@ -1536,6 +1539,9 @@ pub async fn run(
             "deleted": deletes,
             "held_back": held_back,
             "skipped": skipped,
+            "index_written": index_report.written,
+            "index_deferred": index_report.deferred,
+            "index_partial": index_report.partial,
             "bytes": total_bytes,
             "elapsed_secs": elapsed_secs,
         });
@@ -2967,15 +2973,15 @@ async fn finish_owned_sync(
     state: &mut SyncState,
     root: Uuid,
     root_changed: bool,
-) {
+) -> crate::shared_folder_index::IndexRepairReport {
     if state.account_id.is_none() {
         state.owned_keys.clear();
         state.dirty_shared_roots.clear();
         state.removed_index_ids.clear();
-        return;
+        return crate::shared_folder_index::IndexRepairReport::default();
     }
     if root_changed {
-        return;
+        return crate::shared_folder_index::IndexRepairReport::default();
     }
     let resolved = keys.resolved();
     for r in &resolved {
@@ -3011,27 +3017,48 @@ async fn finish_owned_sync(
         .map(|r| (r.canonical["id"].as_str().unwrap_or("").to_string(), r.name.clone()))
         .collect();
     let removed: Vec<_> = state.removed_index_ids.iter().cloned().collect();
-    match crate::shared_folder_index::update_owner_index(api, master, &entries, &removed).await {
-        Ok(r) if r.deferred == 0 && !r.partial => {
-            state.owner_index_dirty = false;
-            state.removed_index_ids.clear();
+    let mut report = match crate::shared_folder_index::update_owner_index(api, master, &entries, &removed).await {
+        Ok(r) => {
+            state.owner_index_dirty = r.deferred > 0 || r.partial;
+            if !state.owner_index_dirty {
+                state.removed_index_ids.clear();
+            }
+            r
         }
-        Ok(_) => state.owner_index_dirty = true,
         Err(e) => {
             state.owner_index_dirty = true;
             print_notice(&format!("search index deferred: {e}"));
+            crate::shared_folder_index::IndexRepairReport {
+                deferred: 1,
+                ..Default::default()
+            }
         }
-    }
+    };
     state.dirty_shared_roots.insert(root.to_string());
     for id in state.dirty_shared_roots.clone() {
         match crate::shared_folder_index::repair(api, master, keys, &id).await {
-            Ok(r) if r.deferred == 0 && !r.partial => {
-                state.dirty_shared_roots.remove(&id);
+            Ok(r) => {
+                if r.deferred == 0 && !r.partial {
+                    state.dirty_shared_roots.remove(&id);
+                }
+                report.written += r.written;
+                report.deferred += r.deferred;
+                report.partial |= r.partial;
             }
-            Ok(_) => {}
-            Err(e) => print_notice(&format!("shared search index deferred: {e}")),
+            Err(e) => {
+                report.deferred += 1;
+                print_notice(&format!("shared search index deferred: {e}"));
+            }
         }
     }
+    if report.partial || report.deferred > 0 {
+        let status = if report.partial { "partial" } else { "deferred" };
+        print_notice(&format!(
+            "search index {status}: {} written; {} deferred",
+            report.written, report.deferred
+        ));
+    }
+    report
 }
 
 fn parent_remote_id(rel: &str, folders: &HashMap<String, Uuid>, root_id: Uuid) -> Option<Uuid> {
