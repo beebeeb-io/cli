@@ -140,6 +140,60 @@ pub(crate) async fn try_download(
     progress: &dyn ChunkProgress,
     display_name: &str,
 ) -> Result<DirectResult, DownloadError> {
+    try_download_inner(
+        api,
+        ChunkDecryptor::for_push(master_key, file_id, pin),
+        pin,
+        true,
+        file_id,
+        chunk_count,
+        out_path,
+        progress,
+        display_name,
+    )
+    .await
+}
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn try_download_with_file_key(
+    api: &ApiClient,
+    file_key: std::sync::Arc<beebeeb_core::kdf::FileKey>,
+    file_id: &str,
+    pin: ExpectedChunkFormat,
+    chunk_count: u32,
+    out_path: &Path,
+    progress: &dyn ChunkProgress,
+    display_name: &str,
+) -> Result<DirectResult, DownloadError> {
+    let decryptor = ChunkDecryptor::for_push_with_file_key(
+        beebeeb_core::kdf::FileKey::from_bytes(*file_key.as_bytes()),
+        file_id,
+        pin,
+    );
+    try_download_inner(
+        api,
+        decryptor,
+        pin,
+        false,
+        file_id,
+        chunk_count,
+        out_path,
+        progress,
+        display_name,
+    )
+    .await
+}
+#[allow(clippy::too_many_arguments)]
+async fn try_download_inner(
+    api: &ApiClient,
+    mut decryptor: ChunkDecryptor,
+    pin: ExpectedChunkFormat,
+    allow_legacy: bool,
+    file_id: &str,
+    chunk_count: u32,
+    out_path: &Path,
+    progress: &dyn ChunkProgress,
+    display_name: &str,
+) -> Result<DirectResult, DownloadError> {
     let Some(discovery) = api.direct_download_offer().await else {
         return Ok(DirectResult::UseApi);
     };
@@ -148,7 +202,6 @@ pub(crate) async fn try_download(
     };
     let config = dt::PlannerConfig::from_discovery(&discovery, rand::random());
     let mut planner = dt::DownloadPlanner::new(config, discovery, api.api_base(), file_id);
-    let mut decryptor = ChunkDecryptor::for_push(master_key, file_id, pin);
     let mut tasks: FuturesUnordered<Task<'_>> = FuturesUnordered::new();
     let mut ready: BTreeMap<u32, Bytes> = BTreeMap::new();
     let mut out: Option<Output> = None;
@@ -349,7 +402,7 @@ pub(crate) async fn try_download(
                         return Ok(DirectResult::UseApi);
                     }
                 }
-                Err(_) if next == 0 && pin != ExpectedChunkFormat::V2 => {
+                Err(_) if allow_legacy && next == 0 && pin != ExpectedChunkFormat::V2 => {
                     // Frame 0 under the string-UUID key failed before any plaintext was written. That
                     // is what a pre-`bb repair` file keyed by the BINARY uuid (or a JSON-blob file)
                     // looks like, and only the API path's buffered fallback can read those: a

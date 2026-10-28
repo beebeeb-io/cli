@@ -104,6 +104,7 @@ pub fn decrypt_name(
 /// base64 `WebAppBlob` (format 2) from OLD web uploads, which core can't parse.
 /// Keeping the CLI's all-format coverage is what keeps `bb ls`/`bb search` output
 /// byte-identical for those legacy files.
+#[cfg(test)]
 pub fn decrypt_names(master_key: &beebeeb_core::kdf::MasterKey, items: &[(&str, &str)]) -> Vec<Option<String>> {
     use rayon::prelude::*;
     items

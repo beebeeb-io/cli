@@ -80,6 +80,10 @@ fn remote_file(id: &str, name: &str) -> Value {
 async fn start_mock(mock: Mock) -> String {
     let app = Router::new()
         .route(
+            "/api/v1/auth/me",
+            get(|| async { Json(json!({"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"})) }),
+        )
+        .route(
             "/api/v1/files",
             get(
                 |State(m): State<Mock>, Query(q): Query<HashMap<String, String>>| async move {
@@ -96,6 +100,9 @@ async fn start_mock(mock: Mock) -> String {
         .route(
             "/api/v1/files/:id",
             get(|State(m): State<Mock>, UrlPath(id): UrlPath<String>| async move {
+                if id == SYNC_FOLDER_ID || id == OLD_ROOT_ID {
+                    return Json(json!({"id":id,"is_folder":true,"name_encrypted":"SyncUp"})).into_response();
+                }
                 match m.records.lock().unwrap().get(&id) {
                     Some(v) => Json(v.clone()).into_response(),
                     None => (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response(),

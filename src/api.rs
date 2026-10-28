@@ -646,6 +646,19 @@ impl ApiClient {
     /// now see the whole folder. Bounded by `FILE_LIST_HARD_CAP` as a safety
     /// valve (mirrors the web client's `FILE_LIST_HARD_CAP`, task 0755).
     async fn list_all_files(&self, parent_id: Option<&str>, trashed: bool) -> Result<Value, String> {
+        self.list_all_files_bounded(parent_id, trashed, FILE_LIST_HARD_CAP)
+            .await
+    }
+    pub async fn list_files_bounded(&self, parent_id: &str, cap: usize) -> Result<Value, String> {
+        self.list_all_files_bounded(Some(parent_id), false, cap.min(FILE_LIST_HARD_CAP))
+            .await
+    }
+    async fn list_all_files_bounded(
+        &self,
+        parent_id: Option<&str>,
+        trashed: bool,
+        cap: usize,
+    ) -> Result<Value, String> {
         let mut all: Vec<Value> = Vec::new();
         let mut cursor: Option<String> = None;
         // Set when the cap cut the listing short. Callers that conclude
@@ -655,12 +668,10 @@ impl ApiClient {
         loop {
             let (mut page, next) = self.list_files_page(parent_id, trashed, cursor.as_deref()).await?;
             all.append(&mut page);
-            if let Some(cut) = listing_cap_reached(&mut all, FILE_LIST_HARD_CAP, next.is_some()) {
+            if let Some(cut) = listing_cap_reached(&mut all, cap, next.is_some()) {
                 truncated = cut;
                 if cut {
-                    eprintln!(
-                        "warning: file listing reached the {FILE_LIST_HARD_CAP}-entry safety cap; some entries may be omitted"
-                    );
+                    eprintln!("warning: file listing reached the {cap}-entry safety cap; some entries may be omitted");
                 }
                 break;
             }
@@ -708,6 +719,45 @@ impl ApiClient {
             .map_err(format_request_error)?;
 
         parse_response(resp).await
+    }
+
+    /// Missing custody is explicit; network/auth/malformed responses never mean absent.
+    pub async fn get_shared_folder(&self, id: &str) -> Result<Value, String> {
+        let resp = self
+            .client
+            .get(self.url(&format!("/api/v1/shared-folders/{id}")))
+            .bearer_auth(self.require_auth()?)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(Value::Null);
+        }
+        parse_response(resp).await
+    }
+    pub async fn get_shared_folder_keys(&self, id: &str, cursor: Option<&str>) -> Result<Value, String> {
+        let mut request = self
+            .client
+            .get(self.url(&format!("/api/v1/shared-folders/{id}/keys")))
+            .bearer_auth(self.require_auth()?)
+            .query(&[("limit", "500")]);
+        if let Some(cursor) = cursor {
+            request = request.query(&[("cursor", cursor)]);
+        }
+        parse_response(request.send().await.map_err(format_request_error)?).await
+    }
+    pub async fn adopt_owner_key(&self, id: &str, wrap: &str) -> Result<bool, String> {
+        let response = self
+            .client
+            .post(self.url(&format!("/api/v1/files/{id}/owner-key")))
+            .bearer_auth(self.require_auth()?)
+            .json(&serde_json::json!({"owner_wrapped_file_key": wrap}))
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(response).await?["adopted"]
+            .as_bool()
+            .ok_or_else(|| "missing adoption result".into())
     }
 
     /// V2 chunked upload init: `POST /api/v1/uploads/init`.
@@ -2017,6 +2067,65 @@ impl ApiClient {
             .await
             .map_err(format_request_error)?;
         parse_response(resp).await
+    }
+
+    /// Index pages are opaque, bounded blobs. Only the shared store has CAS.
+    pub async fn index_blob(&self, path: &str) -> Result<Vec<u8>, String> {
+        let mut response = self
+            .client
+            .get(self.url(path))
+            .bearer_auth(self.require_auth()?)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        if !response.status().is_success() {
+            return Err(format!("index read: {}", response.status()));
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(format_request_error)? {
+            if bytes.len() + chunk.len() > 160 * 1024 {
+                return Err("index page exceeds limit".into());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
+    }
+    pub async fn write_index_page(
+        &self,
+        path: &str,
+        blob: Option<Vec<u8>>,
+        version: Option<u64>,
+    ) -> Result<bool, String> {
+        let mut request = if let Some(blob) = blob {
+            if blob.len() > 160 * 1024 {
+                return Err("index page exceeds limit".into());
+            }
+            self.client
+                .put(self.url(path))
+                .header("Content-Type", "application/octet-stream")
+                .body(blob)
+        } else {
+            self.client.delete(self.url(path))
+        };
+        if let Some(version) = version {
+            request = request.query(&[("if_version", version)]);
+        }
+        let response = request
+            .bearer_auth(self.require_auth()?)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        if response.status() == reqwest::StatusCode::CONFLICT && version.is_some() {
+            let body: Value = response.json().await.map_err(|e| e.to_string())?;
+            if body["error"] == "index_version_conflict" {
+                return Ok(false);
+            }
+            return Err("index write conflict".into());
+        }
+        if !response.status().is_success() {
+            return Err(format!("index write: {}", response.status()));
+        }
+        Ok(true)
     }
 
     /// Upload a raw blob to the speedtest endpoint.

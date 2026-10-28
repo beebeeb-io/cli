@@ -95,6 +95,8 @@ pub struct UploadSpec {
     /// (the server keeps its v2 metadata). Ignored for a new file: see
     /// [`writer_pin`].
     pub replace_pin: Option<ExpectedChunkFormat>,
+    /// Existing item key; only legal with an existing ID/base version and recorded pin.
+    pub replace_file_key: Option<Arc<beebeeb_core::kdf::FileKey>>,
     /// Destination folder, or `None` for the vault root.
     pub parent_id: Option<Uuid>,
     /// Number of files uploaded in parallel by the caller (sync `--concurrency`;
@@ -523,6 +525,9 @@ pub async fn stream_encrypt_upload(
     spec: UploadSpec,
     progress: &dyn ChunkProgress,
 ) -> Result<UploadOutcome, String> {
+    if spec.replace_file_key.is_some() && (spec.base_version_number.is_none() || spec.replace_pin.is_none()) {
+        return Err("explicit replacement key requires an existing ID, base version and pin".into());
+    }
     // Cheap cancellation path for files that never started.
     if spec.shutdown.load(Ordering::Relaxed) {
         return Err(INTERRUPTED.to_string());
@@ -554,7 +559,15 @@ pub async fn stream_encrypt_upload(
     //     format) the session is abandoned — never PUT to again — and the SAME
     //     file id is inited fresh and uploaded from chunk 0.
     let writing = beebeeb_core::chunk_stream::chunk_format_for_pin(writer_pin(&spec));
-    let mut plan = match crate::resume::resumable_upload(&spec.path, size, mtime_ns) {
+    let mut pending = crate::resume::resumable_upload(&spec.path, size, mtime_ns);
+    // Explicit replacement key/base/pin all belong to spec.file_id. A path
+    // sidecar from another destination must neither redirect this write nor
+    // abandon that other file's server session.
+    if spec.replace_file_key.is_some() && pending.is_some_and(|p| p.file_id != spec.file_id) {
+        crate::resume::clear(&spec.path);
+        pending = None;
+    }
+    let mut plan = match pending {
         Some(pending) => match beebeeb_core::chunk_stream::resume_policy(pending.chunk_format, writing) {
             SessionResume::ContinueSession => SessionPlan::Resume {
                 file_id: pending.file_id,
@@ -721,9 +734,18 @@ async fn upload_attempt(
     let chunk_size =
         beebeeb_types::plan_chunks_concurrent(size, ChunkProfile::Cli, spec.concurrency.max(1)).chunk_size_bytes;
     let file = std::fs::File::open(&spec.path).map_err(|e| format!("open {}: {e}", spec.path.display()))?;
-    let encryptor = ChunkEncryptor::from_reader_with_chunk_size(master_key, &file_id_str, size, chunk_size, file)
-        .and_then(|e| e.with_recorded_pin(pin))
-        .map_err(|e| format!("init encryptor for {}: {e}", spec.file_name))?;
+    let encryptor = match &spec.replace_file_key {
+        Some(key) => ChunkEncryptor::from_reader_with_file_key(
+            beebeeb_core::kdf::FileKey::from_bytes(*key.as_bytes()),
+            &file_id_str,
+            size,
+            chunk_size,
+            file,
+        ),
+        None => ChunkEncryptor::from_reader_with_chunk_size(master_key, &file_id_str, size, chunk_size, file),
+    }
+    .and_then(|e| e.with_recorded_pin(pin))
+    .map_err(|e| format!("init encryptor for {}: {e}", spec.file_name))?;
     let chunk_count = encryptor.chunk_plan().chunk_count as u32;
     let expected_total = encryptor.expected_total_ciphertext();
     let format = encryptor.format();
@@ -733,13 +755,21 @@ async fn upload_attempt(
     //     for v1, `chunk_format: 2` for a v2 replace). The name key derives from
     //     the DURABLE file_id, so a replace re-encrypts the name under the same id
     //     the server already stores.
-    let name_encrypted = beebeeb_core::encrypt::encrypt_name_with_chunk_format(
-        master_key,
-        &file_id_str,
-        &spec.file_name,
-        mime,
-        ExpectedChunkFormat::recorded_for(format),
-    )
+    let name_encrypted = match &spec.replace_file_key {
+        Some(key) => beebeeb_core::encrypt::encrypt_name_for(
+            key,
+            &spec.file_name,
+            mime,
+            ExpectedChunkFormat::recorded_for(format),
+        ),
+        None => beebeeb_core::encrypt::encrypt_name_with_chunk_format(
+            master_key,
+            &file_id_str,
+            &spec.file_name,
+            mime,
+            ExpectedChunkFormat::recorded_for(format),
+        ),
+    }
     .map_err(|e| format!("encrypt name: {e}"))?;
 
     // 4. TOCTOU: re-stat just before init. `finish()` catches a file that
@@ -938,7 +968,18 @@ async fn upload_attempt(
     crate::resume::clear(&spec.path);
 
     // 8. Thumbnails: image/* only, one bounded extra read, best-effort.
-    maybe_upload_thumbnail(api, master_key, &file_id_str, &server_id, &spec.path, mime, size, pin).await;
+    maybe_upload_thumbnail(
+        api,
+        master_key,
+        spec.replace_file_key.as_deref(),
+        &file_id_str,
+        &server_id,
+        &spec.path,
+        mime,
+        size,
+        pin,
+    )
+    .await;
 
     let parsed: Uuid = server_id.parse().map_err(|e| format!("invalid server file id: {e}"))?;
     Ok(UploadOutcome {
@@ -1133,6 +1174,7 @@ async fn run_pipeline(
 async fn maybe_upload_thumbnail(
     api: &ApiClient,
     master_key: &MasterKey,
+    explicit_key: Option<&beebeeb_core::kdf::FileKey>,
     file_id_str: &str,
     server_id: &str,
     path: &Path,
@@ -1148,16 +1190,22 @@ async fn maybe_upload_thumbnail(
         Ok(b) => b,
         Err(_) => return,
     };
-    let file_key = beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes());
+    let derived;
+    let file_key = if let Some(key) = explicit_key {
+        key
+    } else {
+        derived = beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes());
+        &derived
+    };
 
     if let Some(thumb) = crate::thumbnail::generate_from_file(&bytes, mime) {
         // Same pin rule as the content and the name (core `encrypt_thumbnail_for`).
-        if let Ok(enc) = beebeeb_core::encrypt::encrypt_thumbnail_for(&file_key, &thumb.data, pin) {
+        if let Ok(enc) = beebeeb_core::encrypt::encrypt_thumbnail_for(file_key, &thumb.data, pin) {
             let _ = api.upload_thumbnail(server_id, enc).await;
         }
     }
     if let Some(large) = crate::thumbnail::generate_large_from_file(&bytes, mime) {
-        if let Ok(enc) = beebeeb_core::encrypt::encrypt_thumbnail_for(&file_key, &large.data, pin) {
+        if let Ok(enc) = beebeeb_core::encrypt::encrypt_thumbnail_for(file_key, &large.data, pin) {
             let _ = api.upload_thumbnail_large(server_id, enc).await;
         }
     }
@@ -1291,6 +1339,7 @@ mod rss_regression {
                 file_id: Uuid::new_v4(),
                 base_version_number: None,
                 replace_pin: None,
+                replace_file_key: None,
                 parent_id: None,
                 concurrency: CONC,
                 shutdown: Arc::new(AtomicBool::new(false)),
@@ -1580,6 +1629,7 @@ mod swept_session_reinit {
             file_id,
             base_version_number: None,
             replace_pin: None,
+            replace_file_key: None,
             parent_id: None,
             concurrency: 1,
             shutdown: Arc::new(AtomicBool::new(false)),

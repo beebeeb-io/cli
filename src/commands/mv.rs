@@ -132,7 +132,7 @@ async fn move_single(
     }
 
     // Resolve dst — three branches.
-    let dst_existing = path::resolve_path(api, master_key, dst_arg).await.ok();
+    let dst_existing = path::resolve_path_if_exists(api, master_key, dst_arg).await?;
 
     let (new_parent_id, new_name): (Option<Uuid>, Option<String>) = if let Some(d) = dst_existing {
         if d.is_folder {

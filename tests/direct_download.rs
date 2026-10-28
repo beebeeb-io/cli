@@ -642,6 +642,10 @@ fn setup_with(
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
             let app = Router::new()
+                .route(
+                    "/api/v1/auth/me",
+                    get(|| async { Json(json!({"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"})) }),
+                )
                 .route("/api/v1/transfer/capabilities", get(h_discovery))
                 .route("/api/v1/files", get(list))
                 .route("/api/v1/files/:id", get(meta))

@@ -75,22 +75,15 @@ pub async fn run(query: String, regex: bool, limit: usize, folder: Option<String
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    let batch_items: Vec<(&str, &str)> = files
-        .iter()
-        .map(|f| {
-            (
-                f.get("id").and_then(|v| v.as_str()).unwrap_or(""),
-                f.get("name_encrypted").and_then(|v| v.as_str()).unwrap_or(""),
-            )
-        })
-        .collect();
-    let names = crate::crypto::decrypt_names(&master_key, &batch_items);
-
-    // Build decrypted nodes (skipping undecryptable entries — exactly the old
-    // walk's `else continue`) + a parent_id -> children index. "" = vault root.
+    let mut keys = crate::owned_keys::OwnedKeyResolver::new();
+    keys.seed(&files);
     let mut nodes: Vec<Node> = Vec::with_capacity(files.len());
-    for (file, name) in files.iter().zip(names) {
-        let Some(name) = name else { continue };
+    for file in &files {
+        let name = keys
+            .resolve(&api, &master_key, file)
+            .await
+            .map(|r| r.name)
+            .unwrap_or_else(|_| crate::owned_keys::UNREADABLE.to_string());
         nodes.push(Node {
             id: file.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             parent: file.get("parent_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
