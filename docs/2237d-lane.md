@@ -114,3 +114,71 @@ D-L1: sync_account_binding red 1 passed / 3 failed, green 4 passed / 0 failed
 Mismatch returns the binding refusal before device/listing/transfer work;
 legacy root readability uses one canonical metadata call. Dry-run never binds.
 Both watch resync paths recheck the session identity before folder work.
+
+L7b correction to the earlier Task 7 note: custody folders use bound L7 child
+wraps exclusively. Only absent-custody, approved flag-off invites use the named
+legacy_invite_child_key reader, which calls core's legacy raw decryptor. L7b
+red 5/1 and green 6/0 (l7b-red.log, l7b-green.log).
+
+## Task 9 completed after D-L1
+
+Task 9 original red: 8 executed, 0 passed / 8 failed (t9-red.log).
+A clean replay of the original fixtures (ad7e833) on pre-task baseline 723ec4b
+again executes 8, 0 passed / 8 failed (t9-red-replay.log). This capture combines
+remote output before returning over SSH, so assert-rust-count.py passes without
+an interleaved Cargo header. Detached proof commit d8ba13a; owned proof tree removed.
+Initial green: 8/0 (t9-green.log). Review strengthened those same eight tests:
+5/3 red, 8/0 green (t9-review-red.log, t9-review-green.log).
+
+The eight cases cover first adoption and authenticated bytes; canonical sparse
+metadata; restart after custody revocation and a real move outside that root;
+rename/move, rapid guest versions and key-preserving local replacement; dirty
+local retention plus recoverable tombstones/restores and index removals; bad
+keys and failed unbound passes; zero API mutations in dry-run; adoption offline
+retry and lost response after commit; bounded CAS retries, concurrent merge,
+corrupt-page rebuild and partial-listing deferral. Three repeat passes assert
+zero echo uploads. Unrelated owner-index entries survive deltas.
+
+Existing sync_never_deletes: initial fixture incompatibility 1/13; add session
+identity and readable legacy-root metadata, keeping all original assertions.
+Green 14/0, including the existing watch/root and mass-delete cases.
+D-L1 remains 4/0. A broader binary unit run: 605 passed / 1 failed / 3 existing
+ignored; it caught the ordinary walk limit regression. Corrected the bound to
+apply only to index fallback; all 28 sync units now pass. Compatibility: 84/0
+(API guard 10, direct download 29, paths 22, resolver 6, transfers 6,
+non-interactive 6, zero-byte 5). Linux fmt and strict all-target Clippy exit 0.
+Logs: t9-delete-regressions.log, t9-final-checks.log, t9-clippy-green.log.
+
+### Decisions and scope
+
+- D-L1 supersedes the recorded stop. Account id is the authenticated session's
+  user id, checked before manifest work in the initial pass and both watches.
+  Failed unbound passes retain no pending envelopes/canonical metadata.
+- Resolved key handles stay in memory; bound manifests keep encrypted metadata,
+  owner envelopes and dirty index ids. Root rebind clears those old records.
+- Foreign-file versions supplement timestamps, avoiding same-second missed
+  overwrites while preserving ordinary-file conflict behavior.
+- Index repair enumerates at most 20,000 entries and defers incomplete or
+  unreadable rebuilds. Shared writes re-read/merge for at most three CAS rounds;
+  owner writes use the existing LWW route, preserving unrelated entries.
+- Known stale shared entries are removed only after authenticated canonical
+  tombstone/move confirmation. Index/adoption transport failures do not block
+  opening readable content; deferred opaque state retries on the next sync.
+- No new activity producer, watcher service or owner key-publication protocol.
+  Existing watch triggers use the same incoming read/replace reconciliation.
+- API safety scan remains strict: binary-spawn guards live in each top-level
+  integration file; shared test helpers only host fixtures and loopback APIs.
+- Core/types remain pinned in Cargo.toml and Cargo.lock to
+  a245a549c12415af6311bf4488deca5def65e983. No new dependencies or core edits.
+
+Deviations: approved D-L1 prerequisite and L7b refinement; additional sync
+fixture auth routes and regression-driven fixes. No unmerged interface is used.
+The prior Task 9 stop is resolved. Brand-new owner-upload publication to link
+guests remains the plan's adjacent server/client work, not claimed here.
+All runtime testing uses isolated HOME and explicit loopback --api; no prod,
+Postgres, local API service, native release build, deployment or merge.
+
+Graphify refresh after code commit: 108/108 AST files, 2,434 nodes, 7,612 edges,
+exit 0, no LLM calls. Generated artifacts retained outside the mapped PR at
+ graphify-resume-generated/ beside graphify-resume-update.log; broad graph churn
+is excluded as before. Owned replay/validation worktrees are cleaned up.
