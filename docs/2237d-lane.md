@@ -98,3 +98,13 @@ Graphify update ran after the code commit: 105/105 AST files, 2,375 nodes,
 external evidence directory; the broad pre-existing graph regeneration is
 excluded from this mapped-code PR (83,086 added / 26,926 removed JSON lines).
 Task 9 premise evidence: task9-stop-evidence.txt compares baseline and head.
+
+## Resume under merged D-L1 and L7b
+
+Lead authorized D-L1 account binding before Task 9, then its eight cases.
+Prior stop is superseded by workspace #223. Verification: four integration
+cases in sync_account_binding.rs, red then green; Task 9's exact eight cases,
+sync_never_deletes, API guard, resolver/transfers, Linux fmt/Clippy.
+The prior CI red was the API spawn safety scan: 9/1. Moved the fully guarded
+spawn into each integration test file, leaving fixture/server helpers shared.
+Resume safety green: API guard 10/0 plus resolver 6/0 and transfers 6/0.

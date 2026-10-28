@@ -160,32 +160,6 @@ impl Harness {
             server: Some(server),
         }
     }
-    pub async fn run(&self, args: &[&str]) -> Output {
-        let home = self.home.clone();
-        let api = self.api.clone();
-        let direct = self.state.lock().unwrap().direct;
-        let args: Vec<_> = args.iter().map(|s| s.to_string()).collect();
-        tokio::task::spawn_blocking(move || {
-            std::process::Command::new(env!("CARGO_BIN_EXE_bb"))
-                .args(args)
-                .args(["--api", &api, "--json"])
-                .env("HOME", &home)
-                .env("XDG_CONFIG_HOME", home.join(".config"))
-                .env("BB_REFUSE_NON_LOOPBACK_API", "1")
-                .env("BB_NO_UPDATE", "1")
-                .env("BB_TRANSPORT", if direct { "auto" } else { "api" })
-                .env_remove("APP_URL")
-                .output()
-                .unwrap()
-        })
-        .await
-        .unwrap()
-    }
-    pub async fn json(&self, args: &[&str]) -> Value {
-        let out = self.run(args).await;
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        serde_json::from_slice(&out.stdout).unwrap()
-    }
     pub fn count(&self, method: &str, path: &str) -> usize {
         self.state
             .lock()
