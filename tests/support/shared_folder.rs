@@ -61,6 +61,7 @@ pub struct Fixture {
     pub direct: bool,
     pub changed: bool,
     pub custody_revoked: bool,
+    pub custody_status: Option<u16>,
     pub adopt_failures: usize,
     pub adopt_lost: bool,
     pub index_conflicts: usize,
@@ -353,9 +354,14 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
     } else if method == "GET" && path == "/api/v1/file-requests" {
         f.requests_doc.clone()
     } else if method == "GET" && path == "/api/v1/shares/invites/sent" {
-        json!({"invites":if f.legacy_invite {vec![json!({"id":BAD,"file_id":ROOT,"is_folder_share":true,"status":"approved","encrypted_owner_folder_key":B64.encode(owned_keys::wrap_key_to_owner(&master(),ROOT,&folder_key()).unwrap())})]} else {vec![]}})
+        json!({"invites":if f.legacy_invite {vec![json!({"id":BAD,"file_id":ROOT,"is_folder_share":true,"status":"approved","encrypted_owner_folder_key":B64.encode(beebeeb_core::encrypt::encrypt_chunk_raw(&beebeeb_core::kdf::derive_file_key(&master(),ROOT.as_bytes()),folder_key().as_bytes()).unwrap())})]} else {vec![]}})
     } else if method == "GET" && path == format!("/api/v1/shares/invites/{BAD}/folder-keys") {
         json!({"keys":f.inventory})
+    } else if let Some(status) = f
+        .custody_status
+        .filter(|_| path == format!("/api/v1/shared-folders/{ROOT}"))
+    {
+        return StatusCode::from_u16(status).unwrap().into_response();
     } else if (f.legacy_invite || f.custody_revoked) && path == format!("/api/v1/shared-folders/{ROOT}") {
         return StatusCode::NOT_FOUND.into_response();
     } else if method == "GET" && path == "/api/v1/files" {

@@ -142,7 +142,7 @@ impl OwnedKeyResolver {
         let owner = normalize_wrap(&canonical["owner_wrapped_file_key"]);
         let has_owner = !canonical["owner_wrapped_file_key"].is_null();
         if let Ok(Some(ref frame)) = owner {
-            if let Ok(key) = owned_keys::unwrap_owner_key(master, &id, frame) {
+            if let Ok(key) = owned_keys::unwrap_owner_file_key(master, &id, frame) {
                 if let Ok(name) = authenticated_name(&key, &canonical) {
                     self.pending.remove(&id);
                     return Ok(ResolvedCliKey {
@@ -159,7 +159,7 @@ impl OwnedKeyResolver {
         // A pending key is never confirmation that adoption committed. Authenticate
         // it against the current name, retain its envelope, then retry in sync.
         if let Some(frame) = self.pending.get(&id) {
-            if let Ok(key) = owned_keys::unwrap_owner_key(master, &id, frame) {
+            if let Ok(key) = owned_keys::unwrap_owner_file_key(master, &id, frame) {
                 if let Ok(name) = authenticated_name(&key, &canonical) {
                     return Ok(ResolvedCliKey {
                         key: Arc::new(key),
@@ -248,7 +248,7 @@ impl OwnedKeyResolver {
                     .map_err(|_| UNREADABLE)?
                 };
                 let name = authenticated_name(&resolved.key, &canonical)?;
-                let pending = owned_keys::wrap_key_to_owner(master, &id, &resolved.key)
+                let pending = owned_keys::wrap_owner_file_key(master, &id, &resolved.key)
                     .map_err(|_| "can't prepare owner envelope")?;
                 self.pending.insert(id.clone(), pending.clone());
                 return Ok(ResolvedCliKey {
@@ -294,7 +294,7 @@ impl OwnedKeyResolver {
                 let frame = normalize_wrap(&invite["encrypted_owner_folder_key"])?.ok_or("missing invite seed")?;
                 // L6 explicitly permits the named legacy invite reader only for
                 // this seed. Permanent custody never reaches this branch.
-                let key = owned_keys::unwrap_owner_key(master, id, &frame).map_err(|_| "invalid invite seed")?;
+                let key = legacy_invite_seed(master, id, &frame)?;
                 let invite_id = text(invite, "id")?;
                 let page = api
                     .get_json(&format!("/api/v1/shares/invites/{invite_id}/folder-keys"))
@@ -379,7 +379,7 @@ impl OwnedKeyResolver {
                 return Err("adoption identity changed".to_string());
             }
             let wrapped = normalize_wrap(&winner["owner_wrapped_file_key"])?.ok_or("adoption pending")?;
-            let key = owned_keys::unwrap_owner_key(master, id, &wrapped).map_err(|_| "invalid adoption winner")?;
+            let key = owned_keys::unwrap_owner_file_key(master, id, &wrapped).map_err(|_| "invalid adoption winner")?;
             authenticated_name(&key, &winner)?;
             if key.as_bytes() != resolved.key.as_bytes() {
                 return Err("adoption winner key differs".into());
@@ -447,4 +447,11 @@ fn legacy_invite_child_key(folder_key: &FileKey, frame: &[u8]) -> Result<FileKey
         .try_into()
         .map_err(|_| "invalid legacy invite child key length")?;
     Ok(FileKey::from_bytes(key))
+}
+
+/// Only the flag-off invite seed uses the pre-L6 generic envelope. This is
+/// never an owner file-key opener or a permanent custody fallback.
+fn legacy_invite_seed(master: &MasterKey, id: &str, frame: &[u8]) -> Result<FileKey, String> {
+    let wrapping_key = beebeeb_core::kdf::derive_file_key(master, id.as_bytes());
+    legacy_invite_child_key(&wrapping_key, frame)
 }
