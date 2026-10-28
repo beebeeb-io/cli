@@ -22,6 +22,8 @@ pub const SUB: &str = "33333333-3333-4333-8333-333333333333";
 pub const FILE: &str = "11111111-1111-4111-8111-111111111111";
 pub const BAD: &str = "44444444-4444-4444-8444-444444444444";
 pub const ACCOUNT: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+/// The approved legacy invite of SUB, used when `Fixture::nested_legacy` puts SUB inside ROOT.
+pub const SUB_INVITE: &str = "55555555-5555-4555-8555-555555555555";
 pub const MASTER: [u8; 32] = [7; 32];
 pub fn master() -> MasterKey {
     MasterKey::from_bytes(MASTER)
@@ -63,6 +65,9 @@ pub struct Fixture {
     pub custody_revoked: bool,
     pub custody_status: Option<u16>,
     pub account_id: Option<String>,
+    /// SUB has an approved legacy invite and no custody (the invites list carries it), with this inventory.
+    pub nested_legacy: bool,
+    pub sub_inventory: Vec<Value>,
     pub adopt_failures: usize,
     pub adopt_lost: bool,
     pub index_conflicts: usize,
@@ -174,16 +179,20 @@ impl Harness {
             server: Some(server),
         }
     }
-    pub fn account_state_path(&self, account: &str) -> PathBuf {
-        let config = if cfg!(target_os = "macos") {
+    /// The CLI's config directory under this harness's HOME (where `config.json` lives).
+    pub fn config_dir(&self) -> PathBuf {
+        if cfg!(target_os = "macos") {
             self.home.join("Library/Application Support/beebeeb")
         } else {
             self.home.join(".config/beebeeb")
-        };
-        config.join("accounts").join(format!("{account}.json"))
+        }
+    }
+    /// L7d: the device's custody memory, one file per config dir, keyed by no account.
+    pub fn custody_path(&self) -> PathBuf {
+        self.config_dir().join("custody.json")
     }
     pub fn custody_state(&self) -> Value {
-        match std::fs::read(self.account_state_path(ACCOUNT)) {
+        match std::fs::read(self.custody_path()) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => json!({"custody_seen":[]}),
             Err(e) => panic!("read custody test state: {e}"),
@@ -370,9 +379,27 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
     } else if method == "GET" && path == "/api/v1/file-requests" {
         f.requests_doc.clone()
     } else if method == "GET" && path == "/api/v1/shares/invites/sent" {
-        json!({"invites":if f.legacy_invite {vec![json!({"id":BAD,"file_id":ROOT,"is_folder_share":true,"status":"approved","encrypted_owner_folder_key":B64.encode(beebeeb_core::encrypt::encrypt_chunk_raw(&beebeeb_core::kdf::derive_file_key(&master(),ROOT.as_bytes()),folder_key().as_bytes()).unwrap())})]} else {vec![]}})
+        let seed = |id: &str| {
+            B64.encode(
+                beebeeb_core::encrypt::encrypt_chunk_raw(
+                    &beebeeb_core::kdf::derive_file_key(&master(), id.as_bytes()),
+                    folder_key().as_bytes(),
+                )
+                .unwrap(),
+            )
+        };
+        let mut invites = vec![];
+        if f.legacy_invite {
+            invites.push(json!({"id":BAD,"file_id":ROOT,"is_folder_share":true,"status":"approved","encrypted_owner_folder_key":seed(ROOT)}));
+        }
+        if f.nested_legacy {
+            invites.push(json!({"id":SUB_INVITE,"file_id":SUB,"is_folder_share":true,"status":"approved","encrypted_owner_folder_key":seed(SUB)}));
+        }
+        json!({ "invites": invites })
     } else if method == "GET" && path == format!("/api/v1/shares/invites/{BAD}/folder-keys") {
         json!({"keys":f.inventory})
+    } else if method == "GET" && path == format!("/api/v1/shares/invites/{SUB_INVITE}/folder-keys") {
+        json!({"keys":f.sub_inventory})
     } else if let Some(status) = f
         .custody_status
         .filter(|_| path == format!("/api/v1/shared-folders/{ROOT}"))

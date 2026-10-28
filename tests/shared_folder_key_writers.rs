@@ -44,12 +44,19 @@ const SANCTIONED: &[(&str, &str)] = &[
         "api.rs",
         r#".get(self.url(&format!("/api/v1/shared-folders/{id}/keys")))"#,
     ),
-    // Encrypted search shards for a shared folder: not a key row.
-    (
-        "shared_folder_index.rs",
-        r#"&format!("/api/v1/shared-folders/{folder_id}/search-index/shards")"#,
-    ),
 ];
+
+/// The one sanctioned WRITE under a route family: encrypted search-index shards of a shared folder, not key
+/// rows. They are written only through `ApiClient::write_index_page`; `only_the_index_page_writer_takes_a_path`
+/// pins that this is the only write helper with a caller-chosen route.
+const SANCTIONED_INDEX_WRITES: &[(&str, &str)] = &[(
+    "shared_folder_index.rs",
+    r#"&format!("/api/v1/shared-folders/{folder_id}/search-index/shards")"#,
+)];
+
+fn sanctioned() -> impl Iterator<Item = &'static (&'static str, &'static str)> {
+    SANCTIONED.iter().chain(SANCTIONED_INDEX_WRITES)
+}
 
 fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).unwrap() {
@@ -97,11 +104,7 @@ fn mentions(root: &Path) -> Vec<(String, usize, String)> {
 fn unsanctioned(found: &[(String, usize, String)]) -> Vec<String> {
     found
         .iter()
-        .filter(|(file, _, code)| {
-            !SANCTIONED
-                .iter()
-                .any(|(f, fragment)| f == file && code.contains(fragment))
-        })
+        .filter(|(file, _, code)| !sanctioned().any(|(f, fragment)| f == file && code.contains(fragment)))
         .map(|(file, n, code)| format!("{file}:{n}: {code}"))
         .collect()
 }
@@ -110,7 +113,7 @@ fn unsanctioned(found: &[(String, usize, String)]) -> Vec<String> {
 fn the_cli_publishes_no_shared_folder_keys() {
     let found = mentions(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"));
     // The instrument must see the reads it sanctions, or a silent scan would pass for the wrong reason.
-    for (file, fragment) in SANCTIONED {
+    for (file, fragment) in sanctioned() {
         assert!(
             found.iter().any(|(f, _, code)| f == file && code.contains(fragment)),
             "sanctioned line not found in src/{file}: {fragment}"
@@ -151,4 +154,45 @@ fn a_write_to_a_key_route_is_not_sanctioned() {
     // ...and the reader method names that tripped the first draft are not writer routes.
     assert!(mentions_family("api.get_shared_folder_keys(id, cursor).await?").is_none());
     assert!(mentions_family(r#"json!({"folder_keys": keys})"#).is_some());
+}
+
+/// Match write helpers by their shape, not by a route string: an `ApiClient` method that takes the route as a
+/// parameter and sends a non-GET request can reach any key-writer route with a computed URL. There must be
+/// exactly one, and it must only be called from the search-index code.
+#[test]
+fn only_the_index_page_writer_takes_a_path() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let api = std::fs::read_to_string(src.join("api.rs")).unwrap();
+    let mut writers = Vec::new();
+    for item in api.split("pub async fn ").skip(1) {
+        let (signature, rest) = item.split_once('{').unwrap();
+        let takes_route = [" path: &str", " url: &str", " route: &str", " endpoint: &str"]
+            .iter()
+            .any(|p| signature.contains(p));
+        let body = rest.split("\n    pub ").next().unwrap();
+        let sends_write = [".post(", ".put(", ".patch(", ".delete(", ".request("]
+            .iter()
+            .any(|m| body.contains(m));
+        if takes_route && sends_write {
+            writers.push(signature.split('(').next().unwrap().trim().to_string());
+        }
+    }
+    assert_eq!(
+        writers,
+        ["write_index_page"],
+        "a new ApiClient helper sends a write to a caller-chosen route: it can reach shared_folder_keys writers"
+    );
+    let mut files = Vec::new();
+    sources(&src, &mut files);
+    let callers: Vec<_> = files
+        .iter()
+        .filter(|f| {
+            std::fs::read_to_string(f)
+                .unwrap()
+                .lines()
+                .any(|l| l.contains("write_index_page(") && !l.contains("fn write_index_page"))
+        })
+        .map(|f| f.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(callers, ["shared_folder_index.rs"]);
 }

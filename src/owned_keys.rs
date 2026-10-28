@@ -43,28 +43,18 @@ impl OwnedKeyResolver {
     pub fn new() -> Self {
         Self::default()
     }
-    async fn custody(&mut self, api: &ApiClient) -> Result<&crate::custody::CustodyStore, String> {
+    // L7d: the device's custody memory, read fresh on every question (another process may have added to it).
+    fn custody(&mut self) -> Result<&crate::custody::CustodyStore, String> {
         if self.custody.is_none() {
-            self.custody = Some(
-                crate::custody::CustodyStore::open(api)
-                    .await
-                    .map_err(|_| CUSTODY_UNAVAILABLE)?,
-            );
+            self.custody = Some(crate::custody::CustodyStore::open().map_err(|_| CUSTODY_UNAVAILABLE)?);
         }
         Ok(self.custody.as_ref().unwrap())
     }
-    async fn seen(&mut self, api: &ApiClient, id: &str) -> Result<bool, String> {
-        self.custody(api)
-            .await?
-            .seen(id)
-            .map_err(|_| CUSTODY_UNAVAILABLE.into())
+    fn seen(&mut self, id: &str) -> Result<bool, String> {
+        self.custody()?.seen(id).map_err(|_| CUSTODY_UNAVAILABLE.into())
     }
-    fn remember(&self, id: &str) -> Result<(), String> {
-        self.custody
-            .as_ref()
-            .ok_or(CUSTODY_UNAVAILABLE)?
-            .remember(id)
-            .map_err(|_| CUSTODY_UNAVAILABLE.into())
+    fn remember(&mut self, id: &str) -> Result<(), String> {
+        self.custody()?.remember(id).map_err(|_| CUSTODY_UNAVAILABLE.into())
     }
     pub fn seed(&mut self, rows: &[Value]) {
         for row in rows {
@@ -114,7 +104,7 @@ impl OwnedKeyResolver {
         master: &MasterKey,
         id: &str,
     ) -> Result<Option<Arc<FileKey>>, String> {
-        let seen = self.seen(api, id).await?;
+        let seen = self.seen(id)?;
         if let Some(root) = self.roots.get(id) {
             if seen && root.legacy_invite {
                 return Err(CUSTODY_UNAVAILABLE.into());
@@ -253,6 +243,9 @@ impl OwnedKeyResolver {
                 return Err("shared-folder ancestry cycle".into());
             }
             self.load_root(api, master, &root_id).await?;
+            if self.roots.get(&root_id).is_some_and(|r| r.legacy_invite) {
+                self.refuse_if_custody_above(api, &root_id).await?;
+            }
             if let Some(root) = self.roots.get(&root_id) {
                 let frame = root.children.get(&id).ok_or(UNREADABLE)?;
                 let kind = if canonical["is_folder"].as_bool() == Some(true) {
@@ -293,22 +286,44 @@ impl OwnedKeyResolver {
                     name,
                 });
             }
-            let ancestor = if let Some(r) = self.rows.get(&root_id) {
-                r.clone()
-            } else {
-                let r = api.get_file(&root_id).await?;
-                if r["id"].as_str() != Some(&root_id) {
-                    return Err("ancestor identity changed".into());
-                }
-                self.rows.insert(root_id.clone(), r.clone());
-                r
-            };
+            let ancestor = self.ancestor_row(api, &root_id).await?;
             parent = ancestor["parent_id"].as_str().map(str::to_string);
         }
         Err(UNREADABLE.into())
     }
+    async fn ancestor_row(&mut self, api: &ApiClient, id: &str) -> Result<Value, String> {
+        if let Some(r) = self.rows.get(id) {
+            return Ok(r.clone());
+        }
+        let r = api.get_file(id).await?;
+        if r["id"].as_str() != Some(id) {
+            return Err("ancestor identity changed".into());
+        }
+        self.rows.insert(id.into(), r.clone());
+        Ok(r)
+    }
+    /// The walk above stops at the nearest root. A legacy root is therefore only readable while nothing higher
+    /// in the tree was ever opened under custody here: a server that hides or withdraws the custody of an
+    /// outer folder must not get its inner folders read through an old invite.
+    async fn refuse_if_custody_above(&mut self, api: &ApiClient, start: &str) -> Result<(), String> {
+        let mut visited = HashSet::from([start.to_string()]);
+        let mut current = start.to_string();
+        loop {
+            let row = self.ancestor_row(api, &current).await?;
+            let Some(parent) = row["parent_id"].as_str().map(str::to_string) else {
+                return Ok(());
+            };
+            if !visited.insert(parent.clone()) || visited.len() > 256 {
+                return Err("shared-folder ancestry cycle".into());
+            }
+            if self.seen(&parent)? {
+                return Err(CUSTODY_UNAVAILABLE.into());
+            }
+            current = parent;
+        }
+    }
     async fn load_root(&mut self, api: &ApiClient, master: &MasterKey, id: &str) -> Result<(), String> {
-        let seen = self.seen(api, id).await?;
+        let seen = self.seen(id)?;
         if seen && (self.absent_roots.contains(id) || self.roots.get(id).is_some_and(|r| r.legacy_invite)) {
             return Err(CUSTODY_UNAVAILABLE.into());
         }
@@ -346,6 +361,11 @@ impl OwnedKeyResolver {
                     {
                         children.insert(id.into(), frame);
                     }
+                }
+                // Another process may have opened custody for this folder while the requests above were in
+                // flight: the answer "no custody" is stale, so ask the store again before trusting it.
+                if self.seen(id)? {
+                    return Err(CUSTODY_UNAVAILABLE.into());
                 }
                 self.roots.insert(
                     id.into(),

@@ -1,5 +1,5 @@
 //! Independent review probes adopted from rv-cli110.
-//! Only storage checkpoints change: security state now belongs to the account.
+//! Only storage checkpoints change: security state now belongs to the device (L7d).
 #[path = "support/shared_folder.rs"]
 mod sf;
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};

@@ -124,7 +124,6 @@ async fn first_failed_sync_retains_custody_without_binding_opaque_keys() {
     let saved = state(&dir);
     assert!(saved["account_id"].is_null());
     assert_eq!(saved["owned_keys"], json!({}));
-    assert_eq!(h.custody_state()["account_id"], ACCOUNT);
     assert_eq!(h.custody_state()["custody_seen"], json!([ROOT]));
     {
         let mut f = h.state.lock().unwrap();
@@ -150,7 +149,7 @@ async fn first_failed_sync_retains_custody_without_binding_opaque_keys() {
     h.close().await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unbound_state_cannot_carry_another_accounts_custody_memory() {
+async fn manifest_custody_fields_are_inert() {
     let mut f = Fixture::transfer(false);
     legacy(&mut f, 501);
     let h = Harness::new(f).await;
