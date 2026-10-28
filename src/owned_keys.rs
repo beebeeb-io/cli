@@ -7,11 +7,12 @@ use beebeeb_core::{
 };
 use serde_json::Value;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::Arc,
 };
 
 pub const UNREADABLE: &str = "can't open (added via shared folder)";
+pub const CUSTODY_UNAVAILABLE: &str = "This folder's keys are unavailable";
 #[derive(Clone)]
 pub struct ResolvedCliKey {
     pub key: Arc<FileKey>,
@@ -36,10 +37,17 @@ pub struct OwnedKeyResolver {
     requests: Option<RequestKeyResolver>,
     sent_invites: Option<Vec<Value>>,
     resolved: HashMap<String, ResolvedCliKey>,
+    custody_seen: BTreeSet<String>,
 }
 impl OwnedKeyResolver {
     pub fn new() -> Self {
         Self::default()
+    }
+    pub fn restore_custody(&mut self, seen: &BTreeSet<String>) {
+        self.custody_seen.extend(seen.iter().cloned());
+    }
+    pub fn custody_seen(&self) -> &BTreeSet<String> {
+        &self.custody_seen
     }
     pub fn seed(&mut self, rows: &[Value]) {
         for row in rows {
@@ -94,6 +102,9 @@ impl OwnedKeyResolver {
         }
         let custody = api.get_shared_folder(id).await?;
         if custody.is_null() {
+            if self.custody_seen.contains(id) {
+                return Err(CUSTODY_UNAVAILABLE.into());
+            }
             return Ok(None);
         }
         if custody["folder_id"].as_str() != Some(id) || custody["role"].as_str() != Some("owner") {
@@ -101,6 +112,7 @@ impl OwnedKeyResolver {
         }
         let frame = normalize_wrap(&custody["owner_wrapped_folder_key"])?.ok_or("missing owner custody")?;
         let key = owned_keys::unwrap_folder_custody(master, id, &frame).map_err(|_| "invalid L6 owner custody")?;
+        self.custody_seen.insert(id.into());
         Ok(Some(Arc::new(key)))
     }
 
@@ -280,6 +292,9 @@ impl OwnedKeyResolver {
         }
         let custody = api.get_shared_folder(id).await?;
         if custody.is_null() {
+            if self.custody_seen.contains(id) {
+                return Err(CUSTODY_UNAVAILABLE.into());
+            }
             // An approved legacy invite permits its sender to read the existing
             // inventory without registering custody (reads must not mutate).
             if self.sent_invites.is_none() {
@@ -325,6 +340,7 @@ impl OwnedKeyResolver {
         }
         let frame = normalize_wrap(&custody["owner_wrapped_folder_key"])?.ok_or("missing owner custody")?;
         let key = owned_keys::unwrap_folder_custody(master, id, &frame).map_err(|_| "invalid L6 owner custody")?;
+        self.custody_seen.insert(id.into());
         let mut children = HashMap::new();
         let mut cursor = None;
         let mut cursors = HashSet::new();

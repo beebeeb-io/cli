@@ -730,7 +730,7 @@ impl ApiClient {
             .send()
             .await
             .map_err(format_request_error)?;
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        if matches!(resp.status().as_u16(), 404 | 405 | 501) {
             return Ok(Value::Null);
         }
         parse_response(resp).await
