@@ -92,3 +92,9 @@ Required lead correction: specify account binding and migration/invalidation of
 existing unbound manifests, including account changes in both watch loops.
 No new persistence or account-switch behavior was invented in this lane.
 Task 7's in-memory adoption interfaces remain available, with no sync caller.
+
+Graphify update ran after the code commit: 105/105 AST files, 2,375 nodes,
+7,110 edges, exit 0, no LLM calls. Generated output and log retained under the
+external evidence directory; the broad pre-existing graph regeneration is
+excluded from this mapped-code PR (83,086 added / 26,926 removed JSON lines).
+Task 9 premise evidence: task9-stop-evidence.txt compares baseline and head.
