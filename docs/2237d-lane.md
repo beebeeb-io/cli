@@ -52,3 +52,12 @@ This preserves the required read-only commands; no custody PUT from reads.
 Permanent custody uses L6 exclusively; child reads always L7.
 Log capture concatenates remote stderr then stdout after completion to avoid
 SSH stream interleaving breaking the plan's row-count guard.
+
+Task 8 first green: 6 executed, 6 passed / 0 failed (t8-green-3.log).
+Initial red: 1/5 (t8-red.log). Corrected fixtures now use real POST
+/files/check-conflict, parent_id query on GET /files, 409 version_unavailable,
+and actual V1 frames for downgrade testing. Repeat baseline red before final.
+Decision: Task 8 also wires push.rs as the concrete replacement consumer;
+sync.rs receives only the new UploadSpec field until Task 9.
+ZIP explicit-key entries use a per-entry authenticated disk staging file and
+stream into the existing archive writer, retaining bounded memory and cleanup.

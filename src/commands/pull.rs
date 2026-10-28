@@ -100,27 +100,13 @@ async fn run_once(
     // Load master key
     let master_key = load_master_key()?;
 
-    // File-request upload? Recover its content key C via the request-key path;
-    // it decrypts both the name and the chunks (normal files use the
-    // master-derived path below).
-    let request_content_key: Option<beebeeb_core::kdf::FileKey> =
-        if crate::commands::request::is_request_upload(&file_meta) {
-            crate::commands::request::RequestKeyResolver::load(&api)
-                .await
-                .ok()
-                .and_then(|mut rk| rk.content_key(&master_key, &file_meta))
-        } else {
-            None
-        };
-
-    // Try to decrypt the filename for display and default output path.
-    // Uses the shared crypto module which handles all server formats
-    // (Rust EncryptedBlob, web-app base64 blob, plaintext) and both
-    // UUID key derivations (binary and string).
-    let decrypted_name = match &request_content_key {
-        Some(c) => crate::crypto::decrypt_name_with_key(c, name_encrypted_str),
-        None => crate::crypto::decrypt_name(&master_key, &file_id, name_encrypted_str),
-    };
+    let mut keys=crate::owned_keys::OwnedKeyResolver::new();
+    let resolved=keys.resolve(&api,&master_key,&file_meta).await?;
+    let request_content_key=if crate::commands::request::is_request_upload(&file_meta) && file_meta["owner_wrapped_file_key"].is_null() {
+        Some(beebeeb_core::kdf::FileKey::from_bytes(*resolved.key.as_bytes()))
+    } else {None};
+    let explicit_key=if resolved.origin!=beebeeb_core::owned_keys::KeyOrigin::Derived && request_content_key.is_none(){Some(resolved.key.clone())}else{None};
+    let decrypted_name=Some(resolved.name);
 
     let is_folder = file_meta.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
 
@@ -149,7 +135,7 @@ async fn run_once(
 
     // The chunk format comes from the file's authenticated metadata, never a
     // server field (task 1943): core's reader opens a v2-pinned file only as v2.
-    let pin = crate::crypto::file_row_pin(&master_key, &file_id, name_encrypted_str, request_content_key.as_ref())?;
+    let pin = crate::crypto::content_pin_with_key(&resolved.key, &file_id, name_encrypted_str)?;
 
     // File-request uploads are sealed under a per-file content key C, not the
     // master-derived key the streaming path assumes. Decrypt them via the
@@ -221,7 +207,10 @@ async fn run_once(
     };
 
     let start = std::time::Instant::now();
-    let stats = crate::download::stream_download_decrypt(
+    let stats = if let Some(key)=explicit_key {
+        crate::download::stream_download_decrypt_with_file_key(&api,key,&file_id,pin,chunk_count,&out_path,progress.as_ref(),display_name).await?
+    } else {
+        crate::download::stream_download_decrypt(
         &api,
         &master_key,
         &file_id,
@@ -231,7 +220,8 @@ async fn run_once(
         progress.as_ref(),
         display_name,
     )
-    .await?;
+    .await?    };
+
     progress.finish_all();
     let elapsed = start.elapsed();
 
@@ -404,7 +394,8 @@ async fn pull_folder(api: &ApiClient, folder_id: &str, out_dir: &std::path::Path
     // A single resolver, shared across the whole folder tree, so request-uploaded
     // files only trigger one `GET /file-requests` and each R_priv is unwrapped once.
     let mut request_keys: Option<crate::commands::request::RequestKeyResolver> = None;
-    let skipped = pull_folder_inner(api, folder_id, out_dir, force, &mut request_keys).await?;
+    let mut keys=crate::owned_keys::OwnedKeyResolver::new();
+    let skipped = pull_folder_inner(api, folder_id, out_dir, force, &mut request_keys, &mut keys).await?;
     if skipped > 0 {
         // Everything safe was pulled; the run is not a clean success, though.
         return Err(crate::exit::with_code(
@@ -428,6 +419,7 @@ async fn pull_folder_inner(
     out_dir: &std::path::Path,
     force: bool,
     request_keys: &mut Option<crate::commands::request::RequestKeyResolver>,
+    keys: &mut crate::owned_keys::OwnedKeyResolver,
 ) -> Result<usize, String> {
     let master_key = load_master_key()?;
 
@@ -447,6 +439,7 @@ async fn pull_folder_inner(
     );
 
     let mut skipped = 0usize;
+    keys.seed(files);
     for item in files {
         let item_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
         let is_subfolder = item.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -454,11 +447,9 @@ async fn pull_folder_inner(
 
         // Request-uploaded files decrypt their name via the request-key path.
         let content_key = resolve_request_key(api, &master_key, item, request_keys).await;
-        let decrypted_name = content_key
-            .as_ref()
-            .and_then(|c| crate::crypto::decrypt_name_with_key(c, name_enc))
-            .or_else(|| crate::crypto::decrypt_name(&master_key, item_id, name_enc))
-            .unwrap_or_else(|| item_id.to_string());
+        let resolved=match keys.resolve(api,&master_key,item).await {Ok(r)=>r,Err(e)=>{warn_skipped(&e);skipped+=1;continue;}};
+        let decrypted_name=resolved.name;
+        let explicit_key=if resolved.origin!=beebeeb_core::owned_keys::KeyOrigin::Derived && content_key.is_none(){Some(resolved.key.clone())}else{None};
 
         // The name is server-provided (for file-request uploads: chosen by an
         // anonymous stranger). It becomes exactly ONE path component under
@@ -474,7 +465,7 @@ async fn pull_folder_inner(
         };
 
         if is_subfolder {
-            skipped += Box::pin(pull_folder_inner(api, item_id, &target, force, request_keys)).await?;
+            skipped += Box::pin(pull_folder_inner(api, item_id, &target, force, request_keys, keys)).await?;
         } else {
             // A request upload's name is attacker-chosen, so it must not silently
             // replace a local file of the same name (same rule as a single-file
@@ -488,7 +479,7 @@ async fn pull_folder_inner(
             }
             // No read pin (task 1943: plaintext or unreadable metadata), no
             // read: skipped like an unsafe name, and the rest still pulls.
-            if let Err(e) = crate::crypto::file_row_pin(&master_key, item_id, name_enc, content_key.as_ref()) {
+            if let Err(e) = crate::crypto::content_pin_with_key(&resolved.key, item_id, name_enc) {
                 warn_skipped(&format!("{}: {e}", target.display()));
                 skipped += 1;
                 continue;
@@ -496,7 +487,7 @@ async fn pull_folder_inner(
             // A new version published while this file downloaded: nothing was written, so read
             // THIS file again from fresh metadata, once, and carry on with the rest of the folder.
             // (This used to abort the whole folder pull.)
-            match pull_single_file(api, item_id, &target, content_key.as_ref()).await {
+            match pull_single_file(api, item_id, &target, content_key.as_ref(), explicit_key.clone()).await {
                 Ok(()) => {}
                 Err(PullFailure::Changed(_)) => {
                     eprintln!(
@@ -504,7 +495,7 @@ async fn pull_folder_inner(
                         "!".custom_color(crate::colors::AMBER),
                         target.display()
                     );
-                    pull_single_file(api, item_id, &target, content_key.as_ref())
+                    pull_single_file(api, item_id, &target, content_key.as_ref(), explicit_key.clone())
                         .await
                         .map_err(|e| format!("{}: {}", target.display(), String::from(e)))?;
                 }
@@ -552,6 +543,7 @@ async fn pull_single_file(
     file_id: &str,
     out_path: &std::path::Path,
     request_content_key: Option<&beebeeb_core::kdf::FileKey>,
+    explicit_key: Option<std::sync::Arc<beebeeb_core::kdf::FileKey>>,
 ) -> Result<(), PullFailure> {
     let master_key = load_master_key()?;
 
@@ -562,7 +554,7 @@ async fn pull_single_file(
         .and_then(|v| v.as_str())
         .ok_or("server response missing name_encrypted")?;
     // Read pin from the file's authenticated metadata (task 1943).
-    let pin = crate::crypto::file_row_pin(&master_key, file_id, name_encrypted, request_content_key)?;
+    let pin = match &explicit_key {Some(key)=>crate::crypto::content_pin_with_key(key,file_id,name_encrypted)?,None=>crate::crypto::file_row_pin(&master_key,file_id,name_encrypted,request_content_key)?};
 
     let name = out_path
         .file_name()
@@ -610,7 +602,10 @@ async fn pull_single_file(
     // Streaming, constant-memory decrypt. Folder pulls print a per-file line, so
     // use a no-op progress sink (no nested bars).
     let start = std::time::Instant::now();
-    let stats = crate::download::stream_download_decrypt(
+    let stats=if let Some(key)=explicit_key {
+        crate::download::stream_download_decrypt_with_file_key(api,key,file_id,pin,chunk_count,out_path,&crate::upload::NoopProgress,&name).await?
+    } else {
+        crate::download::stream_download_decrypt(
         api,
         &master_key,
         file_id,
@@ -620,7 +615,8 @@ async fn pull_single_file(
         &crate::upload::NoopProgress,
         &name,
     )
-    .await?;
+    .await?    };
+
     let elapsed = start.elapsed();
 
     if crate::ui::is_quiet() {
@@ -698,6 +694,7 @@ async fn run_zip(api: &ApiClient, path_arg: &str, output: Option<PathBuf>, force
         api,
         master_key: &master_key,
         request_keys: None,
+        keys: crate::owned_keys::OwnedKeyResolver::new(),
         skipped: 0,
         ancestors: Vec::new(),
         items: Vec::new(),
@@ -765,6 +762,16 @@ async fn run_zip(api: &ApiClient, path_arg: &str, output: Option<PathBuf>, force
                 items.len().to_string().custom_color(crate::colors::INK_DIM),
                 item.entry.path.custom_color(crate::colors::INK_DIM),
             );
+        }
+        if let Some(key)=&item.explicit_key {
+            let staging_dest=out_path.with_file_name(format!(".bb-entry-{}",uuid::Uuid::new_v4()));
+            let mut staged=TempArchive::create(&staging_dest)?;
+            drop(staged.take_file());
+            let result=crate::download::stream_download_decrypt_with_file_key(api,key.clone(),&item.entry.file_id,item.entry.chunk_format,item.entry.chunk_count,&staged.path,&crate::upload::NoopProgress,&item.entry.path).await;
+            if let Err(e)=result {warn_skipped(&format!("{}: {e}",item.entry.path));skipped+=1;continue;}
+            let mut reader=std::fs::File::open(&staged.path).map_err(|e|e.to_string())?;
+            sink.add_reader(i,&item.entry.path,&mut reader,item.entry.size_bytes,&on_progress).map_err(|_|"zip write failed")?;
+            continue;
         }
         let t = std::time::Instant::now();
         let (blob, chunk_size) = crate::download::download_buffered(api, &item.entry.file_id).await?;
@@ -904,6 +911,7 @@ fn decrypt_zip_item(
 struct ZipItem {
     entry: beebeeb_core::zip::ZipEntry,
     content_key: Option<beebeeb_core::kdf::FileKey>,
+    explicit_key: Option<std::sync::Arc<beebeeb_core::kdf::FileKey>>,
 }
 
 enum ZipAddError {
@@ -942,22 +950,22 @@ impl<W: std::io::Write + std::io::Seek> ZipSink<W> {
         plaintext: &[u8],
         on_progress: &dyn Fn(&beebeeb_core::zip::ZipProgress),
     ) -> Result<(), ZipAddError> {
-        use std::io::Write as _;
+        self.add_reader(file_index,path,&mut std::io::Cursor::new(plaintext),plaintext.len() as u64,on_progress)
+    }
+    fn add_reader(&mut self,file_index:usize,path:&str,reader:&mut dyn std::io::Read,size:u64,on_progress:&dyn Fn(&beebeeb_core::zip::ZipProgress))->Result<(),ZipAddError> {
         // Defence in depth: the walk already vetted every component, but the
         // writer is what puts the path into the archive, so it checks again.
         check_archive_path(path).map_err(ZipAddError::UnsafePath)?;
         let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated)
             .compression_level(Some(6))
-            .large_file(plaintext.len() as u64 >= u32::MAX as u64);
+            .large_file(size >= u32::MAX as u64);
         self.archive
             .start_file(path, options)
             .map_err(|e| ZipAddError::Write(e.to_string()))?;
-        self.archive
-            .write_all(plaintext)
-            .map_err(|e| ZipAddError::Write(e.to_string()))?;
+        std::io::copy(reader,&mut self.archive).map_err(|e| ZipAddError::Write(e.to_string()))?;
         self.written += 1;
-        self.bytes_done += plaintext.len() as u64;
+        self.bytes_done += size;
         on_progress(&beebeeb_core::zip::ZipProgress {
             bytes_done: self.bytes_done,
             bytes_total: self.bytes_total,
@@ -1050,6 +1058,7 @@ struct ZipWalk<'a> {
     api: &'a ApiClient,
     master_key: &'a beebeeb_core::kdf::MasterKey,
     request_keys: Option<crate::commands::request::RequestKeyResolver>,
+    keys: crate::owned_keys::OwnedKeyResolver,
     /// Items left out (unsafe name, folder loop, too deep).
     skipped: usize,
     /// Folder ids from the root down to the folder being listed.
@@ -1077,6 +1086,7 @@ impl ZipWalk<'_> {
         // extract case-insensitively, and an uploader controls the names.
         let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+        self.keys.seed(&files);
         for item in &files {
             let item_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
             let name_enc = item.get("name_encrypted").and_then(|v| v.as_str()).unwrap_or("");
@@ -1087,11 +1097,9 @@ impl ZipWalk<'_> {
             // Request-uploaded files decrypt their name (and later their chunks)
             // with the per-file content key, like the non-zip folder pull.
             let content_key = resolve_request_key(self.api, self.master_key, item, &mut self.request_keys).await;
-            let decrypted_name = content_key
-                .as_ref()
-                .and_then(|c| crate::crypto::decrypt_name_with_key(c, name_enc))
-                .or_else(|| crate::crypto::decrypt_name(self.master_key, item_id, name_enc))
-                .unwrap_or_else(|| item_id.to_string());
+            let resolved=match self.keys.resolve(self.api,self.master_key,item).await {Ok(r)=>r,Err(e)=>{warn_skipped(&e);self.skipped+=1;continue;}};
+            let decrypted_name=resolved.name;
+            let explicit_key=if resolved.origin!=beebeeb_core::owned_keys::KeyOrigin::Derived && content_key.is_none(){Some(resolved.key.clone())}else{None};
 
             // Zip entry paths are `prefix/name`: a server-provided name with `..`
             // or a separator would be a zip-slip entry for whoever extracts the
@@ -1129,7 +1137,7 @@ impl ZipWalk<'_> {
             } else {
                 // Read pin from the file's authenticated metadata (task 1943).
                 let chunk_format =
-                    match crate::crypto::file_row_pin(self.master_key, item_id, name_enc, content_key.as_ref()) {
+                    match crate::crypto::content_pin_with_key(&resolved.key, item_id, name_enc) {
                         Ok(pin) => pin,
                         Err(e) => {
                             warn_skipped(&format!("{path:?}: {e}"));
@@ -1146,6 +1154,7 @@ impl ZipWalk<'_> {
                         chunk_format,
                     },
                     content_key,
+                    explicit_key,
                 });
             }
         }

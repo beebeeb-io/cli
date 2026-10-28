@@ -1186,6 +1186,7 @@ pub async fn run(
                         // id, so this is always a new file — no version replace.
                         base_version_number: None,
                         replace_pin: None,
+                        replace_file_key: None,
                         parent_id,
                         concurrency: concurrency as u32,
                         shutdown,
@@ -3057,6 +3058,7 @@ async fn upload_file_to(
         // Watch-loop uploads are always new files (fresh id) → no replace.
         base_version_number: None,
         replace_pin: None,
+        replace_file_key: None,
         parent_id,
         // Single in-flight file in this watch-loop wrapper → full Cli cap.
         concurrency: 1,

@@ -69,11 +69,13 @@ pub(crate) async fn find_conflict(
     let resp = api.check_conflict(parent_uuid).await.ok()?;
     let files = resp.get("files")?.as_array()?;
 
+    let mut keys=crate::owned_keys::OwnedKeyResolver::new();
+    keys.seed(files);
     for file in files {
         let id_str = file.get("id")?.as_str()?;
-        let name_enc_str = file.get("name_encrypted")?.as_str()?;
         let file_uuid: uuid::Uuid = id_str.parse().ok()?;
-        if let Some(decrypted) = crate::crypto::decrypt_name(master_key, id_str, name_enc_str) {
+        if let Ok(resolved) = keys.resolve(api,master_key,file).await {
+            let decrypted=resolved.name;
             if decrypted == filename {
                 return Some(file_uuid);
             }
@@ -456,7 +458,7 @@ async fn push_single_file(
     // A replace also carries the existing file's read pin (task 1943), so a
     // v2-pinned file is written as v2 again: the server keeps its v2 metadata,
     // and a v1 replace would complete and never open.
-    let (base_version_number, replace_pin) = match replace_file_id {
+    let (base_version_number, replace_pin, replace_file_key) = match replace_file_id {
         Some(existing_id) => {
             let existing = existing_id.to_string();
             let meta = api.get_file(&existing).await?;
@@ -468,10 +470,11 @@ async fn push_single_file(
                 .get("name_encrypted")
                 .and_then(|v| v.as_str())
                 .ok_or("server response missing name_encrypted")?;
-            let pin = crate::crypto::content_pin(&master_key, &existing, name_encrypted)?;
-            (Some(version), Some(pin))
+            let resolved=crate::owned_keys::OwnedKeyResolver::new().resolve(api,&master_key,&meta).await?;
+            let pin=crate::crypto::content_pin_with_key(&resolved.key,&existing,name_encrypted)?;
+            (Some(version),Some(pin),Some(resolved.key))
         }
-        None => (None, None),
+        None => (None, None, None),
     };
     let master_key = std::sync::Arc::new(master_key);
     let display_name = upload_name.clone();
@@ -488,6 +491,7 @@ async fn push_single_file(
         file_id,
         base_version_number,
         replace_pin,
+        replace_file_key,
         parent_id: parent_uuid,
         // bb push uploads one file at a time → full Cli cap (128 MiB).
         concurrency: 1,

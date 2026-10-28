@@ -215,6 +215,19 @@ pub async fn stream_download_decrypt(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn stream_download_decrypt_with_file_key(api:&ApiClient, file_key:std::sync::Arc<beebeeb_core::kdf::FileKey>, file_id:&str, pin:ExpectedChunkFormat, chunk_count:u32, out_path:&Path, progress:&dyn ChunkProgress, display_name:&str)->Result<DownloadStats,DownloadError> {
+    stream_download_key(api, DownloadKey::Explicit(file_key), file_id, pin, chunk_count, out_path, progress, display_name, FALLBACK_HARD_CEILING).await
+}
+
+enum DownloadKey<'a> { Legacy(&'a MasterKey), Explicit(std::sync::Arc<beebeeb_core::kdf::FileKey>) }
+impl DownloadKey<'_> {
+    fn decryptor(&self, id:&str, pin:ExpectedChunkFormat)->ChunkDecryptor {
+        match self {Self::Legacy(master)=>ChunkDecryptor::for_push(master,id,pin), Self::Explicit(key)=>ChunkDecryptor::for_push_with_file_key(beebeeb_core::kdf::FileKey::from_bytes(*key.as_bytes()),id,pin)}
+    }
+    fn legacy(&self)->Result<&MasterKey,DownloadError> {match self {Self::Legacy(m)=>Ok(m),Self::Explicit(_)=>Err(DownloadError::Unreadable("explicit-key content failed authentication".into()))}}
+}
+
 /// [`stream_download_decrypt`] with an explicit chunked-fallback ceiling
 /// (production passes [`FALLBACK_HARD_CEILING`]; tests lower it).
 #[allow(clippy::too_many_arguments)]
@@ -229,22 +242,21 @@ async fn stream_download_decrypt_with(
     display_name: &str,
     ceiling: u64,
 ) -> Result<DownloadStats, DownloadError> {
+    stream_download_key(api,DownloadKey::Legacy(master_key),file_id,pin,chunk_count,out_path,progress,display_name,ceiling).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn stream_download_key(api:&ApiClient,key:DownloadKey<'_>,file_id:&str,pin:ExpectedChunkFormat,chunk_count:u32,out_path:&Path,progress:&dyn ChunkProgress,display_name:&str,ceiling:u64)->Result<DownloadStats,DownloadError> {
     let count = chunk_count.max(1);
 
     // Task 2173: straight from object storage when the server offers it and the
     // handshake succeeds. `UseApi` means nothing was published (and nothing is
     // left on disk): this file goes through the API below, as it always did.
-    match crate::direct_download::try_download(
-        api,
-        master_key,
-        file_id,
-        pin,
-        chunk_count,
-        out_path,
-        progress,
-        display_name,
-    )
-    .await?
+    let direct = match &key {
+        DownloadKey::Legacy(master) => crate::direct_download::try_download(api,master,file_id,pin,chunk_count,out_path,progress,display_name).await?,
+        DownloadKey::Explicit(file_key) => crate::direct_download::try_download_with_file_key(api,file_key.clone(),file_id,pin,chunk_count,out_path,progress,display_name).await?,
+    };
+    match direct
     {
         crate::direct_download::DirectResult::Done(stats) => return Ok(stats),
         crate::direct_download::DirectResult::UseApi => {}
@@ -285,7 +297,7 @@ async fn stream_download_decrypt_with(
 
     let result = stream_raw(
         &mut resp,
-        master_key,
+        &key,
         file_id,
         pin,
         count,
@@ -310,7 +322,7 @@ async fn stream_download_decrypt_with(
 #[allow(clippy::too_many_arguments)]
 async fn stream_raw(
     resp: &mut reqwest::Response,
-    master_key: &MasterKey,
+    key: &DownloadKey<'_>,
     file_id: &str,
     pin: ExpectedChunkFormat,
     count: u32,
@@ -341,7 +353,7 @@ async fn stream_raw(
     };
 
     let mut writer = AtomicFile::create(out_path)?;
-    let mut decryptor = ChunkDecryptor::for_push(master_key, file_id, pin);
+    let mut decryptor = key.decryptor(file_id, pin);
     let mut plaintext_bytes: u64 = 0;
     let mut encrypted_bytes: u64 = 0;
 
@@ -357,6 +369,7 @@ async fn stream_raw(
                 // legacy file served with a V2 header. Not a truncation —
                 // hand everything to the buffered path (capped).
                 writer.abort();
+                let master_key = key.legacy()?;
                 let mut full = std::mem::take(&mut carry);
                 drain_rest(resp, &mut full, fb_cap).await?;
                 return buffered_fallback(master_key, file_id, pin, &full, count, chunk_size, out_path, prog)
@@ -385,6 +398,7 @@ async fn stream_raw(
                 // was wrong. Reassemble the full payload and let the buffered
                 // path try both parsers, both keys and the frame-size probe.
                 writer.abort();
+                let master_key = key.legacy()?;
                 let mut full = frame; // the first frame we already read
                 // `carry` holds the bytes read past frame 0; append it once,
                 // then drain the remainder under the fallback cap.
