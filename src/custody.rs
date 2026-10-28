@@ -36,7 +36,10 @@ fn locked<T>(directory: &Path, operation: impl FnOnce() -> Result<T, String>) ->
         .truncate(false)
         .open(directory.join(".lock"))
         .map_err(|e| format!("open account state lock: {e}"))?;
-    lock.lock().map_err(|e| format!("lock account state: {e}"))?;
+    // `File::lock` is std since 1.89; same stance as `upload_lock`: every build pins 1.96.0.
+    #[allow(clippy::incompatible_msrv)]
+    let locked = lock.lock();
+    locked.map_err(|e| format!("lock account state: {e}"))?;
     operation()
 }
 
