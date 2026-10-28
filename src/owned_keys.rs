@@ -12,6 +12,7 @@ use std::{
 };
 
 pub const UNREADABLE: &str = "can't open (added via shared folder)";
+#[derive(Clone)]
 pub struct ResolvedCliKey {
     pub key: Arc<FileKey>,
     pub origin: KeyOrigin,
@@ -34,6 +35,7 @@ pub struct OwnedKeyResolver {
     pending: HashMap<String, Vec<u8>>,
     requests: Option<RequestKeyResolver>,
     sent_invites: Option<Vec<Value>>,
+    resolved: HashMap<String,ResolvedCliKey>,
 }
 impl OwnedKeyResolver {
     pub fn new() -> Self {
@@ -55,7 +57,18 @@ impl OwnedKeyResolver {
         self.pending.insert(file_id.into(), owner_wrap);
         Ok(())
     }
-    pub async fn resolve(
+    pub fn resolved(&self) -> Vec<ResolvedCliKey> { self.resolved.values().cloned().collect() }
+    pub fn pending(&self,id:&str) -> Option<Vec<u8>> {self.pending.get(id).cloned()}
+    pub async fn folder_key(&mut self,api:&ApiClient,master:&MasterKey,id:&str)->Result<Option<Arc<FileKey>>,String> {
+        self.load_root(api,master,id).await?;
+        Ok(self.roots.get(id).filter(|r|!r.legacy_invite).map(|r|r.key.clone()))
+    }
+    pub async fn resolve(&mut self,api:&ApiClient,master:&MasterKey,row:&Value)->Result<ResolvedCliKey,String> {
+        let resolved=self.resolve_inner(api,master,row).await?;
+        self.resolved.insert(resolved.canonical["id"].as_str().ok_or("missing id")?.into(),resolved.clone());
+        Ok(resolved)
+    }
+    async fn resolve_inner(
         &mut self,
         api: &ApiClient,
         master: &MasterKey,
@@ -322,6 +335,8 @@ impl OwnedKeyResolver {
         match confirmed {
             Ok(()) => {
                 self.pending.remove(id);
+                self.rows.insert(id.into(),winner.clone());
+                if let Some(cached)=self.resolved.get_mut(id){cached.canonical=winner;cached.pending_owner_wrap=None;}
                 Ok(true)
             }
             Err(e) => {

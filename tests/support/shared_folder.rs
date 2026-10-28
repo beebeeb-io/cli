@@ -41,7 +41,7 @@ pub fn row(id: &str, parent: Option<&str>, text: &str, folder: bool, foreign: bo
     } else {
         beebeeb_core::kdf::derive_file_key(&master(), id.as_bytes())
     };
-    json!({"id":id,"parent_id":parent,"name_encrypted":name(&key,text),"is_folder":folder,"size_bytes":12,"chunk_count":1,"version_number":1,"created_at":"2026-10-28T10:00:00Z","acted_via_share_id":if foreign {Some(BAD)} else {None},"uploaded_by":null,"owner_wrapped_file_key":null})
+    json!({"id":id,"parent_id":parent,"name_encrypted":name(&key,text),"is_folder":folder,"size_bytes":12,"chunk_count":1,"version_number":1,"created_at":"2026-10-28T10:00:00Z","updated_at":"2026-10-28T10:00:00Z","acted_via_share_id":if foreign {Some(BAD)} else {None},"uploaded_by":null,"owner_wrapped_file_key":null})
 }
 pub fn wrap(id: &str, folder: bool) -> String {
     B64.encode(owned_keys::wrap_child_key(&folder_key(), ROOT, id, if folder { 2 } else { 1 }, &item_key()).unwrap())
@@ -60,6 +60,15 @@ pub struct Fixture {
     pub plaintext: Vec<u8>,
     pub direct: bool,
     pub changed: bool,
+    pub custody_revoked: bool,
+    pub adopt_failures: usize,
+    pub adopt_lost: bool,
+    pub index_conflicts: usize,
+    pub index_partial: bool,
+    pub shared_index: HashMap<(u32,u32),(u64,Vec<u8>)>,
+    pub owner_index: HashMap<(u32,u32),(u64,Vec<u8>)>,
+    pub upload_request: Value,
+    pub uploaded_chunks: Vec<Vec<u8>>,
 }
 impl Fixture {
     pub fn transfer(v2: bool) -> Self {
@@ -201,6 +210,33 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
         .to_vec();
     let mut f = state.lock().unwrap();
     f.requests.push((method.clone(), uri.to_string(), body));
+    // Shared CAS and ordinary LWW stores intentionally have different contracts.
+    if path.contains("/search-index/shards") {
+        let shared=path.starts_with("/api/v1/shared-folders/");
+        let suffix=path.split("/search-index/shards").nth(1).unwrap();
+        if suffix.is_empty() {
+            let index=if shared {&f.shared_index} else {&f.owner_index};
+            return axum::Json(json!({"shards":index.iter().map(|(&(bucket,page),(version,_))| json!({"bucket":bucket,"page":page,"version":version})).collect::<Vec<_>>()})).into_response();
+        }
+        let parts:Vec<_>=suffix.trim_matches('/').split('/').collect();
+        let key=(parts[0].parse::<u32>().unwrap(),parts[1].parse::<u32>().unwrap());
+        if method=="GET" { return match (if shared {&f.shared_index} else {&f.owner_index}).get(&key) {Some((_,b))=>b.clone().into_response(),None=>StatusCode::NOT_FOUND.into_response()}; }
+        if shared && f.index_conflicts>0 { f.index_conflicts-=1;return (StatusCode::CONFLICT,axum::Json(json!({"error":"index_version_conflict"}))).into_response(); }
+        let bytes=f.requests.last().unwrap().2.clone();
+        let index=if shared {&mut f.shared_index} else {&mut f.owner_index};
+        let version=index.get(&key).map(|v|v.0).unwrap_or(0);
+        if shared {assert_eq!(query.get("if_version").and_then(|s|s.parse::<u64>().ok()),Some(version));} else {assert!(!query.contains_key("if_version"));}
+        if method=="PUT" {index.insert(key,(version+1,bytes));} else if method=="DELETE" {index.remove(&key);}
+        return axum::Json(json!({"version":version+1})).into_response();
+    }
+    if method=="POST" && path.ends_with("/owner-key") {
+        if f.adopt_failures>0 {f.adopt_failures-=1;return StatusCode::SERVICE_UNAVAILABLE.into_response();}
+        let id=path.trim_start_matches("/api/v1/files/").trim_end_matches("/owner-key");
+        let wrap=serde_json::from_slice::<Value>(&f.requests.last().unwrap().2).unwrap()["owner_wrapped_file_key"].clone();
+        if let Some(r)=f.rows.iter_mut().find(|r|r["id"]==id) {if r["owner_wrapped_file_key"].is_null(){r["owner_wrapped_file_key"]=wrap;}}
+        if f.adopt_lost {f.adopt_lost=false;return Response::new(Body::from_stream(futures_util::stream::once(async {Err::<bytes::Bytes,_>(std::io::Error::other("fixture response lost after commit"))})));}
+        return axum::Json(json!({"adopted":true})).into_response();
+    }
     let value = if method == "GET" && path == "/api/v1/auth/me" {json!({"id":ACCOUNT})}
     else if method == "GET" && path == "/api/v1/transfer/capabilities" {
         json!({"download":if f.direct {vec!["object-download-v1"]} else {vec![]},"upload":[],"storage_hosts":[host],"storage_buckets":[{"host":host,"bucket":"fixture"}],"max_window":32,"url_ttl_seconds":300})
@@ -233,10 +269,17 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
         json!({"used_bytes":0})
     } else if method == "POST" && path == "/api/v1/uploads/init" {
         let request: Value = serde_json::from_slice(&f.requests.last().unwrap().2).unwrap();
+        f.upload_request=request.clone(); f.uploaded_chunks.clear();
         json!({"upload_session_id":BAD,"file_id":request["file_id"].as_str().unwrap_or(FILE),"chunk_size_bytes":request["chunk_size_bytes"],"chunk_count":request["chunk_count"]})
     } else if method == "PUT" && path.contains("/chunks/") {
+        let b=f.requests.last().unwrap().2.clone(); f.uploaded_chunks.push(b);
         json!({"stored":true})
     } else if method == "POST" && path.ends_with("/complete") {
+        let req=f.upload_request.clone();
+        if req["file_id"]==FILE {
+            let chunks=f.uploaded_chunks.len();
+            if let Some(r)=f.rows.iter_mut().find(|r|r["id"]==FILE) {r["name_encrypted"]=req["file_name"].clone();r["version_number"]=json!(r["version_number"].as_u64().unwrap()+1);r["size_bytes"]=req["size_bytes"].clone();r["chunk_count"]=json!(chunks);}
+        }
         json!({"file_id":FILE,"id":FILE})
     } else if method == "GET" && path == "/api/v1/file-requests" {
         f.requests_doc.clone()
@@ -244,10 +287,12 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
         json!({"invites":if f.legacy_invite {vec![json!({"id":BAD,"file_id":ROOT,"is_folder_share":true,"status":"approved","encrypted_owner_folder_key":B64.encode(owned_keys::wrap_key_to_owner(&master(),ROOT,&folder_key()).unwrap())})]} else {vec![]}})
     } else if method == "GET" && path == format!("/api/v1/shares/invites/{BAD}/folder-keys") {
         json!({"keys":f.inventory})
-    } else if f.legacy_invite && path == format!("/api/v1/shared-folders/{ROOT}") {
+    } else if (f.legacy_invite || f.custody_revoked) && path == format!("/api/v1/shared-folders/{ROOT}") {
         return StatusCode::NOT_FOUND.into_response();
     } else if method == "GET" && path == "/api/v1/files" {
-        json!({"files":f.rows.iter().filter(|r|r["parent_id"].as_str()==query.get("parent_id").map(String::as_str)).cloned().collect::<Vec<_>>()})
+        let mut rows=f.rows.iter().filter(|r|r["parent_id"].as_str()==query.get("parent_id").map(String::as_str) && r["is_trashed"].as_bool().unwrap_or(false)==(query.get("trashed").map(String::as_str)==Some("true"))).cloned().collect::<Vec<_>>();
+        if f.index_partial&&query.get("parent_id").map(String::as_str)==Some(ROOT) {let mut bad=row(BAD,Some(ROOT),"unreadable",false,true);bad["name_encrypted"]=json!("corrupt");rows.push(bad);}
+        json!({"files":rows})
     } else if method == "GET" && path == "/api/v1/files/index" {
         json!({"files":f.rows})
     } else if method == "GET" && path == format!("/api/v1/shared-folders/{ROOT}") {

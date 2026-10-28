@@ -17,6 +17,7 @@ mod path;
 mod region;
 mod resume;
 mod safe_path;
+mod shared_folder_index;
 mod sync_safety;
 mod thumbnail;
 mod transport;

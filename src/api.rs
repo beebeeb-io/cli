@@ -2058,6 +2058,33 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    /// Index pages are opaque, bounded blobs. Only the shared store has CAS.
+    pub async fn index_blob(&self, path: &str) -> Result<Vec<u8>, String> {
+        let mut response = self.client.get(self.url(path)).bearer_auth(self.require_auth()?).send().await.map_err(format_request_error)?;
+        if !response.status().is_success() { return Err(format!("index read: {}", response.status())); }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(format_request_error)? {
+            if bytes.len() + chunk.len() > 160 * 1024 { return Err("index page exceeds limit".into()); }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
+    }
+    pub async fn write_index_page(&self, path: &str, blob: Option<Vec<u8>>, version: Option<u64>) -> Result<bool,String> {
+        let mut request = if let Some(blob) = blob {
+            if blob.len()>160*1024 { return Err("index page exceeds limit".into()); }
+            self.client.put(self.url(path)).header("Content-Type","application/octet-stream").body(blob)
+        } else { self.client.delete(self.url(path)) };
+        if let Some(version)=version { request=request.query(&[("if_version",version)]); }
+        let response=request.bearer_auth(self.require_auth()?).send().await.map_err(format_request_error)?;
+        if response.status()==reqwest::StatusCode::CONFLICT && version.is_some() {
+            let body:Value=response.json().await.map_err(|e|e.to_string())?;
+            if body["error"]=="index_version_conflict" {return Ok(false);}
+            return Err("index write conflict".into());
+        }
+        if !response.status().is_success() {return Err(format!("index write: {}",response.status()));}
+        Ok(true)
+    }
+
     /// Upload a raw blob to the speedtest endpoint.
     pub async fn speedtest_upload(&self, data: &[u8]) -> Result<(), String> {
         let token = self.require_auth()?;

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,6 +16,8 @@ use zeroize::Zeroizing;
 use crate::api::ApiClient;
 use crate::config::load_config;
 use crate::ui;
+use crate::owned_keys::{OwnedKeyResolver,ResolvedCliKey};
+use beebeeb_core::owned_keys::KeyOrigin;
 
 const STATE_FILE: &str = ".bb-sync.json";
 // Chunk size is now computed dynamically via beebeeb_types::plan_chunks().
@@ -107,8 +109,31 @@ struct SyncState {
     session_id: Option<String>,
     #[serde(default)]
     files: HashMap<String, FileEntry>,
+    #[serde(default)]
+    owned_keys: HashMap<String,OpaqueOwnedKey>,
+    #[serde(default)]
+    dirty_shared_roots: BTreeSet<String>,
+    #[serde(default)]
+    owner_index_dirty: bool,
+    #[serde(default)]
+    removed_index_ids: BTreeSet<String>,
 }
 
+/// Ciphertext and envelopes only. Account and root checks precede all reads.
+#[derive(Serialize,Deserialize,Clone)]
+struct OpaqueOwnedKey {
+    canonical: serde_json::Value,
+    pending_owner_wrap: Option<Vec<u8>>,
+    shared_root_id: Option<String>,
+}
+fn sync_keys(state:&SyncState)->Result<OwnedKeyResolver,String>{
+    let mut keys=OwnedKeyResolver::new();
+    if state.account_id.is_some(){for (id,record) in &state.owned_keys {
+        keys.seed(std::slice::from_ref(&record.canonical));
+        if let Some(frame)=&record.pending_owner_wrap {keys.restore_pending(id,frame.clone())?;}
+    }}
+    Ok(keys)
+}
 #[derive(Serialize, Deserialize, Clone)]
 struct FileEntry {
     remote_id: Uuid,
@@ -515,6 +540,7 @@ fn reconcile_remote_deletions(
 #[derive(Clone)]
 struct RemoteFile {
     id: Uuid,
+    resolved: Option<ResolvedCliKey>,
     chunk_count: u32,
     updated_at: DateTime<Utc>,
     /// The content's read pin from the file's authenticated metadata
@@ -614,6 +640,7 @@ pub async fn run(
     };
 
     let account_id = check_sync_account(&api, &state).await?;
+    if state.account_id.is_none(){state.owned_keys.clear();state.dirty_shared_roots.clear();state.removed_index_ids.clear();state.owner_index_dirty=false;}
 
     // Register this device with the server (best-effort, non-fatal)
     let device_info = crate::device::load_or_create();
@@ -692,6 +719,9 @@ pub async fn run(
     // the local files sync into the new folder as new files.
     if rebind && root_unreconciled(&state, remote_folder_id) {
         state.files.clear();
+        state.owned_keys.clear();
+        state.dirty_shared_roots.clear();
+        state.removed_index_ids.clear();
         state.remote_folder_id = Some(remote_folder_id);
         print_notice("rebound to the new remote folder; the old folder's sync record was dropped");
     }
@@ -771,12 +801,13 @@ pub async fn run(
     let scan_active = ui::is_rich() && std::io::stdout().is_terminal();
 
     let local_spinner = make_scan_spinner(scan_active, "scanning local", "files");
-    let local_files = scan_local_files(&local_dir, &state.files, rehash, local_spinner.as_ref())?;
+    let mut local_files = scan_local_files(&local_dir, &state.files, rehash, local_spinner.as_ref())?;
     if let Some(pb) = &local_spinner {
         pb.finish_and_clear();
     }
     let local_folders = walk_local_folders(&local_dir)?;
 
+    let mut keys=sync_keys(&state)?;
     let remote_spinner = make_scan_spinner(scan_active, "scanning remote", "entries");
     let mut remote_files: HashMap<String, RemoteFile> = HashMap::new();
     let mut remote_folders: HashMap<String, Uuid> = HashMap::new();
@@ -789,6 +820,7 @@ pub async fn run(
         &mut remote_files,
         &mut remote_folders,
         &mut listing_health,
+        &mut keys,
         remote_spinner.as_ref(),
     )
     .await?;
@@ -796,6 +828,8 @@ pub async fn run(
         pb.finish_and_clear();
     }
 
+    let moved_conflicts=reconcile_moves(&local_dir,&mut state,&local_files,&remote_files,dry_run)?;
+    if !dry_run {local_files=walk_local_files(&local_dir)?;}
     // Which absent files may be treated as deleted? Only those the server itself
     // reports trashed, from a listing that is not empty/partial/unreadable.
     let absence = plan_absence(
@@ -819,7 +853,7 @@ pub async fn run(
     sorted_folders.sort_by_key(|s| s.matches('/').count());
 
     for folder_rel in &sorted_folders {
-        if !remote_folders.contains_key(folder_rel) {
+        if !remote_folders.contains_key(folder_rel) && listing_healthy(&listing_health) {
             let parent_id = parent_remote_id(folder_rel, &remote_folders, remote_folder_id);
             let folder_name = folder_rel.rsplit('/').next().unwrap_or(folder_rel);
             if dry_run {
@@ -883,7 +917,7 @@ pub async fn run(
     let mut skipped = 0u32;
     // Uploads that errored (not Ctrl-C). Together with `conflicts` this decides
     // whether a one-shot pass may report "synced" and exit 0.
-    let mut failed = 0u32;
+    let mut failed = listing_health.unreadable as u32 + u32::from(listing_health.truncated);
 
     // ── Phase 1: classify each file into an action ─────────────────────────
     enum SyncAction {
@@ -926,6 +960,7 @@ pub async fn run(
     let mut actions: Vec<SyncAction> = Vec::with_capacity(sorted_files.len());
 
     for rel in &sorted_files {
+        if moved_conflicts.contains(rel) {actions.push(SyncAction::Conflict{msg:format!("{rel} moved remotely; local edits kept")});continue;}
         let local = local_files.get(rel).cloned();
         let remote = remote_files.get(rel).cloned();
         let prior = trusted_prior(&state, rel, remote.is_some(), root_changed);
@@ -1084,6 +1119,7 @@ pub async fn run(
                 }
             }
             SyncAction::Upload { rel, local, replace_id } => {
+                if !listing_healthy(&listing_health) || foreign_missing(&state,&rel,&remote_files) {skipped+=1;continue;}
                 pending_uploads.push((rel, local, replace_id));
             }
             SyncAction::Download { rel, remote } => {
@@ -1158,6 +1194,7 @@ pub async fn run(
                 let master_key = Arc::clone(&master_key);
                 let local_dir = &local_dir;
                 let remote_folders = &remote_folders;
+                let resolved=remote_files.get(&rel).and_then(|r|r.resolved.clone());
                 let progress = progress.as_ref();
                 let shutdown = Arc::clone(&shutdown);
                 async move {
@@ -1190,7 +1227,8 @@ pub async fn run(
                         ));
                     }
 
-                    if let Some(old_id) = replace_id {
+                    let replacement=resolved.filter(|r|r.origin!=KeyOrigin::Derived);
+                    if let Some(old_id) = replace_id.filter(|_|replacement.is_none()) {
                         let _ = api.trash_file(&old_id.to_string()).await;
                     }
 
@@ -1204,12 +1242,12 @@ pub async fn run(
                     let spec = crate::upload::UploadSpec {
                         path: local_dir.join(&rel),
                         file_name,
-                        file_id: Uuid::new_v4(),
+                        file_id: if replacement.is_some(){replace_id.ok_or("missing replacement id")?}else{Uuid::new_v4()},
                         // Sync trashes the old file (above) and uploads a fresh
                         // id, so this is always a new file — no version replace.
-                        base_version_number: None,
-                        replace_pin: None,
-                        replace_file_key: None,
+                        base_version_number: replacement.as_ref().map(|r| replacement_version(&r.canonical)).transpose()?,
+                        replace_pin: replacement.as_ref().map(|r|crate::crypto::content_pin_with_key(&r.key,r.canonical["id"].as_str().unwrap_or(""),r.canonical["name_encrypted"].as_str().unwrap_or(""))).transpose()?,
+                        replace_file_key: replacement.as_ref().map(|r|r.key.clone()),
                         parent_id,
                         concurrency: concurrency as u32,
                         shutdown,
@@ -1308,6 +1346,7 @@ pub async fn run(
         if !dry_run {
             api.trash_file(&remote.id.to_string()).await?;
             state.files.remove(rel);
+            state.removed_index_ids.insert(remote.id.to_string());
         }
         if !ui::is_json() && !ui::is_quiet() {
             println!(
@@ -1335,6 +1374,7 @@ pub async fn run(
             match remove_local_recoverably(&local_dir, rel, &entry) {
                 Ok(true) => {
                     state.files.remove(rel);
+                    state.removed_index_ids.insert(entry.remote_id.to_string());
                 }
                 Ok(false) => {
                     print_notice(&format!("{rel} changed since the scan, kept"));
@@ -1370,6 +1410,7 @@ pub async fn run(
         state.account_id = Some(account_id);
     }
     if !dry_run {
+        finish_owned_sync(&api,&master_key,&mut keys,&mut state,remote_folder_id,root_changed).await;
         let data = serde_json::to_vec_pretty(&state).map_err(|e| format!("serialize state: {e}"))?;
         std::fs::write(&state_path, data).map_err(|e| format!("write state file: {e}"))?;
     }
@@ -1698,6 +1739,7 @@ async fn run_plain_watch(
                     let mut resync_remote_files: HashMap<String, RemoteFile> = HashMap::new();
                     let mut resync_remote_folders: HashMap<String, Uuid> = HashMap::new();
                     let mut resync_health = crate::sync_safety::ListingHealth::default();
+                    let mut keys=sync_keys(state)?;
                     walk_remote(
                         &resync_api,
                         &resync_master,
@@ -1706,10 +1748,12 @@ async fn run_plain_watch(
                         &mut resync_remote_files,
                         &mut resync_remote_folders,
                         &mut resync_health,
+                        &mut keys,
                         None,
                     )
                     .await?;
 
+                    let blocked=refresh_watch_reads(&resync_api,&resync_master,local_dir,state,&mut resync_local,&resync_remote_files,&resync_health).await?;
                     // Ensure remote folders exist
                     let mut all_dirs: HashSet<String> = HashSet::new();
                     all_dirs.extend(resync_folders.iter().cloned());
@@ -1717,7 +1761,7 @@ async fn run_plain_watch(
                     let mut sorted_dirs: Vec<String> = all_dirs.into_iter().collect();
                     sorted_dirs.sort_by_key(|s| s.matches('/').count());
                     for folder_rel in &sorted_dirs {
-                        if !resync_remote_folders.contains_key(folder_rel) {
+                        if !resync_remote_folders.contains_key(folder_rel) && listing_healthy(&resync_health) {
                             let pid = parent_remote_id(folder_rel, &resync_remote_folders, remote_folder_id);
                             let fname = folder_rel.rsplit('/').next().unwrap_or(folder_rel);
                             let new_id = create_folder(&resync_api, &resync_master, fname, pid).await?;
@@ -1782,6 +1826,7 @@ async fn run_plain_watch(
                     let mut resync_bytes: u64 = 0;
                     let resync_keys: Vec<String> = resync_local.keys().cloned().collect();
                     for rel in &resync_keys {
+                        if !listing_healthy(&resync_health)||blocked.contains(rel)||foreign_missing(state,rel,&resync_remote_files){continue;}
                         let local = resync_local.get(rel).cloned();
                         let remote = resync_remote_files.get(rel).cloned();
                         let prior =
@@ -1805,7 +1850,7 @@ async fn run_plain_watch(
                                     local_dir,
                                     rel,
                                     &l,
-                                    remote.map(|r| r.id),
+                                    remote,
                                     remote_folder_id,
                                     &resync_remote_folders,
                                     state,
@@ -1817,6 +1862,7 @@ async fn run_plain_watch(
                         }
                     }
 
+                    finish_owned_sync(&resync_api,&resync_master,&mut keys,state,remote_folder_id,root_unreconciled(state,remote_folder_id)).await;
                     // Save state
                     state.last_sync = Some(Utc::now());
                     let data = serde_json::to_vec_pretty(&state).map_err(|e| format!("serialize state: {e}"))?;
@@ -2001,6 +2047,7 @@ async fn run_tui_watch(
             let mut resync_remote_files: HashMap<String, RemoteFile> = HashMap::new();
             let mut resync_remote_folders: HashMap<String, Uuid> = HashMap::new();
             let mut resync_health = crate::sync_safety::ListingHealth::default();
+            let mut keys=match sync_keys(&binding_state){Ok(k)=>k,Err(e)=>{let _=sync_tx.send(TuiEvent::SyncError(e));continue;}};
             if let Err(e) = walk_remote(
                 &resync_api,
                 &resync_master,
@@ -2009,6 +2056,7 @@ async fn run_tui_watch(
                 &mut resync_remote_files,
                 &mut resync_remote_folders,
                 &mut resync_health,
+                &mut keys,
                 None,
             )
             .await
@@ -2024,7 +2072,7 @@ async fn run_tui_watch(
             let mut sorted_dirs: Vec<String> = all_dirs.into_iter().collect();
             sorted_dirs.sort_by_key(|s| s.matches('/').count());
             for folder_rel in &sorted_dirs {
-                if !resync_remote_folders.contains_key(folder_rel) {
+                if !resync_remote_folders.contains_key(folder_rel) && listing_healthy(&resync_health) {
                     let pid = parent_remote_id(folder_rel, &resync_remote_folders, remote_folder_id);
                     let fname = folder_rel.rsplit('/').next().unwrap_or(folder_rel);
                     match create_folder(&resync_api, &resync_master, fname, pid).await {
@@ -2040,6 +2088,7 @@ async fn run_tui_watch(
 
             // Upload changed files.
             let mut sync_state = sync_shared_state.lock().await;
+            let blocked=match refresh_watch_reads(&resync_api,&resync_master,&sync_local_dir,&mut sync_state,&mut resync_local,&resync_remote_files,&resync_health).await {Ok(b)=>b,Err(e)=>{let _=sync_tx.send(TuiEvent::SyncError(e));continue;}};
 
             // Reconcile remote deletions FIRST (shared helper — identical
             // decision to the one-shot path and the plain-watch loop): a
@@ -2092,6 +2141,7 @@ async fn run_tui_watch(
 
             let resync_keys: Vec<String> = resync_local.keys().cloned().collect();
             for rel in &resync_keys {
+                if !listing_healthy(&resync_health)||blocked.contains(rel)||foreign_missing(&sync_state,rel,&resync_remote_files){continue;}
                 let local = resync_local.get(rel).cloned();
                 let remote = resync_remote_files.get(rel).cloned();
                 let prior = trusted_prior(
@@ -2117,7 +2167,7 @@ async fn run_tui_watch(
                             &sync_local_dir,
                             rel,
                             &l,
-                            remote.map(|r| r.id),
+                            remote,
                             remote_folder_id,
                             &resync_remote_folders,
                             &mut sync_state,
@@ -2148,6 +2198,8 @@ async fn run_tui_watch(
             }
 
             // Save state.
+            let root_changed=root_unreconciled(&sync_state,remote_folder_id);
+            finish_owned_sync(&resync_api,&resync_master,&mut keys,&mut sync_state,remote_folder_id,root_changed).await;
             sync_state.last_sync = Some(Utc::now());
             if let Ok(data) = serde_json::to_vec_pretty(&*sync_state) {
                 let _ = std::fs::write(&sync_state_path, data);
@@ -2669,6 +2721,94 @@ fn walk_local_folders(root: &Path) -> Result<HashSet<String>, String> {
     Ok(out)
 }
 
+fn replacement_version(row:&serde_json::Value)->Result<i32,String>{
+    crate::api::current_version_number(row).and_then(|v|i32::try_from(v).ok()).filter(|v|*v>0).ok_or_else(||"missing or invalid replacement version".into())
+}
+fn listing_healthy(health:&crate::sync_safety::ListingHealth)->bool {health.unreadable==0&&!health.truncated}
+fn foreign_missing(state:&SyncState,rel:&str,remote:&HashMap<String,RemoteFile>)->bool{
+    !remote.contains_key(rel)&&state.files.get(rel).is_some_and(|p|state.owned_keys.contains_key(&p.remote_id.to_string()))
+}
+/// Follow identity across remote moves. Only an unchanged local mirror may be
+/// renamed; dirty paths and occupied destinations are held for conflict handling.
+fn reconcile_moves(root:&Path,state:&mut SyncState,local:&HashMap<String,LocalFile>,remote:&HashMap<String,RemoteFile>,dry_run:bool)->Result<HashSet<String>,String>{
+    let mut blocked=HashSet::new();
+    for (new,r) in remote {
+        let old=state.files.iter().find(|(path,e)|*path!=new&&e.remote_id==r.id).map(|(p,e)|(p.clone(),e.clone()));
+        let Some((old,entry))=old else {continue;};
+        if local.contains_key(new)||local.get(&old).is_some_and(|l|!local_matches_entry(l,&entry)) {
+            blocked.insert(old);blocked.insert(new.clone());continue;
+        }
+        if dry_run {continue;}
+        let from=crate::safe_path::safe_rel_join(root,&old,crate::safe_path::Rules::Host).map_err(|e|e.to_string())?;
+        let to=crate::safe_path::safe_rel_join(root,new,crate::safe_path::Rules::Host).map_err(|e|e.to_string())?;
+        if from.exists(){
+            // Recheck bytes immediately before a local move, as for tombstones.
+            if compute_file_hash(&from).ok().as_ref()!=entry.content_hash.as_ref() {blocked.insert(old);blocked.insert(new.clone());continue;}
+            if let Some(parent)=to.parent(){std::fs::create_dir_all(parent).map_err(|e|e.to_string())?;}
+            // Never overwrite a destination which appeared after the scan.
+            if to.exists(){blocked.insert(old);blocked.insert(new.clone());continue;}
+            std::fs::rename(from,to).map_err(|e|e.to_string())?;
+        }
+        state.files.remove(&old);state.files.insert(new.clone(),entry);
+    }
+    Ok(blocked)
+}
+/// Apply incoming files through the same downloader during an existing watch
+/// resync. Local edits keep precedence until the existing conflict flow resolves.
+async fn refresh_watch_reads(api:&ApiClient,master:&beebeeb_core::kdf::MasterKey,root:&Path,state:&mut SyncState,local:&mut HashMap<String,LocalFile>,remote:&HashMap<String,RemoteFile>,health:&crate::sync_safety::ListingHealth)->Result<HashSet<String>,String>{
+    let mut blocked=reconcile_moves(root,state,local,remote,false)?;
+    *local=walk_local_files(root)?;
+    for (rel,r) in remote {
+        if blocked.contains(rel){continue;}
+        let prior=state.files.get(rel);
+        let changed=prior.is_none_or(|p|r.updated_at>p.last_sync+chrono::Duration::seconds(1));
+        let dirty=local.get(rel).is_some_and(|l|prior.is_none_or(|p|local_changed_vs_manifest(l,p)));
+        if changed && dirty {blocked.insert(rel.clone());continue;}
+        if changed || !local.contains_key(rel)&&prior.is_none() {
+            if let Err(e)=do_download(api,master,root,rel,r,state,false).await {print_notice(&format!("{rel}: {e}"));}
+        }
+    }
+    if !listing_healthy(health){print_notice("remote listing incomplete; local uploads held until it is readable");}
+    *local=walk_local_files(root)?;
+    Ok(blocked)
+}
+/// Read failures never make index/adoption failures fatal to file access.
+async fn finish_owned_sync(api:&ApiClient,master:&beebeeb_core::kdf::MasterKey,keys:&mut OwnedKeyResolver,state:&mut SyncState,root:Uuid,root_changed:bool){
+    if state.account_id.is_none() {state.owned_keys.clear();state.dirty_shared_roots.clear();state.removed_index_ids.clear();return;}
+    if root_changed{return;}
+    let resolved=keys.resolved();
+    for r in &resolved {
+        let id=r.canonical["id"].as_str().unwrap_or("");
+        let retained=r.canonical["is_folder"]==true||state.files.values().any(|e|e.remote_id.to_string()==id);
+        if retained && r.pending_owner_wrap.is_some(){
+            if let Err(e)=keys.adopt(api,master,r).await {print_notice(&format!("{id}: adoption pending ({e})"));}
+        }
+    }
+    for r in keys.resolved(){
+        let id=r.canonical["id"].as_str().unwrap_or("").to_string();
+        if r.origin!=KeyOrigin::Derived {
+            let shared_root_id=r.shared_root_id.or_else(||state.owned_keys.get(&id).and_then(|r|r.shared_root_id.clone()));
+            if let Some(root)=&shared_root_id{state.dirty_shared_roots.insert(root.clone());}
+            state.owned_keys.insert(id.clone(),OpaqueOwnedKey{canonical:r.canonical,pending_owner_wrap:keys.pending(&id),shared_root_id});
+        }
+    }
+    let entries:Vec<_>=resolved.iter().map(|r|(r.canonical["id"].as_str().unwrap_or("").to_string(),r.name.clone())).collect();
+    let removed:Vec<_>=state.removed_index_ids.iter().cloned().collect();
+    match crate::shared_folder_index::update_owner_index(api,master,&entries,&removed).await {
+        Ok(r) if r.deferred==0&&!r.partial=>{state.owner_index_dirty=false;state.removed_index_ids.clear();}
+        Ok(_)=>state.owner_index_dirty=true,
+        Err(e)=>{state.owner_index_dirty=true;print_notice(&format!("search index deferred: {e}"));}
+    }
+    state.dirty_shared_roots.insert(root.to_string());
+    for id in state.dirty_shared_roots.clone(){
+        match crate::shared_folder_index::repair(api,master,keys,&id).await {
+            Ok(r) if r.deferred==0&&!r.partial=>{state.dirty_shared_roots.remove(&id);}
+            Ok(_)=>{},
+            Err(e)=>print_notice(&format!("shared search index deferred: {e}")),
+        }
+    }
+}
+
 fn parent_remote_id(rel: &str, folders: &HashMap<String, Uuid>, root_id: Uuid) -> Option<Uuid> {
     match rel.rsplit_once('/') {
         Some((parent, _)) => folders.get(parent).copied().or(Some(root_id)),
@@ -2707,6 +2847,7 @@ async fn resolve_remote_folder(
     }
 
     let mut current_parent: Option<Uuid> = None;
+    let mut keys=OwnedKeyResolver::new();
 
     for seg in segments {
         let listing = api.list_files(current_parent.map(|u| u.to_string()).as_deref()).await?;
@@ -2715,6 +2856,8 @@ async fn resolve_remote_folder(
             .and_then(|v| v.as_array())
             .ok_or("invalid file listing")?;
 
+        keys.seed(items);
+        let mut unreadable=false;
         let mut found: Option<Uuid> = None;
         for item in items {
             let is_folder = item.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -2729,14 +2872,14 @@ async fn resolve_remote_folder(
                 Ok(u) => u,
                 Err(_) => continue,
             };
-            let name_enc = item.get("name_encrypted").and_then(|v| v.as_str()).unwrap_or("");
-            let name = crate::crypto::decrypt_name(master_key, id_str, name_enc);
+            let name=match keys.resolve(api,master_key,item).await {Ok(r)=>Some(r.name),Err(_)=>{unreadable=true;None}};
             if name.as_deref() == Some(seg) {
                 found = Some(id);
                 break;
             }
         }
 
+        if found.is_none()&&(unreadable||crate::sync_safety::listing_truncated(&listing)){return Err("remote folder listing incomplete; cannot create a folder".into());}
         match found {
             Some(id) => current_parent = Some(id),
             None => {
@@ -2781,6 +2924,7 @@ async fn walk_remote(
     files: &mut HashMap<String, RemoteFile>,
     folders: &mut HashMap<String, Uuid>,
     health: &mut crate::sync_safety::ListingHealth,
+    keys: &mut OwnedKeyResolver,
     scan: Option<&indicatif::ProgressBar>,
 ) -> Result<(), String> {
     let listing = api.list_files(Some(&folder_id.to_string())).await?;
@@ -2792,25 +2936,14 @@ async fn walk_remote(
         .and_then(|v| v.as_array())
         .ok_or("invalid file listing")?;
 
+    keys.seed(items);
     for item in items {
+        if files.len()+folders.len()>=20_000 {health.truncated=true;break;}
         let id_str = item.get("id").and_then(|v| v.as_str()).ok_or("missing id")?;
         let id: Uuid = id_str.parse().map_err(|e| format!("invalid id: {e}"))?;
         let is_folder = item.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
-        let name_enc = item.get("name_encrypted").and_then(|v| v.as_str()).unwrap_or("");
-
-        // Use the shared crypto module which handles all server formats
-        // (Rust EncryptedBlob, web-app base64 blob, plaintext) and both
-        // UUID key derivations (binary and string).
-        let name = match crate::crypto::decrypt_name(master_key, id_str, name_enc) {
-            Some(n) => n,
-            None => {
-                // An entry we cannot read might be exactly a file we think is
-                // gone (wrong key, damaged blob): the listing is not complete.
-                health.unreadable += 1;
-                continue;
-            }
-        };
-
+        let resolved=match keys.resolve(api,master_key,item).await {Ok(r)=>r,Err(e)=>{health.unreadable+=1;eprintln!("cannot open item {id_str}: {e}");continue;}};
+        let name=resolved.name.clone();
         // A remote name becomes a local path segment (and part of every `rel`
         // below), so a name that could climb out of the sync root or smuggle a
         // separator is skipped with a warning, never joined (task 1733).
@@ -2835,21 +2968,25 @@ async fn walk_remote(
         };
 
         if is_folder {
+            if folders.values().any(|previous|*previous==id)||files.contains_key(&rel)||folders.contains_key(&rel) {health.unreadable+=1;continue;}
             folders.insert(rel.clone(), id);
-            Box::pin(walk_remote(api, master_key, id, &rel, files, folders, health, scan)).await?;
+            Box::pin(walk_remote(api, master_key, id, &rel, files, folders, health, keys,scan)).await?;
         } else {
             let updated_at_str = item.get("updated_at").and_then(|v| v.as_str()).unwrap_or("");
             let updated_at = DateTime::parse_from_rfc3339(updated_at_str)
                 .map(|d| d.with_timezone(&Utc))
                 .unwrap_or_else(|_| Utc::now());
             let chunk_count = item.get("chunk_count").and_then(|v| v.as_i64()).unwrap_or(1) as u32;
+            if files.contains_key(&rel)||folders.contains_key(&rel){health.unreadable+=1;continue;}
+            let pin=if resolved.origin==KeyOrigin::Derived {crate::crypto::content_pin(master_key,id_str,resolved.canonical["name_encrypted"].as_str().unwrap_or(""))}else{crate::crypto::content_pin_with_key(&resolved.key,id_str,resolved.canonical["name_encrypted"].as_str().unwrap_or(""))};
             files.insert(
                 rel,
                 RemoteFile {
                     id,
                     chunk_count,
                     updated_at,
-                    pin: crate::crypto::content_pin(master_key, id_str, name_enc),
+                    pin,
+                    resolved:Some(resolved),
                 },
             );
         }
@@ -2865,7 +3002,7 @@ async fn do_upload(
     local_dir: &Path,
     rel: &str,
     local: &LocalFile,
-    replace_remote_id: Option<Uuid>,
+    remote: Option<RemoteFile>,
     root_remote_id: Uuid,
     remote_folders: &HashMap<String, Uuid>,
     state: &mut SyncState,
@@ -2885,7 +3022,8 @@ async fn do_upload(
         return Ok(());
     }
 
-    if let Some(old_id) = replace_remote_id {
+    let replacement=remote.as_ref().and_then(|r|r.resolved.as_ref()).filter(|r|r.origin!=KeyOrigin::Derived);
+    if let Some(old_id) = remote.as_ref().filter(|_|replacement.is_none()).map(|r|r.id) {
         let _ = api.trash_file(&old_id.to_string()).await;
     }
 
@@ -2897,7 +3035,11 @@ async fn do_upload(
 
     let file_name = rel.rsplit('/').next().unwrap_or(rel);
     let local_path = local_dir.join(rel);
-    let new_id = upload_file_to(api, master_key, &local_path, file_name, parent_id).await?;
+    let new_id = if let Some(r)=replacement {
+        let spec=crate::upload::UploadSpec{path:local_path,file_name:file_name.into(),file_id:remote.as_ref().unwrap().id,
+            base_version_number:Some(replacement_version(&r.canonical)?),replace_pin:Some(remote.as_ref().unwrap().pin.clone()?),replace_file_key:Some(r.key.clone()),parent_id,concurrency:1,shutdown:Arc::new(AtomicBool::new(false))};
+        crate::upload::stream_encrypt_upload(api,master_key,spec,&crate::upload::NoopProgress).await?.server_id
+    }else{upload_file_to(api, master_key, &local_path, file_name, parent_id).await?};
 
     state.files.insert(
         rel.to_string(),
@@ -2998,7 +3140,7 @@ async fn do_download(
             return Ok(DownloadOutcome::Deferred);
         }
     };
-    let downloaded = download_to(api, master_key, remote.id, &remote.pin, remote.chunk_count, &out_path).await;
+    let downloaded = download_to(api, master_key, remote, &out_path).await;
     // Typed failures first: no message text decides whether a daemon survives (task 2173).
     if let Err(e) = &downloaded {
         if let Some(outcome) = DownloadOutcome::of_failure(e) {
@@ -3103,13 +3245,11 @@ async fn upload_file_to(
 async fn download_to(
     api: &ApiClient,
     master_key: &beebeeb_core::kdf::MasterKey,
-    file_id: Uuid,
-    pin: &Result<beebeeb_core::chunk_stream::ExpectedChunkFormat, String>,
-    chunk_count: u32,
+    remote: &RemoteFile,
     out_path: &Path,
 ) -> Result<(), crate::download::DownloadError> {
-    let pin = pin.clone()?;
-    let file_id_str = file_id.to_string();
+    let pin = remote.pin.clone()?;
+    let file_id_str = remote.id.to_string();
     let name = out_path
         .file_name()
         .and_then(|n| n.to_str())
@@ -3117,12 +3257,16 @@ async fn download_to(
         .to_string();
     // Streaming, constant-memory decrypt. The "↓ rel" line is already printed by
     // the caller, so use a no-op progress sink here.
+    if let Some(r)=remote.resolved.as_ref().filter(|r|r.origin!=KeyOrigin::Derived) {
+        crate::download::stream_download_decrypt_with_file_key(api,r.key.clone(),&file_id_str,pin,remote.chunk_count,out_path,&crate::upload::NoopProgress,&name).await?;
+        return Ok(());
+    }
     crate::download::stream_download_decrypt(
         api,
         master_key,
         &file_id_str,
         pin,
-        chunk_count,
+        remote.chunk_count,
         out_path,
         &crate::upload::NoopProgress,
         &name,
@@ -3298,6 +3442,7 @@ mod tests {
     fn remote_file() -> RemoteFile {
         RemoteFile {
             id: Uuid::new_v4(),
+            resolved:None,
             chunk_count: 1,
             updated_at: Utc::now(),
             pin: Ok(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded),
@@ -3953,6 +4098,7 @@ mod tests {
             &mut files,
             &mut folders,
             &mut health,
+            &mut OwnedKeyResolver::new(),
             None,
         )
         .await
