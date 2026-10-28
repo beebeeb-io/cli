@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 
 use crate::api::ApiClient;
 use crate::config::load_config;
-use crate::owned_keys::{OwnedKeyResolver, ResolvedCliKey};
+use crate::owned_keys::{CUSTODY_UNAVAILABLE, OwnedKeyResolver, ResolvedCliKey};
 use crate::ui;
 use beebeeb_core::owned_keys::KeyOrigin;
 
@@ -660,28 +660,6 @@ pub async fn run(
         state.owner_index_dirty = false;
     }
 
-    // Register this device with the server (best-effort, non-fatal)
-    let device_info = crate::device::load_or_create();
-    let device_resp = if dry_run {
-        None
-    } else {
-        match api
-            .register_device(&device_info.hostname, &device_info.platform, env!("CARGO_PKG_VERSION"))
-            .await
-        {
-            Ok(v) => Some(v),
-            // A 401 means the server no longer accepts our session: stop now with
-            // a distinct exit code so the service manager does not restart us.
-            Err(e) if e == crate::api::SESSION_EXPIRED_MESSAGE => return Err(crate::exit::sync_error(e)),
-            Err(_) => None,
-        }
-    };
-    let server_device_id = device_resp
-        .as_ref()
-        .and_then(|v| v.get("id"))
-        .and_then(|v| v.as_str())
-        .map(String::from);
-
     let remote_path = match remote_path_arg.or_else(|| state.remote_path.clone()) {
         Some(p) => normalize_remote_path(&p),
         None => {
@@ -725,7 +703,7 @@ pub async fn run(
             println!(
                 "  {} {}",
                 "mode".custom_color(crate::colors::INK_DIM),
-                "dry-run (no changes will be written)".custom_color(crate::colors::AMBER),
+                "dry-run (no file changes; security observations are saved)".custom_color(crate::colors::AMBER),
             );
         }
         println!();
@@ -734,7 +712,9 @@ pub async fn run(
     let sync_start = Instant::now();
     let mut total_bytes: u64 = 0;
 
-    let remote_folder_id = resolve_remote_folder(&api, &master_key, &remote_path, dry_run).await?;
+    let mut path_keys = OwnedKeyResolver::new();
+    let resolved_root = resolve_remote_folder(&api, &master_key, &remote_path, dry_run, &mut path_keys).await;
+    let remote_folder_id = resolved_root?;
     // `--rebind`: the user accepts the folder resolved now as this directory's
     // remote root. The old manifest describes the other tree, so it is dropped:
     // nothing that belonged there can be removed on this folder's account, and
@@ -756,6 +736,61 @@ pub async fn run(
     let root_changed = root_unreconciled(&state, remote_folder_id);
     state.remote_path = Some(remote_path.clone());
     state.remote_folder_id.get_or_insert(remote_folder_id);
+
+    // Scan phase — the dominant "looks frozen" symptom. Show a live spinner so
+    // hashing the local tree + fetching the remote tree never looks like a hang.
+    let scan_active = ui::is_rich() && std::io::stdout().is_terminal();
+
+    let local_spinner = make_scan_spinner(scan_active, "scanning local", "files");
+    let mut local_files = scan_local_files(&local_dir, &state.files, rehash, local_spinner.as_ref())?;
+    if let Some(pb) = &local_spinner {
+        pb.finish_and_clear();
+    }
+    let local_folders = walk_local_folders(&local_dir)?;
+
+    let mut keys = sync_keys(&state)?;
+    let remote_spinner = make_scan_spinner(scan_active, "scanning remote", "entries");
+    let mut remote_files: HashMap<String, RemoteFile> = HashMap::new();
+    let mut remote_folders: HashMap<String, Uuid> = HashMap::new();
+    let mut listing_health = crate::sync_safety::ListingHealth::default();
+    let scan_result = walk_remote(
+        &api,
+        &master_key,
+        remote_folder_id,
+        "",
+        &mut remote_files,
+        &mut remote_folders,
+        &mut listing_health,
+        &mut keys,
+        remote_spinner.as_ref(),
+    )
+    .await;
+    if let Some(pb) = &remote_spinner {
+        pb.finish_and_clear();
+    }
+    scan_result?;
+
+    // Register this device with the server (best-effort, non-fatal)
+    let device_info = crate::device::load_or_create();
+    let device_resp = if dry_run {
+        None
+    } else {
+        match api
+            .register_device(&device_info.hostname, &device_info.platform, env!("CARGO_PKG_VERSION"))
+            .await
+        {
+            Ok(v) => Some(v),
+            // A 401 means the server no longer accepts our session: stop now with
+            // a distinct exit code so the service manager does not restart us.
+            Err(e) if e == crate::api::SESSION_EXPIRED_MESSAGE => return Err(crate::exit::sync_error(e)),
+            Err(_) => None,
+        }
+    };
+    let server_device_id = device_resp
+        .as_ref()
+        .and_then(|v| v.get("id"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
 
     // Create or reuse a client session for this sync pair
     let session_id: Option<String> = if let Some(ref device_id) = server_device_id {
@@ -817,38 +852,6 @@ pub async fn run(
     } else {
         None
     };
-
-    // Scan phase — the dominant "looks frozen" symptom. Show a live spinner so
-    // hashing the local tree + fetching the remote tree never looks like a hang.
-    let scan_active = ui::is_rich() && std::io::stdout().is_terminal();
-
-    let local_spinner = make_scan_spinner(scan_active, "scanning local", "files");
-    let mut local_files = scan_local_files(&local_dir, &state.files, rehash, local_spinner.as_ref())?;
-    if let Some(pb) = &local_spinner {
-        pb.finish_and_clear();
-    }
-    let local_folders = walk_local_folders(&local_dir)?;
-
-    let mut keys = sync_keys(&state)?;
-    let remote_spinner = make_scan_spinner(scan_active, "scanning remote", "entries");
-    let mut remote_files: HashMap<String, RemoteFile> = HashMap::new();
-    let mut remote_folders: HashMap<String, Uuid> = HashMap::new();
-    let mut listing_health = crate::sync_safety::ListingHealth::default();
-    walk_remote(
-        &api,
-        &master_key,
-        remote_folder_id,
-        "",
-        &mut remote_files,
-        &mut remote_folders,
-        &mut listing_health,
-        &mut keys,
-        remote_spinner.as_ref(),
-    )
-    .await?;
-    if let Some(pb) = &remote_spinner {
-        pb.finish_and_clear();
-    }
 
     let moved_conflicts = if root_changed {
         HashSet::new()
@@ -1803,7 +1806,7 @@ async fn run_plain_watch(
                     let mut resync_remote_folders: HashMap<String, Uuid> = HashMap::new();
                     let mut resync_health = crate::sync_safety::ListingHealth::default();
                     let mut keys = sync_keys(state)?;
-                    walk_remote(
+                    let scan_result = walk_remote(
                         &resync_api,
                         &resync_master,
                         remote_folder_id,
@@ -1814,7 +1817,8 @@ async fn run_plain_watch(
                         &mut keys,
                         None,
                     )
-                    .await?;
+                    .await;
+                    scan_result?;
 
                     let blocked = refresh_watch_reads(
                         &resync_api,
@@ -2139,7 +2143,7 @@ async fn run_tui_watch(
                     continue;
                 }
             };
-            if let Err(e) = walk_remote(
+            let scan_result = walk_remote(
                 &resync_api,
                 &resync_master,
                 remote_folder_id,
@@ -2150,8 +2154,8 @@ async fn run_tui_watch(
                 &mut keys,
                 None,
             )
-            .await
-            {
+            .await;
+            if let Err(e) = scan_result {
                 let _ = sync_tx.send(TuiEvent::SyncError(e));
                 continue;
             }
@@ -3092,6 +3096,7 @@ async fn resolve_remote_folder(
     master_key: &beebeeb_core::kdf::MasterKey,
     remote_path: &str,
     dry_run: bool,
+    keys: &mut OwnedKeyResolver,
 ) -> Result<Uuid, String> {
     let segments: Vec<&str> = remote_path.split('/').filter(|s| !s.is_empty()).collect();
     if segments.is_empty() {
@@ -3099,7 +3104,6 @@ async fn resolve_remote_folder(
     }
 
     let mut current_parent: Option<Uuid> = None;
-    let mut keys = OwnedKeyResolver::new();
 
     for seg in segments {
         let listing = api.list_files(current_parent.map(|u| u.to_string()).as_deref()).await?;
@@ -3126,6 +3130,7 @@ async fn resolve_remote_folder(
             };
             let name = match keys.resolve(api, master_key, item).await {
                 Ok(r) => Some(r.name),
+                Err(e) if e == CUSTODY_UNAVAILABLE => return Err(e),
                 Err(_) => {
                     unreadable = true;
                     None
@@ -3209,6 +3214,7 @@ async fn walk_remote(
         let is_folder = item.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
         let resolved = match keys.resolve(api, master_key, item).await {
             Ok(r) => r,
+            Err(e) if e == CUSTODY_UNAVAILABLE => return Err(e),
             Err(e) => {
                 health.unreadable += 1;
                 eprintln!("cannot open item {id_str}: {e}");

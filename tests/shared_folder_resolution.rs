@@ -5,12 +5,36 @@ use serde_json::json;
 use sf::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn old_format_owner_wrap_is_rejected() {
+    let mut f = Fixture::default();
+    let mut r = row(FILE, None, "must-not-open.txt", false, true);
+    let legacy_key = beebeeb_core::kdf::derive_file_key(&master(), FILE.as_bytes());
+    r["owner_wrapped_file_key"] =
+        json!(B64.encode(beebeeb_core::encrypt::encrypt_chunk_raw(&legacy_key, item_key().as_bytes()).unwrap()));
+    f.rows.push(r);
+    let h = Harness::new(f).await;
+    let v = h.json(&["ls"]).await;
+    assert_eq!(v["files"][0]["name"], "can't open (added via shared folder)");
+    assert_eq!(
+        h.state
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .filter(|(m, _, _)| m != "GET")
+            .count(),
+        0
+    );
+    h.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn owner_wrap_after_move() {
     let mut f = Fixture::default();
     let mut r = row(FILE, None, "moved.txt", false, true);
     r["acted_via_share_id"] = json!(null);
     r["owner_wrapped_file_key"] =
-        json!(B64.encode(beebeeb_core::owned_keys::wrap_key_to_owner(&master(), FILE, &item_key()).unwrap()));
+        json!(B64.encode(beebeeb_core::owned_keys::wrap_owner_file_key(&master(), FILE, &item_key()).unwrap()));
     f.rows.push(r);
     let h = Harness::new(f).await;
     let v = h.json(&["ls"]).await;
@@ -60,7 +84,7 @@ async fn canonical_enrichment_wire_shapes() {
     for array in [false, true] {
         let mut f = Fixture::default();
         let mut canonical = row(FILE, None, "canonical.txt", false, true);
-        let frame = beebeeb_core::owned_keys::wrap_key_to_owner(&master(), FILE, &item_key()).unwrap();
+        let frame = beebeeb_core::owned_keys::wrap_owner_file_key(&master(), FILE, &item_key()).unwrap();
         canonical["owner_wrapped_file_key"] = if array { json!(frame) } else { json!(B64.encode(frame)) };
         let mut sparse = canonical.clone();
         sparse.as_object_mut().unwrap().remove("owner_wrapped_file_key");

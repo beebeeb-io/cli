@@ -12,6 +12,7 @@ use std::{
 };
 
 pub const UNREADABLE: &str = "can't open (added via shared folder)";
+pub const CUSTODY_UNAVAILABLE: &str = "This folder's keys are unavailable";
 #[derive(Clone)]
 pub struct ResolvedCliKey {
     pub key: Arc<FileKey>,
@@ -36,10 +37,24 @@ pub struct OwnedKeyResolver {
     requests: Option<RequestKeyResolver>,
     sent_invites: Option<Vec<Value>>,
     resolved: HashMap<String, ResolvedCliKey>,
+    custody: Option<crate::custody::CustodyStore>,
 }
 impl OwnedKeyResolver {
     pub fn new() -> Self {
         Self::default()
+    }
+    // L7d: the device's custody memory, read fresh on every question (another process may have added to it).
+    fn custody(&mut self) -> Result<&crate::custody::CustodyStore, String> {
+        if self.custody.is_none() {
+            self.custody = Some(crate::custody::CustodyStore::open().map_err(|_| CUSTODY_UNAVAILABLE)?);
+        }
+        Ok(self.custody.as_ref().unwrap())
+    }
+    fn seen(&mut self, id: &str) -> Result<bool, String> {
+        self.custody()?.seen(id).map_err(|_| CUSTODY_UNAVAILABLE.into())
+    }
+    fn remember(&mut self, id: &str) -> Result<(), String> {
+        self.custody()?.remember(id).map_err(|_| CUSTODY_UNAVAILABLE.into())
     }
     pub fn seed(&mut self, rows: &[Value]) {
         for row in rows {
@@ -89,11 +104,18 @@ impl OwnedKeyResolver {
         master: &MasterKey,
         id: &str,
     ) -> Result<Option<Arc<FileKey>>, String> {
+        let seen = self.seen(id)?;
         if let Some(root) = self.roots.get(id) {
+            if seen && root.legacy_invite {
+                return Err(CUSTODY_UNAVAILABLE.into());
+            }
             return Ok((!root.legacy_invite).then(|| root.key.clone()));
         }
         let custody = api.get_shared_folder(id).await?;
         if custody.is_null() {
+            if seen {
+                return Err(CUSTODY_UNAVAILABLE.into());
+            }
             return Ok(None);
         }
         if custody["folder_id"].as_str() != Some(id) || custody["role"].as_str() != Some("owner") {
@@ -101,6 +123,7 @@ impl OwnedKeyResolver {
         }
         let frame = normalize_wrap(&custody["owner_wrapped_folder_key"])?.ok_or("missing owner custody")?;
         let key = owned_keys::unwrap_folder_custody(master, id, &frame).map_err(|_| "invalid L6 owner custody")?;
+        self.remember(id)?;
         Ok(Some(Arc::new(key)))
     }
 
@@ -142,7 +165,7 @@ impl OwnedKeyResolver {
         let owner = normalize_wrap(&canonical["owner_wrapped_file_key"]);
         let has_owner = !canonical["owner_wrapped_file_key"].is_null();
         if let Ok(Some(ref frame)) = owner {
-            if let Ok(key) = owned_keys::unwrap_owner_key(master, &id, frame) {
+            if let Ok(key) = owned_keys::unwrap_owner_file_key(master, &id, frame) {
                 if let Ok(name) = authenticated_name(&key, &canonical) {
                     self.pending.remove(&id);
                     return Ok(ResolvedCliKey {
@@ -159,7 +182,7 @@ impl OwnedKeyResolver {
         // A pending key is never confirmation that adoption committed. Authenticate
         // it against the current name, retain its envelope, then retry in sync.
         if let Some(frame) = self.pending.get(&id) {
-            if let Ok(key) = owned_keys::unwrap_owner_key(master, &id, frame) {
+            if let Ok(key) = owned_keys::unwrap_owner_file_key(master, &id, frame) {
                 if let Ok(name) = authenticated_name(&key, &canonical) {
                     return Ok(ResolvedCliKey {
                         key: Arc::new(key),
@@ -220,6 +243,9 @@ impl OwnedKeyResolver {
                 return Err("shared-folder ancestry cycle".into());
             }
             self.load_root(api, master, &root_id).await?;
+            if self.roots.get(&root_id).is_some_and(|r| r.legacy_invite) {
+                self.refuse_if_custody_above(api, &root_id).await?;
+            }
             if let Some(root) = self.roots.get(&root_id) {
                 let frame = root.children.get(&id).ok_or(UNREADABLE)?;
                 let kind = if canonical["is_folder"].as_bool() == Some(true) {
@@ -248,7 +274,7 @@ impl OwnedKeyResolver {
                     .map_err(|_| UNREADABLE)?
                 };
                 let name = authenticated_name(&resolved.key, &canonical)?;
-                let pending = owned_keys::wrap_key_to_owner(master, &id, &resolved.key)
+                let pending = owned_keys::wrap_owner_file_key(master, &id, &resolved.key)
                     .map_err(|_| "can't prepare owner envelope")?;
                 self.pending.insert(id.clone(), pending.clone());
                 return Ok(ResolvedCliKey {
@@ -260,26 +286,55 @@ impl OwnedKeyResolver {
                     name,
                 });
             }
-            let ancestor = if let Some(r) = self.rows.get(&root_id) {
-                r.clone()
-            } else {
-                let r = api.get_file(&root_id).await?;
-                if r["id"].as_str() != Some(&root_id) {
-                    return Err("ancestor identity changed".into());
-                }
-                self.rows.insert(root_id.clone(), r.clone());
-                r
-            };
+            let ancestor = self.ancestor_row(api, &root_id).await?;
             parent = ancestor["parent_id"].as_str().map(str::to_string);
         }
         Err(UNREADABLE.into())
     }
+    async fn ancestor_row(&mut self, api: &ApiClient, id: &str) -> Result<Value, String> {
+        if let Some(r) = self.rows.get(id) {
+            return Ok(r.clone());
+        }
+        let r = api.get_file(id).await?;
+        if r["id"].as_str() != Some(id) {
+            return Err("ancestor identity changed".into());
+        }
+        self.rows.insert(id.into(), r.clone());
+        Ok(r)
+    }
+    /// The walk above stops at the nearest root. A legacy root is therefore only readable while nothing higher
+    /// in the tree was ever opened under custody here: a server that hides or withdraws the custody of an
+    /// outer folder must not get its inner folders read through an old invite.
+    async fn refuse_if_custody_above(&mut self, api: &ApiClient, start: &str) -> Result<(), String> {
+        let mut visited = HashSet::from([start.to_string()]);
+        let mut current = start.to_string();
+        loop {
+            let row = self.ancestor_row(api, &current).await?;
+            let Some(parent) = row["parent_id"].as_str().map(str::to_string) else {
+                return Ok(());
+            };
+            if !visited.insert(parent.clone()) || visited.len() > 256 {
+                return Err("shared-folder ancestry cycle".into());
+            }
+            if self.seen(&parent)? {
+                return Err(CUSTODY_UNAVAILABLE.into());
+            }
+            current = parent;
+        }
+    }
     async fn load_root(&mut self, api: &ApiClient, master: &MasterKey, id: &str) -> Result<(), String> {
+        let seen = self.seen(id)?;
+        if seen && (self.absent_roots.contains(id) || self.roots.get(id).is_some_and(|r| r.legacy_invite)) {
+            return Err(CUSTODY_UNAVAILABLE.into());
+        }
         if self.roots.contains_key(id) || self.absent_roots.contains(id) {
             return Ok(());
         }
         let custody = api.get_shared_folder(id).await?;
         if custody.is_null() {
+            if seen {
+                return Err(CUSTODY_UNAVAILABLE.into());
+            }
             // An approved legacy invite permits its sender to read the existing
             // inventory without registering custody (reads must not mutate).
             if self.sent_invites.is_none() {
@@ -294,7 +349,7 @@ impl OwnedKeyResolver {
                 let frame = normalize_wrap(&invite["encrypted_owner_folder_key"])?.ok_or("missing invite seed")?;
                 // L6 explicitly permits the named legacy invite reader only for
                 // this seed. Permanent custody never reaches this branch.
-                let key = owned_keys::unwrap_owner_key(master, id, &frame).map_err(|_| "invalid invite seed")?;
+                let key = legacy_invite_seed(master, id, &frame)?;
                 let invite_id = text(invite, "id")?;
                 let page = api
                     .get_json(&format!("/api/v1/shares/invites/{invite_id}/folder-keys"))
@@ -306,6 +361,11 @@ impl OwnedKeyResolver {
                     {
                         children.insert(id.into(), frame);
                     }
+                }
+                // Another process may have opened custody for this folder while the requests above were in
+                // flight: the answer "no custody" is stale, so ask the store again before trusting it.
+                if self.seen(id)? {
+                    return Err(CUSTODY_UNAVAILABLE.into());
                 }
                 self.roots.insert(
                     id.into(),
@@ -325,6 +385,7 @@ impl OwnedKeyResolver {
         }
         let frame = normalize_wrap(&custody["owner_wrapped_folder_key"])?.ok_or("missing owner custody")?;
         let key = owned_keys::unwrap_folder_custody(master, id, &frame).map_err(|_| "invalid L6 owner custody")?;
+        self.remember(id)?;
         let mut children = HashMap::new();
         let mut cursor = None;
         let mut cursors = HashSet::new();
@@ -379,7 +440,7 @@ impl OwnedKeyResolver {
                 return Err("adoption identity changed".to_string());
             }
             let wrapped = normalize_wrap(&winner["owner_wrapped_file_key"])?.ok_or("adoption pending")?;
-            let key = owned_keys::unwrap_owner_key(master, id, &wrapped).map_err(|_| "invalid adoption winner")?;
+            let key = owned_keys::unwrap_owner_file_key(master, id, &wrapped).map_err(|_| "invalid adoption winner")?;
             authenticated_name(&key, &winner)?;
             if key.as_bytes() != resolved.key.as_bytes() {
                 return Err("adoption winner key differs".into());
@@ -447,4 +508,11 @@ fn legacy_invite_child_key(folder_key: &FileKey, frame: &[u8]) -> Result<FileKey
         .try_into()
         .map_err(|_| "invalid legacy invite child key length")?;
     Ok(FileKey::from_bytes(key))
+}
+
+/// Only the flag-off invite seed uses the pre-L6 generic envelope. This is
+/// never an owner file-key opener or a permanent custody fallback.
+fn legacy_invite_seed(master: &MasterKey, id: &str, frame: &[u8]) -> Result<FileKey, String> {
+    let wrapping_key = beebeeb_core::kdf::derive_file_key(master, id.as_bytes());
+    legacy_invite_child_key(&wrapping_key, frame)
 }
