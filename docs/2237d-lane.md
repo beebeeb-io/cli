@@ -182,3 +182,22 @@ Graphify refresh after code commit: 108/108 AST files, 2,434 nodes, 7,612 edges,
 exit 0, no LLM calls. Generated artifacts retained outside the mapped PR at
  graphify-resume-generated/ beside graphify-resume-update.log; broad graph churn
 is excluded as before. Owned replay/validation worktrees are cleaned up.
+
+## Lead full-gate regression correction
+
+The lead's full gate at 8ce17eb was 808 passed / 3 failed. The previously
+reported 138/0 was a selection, not the full suite. Reproduced move_parent
+without changing tests: 4 passed / 3 failed. Bisect on Linux tested 4d6e6cc,
+b033f1e, 5c59c5b and 0c0be07, each 4/3; first bad commit is
+0c0be0770bb7de7f5a0391d76fc01e75fbf16a2e (Task 7). Its parent eb97a5c
+was verified separately: 7 passed / 0 failed.
+
+Cause: path lookup skipped resolver errors for invalid item identities, hiding
+an existing malformed destination. Single mv then interpreted any lookup error
+as absence and could rename instead of refusing. Repair: reject invalid UUID
+metadata before resolving keys and distinguish an absent destination from a
+listing/metadata error through an optional path lookup. mv propagates errors.
+The seven existing move_parent tests and every expectation remain unchanged.
+Targeted green: 7 passed / 0 failed (regression-move-green.log).
+Decision: preserve resolver authentication and L7b rules; no name/key fallback
+was added. Full cargo test --locked --no-fail-fast is the required final gate.

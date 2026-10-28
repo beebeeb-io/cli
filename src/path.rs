@@ -138,16 +138,36 @@ pub async fn resolve_path_with_keys(
     path: &str,
     keys: &mut crate::owned_keys::OwnedKeyResolver,
 ) -> Result<ResolvedPath, String> {
+    lookup_path(api, master_key, path, keys)
+        .await?
+        .ok_or_else(|| format!("not found: \"{path}\""))
+}
+
+/// Only an absent path returns `None`; listing/metadata failures stay errors.
+pub async fn resolve_path_if_exists(
+    api: &ApiClient,
+    master_key: &MasterKey,
+    path: &str,
+) -> Result<Option<ResolvedPath>, String> {
+    lookup_path(api, master_key, path, &mut crate::owned_keys::OwnedKeyResolver::new()).await
+}
+
+async fn lookup_path(
+    api: &ApiClient,
+    master_key: &MasterKey,
+    path: &str,
+    keys: &mut crate::owned_keys::OwnedKeyResolver,
+) -> Result<Option<ResolvedPath>, String> {
     let trimmed = path.trim_matches('/');
 
     // Empty path → root.
     if trimmed.is_empty() {
-        return Ok(ResolvedPath {
+        return Ok(Some(ResolvedPath {
             file_id: None,
             parent_id: None,
             name: "/".to_string(),
             is_folder: true,
-        });
+        }));
     }
 
     let segments: Vec<&str> = trimmed.split('/').collect();
@@ -177,6 +197,9 @@ pub async fn resolve_path_with_keys(
 
         for entry in files {
             let id = entry.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+            // A malformed identity is corrupt listing metadata, not an absent
+            // path. Never let a skipped row become permission to create/rename.
+            uuid::Uuid::parse_str(id).map_err(|_| "directory entry has an invalid UUID".to_string())?;
             let is_folder = entry.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
 
             let Ok(resolved) = keys.resolve(api, master_key, entry).await else {
@@ -197,11 +220,11 @@ pub async fn resolve_path_with_keys(
         }
 
         if !found {
-            return Err(format!("not found: \"{decoded}\" in {}", current.name));
+            return Ok(None);
         }
     }
 
-    Ok(current)
+    Ok(Some(current))
 }
 
 /// Look up an immediate child by plaintext name. Used by `mkdir` to detect a
