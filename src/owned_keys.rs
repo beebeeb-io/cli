@@ -347,21 +347,25 @@ impl OwnedKeyResolver {
                     && r["status"].as_str() == Some("approved")
             }) {
                 let frame = normalize_wrap(&invite["encrypted_owner_folder_key"])?.ok_or("missing invite seed")?;
-                // L6 explicitly permits the named legacy invite reader only for
-                // this seed. Permanent custody never reaches this branch.
-                let key = legacy_invite_seed(master, id, &frame)?;
                 let invite_id = text(invite, "id")?;
+                // The rows come through the APPROVED invite (the server answers 400 for any other). They are the
+                // folder's child inventory and also the evidence a legacy owner copy is proven against.
                 let page = api
                     .get_json(&format!("/api/v1/shares/invites/{invite_id}/folder-keys"))
                     .await?;
+                let mut rows: Vec<(String, Vec<u8>)> = Vec::new();
                 let mut children = HashMap::new();
                 for row in page["keys"].as_array().ok_or("missing invite inventory")? {
                     if let (Some(id), Ok(Some(frame))) =
                         (row["file_id"].as_str(), normalize_wrap(&row["encrypted_file_key"]))
                     {
+                        rows.push((id.into(), frame.clone()));
                         children.insert(id.into(), frame);
                     }
                 }
+                // L6 permits the named legacy invite reader only here, and only for a copy that is proven.
+                // Permanent custody never reaches this branch. No proof is no key: never a mint.
+                let key = open_invite_owner_copy(master, id, &frame, &rows).ok_or(CUSTODY_UNAVAILABLE)?;
                 // Another process may have opened custody for this folder while the requests above were in
                 // flight: the answer "no custody" is stale, so ask the store again before trusting it.
                 if self.seen(id)? {
@@ -510,9 +514,28 @@ fn legacy_invite_child_key(folder_key: &FileKey, frame: &[u8]) -> Result<FileKey
     Ok(FileKey::from_bytes(key))
 }
 
-/// Only the flag-off invite seed uses the pre-L6 generic envelope. This is
-/// never an owner file-key opener or a permanent custody fallback.
-fn legacy_invite_seed(master: &MasterKey, id: &str, frame: &[u8]) -> Result<FileKey, String> {
-    let wrapping_key = beebeeb_core::kdf::derive_file_key(master, id.as_bytes());
-    legacy_invite_child_key(&wrapping_key, frame)
+/// An approved invite's owner copy of the folder key (task 2266). The purpose-bound format first, which needs
+/// no proof; otherwise a legacy copy only through core's possession proof over the folder's `rows`, in the
+/// order the server sent them (core examines a bounded, deduplicated prefix). `None` means unproven: the caller
+/// refuses, and no key is minted. This is never an owner file-key opener or a permanent custody fallback.
+fn open_invite_owner_copy(
+    master: &MasterKey,
+    folder_id: &str,
+    frame: &[u8],
+    rows: &[(String, Vec<u8>)],
+) -> Option<FileKey> {
+    let blob = beebeeb_types::EncryptedBlob {
+        cipher_suite: beebeeb_types::CipherSuite::V1Aes256Gcm,
+        nonce: frame.get(..12)?.to_vec(),
+        ciphertext: frame.get(12..)?.to_vec(),
+    };
+    if let Ok(key) = beebeeb_core::kdf::unwrap_invite_owner_copy(master, folder_id.as_bytes(), &blob) {
+        return Some(key);
+    }
+    beebeeb_core::kdf::open_legacy_invite_owner_copy(
+        master,
+        folder_id.as_bytes(),
+        frame,
+        rows.iter().map(|(id, wrap)| (id.as_bytes(), wrap.as_slice())),
+    )
 }

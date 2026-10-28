@@ -24,6 +24,9 @@ pub const BAD: &str = "44444444-4444-4444-8444-444444444444";
 pub const ACCOUNT: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 /// The approved legacy invite of SUB, used when `Fixture::nested_legacy` puts SUB inside ROOT.
 pub const SUB_INVITE: &str = "55555555-5555-4555-8555-555555555555";
+/// A child the owner wrote into the folder: its wrap in the legacy inventory opens to the owner-derived key of
+/// this id, which is what proves the owner copy is the folder's key.
+pub const PROOF_ID: &str = "77777777-7777-4777-8777-777777777777";
 pub const MASTER: [u8; 32] = [7; 32];
 pub fn master() -> MasterKey {
     MasterKey::from_bytes(MASTER)
@@ -44,6 +47,18 @@ pub fn row(id: &str, parent: Option<&str>, text: &str, folder: bool, foreign: bo
         beebeeb_core::kdf::derive_file_key(&master(), id.as_bytes())
     };
     json!({"id":id,"parent_id":parent,"name_encrypted":name(&key,text),"is_folder":folder,"size_bytes":12,"chunk_count":1,"version_number":1,"created_at":"2026-10-28T10:00:00Z","updated_at":"2026-10-28T10:00:00Z","acted_via_share_id":if foreign {Some(BAD)} else {None},"uploaded_by":null,"owner_wrapped_file_key":null})
+}
+pub fn proof_row() -> Value {
+    json!({
+        "file_id": PROOF_ID,
+        "encrypted_file_key": B64.encode(
+            beebeeb_core::encrypt::encrypt_chunk_raw(
+                &folder_key(),
+                beebeeb_core::kdf::derive_file_key(&master(), PROOF_ID.as_bytes()).as_bytes(),
+            )
+            .unwrap()
+        ),
+    })
 }
 pub fn wrap(id: &str, folder: bool) -> String {
     B64.encode(owned_keys::wrap_child_key(&folder_key(), ROOT, id, if folder { 2 } else { 1 }, &item_key()).unwrap())
@@ -68,6 +83,10 @@ pub struct Fixture {
     /// SUB has an approved legacy invite and no custody (the invites list carries it), with this inventory.
     pub nested_legacy: bool,
     pub sub_inventory: Vec<Value>,
+    /// Replaces the ROOT legacy invite's `encrypted_owner_folder_key` (base64).
+    pub invite_owner_copy: Option<String>,
+    /// Replaces what the ROOT legacy invite's folder-keys route answers (default: `inventory` plus a proof row).
+    pub invite_rows: Option<Vec<Value>>,
     pub adopt_failures: usize,
     pub adopt_lost: bool,
     pub index_conflicts: usize,
@@ -390,16 +409,24 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
         };
         let mut invites = vec![];
         if f.legacy_invite {
-            invites.push(json!({"id":BAD,"file_id":ROOT,"is_folder_share":true,"status":"approved","encrypted_owner_folder_key":seed(ROOT)}));
+            let copy = f.invite_owner_copy.clone().unwrap_or_else(|| seed(ROOT));
+            invites.push(json!({"id":BAD,"file_id":ROOT,"is_folder_share":true,"status":"approved","encrypted_owner_folder_key":copy}));
         }
         if f.nested_legacy {
             invites.push(json!({"id":SUB_INVITE,"file_id":SUB,"is_folder_share":true,"status":"approved","encrypted_owner_folder_key":seed(SUB)}));
         }
         json!({ "invites": invites })
     } else if method == "GET" && path == format!("/api/v1/shares/invites/{BAD}/folder-keys") {
-        json!({"keys":f.inventory})
+        let rows = f.invite_rows.clone().unwrap_or_else(|| {
+            let mut rows = f.inventory.clone();
+            rows.push(proof_row());
+            rows
+        });
+        json!({ "keys": rows })
     } else if method == "GET" && path == format!("/api/v1/shares/invites/{SUB_INVITE}/folder-keys") {
-        json!({"keys":f.sub_inventory})
+        let mut rows = f.sub_inventory.clone();
+        rows.push(proof_row());
+        json!({ "keys": rows })
     } else if let Some(status) = f
         .custody_status
         .filter(|_| path == format!("/api/v1/shared-folders/{ROOT}"))
