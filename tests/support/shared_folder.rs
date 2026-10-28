@@ -63,14 +63,41 @@ pub struct Fixture {
 }
 impl Fixture {
     pub fn transfer(v2: bool) -> Self {
-        use beebeeb_core::chunk_stream::{ChunkEncryptor,ExpectedChunkFormat};
-        let mut f=Self::basic(); f.plaintext=b"guest-content: lots of bytes across frames".to_vec();f.stride=8;
-        let pin=if v2 {ExpectedChunkFormat::V2} else {ExpectedChunkFormat::Unrecorded};
-        let mut enc=ChunkEncryptor::from_reader_with_file_key(item_key(),FILE,f.plaintext.len() as u64,f.stride,std::io::Cursor::new(f.plaintext.clone())).unwrap().with_recorded_pin(pin).unwrap();
-        while let Some(c)=enc.next_chunk().unwrap(){f.frames.push(c.data);}enc.finish().unwrap();
-        if !v2 {f.frames=f.plaintext.chunks(f.stride as usize).map(|c|beebeeb_core::encrypt::encrypt_chunk_raw(&item_key(),c).unwrap()).collect();}
-        f.rows[1]["name_encrypted"]=json!(beebeeb_core::encrypt::encrypt_name_for(&item_key(),"guest.txt",None,pin).unwrap());
-        f.rows[1]["size_bytes"]=json!(f.plaintext.len());f.rows[1]["chunk_count"]=json!(f.frames.len());f
+        use beebeeb_core::chunk_stream::{ChunkEncryptor, ExpectedChunkFormat};
+        let mut f = Self::basic();
+        f.plaintext = b"guest-content: lots of bytes across frames".to_vec();
+        f.stride = 8;
+        let pin = if v2 {
+            ExpectedChunkFormat::V2
+        } else {
+            ExpectedChunkFormat::Unrecorded
+        };
+        let mut enc = ChunkEncryptor::from_reader_with_file_key(
+            item_key(),
+            FILE,
+            f.plaintext.len() as u64,
+            f.stride,
+            std::io::Cursor::new(f.plaintext.clone()),
+        )
+        .unwrap()
+        .with_recorded_pin(pin)
+        .unwrap();
+        while let Some(c) = enc.next_chunk().unwrap() {
+            f.frames.push(c.data);
+        }
+        enc.finish().unwrap();
+        if !v2 {
+            f.frames = f
+                .plaintext
+                .chunks(f.stride as usize)
+                .map(|c| beebeeb_core::encrypt::encrypt_chunk_raw(&item_key(), c).unwrap())
+                .collect();
+        }
+        f.rows[1]["name_encrypted"] =
+            json!(beebeeb_core::encrypt::encrypt_name_for(&item_key(), "guest.txt", None, pin).unwrap());
+        f.rows[1]["size_bytes"] = json!(f.plaintext.len());
+        f.rows[1]["chunk_count"] = json!(f.frames.len());
+        f
     }
     pub fn add_request(&mut self) {
         let private = [31; 32];
@@ -83,8 +110,12 @@ impl Fixture {
         r["file_request_id"] = json!(SUB);
         r["sender_ephemeral_pubkey"] = json!(B64.encode(seal.e_pub));
         r["wrapped_content_key"] = json!(B64.encode(seal.wrapped_key));
-        r["size_bytes"]=json!(self.plaintext.len());r["chunk_count"]=json!(1);
-        if !self.plaintext.is_empty(){self.frames=vec![beebeeb_core::encrypt::encrypt_chunk_raw(&item_key(),&self.plaintext).unwrap()];self.stride=self.plaintext.len() as u64;}
+        r["size_bytes"] = json!(self.plaintext.len());
+        r["chunk_count"] = json!(1);
+        if !self.plaintext.is_empty() {
+            self.frames = vec![beebeeb_core::encrypt::encrypt_chunk_raw(&item_key(), &self.plaintext).unwrap()];
+            self.stride = self.plaintext.len() as u64;
+        }
         self.rows.push(r);
     }
     pub fn basic() -> Self {
@@ -199,25 +230,40 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
     let value = if method == "GET" && path == "/api/v1/transfer/capabilities" {
         json!({"download":if f.direct {vec!["object-download-v1"]} else {vec![]},"upload":[],"storage_hosts":[host],"storage_buckets":[{"host":host,"bucket":"fixture"}],"max_window":32,"url_ttl_seconds":300})
     } else if method == "POST" && path.ends_with("/download-grants") {
-        if f.changed {return (StatusCode::CONFLICT,axum::Json(json!({"error":"version_unavailable"}))).into_response();}
-        let request:Value=serde_json::from_slice(&f.requests.last().unwrap().2).unwrap();
-        let start=request["start_index"].as_u64().unwrap_or(0) as usize;
-        let expires=(chrono::Utc::now()+chrono::Duration::minutes(5)).to_rfc3339();
+        if f.changed {
+            return (StatusCode::CONFLICT, axum::Json(json!({"error":"version_unavailable"}))).into_response();
+        }
+        let request: Value = serde_json::from_slice(&f.requests.last().unwrap().2).unwrap();
+        let start = request["start_index"].as_u64().unwrap_or(0) as usize;
+        let expires = (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339();
         json!({"transport":"object-download-v1","file_id":FILE,"object_version_id":SUB,"chunk_count":f.frames.len(),"chunk_size":f.stride,"encrypted_size":f.frames.iter().map(Vec::len).sum::<usize>(),"original_size":f.plaintext.len(),"grants":(start..f.frames.len()).map(|i|json!({"index":i,"method":"GET","url":format!("http://{host}/fixture/{FILE}/{i}?X-Amz-Signature=fixture&X-Amz-Expires=300"),"length":f.frames[i].len(),"expires_at":expires})).collect::<Vec<_>>(),"next_index":null})
     } else if method == "GET" && path.starts_with("/fixture/") {
-        let i=path.rsplit('/').next().unwrap().parse::<usize>().unwrap();return f.frames[i].clone().into_response();
+        let i = path.rsplit('/').next().unwrap().parse::<usize>().unwrap();
+        return f.frames[i].clone().into_response();
     } else if method == "GET" && path.ends_with("/download") {
-        return ([("X-Chunk-Size",f.stride.to_string()),("X-Chunk-Count",f.frames.len().to_string()),("X-Original-Size",f.plaintext.len().to_string())],f.frames.concat()).into_response();
+        return (
+            [
+                ("X-Chunk-Size", f.stride.to_string()),
+                ("X-Chunk-Count", f.frames.len().to_string()),
+                ("X-Original-Size", f.plaintext.len().to_string()),
+            ],
+            f.frames.concat(),
+        )
+            .into_response();
     } else if method == "POST" && path == "/api/v1/files/check-conflict" {
         json!({"files":f.rows.iter().filter(|r|r["parent_id"]==serde_json::from_slice::<Value>(&f.requests.last().unwrap().2).unwrap()["parent_id"]).cloned().collect::<Vec<_>>()})
-    } else if method == "GET" && path == "/api/v1/billing/subscription" {json!({"plan":"personal","quota_bytes":1000000000,"used_bytes":0})}
-    else if method == "GET" && path == "/api/v1/files/usage" {json!({"used_bytes":0})}
-    else if method == "POST" && path == "/api/v1/uploads/init" {
-        let request:Value=serde_json::from_slice(&f.requests.last().unwrap().2).unwrap();
+    } else if method == "GET" && path == "/api/v1/billing/subscription" {
+        json!({"plan":"personal","quota_bytes":1000000000,"used_bytes":0})
+    } else if method == "GET" && path == "/api/v1/files/usage" {
+        json!({"used_bytes":0})
+    } else if method == "POST" && path == "/api/v1/uploads/init" {
+        let request: Value = serde_json::from_slice(&f.requests.last().unwrap().2).unwrap();
         json!({"upload_session_id":BAD,"file_id":request["file_id"].as_str().unwrap_or(FILE),"chunk_size_bytes":request["chunk_size_bytes"],"chunk_count":request["chunk_count"]})
-    } else if method == "PUT" && path.contains("/chunks/") {json!({"stored":true})}
-    else if method == "POST" && path.ends_with("/complete") {json!({"file_id":FILE,"id":FILE})}
-    else if method == "GET" && path == "/api/v1/file-requests" {
+    } else if method == "PUT" && path.contains("/chunks/") {
+        json!({"stored":true})
+    } else if method == "POST" && path.ends_with("/complete") {
+        json!({"file_id":FILE,"id":FILE})
+    } else if method == "GET" && path == "/api/v1/file-requests" {
         f.requests_doc.clone()
     } else if method == "GET" && path == "/api/v1/shares/invites/sent" {
         json!({"invites":if f.legacy_invite {vec![json!({"id":BAD,"file_id":ROOT,"is_folder_share":true,"status":"approved","encrypted_owner_folder_key":B64.encode(owned_keys::wrap_key_to_owner(&master(),ROOT,&folder_key()).unwrap())})]} else {vec![]}})

@@ -67,3 +67,28 @@ Task 8 corrected-fixture baseline red: 6 executed, 1 passed / 5 failed
 download/direct unit selection: 23 passed / 0 failed; upload/direct selection:
 55 passed / 0 failed, 1 pre-existing ignored (t8-regressions.log).
 The direct_upload.rs test fixture also needs the new optional UploadSpec field.
+
+Task 8 complete: final shared_folder_transfers 6 passed / 0 failed;
+cargo fmt --all -- --check and cargo clippy --locked --all-targets -- -D warnings
+both exit 0 (t8-final-checks.log). The initial Clippy finding was an owned test
+MutexGuard scope; fixed with a lexical scope, not suppressed. Formatted only
+owned files copied back from the testrig. No write-format rollout.
+
+## Task 9 stopped: false plan premise (2026-10-28)
+
+The task requires persisting adoption envelopes in the "existing account/root-bound
+sync state" (plan D Task 9 Interfaces). At CLI baseline eb97a5c and this head:
+- src/commands/sync.rs:100-110 SyncState has remote_path, remote_folder_id,
+  last_sync, session_id and files, with no account or API-origin binding.
+- src/commands/sync.rs:223-225 root_unreconciled checks only the root UUID.
+- src/commands/sync.rs:605-611 loads .bb-sync.json directly from the local
+  directory, without comparing an account identity or API origin.
+The opaque envelope's crypto domain is account-specific, but that does not make
+the surrounding manifest account-bound or define its account-switch lifecycle.
+The brief explicitly requires stopping a task whose premise is wrong rather than
+inventing a contract. Therefore no Task 9 implementation or claimed red/green:
+0 of its 8 tests executed. Sync/adoption/tombstones/index repair are unfinished.
+Required lead correction: specify account binding and migration/invalidation of
+existing unbound manifests, including account changes in both watch loops.
+No new persistence or account-switch behavior was invented in this lane.
+Task 7's in-memory adoption interfaces remain available, with no sync caller.

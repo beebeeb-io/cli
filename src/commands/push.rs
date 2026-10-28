@@ -69,13 +69,13 @@ pub(crate) async fn find_conflict(
     let resp = api.check_conflict(parent_uuid).await.ok()?;
     let files = resp.get("files")?.as_array()?;
 
-    let mut keys=crate::owned_keys::OwnedKeyResolver::new();
+    let mut keys = crate::owned_keys::OwnedKeyResolver::new();
     keys.seed(files);
     for file in files {
         let id_str = file.get("id")?.as_str()?;
         let file_uuid: uuid::Uuid = id_str.parse().ok()?;
-        if let Ok(resolved) = keys.resolve(api,master_key,file).await {
-            let decrypted=resolved.name;
+        if let Ok(resolved) = keys.resolve(api, master_key, file).await {
+            let decrypted = resolved.name;
             if decrypted == filename {
                 return Some(file_uuid);
             }
@@ -470,9 +470,11 @@ async fn push_single_file(
                 .get("name_encrypted")
                 .and_then(|v| v.as_str())
                 .ok_or("server response missing name_encrypted")?;
-            let resolved=crate::owned_keys::OwnedKeyResolver::new().resolve(api,&master_key,&meta).await?;
-            let pin=crate::crypto::content_pin_with_key(&resolved.key,&existing,name_encrypted)?;
-            (Some(version),Some(pin),Some(resolved.key))
+            let resolved = crate::owned_keys::OwnedKeyResolver::new()
+                .resolve(api, &master_key, &meta)
+                .await?;
+            let pin = crate::crypto::content_pin_with_key(&resolved.key, &existing, name_encrypted)?;
+            (Some(version), Some(pin), Some(resolved.key))
         }
         None => (None, None, None),
     };

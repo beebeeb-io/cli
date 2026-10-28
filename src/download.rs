@@ -216,16 +216,51 @@ pub async fn stream_download_decrypt(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn stream_download_decrypt_with_file_key(api:&ApiClient, file_key:std::sync::Arc<beebeeb_core::kdf::FileKey>, file_id:&str, pin:ExpectedChunkFormat, chunk_count:u32, out_path:&Path, progress:&dyn ChunkProgress, display_name:&str)->Result<DownloadStats,DownloadError> {
-    stream_download_key(api, DownloadKey::Explicit(file_key), file_id, pin, chunk_count, out_path, progress, display_name, FALLBACK_HARD_CEILING).await
+pub async fn stream_download_decrypt_with_file_key(
+    api: &ApiClient,
+    file_key: std::sync::Arc<beebeeb_core::kdf::FileKey>,
+    file_id: &str,
+    pin: ExpectedChunkFormat,
+    chunk_count: u32,
+    out_path: &Path,
+    progress: &dyn ChunkProgress,
+    display_name: &str,
+) -> Result<DownloadStats, DownloadError> {
+    stream_download_key(
+        api,
+        DownloadKey::Explicit(file_key),
+        file_id,
+        pin,
+        chunk_count,
+        out_path,
+        progress,
+        display_name,
+        FALLBACK_HARD_CEILING,
+    )
+    .await
 }
 
-enum DownloadKey<'a> { Legacy(&'a MasterKey), Explicit(std::sync::Arc<beebeeb_core::kdf::FileKey>) }
+enum DownloadKey<'a> {
+    Legacy(&'a MasterKey),
+    Explicit(std::sync::Arc<beebeeb_core::kdf::FileKey>),
+}
 impl DownloadKey<'_> {
-    fn decryptor(&self, id:&str, pin:ExpectedChunkFormat)->ChunkDecryptor {
-        match self {Self::Legacy(master)=>ChunkDecryptor::for_push(master,id,pin), Self::Explicit(key)=>ChunkDecryptor::for_push_with_file_key(beebeeb_core::kdf::FileKey::from_bytes(*key.as_bytes()),id,pin)}
+    fn decryptor(&self, id: &str, pin: ExpectedChunkFormat) -> ChunkDecryptor {
+        match self {
+            Self::Legacy(master) => ChunkDecryptor::for_push(master, id, pin),
+            Self::Explicit(key) => {
+                ChunkDecryptor::for_push_with_file_key(beebeeb_core::kdf::FileKey::from_bytes(*key.as_bytes()), id, pin)
+            }
+        }
     }
-    fn legacy(&self)->Result<&MasterKey,DownloadError> {match self {Self::Legacy(m)=>Ok(m),Self::Explicit(_)=>Err(DownloadError::Unreadable("explicit-key content failed authentication".into()))}}
+    fn legacy(&self) -> Result<&MasterKey, DownloadError> {
+        match self {
+            Self::Legacy(m) => Ok(m),
+            Self::Explicit(_) => Err(DownloadError::Unreadable(
+                "explicit-key content failed authentication".into(),
+            )),
+        }
+    }
 }
 
 /// [`stream_download_decrypt`] with an explicit chunked-fallback ceiling
@@ -242,22 +277,66 @@ async fn stream_download_decrypt_with(
     display_name: &str,
     ceiling: u64,
 ) -> Result<DownloadStats, DownloadError> {
-    stream_download_key(api,DownloadKey::Legacy(master_key),file_id,pin,chunk_count,out_path,progress,display_name,ceiling).await
+    stream_download_key(
+        api,
+        DownloadKey::Legacy(master_key),
+        file_id,
+        pin,
+        chunk_count,
+        out_path,
+        progress,
+        display_name,
+        ceiling,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn stream_download_key(api:&ApiClient,key:DownloadKey<'_>,file_id:&str,pin:ExpectedChunkFormat,chunk_count:u32,out_path:&Path,progress:&dyn ChunkProgress,display_name:&str,ceiling:u64)->Result<DownloadStats,DownloadError> {
+async fn stream_download_key(
+    api: &ApiClient,
+    key: DownloadKey<'_>,
+    file_id: &str,
+    pin: ExpectedChunkFormat,
+    chunk_count: u32,
+    out_path: &Path,
+    progress: &dyn ChunkProgress,
+    display_name: &str,
+    ceiling: u64,
+) -> Result<DownloadStats, DownloadError> {
     let count = chunk_count.max(1);
 
     // Task 2173: straight from object storage when the server offers it and the
     // handshake succeeds. `UseApi` means nothing was published (and nothing is
     // left on disk): this file goes through the API below, as it always did.
     let direct = match &key {
-        DownloadKey::Legacy(master) => crate::direct_download::try_download(api,master,file_id,pin,chunk_count,out_path,progress,display_name).await?,
-        DownloadKey::Explicit(file_key) => crate::direct_download::try_download_with_file_key(api,file_key.clone(),file_id,pin,chunk_count,out_path,progress,display_name).await?,
+        DownloadKey::Legacy(master) => {
+            crate::direct_download::try_download(
+                api,
+                master,
+                file_id,
+                pin,
+                chunk_count,
+                out_path,
+                progress,
+                display_name,
+            )
+            .await?
+        }
+        DownloadKey::Explicit(file_key) => {
+            crate::direct_download::try_download_with_file_key(
+                api,
+                file_key.clone(),
+                file_id,
+                pin,
+                chunk_count,
+                out_path,
+                progress,
+                display_name,
+            )
+            .await?
+        }
     };
-    match direct
-    {
+    match direct {
         crate::direct_download::DirectResult::Done(stats) => return Ok(stats),
         crate::direct_download::DirectResult::UseApi => {}
     }

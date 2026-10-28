@@ -525,7 +525,9 @@ pub async fn stream_encrypt_upload(
     spec: UploadSpec,
     progress: &dyn ChunkProgress,
 ) -> Result<UploadOutcome, String> {
-    if spec.replace_file_key.is_some() && (spec.base_version_number.is_none() || spec.replace_pin.is_none()) {return Err("explicit replacement key requires an existing ID, base version and pin".into());}
+    if spec.replace_file_key.is_some() && (spec.base_version_number.is_none() || spec.replace_pin.is_none()) {
+        return Err("explicit replacement key requires an existing ID, base version and pin".into());
+    }
     // Cheap cancellation path for files that never started.
     if spec.shutdown.load(Ordering::Relaxed) {
         return Err(INTERRUPTED.to_string());
@@ -725,11 +727,17 @@ async fn upload_attempt(
         beebeeb_types::plan_chunks_concurrent(size, ChunkProfile::Cli, spec.concurrency.max(1)).chunk_size_bytes;
     let file = std::fs::File::open(&spec.path).map_err(|e| format!("open {}: {e}", spec.path.display()))?;
     let encryptor = match &spec.replace_file_key {
-        Some(key)=>ChunkEncryptor::from_reader_with_file_key(beebeeb_core::kdf::FileKey::from_bytes(*key.as_bytes()),&file_id_str,size,chunk_size,file),
-        None=>ChunkEncryptor::from_reader_with_chunk_size(master_key,&file_id_str,size,chunk_size,file),
+        Some(key) => ChunkEncryptor::from_reader_with_file_key(
+            beebeeb_core::kdf::FileKey::from_bytes(*key.as_bytes()),
+            &file_id_str,
+            size,
+            chunk_size,
+            file,
+        ),
+        None => ChunkEncryptor::from_reader_with_chunk_size(master_key, &file_id_str, size, chunk_size, file),
     }
-        .and_then(|e| e.with_recorded_pin(pin))
-        .map_err(|e| format!("init encryptor for {}: {e}", spec.file_name))?;
+    .and_then(|e| e.with_recorded_pin(pin))
+    .map_err(|e| format!("init encryptor for {}: {e}", spec.file_name))?;
     let chunk_count = encryptor.chunk_plan().chunk_count as u32;
     let expected_total = encryptor.expected_total_ciphertext();
     let format = encryptor.format();
@@ -740,8 +748,19 @@ async fn upload_attempt(
     //     the DURABLE file_id, so a replace re-encrypts the name under the same id
     //     the server already stores.
     let name_encrypted = match &spec.replace_file_key {
-        Some(key)=>beebeeb_core::encrypt::encrypt_name_for(key,&spec.file_name,mime,ExpectedChunkFormat::recorded_for(format)),
-        None=>beebeeb_core::encrypt::encrypt_name_with_chunk_format(master_key,&file_id_str,&spec.file_name,mime,ExpectedChunkFormat::recorded_for(format)),
+        Some(key) => beebeeb_core::encrypt::encrypt_name_for(
+            key,
+            &spec.file_name,
+            mime,
+            ExpectedChunkFormat::recorded_for(format),
+        ),
+        None => beebeeb_core::encrypt::encrypt_name_with_chunk_format(
+            master_key,
+            &file_id_str,
+            &spec.file_name,
+            mime,
+            ExpectedChunkFormat::recorded_for(format),
+        ),
     }
     .map_err(|e| format!("encrypt name: {e}"))?;
 
@@ -941,7 +960,18 @@ async fn upload_attempt(
     crate::resume::clear(&spec.path);
 
     // 8. Thumbnails: image/* only, one bounded extra read, best-effort.
-    maybe_upload_thumbnail(api, master_key, spec.replace_file_key.as_deref(), &file_id_str, &server_id, &spec.path, mime, size, pin).await;
+    maybe_upload_thumbnail(
+        api,
+        master_key,
+        spec.replace_file_key.as_deref(),
+        &file_id_str,
+        &server_id,
+        &spec.path,
+        mime,
+        size,
+        pin,
+    )
+    .await;
 
     let parsed: Uuid = server_id.parse().map_err(|e| format!("invalid server file id: {e}"))?;
     Ok(UploadOutcome {
@@ -1153,7 +1183,12 @@ async fn maybe_upload_thumbnail(
         Err(_) => return,
     };
     let derived;
-    let file_key = if let Some(key)=explicit_key {key} else {derived=beebeeb_core::kdf::derive_file_key(master_key,file_id_str.as_bytes());&derived};
+    let file_key = if let Some(key) = explicit_key {
+        key
+    } else {
+        derived = beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes());
+        &derived
+    };
 
     if let Some(thumb) = crate::thumbnail::generate_from_file(&bytes, mime) {
         // Same pin rule as the content and the name (core `encrypt_thumbnail_for`).

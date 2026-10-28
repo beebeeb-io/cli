@@ -140,15 +140,60 @@ pub(crate) async fn try_download(
     progress: &dyn ChunkProgress,
     display_name: &str,
 ) -> Result<DirectResult, DownloadError> {
-    try_download_inner(api,ChunkDecryptor::for_push(master_key,file_id,pin),pin,true,file_id,chunk_count,out_path,progress,display_name).await
+    try_download_inner(
+        api,
+        ChunkDecryptor::for_push(master_key, file_id, pin),
+        pin,
+        true,
+        file_id,
+        chunk_count,
+        out_path,
+        progress,
+        display_name,
+    )
+    .await
 }
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn try_download_with_file_key(api:&ApiClient,file_key:std::sync::Arc<beebeeb_core::kdf::FileKey>,file_id:&str,pin:ExpectedChunkFormat,chunk_count:u32,out_path:&Path,progress:&dyn ChunkProgress,display_name:&str)->Result<DirectResult,DownloadError> {
-    let decryptor=ChunkDecryptor::for_push_with_file_key(beebeeb_core::kdf::FileKey::from_bytes(*file_key.as_bytes()),file_id,pin);
-    try_download_inner(api,decryptor,pin,false,file_id,chunk_count,out_path,progress,display_name).await
+pub(crate) async fn try_download_with_file_key(
+    api: &ApiClient,
+    file_key: std::sync::Arc<beebeeb_core::kdf::FileKey>,
+    file_id: &str,
+    pin: ExpectedChunkFormat,
+    chunk_count: u32,
+    out_path: &Path,
+    progress: &dyn ChunkProgress,
+    display_name: &str,
+) -> Result<DirectResult, DownloadError> {
+    let decryptor = ChunkDecryptor::for_push_with_file_key(
+        beebeeb_core::kdf::FileKey::from_bytes(*file_key.as_bytes()),
+        file_id,
+        pin,
+    );
+    try_download_inner(
+        api,
+        decryptor,
+        pin,
+        false,
+        file_id,
+        chunk_count,
+        out_path,
+        progress,
+        display_name,
+    )
+    .await
 }
 #[allow(clippy::too_many_arguments)]
-async fn try_download_inner(api:&ApiClient,mut decryptor:ChunkDecryptor,pin:ExpectedChunkFormat,allow_legacy:bool,file_id:&str,chunk_count:u32,out_path:&Path,progress:&dyn ChunkProgress,display_name:&str)->Result<DirectResult,DownloadError> {
+async fn try_download_inner(
+    api: &ApiClient,
+    mut decryptor: ChunkDecryptor,
+    pin: ExpectedChunkFormat,
+    allow_legacy: bool,
+    file_id: &str,
+    chunk_count: u32,
+    out_path: &Path,
+    progress: &dyn ChunkProgress,
+    display_name: &str,
+) -> Result<DirectResult, DownloadError> {
     let Some(discovery) = api.direct_download_offer().await else {
         return Ok(DirectResult::UseApi);
     };
