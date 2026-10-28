@@ -2843,6 +2843,9 @@ fn remote_version(remote: &RemoteFile) -> Option<i64> {
         .and_then(|r| crate::api::current_version_number(&r.canonical))
 }
 fn remote_changed(remote: &RemoteFile, prior: &FileEntry) -> bool {
+    if remote.id != prior.remote_id {
+        return true;
+    }
     match (remote_version(remote), prior.remote_version) {
         (Some(current), Some(previous)) => current > previous,
         _ => remote.updated_at > prior.last_sync + chrono::Duration::seconds(1),

@@ -66,6 +66,8 @@ pub struct Fixture {
     pub index_conflicts: usize,
     pub concurrent_shared: HashMap<(u32, u32), (u64, Vec<u8>)>,
     pub index_partial: bool,
+    pub review_partial_repair_only: bool,
+    pub review_complete_requested_id: bool,
     pub shared_index: HashMap<(u32, u32), (u64, Vec<u8>)>,
     pub owner_index: HashMap<(u32, u32), (u64, Vec<u8>)>,
     pub upload_request: Value,
@@ -328,16 +330,26 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
         json!({"stored":true})
     } else if method == "POST" && path.ends_with("/complete") {
         let req = f.upload_request.clone();
-        if req["file_id"] == FILE {
+        if req["file_id"] == FILE || f.review_complete_requested_id {
             let chunks = f.uploaded_chunks.len();
-            if let Some(r) = f.rows.iter_mut().find(|r| r["id"] == FILE) {
+            let target = if f.review_complete_requested_id {
+                req["file_id"].as_str().unwrap_or(FILE)
+            } else {
+                FILE
+            };
+            if let Some(r) = f.rows.iter_mut().find(|r| r["id"] == target) {
                 r["name_encrypted"] = req["file_name"].clone();
                 r["version_number"] = json!(r["version_number"].as_u64().unwrap() + 1);
                 r["size_bytes"] = req["size_bytes"].clone();
                 r["chunk_count"] = json!(chunks);
             }
         }
-        json!({"file_id":FILE,"id":FILE})
+        let completed_id = if f.review_complete_requested_id {
+            req["file_id"].as_str().unwrap_or(FILE)
+        } else {
+            FILE
+        };
+        json!({"file_id":completed_id,"id":completed_id})
     } else if method == "GET" && path == "/api/v1/file-requests" {
         f.requests_doc.clone()
     } else if method == "GET" && path == "/api/v1/shares/invites/sent" {
@@ -357,7 +369,14 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
             })
             .cloned()
             .collect::<Vec<_>>();
-        if f.index_partial && query.get("parent_id").map(String::as_str) == Some(ROOT) {
+        let root_listings = f
+            .requests
+            .iter()
+            .filter(|(m, p, _)| m == "GET" && p.starts_with(&format!("/api/v1/files?parent_id={ROOT}")))
+            .count();
+        if (f.index_partial || f.review_partial_repair_only && root_listings >= 2)
+            && query.get("parent_id").map(String::as_str) == Some(ROOT)
+        {
             let mut bad = row(BAD, Some(ROOT), "unreadable", false, true);
             bad["name_encrypted"] = json!("corrupt");
             rows.push(bad);

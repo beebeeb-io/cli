@@ -216,3 +216,10 @@ recorded, generated graph churn is retained in external evidence and excluded.
 The lead's combined review adds identity/version, replacement-resume identity,
 and partial-index reporting fixes. A's full 811/0 gate predates those fixes;
 a new full --no-fail-fast gate is required after all three review fixes.
+
+Review P1-1 identity/version: imported the independent review's opt-in mock
+completion behavior and safety reproduction. RED 0 passed / 1 failed (an
+unexpected upload init). Identity is now checked before version/timestamp.
+GREEN 1 passed / 0 failed, exercising equal and lower versions: no upload,
+conflict exit 3/count 1, local bytes and prior manifest identity retained.
+Evidence: review-p1-identity-{red,green}.log. Existing move tests unchanged.
