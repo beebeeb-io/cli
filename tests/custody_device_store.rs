@@ -250,6 +250,19 @@ async fn a_legacy_root_inside_an_unseen_folder_still_reads() {
     h.close().await;
 }
 
+/// A folder id the server writes in a form that is not a UUID cannot be looked up in the device memory, so it
+/// must not be read as "never seen".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parent_id_that_is_not_a_uuid_refuses_as_unavailable() {
+    let mut f = Fixture::transfer(false);
+    f.rows[1]["parent_id"] = json!("not-a-uuid");
+    let h = Harness::new(f).await;
+    let output = h.home.join("not-a-uuid.txt");
+    let out = h.run(&["pull", FILE, "-o", output.to_str().unwrap()]).await;
+    refusal(&h, &out, &output);
+    h.close().await;
+}
+
 fn refusal(h: &Harness, out: &std::process::Output, output: &std::path::Path) {
     assert!(!out.status.success(), "accepted unusable security state");
     assert!(String::from_utf8_lossy(&out.stderr).contains("This folder's keys are unavailable"));

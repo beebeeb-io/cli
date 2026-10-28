@@ -93,6 +93,15 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     result
 }
 
+/// One folder, one spelling: the lowercase hyphenated UUID, for what is stored and what is compared. A server
+/// that later writes the same id as uppercase, braced, hyphenless or a URN must land on the same entry. An id
+/// that is not a UUID cannot be compared at all, so it is an error and the callers refuse.
+fn canonical(id: &str) -> Result<String, String> {
+    Uuid::parse_str(id)
+        .map(|uuid| uuid.hyphenated().to_string())
+        .map_err(|_| "folder id is not a UUID".into())
+}
+
 impl CustodyStore {
     pub fn open() -> Result<Self, String> {
         Ok(Self { directory: directory() })
@@ -109,15 +118,17 @@ impl CustodyStore {
     }
 
     pub fn seen(&self, id: &str) -> Result<bool, String> {
-        Ok(self.read()?.custody_seen.contains(id))
+        let id = canonical(id)?;
+        Ok(self.read()?.custody_seen.contains(&id))
     }
 
     /// Synchronous durability is intentional: no inventory/content await may happen between authenticating L6
     /// custody and committing this observation.
     pub fn remember(&self, id: &str) -> Result<(), String> {
+        let id = canonical(id)?;
         locked(&self.directory, || {
             let mut record = self.read()?;
-            if record.custody_seen.insert(id.into()) {
+            if record.custody_seen.insert(id) {
                 let bytes = serde_json::to_vec(&record).map_err(|e| format!("serialize custody observations: {e}"))?;
                 atomic_write(&self.directory.join(RECORD), &bytes)?;
             }
@@ -158,5 +169,52 @@ mod tests {
             "{lost} of {} observations were lost to a concurrent writer",
             ids.len()
         );
+    }
+
+    fn scratch() -> (PathBuf, CustodyStore) {
+        let dir = std::env::temp_dir().join(format!("bb-custody-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        (dir.clone(), CustodyStore { directory: dir })
+    }
+
+    /// A server that later writes the same folder id in another form (uppercase, braced, no hyphens, URN) must
+    /// not slip past the set: every form is one canonical lowercase hyphenated string, stored and compared.
+    #[test]
+    fn one_folder_is_one_entry_whatever_form_the_server_writes_its_id_in() {
+        let (dir, store) = scratch();
+        let id = "22222222-2222-4222-8222-22222222abcd";
+        store.remember(id).unwrap();
+        for form in [
+            id.to_uppercase(),
+            format!("{{{id}}}"),
+            id.replace('-', ""),
+            format!("urn:uuid:{id}"),
+        ] {
+            assert!(store.seen(&form).unwrap(), "{form} must be the remembered folder");
+        }
+        // Remembering another spelling adds nothing and writes the canonical form only.
+        store.remember(&id.to_uppercase()).unwrap();
+        let saved = std::fs::read_to_string(dir.join(RECORD)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(saved, format!(r#"{{"custody_seen":["{id}"]}}"#));
+    }
+
+    /// An id that is not a UUID cannot be compared, so it is an error for both calls (the resolver turns it into
+    /// "This folder's keys are unavailable"), and nothing is written.
+    #[test]
+    fn an_id_that_is_not_a_uuid_is_refused_by_seen_and_remember() {
+        let (dir, store) = scratch();
+        for bad in [
+            "",
+            "not-a-uuid",
+            "22222222-2222-4222-8222",
+            "2222222222222222222222222222222g",
+        ] {
+            assert!(store.seen(bad).is_err(), "seen({bad:?}) must refuse");
+            assert!(store.remember(bad).is_err(), "remember({bad:?}) must refuse");
+        }
+        let written = dir.join(RECORD).exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!written, "a refused id must not create the record");
     }
 }
