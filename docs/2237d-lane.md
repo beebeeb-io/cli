@@ -223,3 +223,14 @@ unexpected upload init). Identity is now checked before version/timestamp.
 GREEN 1 passed / 0 failed, exercising equal and lower versions: no upload,
 conflict exit 3/count 1, local bytes and prior manifest identity retained.
 Evidence: review-p1-identity-{red,green}.log. Existing move tests unchanged.
+
+Review P1-2 resume/key identity: the independent reproduction's safety assertion
+failed RED 0/1: init targeted SUB instead of intended FILE. Discard only a
+mismatched explicit-replacement path sidecar before selecting a session; keep
+intended file id/key/base version/pin together and do not abandon the other
+file's server session. GREEN: combined review binary 2/0 (resume case 1/0),
+covering V2 restart and V1 continue policies, intended ciphertext/key/id,
+manifest identity, unrelated version unchanged, no stale-session requests.
+The first post-fix run was 1/1 because the test reused the mock's new session
+id for the stale record; distinct synthetic session ids corrected that probe.
+Evidence: review-p1-resume-red.log, review-p1-resume-green{-2,}.log.

@@ -559,7 +559,15 @@ pub async fn stream_encrypt_upload(
     //     format) the session is abandoned — never PUT to again — and the SAME
     //     file id is inited fresh and uploaded from chunk 0.
     let writing = beebeeb_core::chunk_stream::chunk_format_for_pin(writer_pin(&spec));
-    let mut plan = match crate::resume::resumable_upload(&spec.path, size, mtime_ns) {
+    let mut pending = crate::resume::resumable_upload(&spec.path, size, mtime_ns);
+    // Explicit replacement key/base/pin all belong to spec.file_id. A path
+    // sidecar from another destination must neither redirect this write nor
+    // abandon that other file's server session.
+    if spec.replace_file_key.is_some() && pending.is_some_and(|p| p.file_id != spec.file_id) {
+        crate::resume::clear(&spec.path);
+        pending = None;
+    }
+    let mut plan = match pending {
         Some(pending) => match beebeeb_core::chunk_stream::resume_policy(pending.chunk_format, writing) {
             SessionResume::ContinueSession => SessionPlan::Resume {
                 file_id: pending.file_id,

@@ -68,6 +68,83 @@ async fn changed_identity_conflicts_before_comparing_versions() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_replacement_discards_resume_for_a_different_identity() {
+    for v2 in [true, false] {
+        let mut f = Fixture::transfer(v2);
+        f.review_complete_requested_id = true;
+        f.rows.push(row(SUB, None, "unrelated-existing.txt", false, false));
+        let h = Harness::new(f).await;
+        let d = initial(&h).await;
+        let path = d.join("guest.txt");
+        let edited = b"new local replacement content";
+        std::fs::write(&path, edited).unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        let nanos = meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        // The independent review reproduction: a previous push of this same
+        // unchanged local path targeted the unrelated existing SUB file.
+        // Keep its session distinct from the fresh init returned by the mock.
+        let stale_session = "55555555-5555-4555-8555-555555555555";
+        let db = json!({"uploads":{path.canonicalize().unwrap().to_str().unwrap():{"file_id":SUB,"upload_session_id":stale_session,"chunk_format":if v2 {2} else {1},"direct":false,"size":meta.len(),"mtime_ns":nanos}}});
+        std::fs::write(h.home.join(".config/beebeeb/pending-uploads.json"), db.to_string()).unwrap();
+        let result = sync(&h, &d).await;
+        ok(&result);
+        {
+            let f = h.state.lock().unwrap();
+            assert_eq!(
+                f.upload_request["file_id"], FILE,
+                "resume must never redirect an explicit replacement"
+            );
+            assert_eq!(f.upload_request["base_version_number"], 1);
+            assert_eq!(manifest(&d)["files"]["guest.txt"]["remote_id"], FILE);
+            let other_key = beebeeb_core::kdf::derive_file_key(&master(), SUB.as_bytes());
+            let pin = if v2 {
+                beebeeb_core::chunk_stream::ExpectedChunkFormat::V2
+            } else {
+                beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded
+            };
+            assert!(opened_with_pin(&other_key, FILE, &f.uploaded_chunks, pin).is_err());
+            assert_eq!(
+                opened_with_pin(&item_key(), FILE, &f.uploaded_chunks, pin).unwrap(),
+                edited
+            );
+            assert_eq!(f.rows[1]["version_number"], 2, "intended FILE was replaced");
+            assert_eq!(f.rows[2]["version_number"], 1, "unrelated SUB is unchanged");
+            assert!(
+                !f.requests
+                    .iter()
+                    .any(|(_, path, _)| path.starts_with(&format!("/api/v1/uploads/{stale_session}/")))
+            );
+        }
+        assert_eq!(h.count("POST", &format!("/api/v1/files/{SUB}/upload/abandon")), 0);
+        h.close().await;
+    }
+}
+
+fn opened_with_pin(
+    key: &beebeeb_core::kdf::FileKey,
+    id: &str,
+    frames: &[Vec<u8>],
+    pin: beebeeb_core::chunk_stream::ExpectedChunkFormat,
+) -> Result<Vec<u8>, String> {
+    let mut dec = beebeeb_core::chunk_stream::ChunkDecryptor::for_push_with_file_key(
+        beebeeb_core::kdf::FileKey::from_bytes(*key.as_bytes()),
+        id,
+        pin,
+    );
+    let mut bytes = Vec::new();
+    for frame in frames {
+        bytes.extend(dec.push_frame(frame).map_err(|e| e.to_string())?.data);
+    }
+    dec.finish().map_err(|e| e.to_string())?;
+    Ok(bytes)
+}
+
 impl Harness {
     pub async fn run(&self, args: &[&str]) -> std::process::Output {
         let home = self.home.clone();
