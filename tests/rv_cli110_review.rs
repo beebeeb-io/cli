@@ -1,4 +1,5 @@
-//! Review-only regression probes; the reviewed PR source is unchanged.
+//! Independent review probes adopted from rv-cli110.
+//! Only storage checkpoints change: security state now belongs to the account.
 #[path = "support/shared_folder.rs"]
 mod sf;
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
@@ -77,7 +78,7 @@ async fn reviewed_sync_memory_must_protect_a_second_local_sync_root() {
     std::fs::create_dir(&a).unwrap();
     std::fs::create_dir(&b).unwrap();
     ok(&sync(&h, &a, false).await);
-    let saved: Value = serde_json::from_slice(&std::fs::read(a.join(".bb-sync.json")).unwrap()).unwrap();
+    let saved = h.custody_state();
     assert_eq!(saved["custody_seen"], json!([ROOT]));
     replay(&mut h.state.lock().unwrap(), 405);
     let out = sync(&h, &b, false).await;
@@ -93,6 +94,8 @@ async fn reviewed_dry_run_observation_must_survive_restart() {
     ok(&sync(&h, &dir, true).await);
     assert_eq!(h.count("GET", &format!("/api/v1/shared-folders/{ROOT}/keys")), 1);
     assert!(!dir.join("guest.txt").exists());
+    assert!(!dir.join(".bb-sync.json").exists(), "dry-run must not bind sync state");
+    assert_eq!(h.custody_state()["custody_seen"], json!([ROOT]));
     replay(&mut h.state.lock().unwrap(), 501);
     let out = sync(&h, &dir, false).await;
     require_refusal(&out, &h, &dir.join("guest.txt"));
@@ -189,11 +192,11 @@ async fn reviewed_interrupted_scan_must_retain_opened_custody() {
     );
     assert!(!stopped.success());
     assert_eq!(h.count("GET", &format!("/api/v1/shared-folders/{ROOT}")), 1);
-    let remembered = std::fs::read(dir.join(".bb-sync.json"))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .is_some_and(|v| v["custody_seen"].as_array().is_some_and(|a| a.contains(&json!(ROOT))));
-    eprintln!("authenticated custody followed by interrupted inventory: durable_memory={remembered}");
+    assert_eq!(
+        h.custody_state()["custody_seen"],
+        json!([ROOT]),
+        "L6 observation must be durable before inventory I/O"
+    );
     h.api = upstream;
     replay(&mut h.state.lock().unwrap(), 404);
     let out = sync(&h, &dir, false).await;

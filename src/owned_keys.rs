@@ -7,7 +7,7 @@ use beebeeb_core::{
 };
 use serde_json::Value;
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     sync::Arc,
 };
 
@@ -37,17 +37,34 @@ pub struct OwnedKeyResolver {
     requests: Option<RequestKeyResolver>,
     sent_invites: Option<Vec<Value>>,
     resolved: HashMap<String, ResolvedCliKey>,
-    custody_seen: BTreeSet<String>,
+    custody: Option<crate::custody::CustodyStore>,
 }
 impl OwnedKeyResolver {
     pub fn new() -> Self {
         Self::default()
     }
-    pub fn restore_custody(&mut self, seen: &BTreeSet<String>) {
-        self.custody_seen.extend(seen.iter().cloned());
+    async fn custody(&mut self, api: &ApiClient) -> Result<&crate::custody::CustodyStore, String> {
+        if self.custody.is_none() {
+            self.custody = Some(
+                crate::custody::CustodyStore::open(api)
+                    .await
+                    .map_err(|_| CUSTODY_UNAVAILABLE)?,
+            );
+        }
+        Ok(self.custody.as_ref().unwrap())
     }
-    pub fn custody_seen(&self) -> &BTreeSet<String> {
-        &self.custody_seen
+    async fn seen(&mut self, api: &ApiClient, id: &str) -> Result<bool, String> {
+        self.custody(api)
+            .await?
+            .seen(id)
+            .map_err(|_| CUSTODY_UNAVAILABLE.into())
+    }
+    fn remember(&self, id: &str) -> Result<(), String> {
+        self.custody
+            .as_ref()
+            .ok_or(CUSTODY_UNAVAILABLE)?
+            .remember(id)
+            .map_err(|_| CUSTODY_UNAVAILABLE.into())
     }
     pub fn seed(&mut self, rows: &[Value]) {
         for row in rows {
@@ -97,12 +114,16 @@ impl OwnedKeyResolver {
         master: &MasterKey,
         id: &str,
     ) -> Result<Option<Arc<FileKey>>, String> {
+        let seen = self.seen(api, id).await?;
         if let Some(root) = self.roots.get(id) {
+            if seen && root.legacy_invite {
+                return Err(CUSTODY_UNAVAILABLE.into());
+            }
             return Ok((!root.legacy_invite).then(|| root.key.clone()));
         }
         let custody = api.get_shared_folder(id).await?;
         if custody.is_null() {
-            if self.custody_seen.contains(id) {
+            if seen {
                 return Err(CUSTODY_UNAVAILABLE.into());
             }
             return Ok(None);
@@ -112,7 +133,7 @@ impl OwnedKeyResolver {
         }
         let frame = normalize_wrap(&custody["owner_wrapped_folder_key"])?.ok_or("missing owner custody")?;
         let key = owned_keys::unwrap_folder_custody(master, id, &frame).map_err(|_| "invalid L6 owner custody")?;
-        self.custody_seen.insert(id.into());
+        self.remember(id)?;
         Ok(Some(Arc::new(key)))
     }
 
@@ -287,12 +308,16 @@ impl OwnedKeyResolver {
         Err(UNREADABLE.into())
     }
     async fn load_root(&mut self, api: &ApiClient, master: &MasterKey, id: &str) -> Result<(), String> {
+        let seen = self.seen(api, id).await?;
+        if seen && (self.absent_roots.contains(id) || self.roots.get(id).is_some_and(|r| r.legacy_invite)) {
+            return Err(CUSTODY_UNAVAILABLE.into());
+        }
         if self.roots.contains_key(id) || self.absent_roots.contains(id) {
             return Ok(());
         }
         let custody = api.get_shared_folder(id).await?;
         if custody.is_null() {
-            if self.custody_seen.contains(id) {
+            if seen {
                 return Err(CUSTODY_UNAVAILABLE.into());
             }
             // An approved legacy invite permits its sender to read the existing
@@ -340,7 +365,7 @@ impl OwnedKeyResolver {
         }
         let frame = normalize_wrap(&custody["owner_wrapped_folder_key"])?.ok_or("missing owner custody")?;
         let key = owned_keys::unwrap_folder_custody(master, id, &frame).map_err(|_| "invalid L6 owner custody")?;
-        self.custody_seen.insert(id.into());
+        self.remember(id)?;
         let mut children = HashMap::new();
         let mut cursor = None;
         let mut cursors = HashSet::new();

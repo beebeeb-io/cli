@@ -4,6 +4,7 @@ mod colors;
 mod commands;
 mod config;
 mod crypto;
+mod custody;
 pub mod daemon;
 pub mod device;
 mod direct_download;

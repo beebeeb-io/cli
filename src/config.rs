@@ -120,6 +120,7 @@ pub fn save_config(config: &Config) -> Result<(), String> {
 }
 
 pub fn clear_config() -> Result<(), String> {
+    crate::custody::clear_current()?;
     let path = config_path();
     if path.exists() {
         std::fs::remove_file(&path).map_err(|e| format!("failed to remove config: {e}"))?;

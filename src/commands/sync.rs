@@ -102,12 +102,6 @@ fn is_ignored_path(path: &Path) -> bool {
 struct SyncState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     account_id: Option<String>,
-    // Custody facts may be recorded before the first successful sync binds
-    // opaque keys. This account ID authorizes no file or key-cache reuse.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    custody_account_id: Option<String>,
-    #[serde(default)]
-    custody_seen: BTreeSet<String>,
     remote_path: Option<String>,
     remote_folder_id: Option<Uuid>,
     last_sync: Option<DateTime<Utc>>,
@@ -134,9 +128,6 @@ struct OpaqueOwnedKey {
 }
 fn sync_keys(state: &SyncState) -> Result<OwnedKeyResolver, String> {
     let mut keys = OwnedKeyResolver::new();
-    if state.custody_account_id.is_some() {
-        keys.restore_custody(&state.custody_seen);
-    }
     if state.account_id.is_some() {
         for (id, record) in &state.owned_keys {
             keys.seed(std::slice::from_ref(&record.canonical));
@@ -146,17 +137,6 @@ fn sync_keys(state: &SyncState) -> Result<OwnedKeyResolver, String> {
         }
     }
     Ok(keys)
-}
-/// Save newly authenticated custody before applying files or making writes.
-/// A failed first pass retains only account-scoped custody facts; opaque keys
-/// still require D-L1's successful sync binding. Dry-runs write nothing.
-fn persist_custody(state: &mut SyncState, keys: &OwnedKeyResolver, path: &Path, dry_run: bool) -> Result<(), String> {
-    if dry_run || state.custody_account_id.is_none() || keys.custody_seen().is_subset(&state.custody_seen) {
-        return Ok(());
-    }
-    state.custody_seen.extend(keys.custody_seen().iter().cloned());
-    let data = serde_json::to_vec_pretty(state).map_err(|e| format!("serialize state: {e}"))?;
-    std::fs::write(path, data).map_err(|e| format!("write state file: {e}"))
 }
 #[derive(Serialize, Deserialize, Clone)]
 struct FileEntry {
@@ -673,10 +653,6 @@ pub async fn run(
     };
 
     let account_id = check_sync_account(&api, &state).await?;
-    if state.custody_account_id.as_ref().or(state.account_id.as_ref()) != Some(&account_id) {
-        state.custody_seen.clear();
-    }
-    state.custody_account_id = Some(account_id.clone());
     if state.account_id.is_none() {
         state.owned_keys.clear();
         state.dirty_shared_roots.clear();
@@ -727,7 +703,7 @@ pub async fn run(
             println!(
                 "  {} {}",
                 "mode".custom_color(crate::colors::INK_DIM),
-                "dry-run (no changes will be written)".custom_color(crate::colors::AMBER),
+                "dry-run (no file changes; security observations are saved)".custom_color(crate::colors::AMBER),
             );
         }
         println!();
@@ -737,9 +713,7 @@ pub async fn run(
     let mut total_bytes: u64 = 0;
 
     let mut path_keys = OwnedKeyResolver::new();
-    path_keys.restore_custody(&state.custody_seen);
     let resolved_root = resolve_remote_folder(&api, &master_key, &remote_path, dry_run, &mut path_keys).await;
-    persist_custody(&mut state, &path_keys, &state_path, dry_run)?;
     let remote_folder_id = resolved_root?;
     // `--rebind`: the user accepts the folder resolved now as this directory's
     // remote root. The old manifest describes the other tree, so it is dropped:
@@ -775,7 +749,6 @@ pub async fn run(
     let local_folders = walk_local_folders(&local_dir)?;
 
     let mut keys = sync_keys(&state)?;
-    keys.restore_custody(path_keys.custody_seen());
     let remote_spinner = make_scan_spinner(scan_active, "scanning remote", "entries");
     let mut remote_files: HashMap<String, RemoteFile> = HashMap::new();
     let mut remote_folders: HashMap<String, Uuid> = HashMap::new();
@@ -795,7 +768,6 @@ pub async fn run(
     if let Some(pb) = &remote_spinner {
         pb.finish_and_clear();
     }
-    persist_custody(&mut state, &keys, &state_path, dry_run)?;
     scan_result?;
 
     // Register this device with the server (best-effort, non-fatal)
@@ -1846,7 +1818,6 @@ async fn run_plain_watch(
                         None,
                     )
                     .await;
-                    persist_custody(state, &keys, state_path, false)?;
                     scan_result?;
 
                     let blocked = refresh_watch_reads(
@@ -2184,11 +2155,7 @@ async fn run_tui_watch(
                 None,
             )
             .await;
-            let persistence = {
-                let mut state = sync_shared_state.lock().await;
-                persist_custody(&mut state, &keys, &sync_state_path, false)
-            };
-            if let Err(e) = persistence.and(scan_result) {
+            if let Err(e) = scan_result {
                 let _ = sync_tx.send(TuiEvent::SyncError(e));
                 continue;
             }
@@ -3017,7 +2984,6 @@ async fn finish_owned_sync(
         state.removed_index_ids.clear();
         return crate::shared_folder_index::IndexRepairReport::default();
     }
-    state.custody_seen.extend(keys.custody_seen().iter().cloned());
     if root_changed {
         return crate::shared_folder_index::IndexRepairReport::default();
     }
@@ -3089,7 +3055,6 @@ async fn finish_owned_sync(
             }
         }
     }
-    state.custody_seen.extend(keys.custody_seen().iter().cloned());
     if report.partial || report.deferred > 0 {
         let status = if report.partial { "partial" } else { "deferred" };
         print_notice(&format!(

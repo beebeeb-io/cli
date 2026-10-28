@@ -142,6 +142,7 @@ async fn browser_login(headless_flag: bool) -> Result<(), String> {
     let email = creds["email"].as_str().ok_or("Missing email in credentials")?;
 
     let mut config = load_config();
+    crate::custody::clear_current()?;
     config.session_token = Some(session_token.to_string());
     config.master_key = Some(master_key_b64.to_string());
     config.email = Some(email.to_string());

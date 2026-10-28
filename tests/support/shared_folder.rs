@@ -62,6 +62,7 @@ pub struct Fixture {
     pub changed: bool,
     pub custody_revoked: bool,
     pub custody_status: Option<u16>,
+    pub account_id: Option<String>,
     pub adopt_failures: usize,
     pub adopt_lost: bool,
     pub index_conflicts: usize,
@@ -171,6 +172,21 @@ impl Harness {
             api,
             home,
             server: Some(server),
+        }
+    }
+    pub fn account_state_path(&self, account: &str) -> PathBuf {
+        let config = if cfg!(target_os = "macos") {
+            self.home.join("Library/Application Support/beebeeb")
+        } else {
+            self.home.join(".config/beebeeb")
+        };
+        config.join("accounts").join(format!("{account}.json"))
+    }
+    pub fn custody_state(&self) -> Value {
+        match std::fs::read(self.account_state_path(ACCOUNT)) {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => json!({"custody_seen":[]}),
+            Err(e) => panic!("read custody test state: {e}"),
         }
     }
     pub fn count(&self, method: &str, path: &str) -> usize {
@@ -290,7 +306,7 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
         return axum::Json(json!({"adopted":true})).into_response();
     }
     let value = if method == "GET" && path == "/api/v1/auth/me" {
-        json!({"id":ACCOUNT})
+        json!({"id":f.account_id.as_deref().unwrap_or(ACCOUNT)})
     } else if method == "GET" && path == "/api/v1/transfer/capabilities" {
         json!({"download":if f.direct {vec!["object-download-v1"]} else {vec![]},"upload":[],"storage_hosts":[host],"storage_buckets":[{"host":host,"bucket":"fixture"}],"max_window":32,"url_ttl_seconds":300})
     } else if method == "POST" && path.ends_with("/download-grants") {

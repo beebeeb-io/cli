@@ -100,7 +100,7 @@ async fn never_seen_501_reads_legacy() {
         h.state.lock().unwrap().plaintext
     );
     assert_eq!(h.count("GET", &format!("/api/v1/shares/invites/{BAD}/folder-keys")), 1);
-    assert_eq!(state(&dir)["custody_seen"], json!([]));
+    assert_eq!(h.custody_state()["custody_seen"], json!([]));
     h.close().await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -110,7 +110,7 @@ async fn custody_memory_is_bound_and_survives_second_sync() {
     for _ in 0..2 {
         ok(sync(&h, &dir).await);
         assert_eq!(state(&dir)["account_id"], ACCOUNT);
-        assert_eq!(state(&dir)["custody_seen"], json!([ROOT]));
+        assert_eq!(h.custody_state()["custody_seen"], json!([ROOT]));
     }
     h.close().await;
 }
@@ -124,8 +124,8 @@ async fn first_failed_sync_retains_custody_without_binding_opaque_keys() {
     let saved = state(&dir);
     assert!(saved["account_id"].is_null());
     assert_eq!(saved["owned_keys"], json!({}));
-    assert_eq!(saved["custody_account_id"], ACCOUNT);
-    assert_eq!(saved["custody_seen"], json!([ROOT]));
+    assert_eq!(h.custody_state()["account_id"], ACCOUNT);
+    assert_eq!(h.custody_state()["custody_seen"], json!([ROOT]));
     {
         let mut f = h.state.lock().unwrap();
         f.frames[0][0] ^= 1;
@@ -146,7 +146,7 @@ async fn first_failed_sync_retains_custody_without_binding_opaque_keys() {
             .count(),
         0
     );
-    assert_eq!(state(&dir)["custody_seen"], json!([ROOT]));
+    assert_eq!(h.custody_state()["custody_seen"], json!([ROOT]));
     h.close().await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -163,7 +163,7 @@ async fn unbound_state_cannot_carry_another_accounts_custody_memory() {
     .unwrap();
     ok(sync(&h, &dir).await);
     assert_eq!(state(&dir)["account_id"], ACCOUNT);
-    assert_eq!(state(&dir)["custody_seen"], json!([]));
+    assert_eq!(h.custody_state()["custody_seen"], json!([]));
     assert!(dir.join("guest.txt").exists());
     h.close().await;
 }
