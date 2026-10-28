@@ -71,10 +71,12 @@ pub async fn run(path: Option<String>, opts: LsOpts) -> Result<(), String> {
     api.require_auth()?;
     let master_key = load_master_key()?;
 
+    let mut keys = crate::owned_keys::OwnedKeyResolver::new();
+
     // Resolve the start folder (UUID passthrough or path walk).
     let parent_id = match &path {
         Some(p) if uuid::Uuid::parse_str(p).is_err() => {
-            let resolved = crate::path::resolve_path(&api, &master_key, p).await?;
+            let resolved = crate::path::resolve_path_with_keys(&api, &master_key, p, &mut keys).await?;
             if !resolved.is_folder {
                 return Err(format!(
                     "'{}' is a file, not a folder. Use `bb pull` to download it.",
@@ -87,19 +89,19 @@ pub async fn run(path: Option<String>, opts: LsOpts) -> Result<(), String> {
         None => None,
     };
 
-    let mut listing = decrypt_listing(&api, &master_key, parent_id.as_deref(), false).await?;
+    let mut listing = decrypt_listing(&api, &master_key, parent_id.as_deref(), false, &mut keys).await?;
 
     // `-a/--all`: append trashed entries (flat — the trash listing is not
     // per-folder), flagged so they're visually distinct.
     if opts.all {
-        let mut trashed = decrypt_listing(&api, &master_key, None, true).await?;
+        let mut trashed = decrypt_listing(&api, &master_key, None, true, &mut keys).await?;
         listing.append(&mut trashed);
     }
 
     sort_listing(&mut listing, opts.sort, opts.reverse);
 
     if ui::is_json() {
-        return print_json(&api, &master_key, parent_id.as_deref(), &listing, &opts).await;
+        return print_json(&api, &master_key, parent_id.as_deref(), &listing, &opts, &mut keys).await;
     }
 
     if listing.is_empty() {
@@ -127,7 +129,7 @@ pub async fn run(path: Option<String>, opts: LsOpts) -> Result<(), String> {
     if opts.recursive && opts.depth > 0 {
         for f in &listing {
             if f.is_folder && !f.trashed {
-                Box::pin(print_recursive(&api, &master_key, f, 1, &opts)).await?;
+                Box::pin(print_recursive(&api, &master_key, f, 1, &opts, &mut keys)).await?;
             }
         }
     }
@@ -154,8 +156,9 @@ async fn print_recursive(
     folder: &DecryptedFile,
     depth: usize,
     opts: &LsOpts,
+    keys: &mut crate::owned_keys::OwnedKeyResolver,
 ) -> Result<(), String> {
-    let mut children = decrypt_listing(api, master_key, Some(&folder.id), false).await?;
+    let mut children = decrypt_listing(api, master_key, Some(&folder.id), false, keys).await?;
     if children.is_empty() {
         return Ok(());
     }
@@ -173,7 +176,7 @@ async fn print_recursive(
     if depth < opts.depth {
         for c in &children {
             if c.is_folder {
-                Box::pin(print_recursive(api, master_key, c, depth + 1, opts)).await?;
+                Box::pin(print_recursive(api, master_key, c, depth + 1, opts, keys)).await?;
             }
         }
     }
@@ -186,6 +189,7 @@ async fn decrypt_listing(
     master_key: &beebeeb_core::kdf::MasterKey,
     parent_id: Option<&str>,
     trashed: bool,
+    keys: &mut crate::owned_keys::OwnedKeyResolver,
 ) -> Result<Vec<DecryptedFile>, String> {
     let result = if trashed {
         api.list_trashed().await?
@@ -198,49 +202,15 @@ async fn decrypt_listing(
         .or_else(|| result.get("files").and_then(|f| f.as_array()).cloned())
         .unwrap_or_default();
 
-    let mut request_keys: Option<crate::commands::request::RequestKeyResolver> =
-        if !trashed && files.iter().any(crate::commands::request::is_request_upload) {
-            Some(crate::commands::request::RequestKeyResolver::load(api).await?)
-        } else {
-            None
-        };
-
-    // Name decryption (task 0810): request-upload names use the per-file request
-    // content key (stateful resolver — kept sequential); all other names use the
-    // master key and are decrypted in ONE parallel batch. Output order preserved.
-    let mut request_names: Vec<Option<String>> = Vec::with_capacity(files.len());
-    for file in &files {
-        let name_encrypted = file.get("name_encrypted").and_then(|v| v.as_str()).unwrap_or("");
-        request_names.push(
-            request_keys
-                .as_mut()
-                .and_then(|rk| rk.content_key(master_key, file))
-                .and_then(|c| crate::crypto::decrypt_name_with_key(&c, name_encrypted)),
-        );
-    }
-    let batch_items: Vec<(&str, &str)> = files
-        .iter()
-        .zip(&request_names)
-        .filter(|(_, rn)| rn.is_none())
-        .map(|(file, _)| {
-            (
-                file.get("id").and_then(|v| v.as_str()).unwrap_or(""),
-                file.get("name_encrypted").and_then(|v| v.as_str()).unwrap_or(""),
-            )
-        })
-        .collect();
-    let mut batch = crate::crypto::decrypt_names(master_key, &batch_items).into_iter();
-
+    keys.seed(&files);
     let mut out = Vec::with_capacity(files.len());
-    for (i, file) in files.iter().enumerate() {
+    for file in &files {
         let file_id = file.get("id").and_then(|v| v.as_str()).unwrap_or("");
-        let name = match request_names[i].take() {
-            Some(rn) => rn,
-            None => batch
-                .next()
-                .flatten()
-                .unwrap_or_else(|| format!("(encrypted) {}", &file_id[..8.min(file_id.len())])),
-        };
+        let name = keys
+            .resolve(api, master_key, file)
+            .await
+            .map(|r| r.name)
+            .unwrap_or_else(|_| crate::owned_keys::UNREADABLE.to_string());
 
         out.push(DecryptedFile {
             id: file_id.to_string(),
@@ -357,6 +327,7 @@ async fn print_json(
     parent_id: Option<&str>,
     listing: &[DecryptedFile],
     opts: &LsOpts,
+    keys: &mut crate::owned_keys::OwnedKeyResolver,
 ) -> Result<(), String> {
     fn to_json(f: &DecryptedFile) -> serde_json::Value {
         serde_json::json!({
@@ -380,7 +351,7 @@ async fn print_json(
             .map(|f| (f.id.clone(), 1usize))
             .collect();
         while let Some((fid, d)) = stack.pop() {
-            let children = decrypt_listing(api, master_key, Some(&fid), false).await?;
+            let children = decrypt_listing(api, master_key, Some(&fid), false, keys).await?;
             for c in &children {
                 let mut row = to_json(c);
                 row["parent"] = serde_json::json!(fid);

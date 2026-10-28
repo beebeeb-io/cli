@@ -12,6 +12,7 @@ mod download;
 mod env_detect;
 mod exit;
 mod loopback;
+mod owned_keys;
 mod path;
 mod region;
 mod resume;

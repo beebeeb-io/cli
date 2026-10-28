@@ -129,6 +129,15 @@ pub struct ResolvedPath {
 ///   decrypted children of the current parent.
 /// - Returns `Err` if any segment cannot be found.
 pub async fn resolve_path(api: &ApiClient, master_key: &MasterKey, path: &str) -> Result<ResolvedPath, String> {
+    resolve_path_with_keys(api, master_key, path, &mut crate::owned_keys::OwnedKeyResolver::new()).await
+}
+
+pub async fn resolve_path_with_keys(
+    api: &ApiClient,
+    master_key: &MasterKey,
+    path: &str,
+    keys: &mut crate::owned_keys::OwnedKeyResolver,
+) -> Result<ResolvedPath, String> {
     let trimmed = path.trim_matches('/');
 
     // Empty path → root.
@@ -163,15 +172,17 @@ pub async fn resolve_path(api: &ApiClient, master_key: &MasterKey, path: &str) -
             .and_then(|v| v.as_array())
             .ok_or_else(|| "unexpected API response: missing files array".to_string())?;
 
+        keys.seed(files);
         let mut found = false;
 
         for entry in files {
             let id = entry.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-            let name_enc = entry.get("name_encrypted").and_then(|v| v.as_str()).unwrap_or_default();
             let is_folder = entry.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
 
-            let decrypted =
-                crate::crypto::decrypt_name(master_key, id, name_enc).unwrap_or_else(|| name_enc.to_string());
+            let Ok(resolved) = keys.resolve(api, master_key, entry).await else {
+                continue;
+            };
+            let decrypted = resolved.name;
 
             if decrypted.eq_ignore_ascii_case(&decoded) {
                 current = ResolvedPath {

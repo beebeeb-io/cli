@@ -710,6 +710,45 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    /// Missing custody is explicit; network/auth/malformed responses never mean absent.
+    pub async fn get_shared_folder(&self, id: &str) -> Result<Value, String> {
+        let resp = self
+            .client
+            .get(self.url(&format!("/api/v1/shared-folders/{id}")))
+            .bearer_auth(self.require_auth()?)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(Value::Null);
+        }
+        parse_response(resp).await
+    }
+    pub async fn get_shared_folder_keys(&self, id: &str, cursor: Option<&str>) -> Result<Value, String> {
+        let mut request = self
+            .client
+            .get(self.url(&format!("/api/v1/shared-folders/{id}/keys")))
+            .bearer_auth(self.require_auth()?)
+            .query(&[("limit", "500")]);
+        if let Some(cursor) = cursor {
+            request = request.query(&[("cursor", cursor)]);
+        }
+        parse_response(request.send().await.map_err(format_request_error)?).await
+    }
+    pub async fn adopt_owner_key(&self, id: &str, wrap: &str) -> Result<bool, String> {
+        let response = self
+            .client
+            .post(self.url(&format!("/api/v1/files/{id}/owner-key")))
+            .bearer_auth(self.require_auth()?)
+            .json(&serde_json::json!({"owner_wrapped_file_key": wrap}))
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        parse_response(response).await?["adopted"]
+            .as_bool()
+            .ok_or_else(|| "missing adoption result".into())
+    }
+
     /// V2 chunked upload init: `POST /api/v1/uploads/init`.
     ///
     /// Opens an upload *session* against the v2 route (`routes/uploads.rs`). The
