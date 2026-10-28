@@ -520,6 +520,7 @@ mod tests {
             file_id,
             base_version_number: None,
             replace_pin: None,
+            replace_file_key: None,
             parent_id: None,
             concurrency: CONCURRENCY,
             shutdown: Arc::new(AtomicBool::new(false)),

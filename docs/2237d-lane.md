@@ -61,3 +61,9 @@ Decision: Task 8 also wires push.rs as the concrete replacement consumer;
 sync.rs receives only the new UploadSpec field until Task 9.
 ZIP explicit-key entries use a per-entry authenticated disk staging file and
 stream into the existing archive writer, retaining bounded memory and cleanup.
+
+Task 8 corrected-fixture baseline red: 6 executed, 1 passed / 5 failed
+(t8-corrected-red.log). Restored green plus integrations: 35 passed / 0 failed;
+download/direct unit selection: 23 passed / 0 failed; upload/direct selection:
+55 passed / 0 failed, 1 pre-existing ignored (t8-regressions.log).
+The direct_upload.rs test fixture also needs the new optional UploadSpec field.

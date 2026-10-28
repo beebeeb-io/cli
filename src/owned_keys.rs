@@ -17,6 +17,7 @@ pub struct ResolvedCliKey {
     pub origin: KeyOrigin,
     pub canonical: Value,
     pub pending_owner_wrap: Option<Vec<u8>>,
+    #[allow(dead_code)] // Consumed by Task 9 sync/index integration.
     pub shared_root_id: Option<String>,
     pub name: String,
 }
