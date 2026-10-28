@@ -64,6 +64,22 @@ async fn logout_offline_clears_only_current_account_observations() {
     h.close().await;
 }
 
+/// The store fails closed when it cannot be read, so signing out is the only way to repair it. A damaged
+/// binding must therefore never be able to stop `logout` (or `login`, which clears through the same call).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unreadable_binding_does_not_trap_logout() {
+    let mut h = Harness::new(Fixture::transfer(false)).await;
+    ok(h.run(&["ls", "Shared"]).await);
+    let binding = h.account_state_path(ACCOUNT).parent().unwrap().join("active.json");
+    std::fs::write(&binding, b"broken-json").unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    h.api = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    ok(h.run(&["logout"]).await);
+    assert!(!binding.exists(), "an unreadable binding must be removed by sign-out");
+    h.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn corrupt_account_store_refuses_before_legacy_or_content() {
     let h = Harness::new(Fixture::transfer(false)).await;

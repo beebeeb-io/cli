@@ -115,12 +115,17 @@ pub fn clear_current() -> Result<(), String> {
         return Ok(());
     }
     locked(&directory, || {
-        if let Some(account) = active(&directory)? {
+        // Every other reader fails closed on a damaged store, so this call is how it gets repaired: an
+        // unreadable binding is dropped as well. It cannot say whose record it named; that record stays
+        // and is only read again if the same account signs back in, which can only make a check stricter.
+        if let Some(account) = active(&directory).ok().flatten() {
             remove_account(&directory, account)?;
-            std::fs::remove_file(directory.join("active.json")).map_err(|e| format!("clear account binding: {e}"))?;
-            sync_directory(&directory)?;
         }
-        Ok(())
+        match std::fs::remove_file(directory.join("active.json")) {
+            Ok(()) => sync_directory(&directory),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("clear account binding: {e}")),
+        }
     })
 }
 
