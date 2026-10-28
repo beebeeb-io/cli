@@ -201,3 +201,11 @@ The seven existing move_parent tests and every expectation remain unchanged.
 Targeted green: 7 passed / 0 failed (regression-move-green.log).
 Decision: preserve resolver authentication and L7b rules; no name/key fallback
 was added. Full cargo test --locked --no-fail-fast is the required final gate.
+
+Full Linux gate on repair commit 5844ab2, isolated HOME, loopback refusal guard:
+`cargo test --locked --no-fail-fast` exited 0. Aggregate verified against all
+individual result rows and summaries (29 binaries; no filters):
+TOTAL: 811 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; 29 test binaries.
+The four existing ignored tests were not enabled. Evidence:
+regression-full-suite.log, regression-full-total.txt, count-full-suite.py.
+This supersedes all earlier selected-check totals as the final suite evidence.
