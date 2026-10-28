@@ -209,3 +209,10 @@ TOTAL: 811 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; 29 test bina
 The four existing ignored tests were not enabled. Evidence:
 regression-full-suite.log, regression-full-total.txt, count-full-suite.py.
 This supersedes all earlier selected-check totals as the final suite evidence.
+
+Formatting and strict all-target Clippy after A both exited 0. Graphify
+refreshed 108/108 AST files, 2,436 nodes, 7,617 edges, exit 0. As previously
+recorded, generated graph churn is retained in external evidence and excluded.
+The lead's combined review adds identity/version, replacement-resume identity,
+and partial-index reporting fixes. A's full 811/0 gate predates those fixes;
+a new full --no-fail-fast gate is required after all three review fixes.
