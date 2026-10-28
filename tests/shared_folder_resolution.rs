@@ -37,11 +37,22 @@ async fn nested_guest_and_member_names() {
     h.close().await;
     let mut legacy = Fixture::basic();
     legacy.legacy_invite = true;
+    legacy.inventory[0]["encrypted_file_key"]=json!(B64.encode(beebeeb_core::encrypt::encrypt_chunk_raw(&folder_key(),item_key().as_bytes()).unwrap()));
     let h = Harness::new(legacy).await;
     let v = h.json(&["ls", "Shared"]).await;
     assert_eq!(v["files"][0]["name"], "guest.txt");
     assert_eq!(h.count("PUT", "/api/v1/shared-folders"), 0);
     h.close().await;
+    let mut custody=Fixture::basic();
+    custody.inventory[0]["encrypted_file_key"]=json!(B64.encode(beebeeb_core::encrypt::encrypt_chunk_raw(&folder_key(),item_key().as_bytes()).unwrap()));
+    custody.legacy_invite=false;
+    let h=Harness::new(custody).await;
+    let v=h.json(&["ls","Shared"]).await;
+    assert_eq!(v["files"][0]["name"],"can't open (added via shared folder)");
+    assert_eq!(h.count("GET","/api/v1/shares/invites/sent"),0);
+    assert_eq!(h.count("GET",&format!("/api/v1/shares/invites/{BAD}/folder-keys")),0);
+    h.close().await;
+
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn canonical_enrichment_wire_shapes() {

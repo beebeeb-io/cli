@@ -24,6 +24,7 @@ pub struct ResolvedCliKey {
 struct SharedRoot {
     key: Arc<FileKey>,
     children: HashMap<String, Vec<u8>>,
+    legacy_invite: bool,
 }
 #[derive(Default)]
 pub struct OwnedKeyResolver {
@@ -164,7 +165,9 @@ impl OwnedKeyResolver {
                 } else {
                     1
                 };
-                let resolved = owned_keys::resolve_owned_key(
+                let resolved = if root.legacy_invite {
+                    owned_keys::ResolvedOwnedKey { key: legacy_invite_child_key(&root.key,frame)?, origin: KeyOrigin::FolderWrap }
+                } else { owned_keys::resolve_owned_key(
                     master,
                     &id,
                     owner.as_ref().ok().and_then(|x| x.as_deref()),
@@ -176,7 +179,7 @@ impl OwnedKeyResolver {
                     }),
                     true,
                 )
-                .map_err(|_| UNREADABLE)?;
+                .map_err(|_| UNREADABLE)? };
                 let name = authenticated_name(&resolved.key, &canonical)?;
                 let pending = owned_keys::wrap_key_to_owner(master, &id, &resolved.key)
                     .map_err(|_| "can't prepare owner envelope")?;
@@ -242,6 +245,7 @@ impl OwnedKeyResolver {
                     SharedRoot {
                         key: Arc::new(key),
                         children,
+                        legacy_invite: true,
                     },
                 );
             } else {
@@ -282,6 +286,7 @@ impl OwnedKeyResolver {
             SharedRoot {
                 key: Arc::new(key),
                 children,
+                legacy_invite: false,
             },
         );
         Ok(())
@@ -356,4 +361,12 @@ pub fn normalize_wrap(v: &Value) -> Result<Option<Vec<u8>>, String> {
         return Err("invalid envelope length".into());
     }
     Ok(Some(bytes))
+}
+
+/// L7b flag-off invite reader. Reached only after permanent custody was absent;
+/// custody-backed roots always use core's bound reader and never fall back here.
+fn legacy_invite_child_key(folder_key: &FileKey, frame: &[u8]) -> Result<FileKey,String> {
+    let bytes=zeroize::Zeroizing::new(beebeeb_core::encrypt::decrypt_chunk_raw(folder_key,frame).map_err(|_| "invalid legacy invite child envelope")?);
+    let key: [u8;32]=bytes.as_slice().try_into().map_err(|_| "invalid legacy invite child key length")?;
+    Ok(FileKey::from_bytes(key))
 }
