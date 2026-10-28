@@ -35,7 +35,7 @@ pub struct OwnedKeyResolver {
     pending: HashMap<String, Vec<u8>>,
     requests: Option<RequestKeyResolver>,
     sent_invites: Option<Vec<Value>>,
-    resolved: HashMap<String,ResolvedCliKey>,
+    resolved: HashMap<String, ResolvedCliKey>,
 }
 impl OwnedKeyResolver {
     pub fn new() -> Self {
@@ -57,15 +57,64 @@ impl OwnedKeyResolver {
         self.pending.insert(file_id.into(), owner_wrap);
         Ok(())
     }
-    pub fn resolved(&self) -> Vec<ResolvedCliKey> { self.resolved.values().cloned().collect() }
-    pub fn pending(&self,id:&str) -> Option<Vec<u8>> {self.pending.get(id).cloned()}
-    pub async fn folder_key(&mut self,api:&ApiClient,master:&MasterKey,id:&str)->Result<Option<Arc<FileKey>>,String> {
-        self.load_root(api,master,id).await?;
-        Ok(self.roots.get(id).filter(|r|!r.legacy_invite).map(|r|r.key.clone()))
+    pub fn resolved(&self) -> Vec<ResolvedCliKey> {
+        self.resolved.values().cloned().collect()
     }
-    pub async fn resolve(&mut self,api:&ApiClient,master:&MasterKey,row:&Value)->Result<ResolvedCliKey,String> {
-        let resolved=self.resolve_inner(api,master,row).await?;
-        self.resolved.insert(resolved.canonical["id"].as_str().ok_or("missing id")?.into(),resolved.clone());
+    pub fn pending(&self, id: &str) -> Option<Vec<u8>> {
+        self.pending.get(id).cloned()
+    }
+    pub fn descendant_ids(&self, root: &str) -> HashSet<String> {
+        self.rows
+            .iter()
+            .filter(|(_, row)| {
+                let mut parent = row["parent_id"].as_str();
+                let mut seen = HashSet::new();
+                while let Some(id) = parent {
+                    if id == root {
+                        return true;
+                    }
+                    if !seen.insert(id) || seen.len() > 256 {
+                        break;
+                    }
+                    parent = self.rows.get(id).and_then(|r| r["parent_id"].as_str());
+                }
+                false
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+    pub async fn folder_key(
+        &mut self,
+        api: &ApiClient,
+        master: &MasterKey,
+        id: &str,
+    ) -> Result<Option<Arc<FileKey>>, String> {
+        if let Some(root) = self.roots.get(id) {
+            return Ok((!root.legacy_invite).then(|| root.key.clone()));
+        }
+        let custody = api.get_shared_folder(id).await?;
+        if custody.is_null() {
+            return Ok(None);
+        }
+        if custody["folder_id"].as_str() != Some(id) || custody["role"].as_str() != Some("owner") {
+            return Err("not owner custody".into());
+        }
+        let frame = normalize_wrap(&custody["owner_wrapped_folder_key"])?.ok_or("missing owner custody")?;
+        let key = owned_keys::unwrap_folder_custody(master, id, &frame).map_err(|_| "invalid L6 owner custody")?;
+        Ok(Some(Arc::new(key)))
+    }
+
+    pub async fn resolve(
+        &mut self,
+        api: &ApiClient,
+        master: &MasterKey,
+        row: &Value,
+    ) -> Result<ResolvedCliKey, String> {
+        let resolved = self.resolve_inner(api, master, row).await?;
+        self.resolved.insert(
+            resolved.canonical["id"].as_str().ok_or("missing id")?.into(),
+            resolved.clone(),
+        );
         Ok(resolved)
     }
     async fn resolve_inner(
@@ -179,20 +228,25 @@ impl OwnedKeyResolver {
                     1
                 };
                 let resolved = if root.legacy_invite {
-                    owned_keys::ResolvedOwnedKey { key: legacy_invite_child_key(&root.key,frame)?, origin: KeyOrigin::FolderWrap }
-                } else { owned_keys::resolve_owned_key(
-                    master,
-                    &id,
-                    owner.as_ref().ok().and_then(|x| x.as_deref()),
-                    Some(FolderWrap {
-                        shared_folder_id: &root_id,
-                        kind,
-                        folder_key: &root.key,
-                        wrapped_key: frame,
-                    }),
-                    true,
-                )
-                .map_err(|_| UNREADABLE)? };
+                    owned_keys::ResolvedOwnedKey {
+                        key: legacy_invite_child_key(&root.key, frame)?,
+                        origin: KeyOrigin::FolderWrap,
+                    }
+                } else {
+                    owned_keys::resolve_owned_key(
+                        master,
+                        &id,
+                        owner.as_ref().ok().and_then(|x| x.as_deref()),
+                        Some(FolderWrap {
+                            shared_folder_id: &root_id,
+                            kind,
+                            folder_key: &root.key,
+                            wrapped_key: frame,
+                        }),
+                        true,
+                    )
+                    .map_err(|_| UNREADABLE)?
+                };
                 let name = authenticated_name(&resolved.key, &canonical)?;
                 let pending = owned_keys::wrap_key_to_owner(master, &id, &resolved.key)
                     .map_err(|_| "can't prepare owner envelope")?;
@@ -335,8 +389,11 @@ impl OwnedKeyResolver {
         match confirmed {
             Ok(()) => {
                 self.pending.remove(id);
-                self.rows.insert(id.into(),winner.clone());
-                if let Some(cached)=self.resolved.get_mut(id){cached.canonical=winner;cached.pending_owner_wrap=None;}
+                self.rows.insert(id.into(), winner.clone());
+                if let Some(cached) = self.resolved.get_mut(id) {
+                    cached.canonical = winner;
+                    cached.pending_owner_wrap = None;
+                }
                 Ok(true)
             }
             Err(e) => {
@@ -380,8 +437,14 @@ pub fn normalize_wrap(v: &Value) -> Result<Option<Vec<u8>>, String> {
 
 /// L7b flag-off invite reader. Reached only after permanent custody was absent;
 /// custody-backed roots always use core's bound reader and never fall back here.
-fn legacy_invite_child_key(folder_key: &FileKey, frame: &[u8]) -> Result<FileKey,String> {
-    let bytes=zeroize::Zeroizing::new(beebeeb_core::encrypt::decrypt_chunk_raw(folder_key,frame).map_err(|_| "invalid legacy invite child envelope")?);
-    let key: [u8;32]=bytes.as_slice().try_into().map_err(|_| "invalid legacy invite child key length")?;
+fn legacy_invite_child_key(folder_key: &FileKey, frame: &[u8]) -> Result<FileKey, String> {
+    let bytes = zeroize::Zeroizing::new(
+        beebeeb_core::encrypt::decrypt_chunk_raw(folder_key, frame)
+            .map_err(|_| "invalid legacy invite child envelope")?,
+    );
+    let key: [u8; 32] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| "invalid legacy invite child key length")?;
     Ok(FileKey::from_bytes(key))
 }

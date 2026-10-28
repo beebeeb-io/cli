@@ -207,9 +207,4 @@ impl Harness {
         .await
         .unwrap()
     }
-    pub async fn json(&self, args: &[&str]) -> serde_json::Value {
-        let out = self.run(args).await;
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        serde_json::from_slice(&out.stdout).unwrap()
-    }
 }

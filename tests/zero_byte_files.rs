@@ -49,7 +49,10 @@ struct Mock {
 
 async fn start_mock(mock: Mock) -> String {
     let app = Router::new()
-        .route("/api/v1/auth/me",get(||async{Json(json!({"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}))}))
+        .route(
+            "/api/v1/auth/me",
+            get(|| async { Json(json!({"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"})) }),
+        )
         .route(
             "/api/v1/files/usage",
             get(|| async { Json(json!({ "used_bytes": 0 })) }),

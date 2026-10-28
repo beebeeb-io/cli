@@ -44,7 +44,10 @@ struct Calls {
 /// Starts the mock API on an ephemeral port; returns its base URL.
 async fn start_mock(calls: Calls) -> String {
     let app = Router::new()
-        .route("/api/v1/auth/me",get(||async{Json(json!({"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}))}))
+        .route(
+            "/api/v1/auth/me",
+            get(|| async { Json(json!({"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"})) }),
+        )
         .route(
             "/api/v1/files/usage",
             get(|| async { Json(json!({ "used_bytes": 0 })) }),
