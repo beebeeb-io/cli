@@ -102,6 +102,10 @@ fn is_ignored_path(path: &Path) -> bool {
 struct SyncState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     account_id: Option<String>,
+    // Custody facts may be recorded before the first successful sync binds
+    // opaque keys. This account ID authorizes no file or key-cache reuse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    custody_account_id: Option<String>,
     #[serde(default)]
     custody_seen: BTreeSet<String>,
     remote_path: Option<String>,
@@ -130,8 +134,10 @@ struct OpaqueOwnedKey {
 }
 fn sync_keys(state: &SyncState) -> Result<OwnedKeyResolver, String> {
     let mut keys = OwnedKeyResolver::new();
-    if state.account_id.is_some() {
+    if state.custody_account_id.is_some() {
         keys.restore_custody(&state.custody_seen);
+    }
+    if state.account_id.is_some() {
         for (id, record) in &state.owned_keys {
             keys.seed(std::slice::from_ref(&record.canonical));
             if let Some(frame) = &record.pending_owner_wrap {
@@ -142,9 +148,10 @@ fn sync_keys(state: &SyncState) -> Result<OwnedKeyResolver, String> {
     Ok(keys)
 }
 /// Save newly authenticated custody before applying files or making writes.
-/// Unbound state and dry-runs retain the D-L1 no-persistence boundary.
+/// A failed first pass retains only account-scoped custody facts; opaque keys
+/// still require D-L1's successful sync binding. Dry-runs write nothing.
 fn persist_custody(state: &mut SyncState, keys: &OwnedKeyResolver, path: &Path, dry_run: bool) -> Result<(), String> {
-    if dry_run || state.account_id.is_none() || keys.custody_seen().is_subset(&state.custody_seen) {
+    if dry_run || state.custody_account_id.is_none() || keys.custody_seen().is_subset(&state.custody_seen) {
         return Ok(());
     }
     state.custody_seen.extend(keys.custody_seen().iter().cloned());
@@ -666,8 +673,11 @@ pub async fn run(
     };
 
     let account_id = check_sync_account(&api, &state).await?;
-    if state.account_id.is_none() {
+    if state.custody_account_id.as_ref().or(state.account_id.as_ref()) != Some(&account_id) {
         state.custody_seen.clear();
+    }
+    state.custody_account_id = Some(account_id.clone());
+    if state.account_id.is_none() {
         state.owned_keys.clear();
         state.dirty_shared_roots.clear();
         state.removed_index_ids.clear();
@@ -3002,7 +3012,6 @@ async fn finish_owned_sync(
     root_changed: bool,
 ) -> crate::shared_folder_index::IndexRepairReport {
     if state.account_id.is_none() {
-        state.custody_seen.clear();
         state.owned_keys.clear();
         state.dirty_shared_roots.clear();
         state.removed_index_ids.clear();

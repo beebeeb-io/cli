@@ -115,6 +115,41 @@ async fn custody_memory_is_bound_and_survives_second_sync() {
     h.close().await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_failed_sync_retains_custody_without_binding_opaque_keys() {
+    let mut f = Fixture::transfer(false);
+    f.frames[0][0] ^= 1;
+    let h = Harness::new(f).await;
+    let dir = dir(&h);
+    assert_eq!(sync(&h, &dir).await.status.code(), Some(3));
+    let saved = state(&dir);
+    assert!(saved["account_id"].is_null());
+    assert_eq!(saved["owned_keys"], json!({}));
+    assert_eq!(saved["custody_account_id"], ACCOUNT);
+    assert_eq!(saved["custody_seen"], json!([ROOT]));
+    {
+        let mut f = h.state.lock().unwrap();
+        f.frames[0][0] ^= 1;
+        legacy(&mut f, 404);
+        f.requests.clear();
+    }
+    let out = sync(&h, &dir).await;
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("This folder's keys are unavailable"));
+    assert!(!dir.join("guest.txt").exists());
+    assert_eq!(
+        h.state
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .filter(|(m, _, _)| m != "GET")
+            .count(),
+        0
+    );
+    assert_eq!(state(&dir)["custody_seen"], json!([ROOT]));
+    h.close().await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unbound_state_cannot_carry_another_accounts_custody_memory() {
     let mut f = Fixture::transfer(false);
     legacy(&mut f, 501);
@@ -122,7 +157,8 @@ async fn unbound_state_cannot_carry_another_accounts_custody_memory() {
     let dir = dir(&h);
     std::fs::write(
         dir.join(".bb-sync.json"),
-        json!({"remote_path":"/Shared", "remote_folder_id":ROOT, "custody_seen":[ROOT]}).to_string(),
+        json!({"remote_path":"/Shared", "remote_folder_id":ROOT, "custody_account_id":BAD, "custody_seen":[ROOT]})
+            .to_string(),
     )
     .unwrap();
     ok(sync(&h, &dir).await);
