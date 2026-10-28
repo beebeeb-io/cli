@@ -190,21 +190,22 @@ async fn rename_move_overwrite_converge() {
     let edited = b"owner local replacement preserves the random key";
     std::fs::write(d.join("Nested/renamed.txt"), edited).unwrap();
     ok(sync(&h, &d).await);
-    let f = h.state.lock().unwrap();
-    assert_eq!(f.upload_request["file_id"], FILE);
-    assert_eq!(f.upload_request["base_version_number"], 2);
-    let mut dec = beebeeb_core::chunk_stream::ChunkDecryptor::for_push_with_file_key(
-        item_key(),
-        FILE,
-        beebeeb_core::chunk_stream::ExpectedChunkFormat::V2,
-    );
-    let mut plain = Vec::new();
-    for c in &f.uploaded_chunks {
-        plain.extend(dec.push_frame(c).unwrap().data);
+    {
+        let f = h.state.lock().unwrap();
+        assert_eq!(f.upload_request["file_id"], FILE);
+        assert_eq!(f.upload_request["base_version_number"], 2);
+        let mut dec = beebeeb_core::chunk_stream::ChunkDecryptor::for_push_with_file_key(
+            item_key(),
+            FILE,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::V2,
+        );
+        let mut plain = Vec::new();
+        for c in &f.uploaded_chunks {
+            plain.extend(dec.push_frame(c).unwrap().data);
+        }
+        dec.finish().unwrap();
+        assert_eq!(plain, edited);
     }
-    dec.finish().unwrap();
-    assert_eq!(plain, edited);
-    drop(f);
     assert_eq!(h.count("DELETE", &format!("/api/v1/files/{FILE}")), 0);
     assert_eq!(h.count("POST", &format!("/api/v1/files/{FILE}/trash")), 0);
     repeats(&h, &d).await;

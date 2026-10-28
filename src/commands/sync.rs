@@ -850,7 +850,11 @@ pub async fn run(
         pb.finish_and_clear();
     }
 
-    let moved_conflicts = reconcile_moves(&local_dir, &mut state, &local_files, &remote_files, dry_run)?;
+    let moved_conflicts = if root_changed {
+        HashSet::new()
+    } else {
+        reconcile_moves(&local_dir, &mut state, &local_files, &remote_files, dry_run)?
+    };
     if !dry_run {
         local_files = walk_local_files(&local_dir)?;
     }
@@ -941,7 +945,7 @@ pub async fn run(
     let mut skipped = 0u32;
     // Uploads that errored (not Ctrl-C). Together with `conflicts` this decides
     // whether a one-shot pass may report "synced" and exit 0.
-    let mut failed = listing_health.unreadable as u32 + u32::from(listing_health.truncated);
+    let mut failed = listing_health.unreadable + u32::from(listing_health.truncated);
 
     // ── Phase 1: classify each file into an action ─────────────────────────
     enum SyncAction {
@@ -1813,7 +1817,6 @@ async fn run_plain_watch(
                         state,
                         &mut resync_local,
                         &resync_remote_files,
-                        &resync_health,
                         remote_folder_id,
                     )
                     .await?;
@@ -2177,7 +2180,6 @@ async fn run_tui_watch(
                 &mut sync_state,
                 &mut resync_local,
                 &resync_remote_files,
-                &resync_health,
                 remote_folder_id,
             )
             .await
@@ -2925,7 +2927,6 @@ async fn refresh_watch_reads(
     state: &mut SyncState,
     local: &mut HashMap<String, LocalFile>,
     remote: &HashMap<String, RemoteFile>,
-    health: &crate::sync_safety::ListingHealth,
     remote_root: Uuid,
 ) -> Result<HashSet<String>, String> {
     if root_unreconciled(state, remote_root) {
@@ -2951,9 +2952,6 @@ async fn refresh_watch_reads(
                 print_notice(&format!("{rel}: {e}"));
             }
         }
-    }
-    if !listing_healthy(health) {
-        print_notice("remote listing incomplete; local uploads held until it is readable");
     }
     *local = walk_local_files(root)?;
     Ok(blocked)
