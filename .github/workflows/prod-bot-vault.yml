@@ -35,7 +35,7 @@ jobs:
       BB_BOTS_DISABLED: ${{ vars.BB_BOTS_DISABLED }}
       API_BASE_URL: https://api.beebeeb.io
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Guard — secrets present
