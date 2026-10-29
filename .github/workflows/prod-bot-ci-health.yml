@@ -38,7 +38,7 @@ jobs:
       # state, if a cache entry exists. restore-keys prefix-matches so this
       # finds the most recent entry regardless of exact run id.
       - name: Restore previous state
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: scripts/prod-bots/ci-health-state.json
           key: ci-health-state-${{ github.run_id }}
@@ -58,7 +58,7 @@ jobs:
       # -- a cache key can only be written once, so every run needs its own.
       - name: Save state
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: scripts/prod-bots/ci-health-state.json
           key: ci-health-state-${{ github.run_id }}
