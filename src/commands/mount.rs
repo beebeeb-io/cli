@@ -1400,10 +1400,13 @@ mod fuse_impl {
         //             format!("auto_unmount requires acl != Owner, got: {:?}", options.acl),
         //
         // because fusermount needs `allow_other` to handle auto_unmount.
-        // `RootAndOwner` is the narrowest ACL that keeps `AutoUnmount`: fuser
-        // rejects every request whose uid is neither the owner nor root
-        // (src/request.rs:73-76), so other local accounts get EPERM. Root can
-        // read the user's files anyway, so this gives nothing away.
+        // `RootAndOwner` is the narrowest ACL that keeps `AutoUnmount`. Other
+        // local accounts are refused by the kernel: `DefaultPermissions` checks
+        // the owner-only modes from `node_perm` (EACCES). fuser also filters
+        // most request kinds from other uids (src/request.rs:73-90), but not
+        // read, write, readdir, fsync, release or forget. It still mounts with
+        // the kernel's allow_other, so root-run jobs can read the mount; the
+        // stricter `Owner` needs dropping `AutoUnmount` (follow-up task).
         (mount_options, SessionACL::RootAndOwner)
     }
 
