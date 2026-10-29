@@ -173,11 +173,13 @@ mod fuse_impl {
     // Chunk size is now computed dynamically via beebeeb_types::plan_chunks().
     // See the adaptive chunk-size ladder in beebeeb-types/src/chunk.rs.
 
-    /// Permission bits for one inode: `0o755` for directories, `0o644` for
-    /// files. Every attribute path goes through here, so the mode cannot drift
-    /// between `getattr`, `lookup`, `create` and `setattr` replies.
+    /// Permission bits for one inode: `0o700` for directories, `0o600` for
+    /// files — owner only. The mount is the decrypted vault, so no other local
+    /// account may list a directory or read a file. Every attribute path goes
+    /// through here, so the mode cannot drift between `getattr`, `lookup`,
+    /// `create` and `setattr` replies.
     fn node_perm(is_dir: bool) -> u16 {
-        if is_dir { 0o755 } else { 0o644 }
+        if is_dir { 0o700 } else { 0o600 }
     }
 
     // ── Inode table entry ─────────────────────────────────────────────────────
@@ -223,7 +225,7 @@ mod fuse_impl {
                 ctime: self.modified,
                 crtime: self.modified,
                 kind,
-                // rw-r--r-- for files, rwxr-xr-x for dirs — writable by owner
+                // Owner-only: this is the decrypted vault.
                 perm: node_perm(self.is_dir),
                 nlink: if self.is_dir { 2 } else { 1 },
                 uid: unsafe { libc::getuid() },
@@ -797,6 +799,8 @@ mod fuse_impl {
             &mut self,
             _req: &Request,
             ino: INodeNo,
+            // Ignored: a requested mode is never applied, so `chmod` cannot widen
+            // the owner-only modes from `node_perm()`.
             _mode: Option<u32>,
             _uid: Option<u32>,
             _gid: Option<u32>,
@@ -1383,7 +1387,24 @@ mod fuse_impl {
             MountOption::DefaultPermissions,
         ];
         // `allow_other` is a session ACL in fuser 0.17+, not a MountOption.
-        (mount_options, SessionACL::All)
+        //
+        // `SessionACL::Owner` (fuser's default, no `allow_other`) is what we
+        // want, but fuser 0.18 refuses it together with `AutoUnmount`
+        // (src/session.rs:165-170):
+        //
+        //     if options.mount_options.contains(&MountOption::AutoUnmount)
+        //         && options.acl == SessionACL::Owner
+        //     {
+        //         return Err(io::Error::new(
+        //             io::ErrorKind::InvalidInput,
+        //             format!("auto_unmount requires acl != Owner, got: {:?}", options.acl),
+        //
+        // because fusermount needs `allow_other` to handle auto_unmount.
+        // `RootAndOwner` is the narrowest ACL that keeps `AutoUnmount`: fuser
+        // rejects every request whose uid is neither the owner nor root
+        // (src/request.rs:73-76), so other local accounts get EPERM. Root can
+        // read the user's files anyway, so this gives nothing away.
+        (mount_options, SessionACL::RootAndOwner)
     }
 
     pub async fn run(mountpoint: PathBuf, foreground: bool, cache_ttl: u64) -> Result<(), String> {
@@ -1529,11 +1550,7 @@ mod fuse_impl {
             // fuser 0.18 `Session::new` rejects `AutoUnmount` with `SessionACL::Owner`
             // (src/session.rs:165-170), so the ACL is also never `Owner` here.
             if options.contains(&MountOption::AutoUnmount) {
-                assert_ne!(
-                    acl,
-                    SessionACL::Owner,
-                    "fuser 0.18: auto_unmount requires acl != Owner"
-                );
+                assert_ne!(acl, SessionACL::Owner, "fuser 0.18: auto_unmount requires acl != Owner");
             }
         }
 
