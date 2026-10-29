@@ -28,7 +28,7 @@ jobs:
       BOT_PROBE_1_PASSWORD: ${{ secrets.BOT_PROBE_1_PASSWORD }}
       BB_BOTS_DISABLED: ${{ vars.BB_BOTS_DISABLED }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Guard — secrets present

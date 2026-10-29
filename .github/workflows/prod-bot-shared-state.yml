@@ -27,7 +27,7 @@ jobs:
     env:
       BB_BOTS_DISABLED: ${{ vars.BB_BOTS_DISABLED }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: oven-sh/setup-bun@v1

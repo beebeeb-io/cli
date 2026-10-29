@@ -32,7 +32,7 @@ jobs:
   ci-health:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Overwrites the checked-out (seed) file with the last run's actual
       # state, if a cache entry exists. restore-keys prefix-matches so this
