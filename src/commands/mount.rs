@@ -173,6 +173,13 @@ mod fuse_impl {
     // Chunk size is now computed dynamically via beebeeb_types::plan_chunks().
     // See the adaptive chunk-size ladder in beebeeb-types/src/chunk.rs.
 
+    /// Permission bits for one inode: `0o755` for directories, `0o644` for
+    /// files. Every attribute path goes through here, so the mode cannot drift
+    /// between `getattr`, `lookup`, `create` and `setattr` replies.
+    fn node_perm(is_dir: bool) -> u16 {
+        if is_dir { 0o755 } else { 0o644 }
+    }
+
     // ── Inode table entry ─────────────────────────────────────────────────────
 
     #[derive(Clone)]
@@ -217,7 +224,7 @@ mod fuse_impl {
                 crtime: self.modified,
                 kind,
                 // rw-r--r-- for files, rwxr-xr-x for dirs — writable by owner
-                perm: if self.is_dir { 0o755 } else { 0o644 },
+                perm: node_perm(self.is_dir),
                 nlink: if self.is_dir { 2 } else { 1 },
                 uid: unsafe { libc::getuid() },
                 gid: unsafe { libc::getgid() },
@@ -550,7 +557,7 @@ mod fuse_impl {
                 ctime: SystemTime::now(),
                 crtime: SystemTime::now(),
                 kind: FileType::Directory,
-                perm: 0o755,
+                perm: node_perm(true),
                 nlink: 2,
                 uid: unsafe { libc::getuid() },
                 gid: unsafe { libc::getgid() },
@@ -1363,6 +1370,22 @@ mod fuse_impl {
 
     // ── CLI entry points ──────────────────────────────────────────────────────
 
+    /// The mount options and session ACL `bb mount` hands to fuser.
+    ///
+    /// Pulled out of [`run`] so a test can assert who is allowed to access the
+    /// mount without mounting anything.
+    fn mount_config() -> (Vec<MountOption>, SessionACL) {
+        let mount_options = vec![
+            MountOption::RW, // Day 2: full read-write
+            MountOption::FSName("beebeeb".to_string()),
+            MountOption::Subtype("beebeeb".to_string()),
+            MountOption::AutoUnmount,
+            MountOption::DefaultPermissions,
+        ];
+        // `allow_other` is a session ACL in fuser 0.17+, not a MountOption.
+        (mount_options, SessionACL::All)
+    }
+
     pub async fn run(mountpoint: PathBuf, foreground: bool, cache_ttl: u64) -> Result<(), String> {
         let config = load_config();
         if config.session_token.is_none() {
@@ -1392,15 +1415,9 @@ mod fuse_impl {
 
         // `Config` is `non_exhaustive`: build it from its default and set fields.
         let mut options = Config::default();
-        options.mount_options = vec![
-            MountOption::RW, // Day 2: full read-write
-            MountOption::FSName("beebeeb".to_string()),
-            MountOption::Subtype("beebeeb".to_string()),
-            MountOption::AutoUnmount,
-            MountOption::DefaultPermissions,
-        ];
-        // `allow_other` is a session ACL in fuser 0.17+, not a MountOption.
-        options.acl = SessionACL::All;
+        let (mount_options, acl) = mount_config();
+        options.mount_options = mount_options;
+        options.acl = acl;
 
         let mp = mountpoint.clone();
         println!();
