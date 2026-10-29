@@ -60,6 +60,31 @@ jobs:
       - name: help link check
         run: cargo test --bin bb help_links_return_200 -- --ignored --nocapture
 
+  fuse:
+    name: Fuse feature (clippy)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      # The `fuse` feature links against libfuse3 (mount.rs), so the headers
+      # and pkg-config must be present before cargo builds the crate.
+      - name: Install libfuse3
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends libfuse3-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # action pinned; toolchain set below
+        with:
+          toolchain: "1.96.0"
+          components: clippy
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      # `mount.rs` is only compiled with `--features fuse`; without this job a
+      # broken FUSE port would keep the default-feature CI green.
+      - name: cargo clippy (fuse)
+        run: cargo clippy --locked --features fuse --all-targets -- -D warnings
+
   installer:
     name: Installer update regression
     runs-on: ubuntu-latest

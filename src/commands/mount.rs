@@ -157,8 +157,9 @@ mod fuse_impl {
     use base64::Engine as _;
     use colored::Colorize;
     use fuser::{
-        FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
-        ReplyOpen, Request,
+        BsdFileFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation, INodeNo,
+        LockOwner, MountOption, OpenFlags, RenameFlags, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
+        ReplyOpen, Request, SessionACL, WriteFlags,
     };
     use zeroize::Zeroizing;
 
@@ -207,7 +208,7 @@ mod fuse_impl {
                 FileType::RegularFile
             };
             FileAttr {
-                ino,
+                ino: INodeNo(ino),
                 size: self.size,
                 blocks: self.size.div_ceil(512),
                 atime: self.modified,
@@ -245,6 +246,14 @@ mod fuse_impl {
     // ── Filesystem state ──────────────────────────────────────────────────────
 
     pub struct BeebeebFs {
+        /// fuser 0.17+ calls the `Filesystem` methods through `&self` and
+        /// requires the type to be `Send + Sync`. All mutable state lives
+        /// behind one mutex; the default single-threaded session takes it
+        /// once per request.
+        inner: std::sync::Mutex<BeebeebFsState>,
+    }
+
+    struct BeebeebFsState {
         rt: tokio::runtime::Runtime,
         api: ApiClient,
         master_key: beebeeb_core::kdf::MasterKey,
@@ -266,6 +275,20 @@ mod fuse_impl {
 
     impl BeebeebFs {
         pub fn new(api: ApiClient, master_key: beebeeb_core::kdf::MasterKey, cache_ttl: Duration) -> Self {
+            Self {
+                inner: std::sync::Mutex::new(BeebeebFsState::new(api, master_key, cache_ttl)),
+            }
+        }
+
+        fn lock(&self) -> std::sync::MutexGuard<'_, BeebeebFsState> {
+            // A panic while holding the lock must not take the whole mount
+            // down: the state itself is still consistent enough to continue.
+            self.inner.lock().unwrap_or_else(|e| e.into_inner())
+        }
+    }
+
+    impl BeebeebFsState {
+        fn new(api: ApiClient, master_key: beebeeb_core::kdf::MasterKey, cache_ttl: Duration) -> Self {
             let mut fs = Self {
                 rt: tokio::runtime::Runtime::new().expect("failed to create FUSE tokio runtime"),
                 api,
@@ -405,7 +428,7 @@ mod fuse_impl {
             let children = self.populate_dir(parent_ino);
             children
                 .into_iter()
-                .find(|&ino| self.inodes.get(&ino).map_or(false, |e| e.name == name))
+                .find(|&ino| self.inodes.get(&ino).is_some_and(|e| e.name == name))
         }
 
         // ── File download ─────────────────────────────────────────────────────
@@ -519,7 +542,7 @@ mod fuse_impl {
 
         fn root_attr() -> FileAttr {
             FileAttr {
-                ino: ROOT_INO,
+                ino: INodeNo(ROOT_INO),
                 size: 0,
                 blocks: 0,
                 atime: SystemTime::now(),
@@ -538,16 +561,18 @@ mod fuse_impl {
         }
     }
 
-    // ── FUSE trait implementation ─────────────────────────────────────────────
+    // ── FUSE request handlers ─────────────────────────────────────────────────
 
-    impl Filesystem for BeebeebFs {
+    #[allow(clippy::too_many_arguments)]
+    impl BeebeebFsState {
         // ─── Read operations ──────────────────────────────────────────────────
 
-        fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
+        fn lookup(&mut self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
+            let parent = parent.0;
             let name_str = match name.to_str() {
                 Some(n) => n.to_string(),
                 None => {
-                    reply.error(libc::ENOENT);
+                    reply.error(Errno::ENOENT);
                     return;
                 }
             };
@@ -559,18 +584,19 @@ mod fuse_impl {
                         match self.inodes.get(&ino) {
                             Some(e) => e.clone().file_attr(ino),
                             None => {
-                                reply.error(libc::ENOENT);
+                                reply.error(Errno::ENOENT);
                                 return;
                             }
                         }
                     };
-                    reply.entry(&ATTR_TTL, &attr, 0);
+                    reply.entry(&ATTR_TTL, &attr, Generation(0));
                 }
-                None => reply.error(libc::ENOENT),
+                None => reply.error(Errno::ENOENT),
             }
         }
 
-        fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
+        fn getattr(&mut self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
+            let ino = ino.0;
             if ino == ROOT_INO {
                 reply.attr(&ATTR_TTL, &Self::root_attr());
                 return;
@@ -580,11 +606,12 @@ mod fuse_impl {
                     let a = e.clone().file_attr(ino);
                     reply.attr(&ATTR_TTL, &a);
                 }
-                None => reply.error(libc::ENOENT),
+                None => reply.error(Errno::ENOENT),
             }
         }
 
-        fn readdir(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, mut reply: ReplyDirectory) {
+        fn readdir(&mut self, _req: &Request, ino: INodeNo, _fh: FileHandle, offset: u64, mut reply: ReplyDirectory) {
+            let ino = ino.0;
             let parent_ino = self.inodes.get(&ino).map(|e| e.parent_ino).unwrap_or(ROOT_INO);
             let mut entries: Vec<(u64, FileType, String)> = vec![
                 (ino, FileType::Directory, ".".to_string()),
@@ -604,36 +631,38 @@ mod fuse_impl {
             }
 
             for (i, (child_ino, kind, name)) in entries.iter().enumerate().skip(offset as usize) {
-                if reply.add(*child_ino, (i + 1) as i64, *kind, name) {
+                if reply.add(INodeNo(*child_ino), (i + 1) as u64, *kind, name) {
                     break;
                 }
             }
             reply.ok();
         }
 
-        fn open(&mut self, _req: &Request, ino: u64, _flags: i32, reply: ReplyOpen) {
+        fn open(&mut self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+            let ino = ino.0;
             match self.inodes.get(&ino) {
-                Some(e) if !e.is_dir => reply.opened(ino, 0),
-                Some(_) => reply.error(libc::EISDIR),
-                None => reply.error(libc::ENOENT),
+                Some(e) if !e.is_dir => reply.opened(FileHandle(ino), FopenFlags::empty()),
+                Some(_) => reply.error(Errno::EISDIR),
+                None => reply.error(Errno::ENOENT),
             }
         }
 
         fn read(
             &mut self,
             _req: &Request,
-            ino: u64,
-            _fh: u64,
-            offset: i64,
+            ino: INodeNo,
+            _fh: FileHandle,
+            offset: u64,
             size: u32,
-            _flags: i32,
-            _lock_owner: Option<u64>,
+            _flags: OpenFlags,
+            _lock_owner: Option<LockOwner>,
             reply: ReplyData,
         ) {
+            let ino = ino.0;
             if !self.file_cache.contains_key(&ino) {
                 if let Err(e) = self.fetch_file(ino) {
                     eprintln!("[mount] read ino={ino}: {e}");
-                    reply.error(libc::EIO);
+                    reply.error(Errno::EIO);
                     return;
                 }
             }
@@ -643,7 +672,7 @@ mod fuse_impl {
                     let end = (start + size as usize).min(data.len());
                     reply.data(&data[start..end]);
                 }
-                None => reply.error(libc::EIO),
+                None => reply.error(Errno::EIO),
             }
         }
 
@@ -654,17 +683,18 @@ mod fuse_impl {
         fn create(
             &mut self,
             _req: &Request,
-            parent: u64,
+            parent: INodeNo,
             name: &OsStr,
             _mode: u32,
             _umask: u32,
             _flags: i32,
             reply: fuser::ReplyCreate,
         ) {
+            let parent = parent.0;
             let name_str = match name.to_str() {
                 Some(n) => n.to_string(),
                 None => {
-                    reply.error(libc::EINVAL);
+                    reply.error(Errno::EINVAL);
                     return;
                 }
             };
@@ -710,26 +740,27 @@ mod fuse_impl {
             self.write_buffers.insert(ino, Vec::new());
 
             let attr = self.inodes[&ino].file_attr(ino);
-            // generation=0, fh=ino (we key write_buffers by ino), flags=0
-            reply.created(&ATTR_TTL, &attr, 0, ino, 0);
+            // generation=0, fh=ino (we key write_buffers by ino), no open flags
+            reply.created(&ATTR_TTL, &attr, Generation(0), FileHandle(ino), FopenFlags::empty());
         }
 
         /// Accumulate `data` at `offset` into the in-memory write buffer.
         fn write(
             &mut self,
             _req: &Request,
-            ino: u64,
-            _fh: u64,
-            offset: i64,
+            ino: INodeNo,
+            _fh: FileHandle,
+            offset: u64,
             data: &[u8],
-            _write_flags: u32,
-            _flags: i32,
-            _lock_owner: Option<u64>,
+            _write_flags: WriteFlags,
+            _flags: OpenFlags,
+            _lock_owner: Option<LockOwner>,
             reply: fuser::ReplyWrite,
         ) {
+            let ino = ino.0;
             // Only files with an active write buffer accept writes.
             if !self.write_buffers.contains_key(&ino) {
-                reply.error(libc::ENOTSUP);
+                reply.error(Errno::ENOTSUP);
                 return;
             }
 
@@ -758,7 +789,7 @@ mod fuse_impl {
         fn setattr(
             &mut self,
             _req: &Request,
-            ino: u64,
+            ino: INodeNo,
             _mode: Option<u32>,
             _uid: Option<u32>,
             _gid: Option<u32>,
@@ -766,13 +797,14 @@ mod fuse_impl {
             _atime: Option<fuser::TimeOrNow>,
             _mtime: Option<fuser::TimeOrNow>,
             _ctime: Option<SystemTime>,
-            _fh: Option<u64>,
+            _fh: Option<FileHandle>,
             _crtime: Option<SystemTime>,
             _chgtime: Option<SystemTime>,
             _bkuptime: Option<SystemTime>,
-            _flags: Option<u32>,
+            _flags: Option<BsdFileFlags>,
             reply: ReplyAttr,
         ) {
+            let ino = ino.0;
             if ino == ROOT_INO {
                 reply.attr(&ATTR_TTL, &Self::root_attr());
                 return;
@@ -799,7 +831,7 @@ mod fuse_impl {
 
             match self.inodes.get(&ino) {
                 Some(e) => reply.attr(&ATTR_TTL, &e.clone().file_attr(ino)),
-                None => reply.error(libc::ENOENT),
+                None => reply.error(Errno::ENOENT),
             }
         }
 
@@ -807,13 +839,14 @@ mod fuse_impl {
         fn release(
             &mut self,
             _req: &Request,
-            ino: u64,
-            _fh: u64,
-            _flags: i32,
-            _lock_owner: Option<u64>,
+            ino: INodeNo,
+            _fh: FileHandle,
+            _flags: OpenFlags,
+            _lock_owner: Option<LockOwner>,
             _flush: bool,
             reply: ReplyEmpty,
         ) {
+            let ino = ino.0;
             // Take the write buffer — if absent, nothing to upload.
             let buf = match self.write_buffers.remove(&ino) {
                 Some(b) => b,
@@ -831,7 +864,7 @@ mod fuse_impl {
                     Ok(_) => reply.ok(),
                     Err(e) => {
                         eprintln!("[mount] release upload (new file): {e}");
-                        reply.error(libc::EIO);
+                        reply.error(Errno::EIO);
                     }
                 }
                 return;
@@ -842,7 +875,7 @@ mod fuse_impl {
                 let (name, parent_ino, old_file_id) = match self.inodes.get(&ino) {
                     Some(e) => (e.name.clone(), e.parent_ino, e.file_id.clone()),
                     None => {
-                        reply.error(libc::ENOENT);
+                        reply.error(Errno::ENOENT);
                         return;
                     }
                 };
@@ -863,7 +896,7 @@ mod fuse_impl {
                     Ok(_) => reply.ok(),
                     Err(e) => {
                         eprintln!("[mount] release upload (overwrite): {e}");
-                        reply.error(libc::EIO);
+                        reply.error(Errno::EIO);
                     }
                 }
                 return;
@@ -876,11 +909,12 @@ mod fuse_impl {
         // ─── Directory write operations ───────────────────────────────────────
 
         /// Create an encrypted folder.
-        fn mkdir(&mut self, _req: &Request, parent: u64, name: &OsStr, _mode: u32, _umask: u32, reply: ReplyEntry) {
+        fn mkdir(&mut self, _req: &Request, parent: INodeNo, name: &OsStr, _mode: u32, _umask: u32, reply: ReplyEntry) {
+            let parent = parent.0;
             let name_str = match name.to_str() {
                 Some(n) => n.to_string(),
                 None => {
-                    reply.error(libc::EINVAL);
+                    reply.error(Errno::EINVAL);
                     return;
                 }
             };
@@ -893,7 +927,7 @@ mod fuse_impl {
                 Ok(b) => b,
                 Err(e) => {
                     eprintln!("[mount] mkdir encrypt: {e}");
-                    reply.error(libc::EIO);
+                    reply.error(Errno::EIO);
                     return;
                 }
             };
@@ -901,7 +935,7 @@ mod fuse_impl {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("[mount] mkdir serialize: {e}");
-                    reply.error(libc::EIO);
+                    reply.error(Errno::EIO);
                     return;
                 }
             };
@@ -919,7 +953,7 @@ mod fuse_impl {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!("[mount] mkdir API: {e}");
-                    reply.error(libc::EIO);
+                    reply.error(Errno::EIO);
                     return;
                 }
             };
@@ -950,15 +984,16 @@ mod fuse_impl {
             self.dir_cache.remove(&parent);
 
             let attr = self.inodes[&ino].file_attr(ino);
-            reply.entry(&ATTR_TTL, &attr, 0);
+            reply.entry(&ATTR_TTL, &attr, Generation(0));
         }
 
         /// Soft-delete (trash) a file.
-        fn unlink(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        fn unlink(&mut self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+            let parent = parent.0;
             let name_str = match name.to_str() {
                 Some(n) => n,
                 None => {
-                    reply.error(libc::EINVAL);
+                    reply.error(Errno::EINVAL);
                     return;
                 }
             };
@@ -966,7 +1001,7 @@ mod fuse_impl {
             let ino = match self.find_child(parent, name_str) {
                 Some(i) => i,
                 None => {
-                    reply.error(libc::ENOENT);
+                    reply.error(Errno::ENOENT);
                     return;
                 }
             };
@@ -986,7 +1021,7 @@ mod fuse_impl {
 
             if let Err(e) = self.rt.block_on(self.api.trash_file(&file_id)) {
                 eprintln!("[mount] unlink {file_id}: {e}");
-                reply.error(libc::EIO);
+                reply.error(Errno::EIO);
                 return;
             }
 
@@ -999,11 +1034,12 @@ mod fuse_impl {
         }
 
         /// Soft-delete (trash) an empty folder.
-        fn rmdir(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        fn rmdir(&mut self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+            let parent = parent.0;
             let name_str = match name.to_str() {
                 Some(n) => n,
                 None => {
-                    reply.error(libc::EINVAL);
+                    reply.error(Errno::EINVAL);
                     return;
                 }
             };
@@ -1011,7 +1047,7 @@ mod fuse_impl {
             let ino = match self.find_child(parent, name_str) {
                 Some(i) => i,
                 None => {
-                    reply.error(libc::ENOENT);
+                    reply.error(Errno::ENOENT);
                     return;
                 }
             };
@@ -1019,7 +1055,7 @@ mod fuse_impl {
             // Must be empty: list children (bypasses cache to be sure).
             let children = self.populate_dir(ino);
             if !children.is_empty() {
-                reply.error(libc::ENOTEMPTY);
+                reply.error(Errno::ENOTEMPTY);
                 return;
             }
 
@@ -1035,7 +1071,7 @@ mod fuse_impl {
 
             if let Err(e) = self.rt.block_on(self.api.trash_file(&file_id)) {
                 eprintln!("[mount] rmdir {file_id}: {e}");
-                reply.error(libc::EIO);
+                reply.error(Errno::EIO);
                 return;
             }
 
@@ -1050,24 +1086,26 @@ mod fuse_impl {
         fn rename(
             &mut self,
             _req: &Request,
-            parent: u64,
+            parent: INodeNo,
             name: &OsStr,
-            newparent: u64,
+            newparent: INodeNo,
             newname: &OsStr,
-            _flags: u32,
+            _flags: RenameFlags,
             reply: ReplyEmpty,
         ) {
+            let parent = parent.0;
+            let newparent = newparent.0;
             let name_str = match name.to_str() {
                 Some(n) => n,
                 None => {
-                    reply.error(libc::EINVAL);
+                    reply.error(Errno::EINVAL);
                     return;
                 }
             };
             let newname_str = match newname.to_str() {
                 Some(n) => n.to_string(),
                 None => {
-                    reply.error(libc::EINVAL);
+                    reply.error(Errno::EINVAL);
                     return;
                 }
             };
@@ -1075,7 +1113,7 @@ mod fuse_impl {
             let ino = match self.find_child(parent, name_str) {
                 Some(i) => i,
                 None => {
-                    reply.error(libc::ENOENT);
+                    reply.error(Errno::ENOENT);
                     return;
                 }
             };
@@ -1083,7 +1121,7 @@ mod fuse_impl {
             let (file_id, key_uuid, old_name) = match self.inodes.get(&ino) {
                 Some(e) => (e.file_id.clone(), e.key_uuid, e.name.clone()),
                 None => {
-                    reply.error(libc::ENOENT);
+                    reply.error(Errno::ENOENT);
                     return;
                 }
             };
@@ -1098,8 +1136,8 @@ mod fuse_impl {
                 Err(e) => {
                     eprintln!("[mount] rename parent {newparent}: {e}");
                     let errno = match e {
-                        crate::commands::move_target::ParentError::NotFound => libc::ENOENT,
-                        _ => libc::EIO,
+                        crate::commands::move_target::ParentError::NotFound => Errno::ENOENT,
+                        _ => Errno::EIO,
                     };
                     reply.error(errno);
                     return;
@@ -1140,13 +1178,13 @@ mod fuse_impl {
                         Ok(s) => Some(s),
                         Err(e) => {
                             eprintln!("[mount] rename serialize: {e}");
-                            reply.error(libc::EIO);
+                            reply.error(Errno::EIO);
                             return;
                         }
                     },
                     Err(e) => {
                         eprintln!("[mount] rename encrypt: {e}");
-                        reply.error(libc::EIO);
+                        reply.error(Errno::EIO);
                         return;
                     }
                 }
@@ -1171,7 +1209,7 @@ mod fuse_impl {
                     .move_file(&file_id, new_name_enc.as_deref(), new_parent_file_id),
             ) {
                 eprintln!("[mount] rename move_file: {e}");
-                reply.error(libc::EIO);
+                reply.error(Errno::EIO);
                 return;
             }
 
@@ -1189,6 +1227,130 @@ mod fuse_impl {
                 self.dir_cache.remove(&newparent);
             }
             reply.ok();
+        }
+    }
+
+    // ── FUSE trait implementation (locks the state per request) ───────────────
+
+    impl Filesystem for BeebeebFs {
+        fn lookup(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
+            self.lock().lookup(req, parent, name, reply);
+        }
+
+        fn getattr(&self, req: &Request, ino: INodeNo, fh: Option<FileHandle>, reply: ReplyAttr) {
+            self.lock().getattr(req, ino, fh, reply);
+        }
+
+        fn readdir(&self, req: &Request, ino: INodeNo, fh: FileHandle, offset: u64, reply: ReplyDirectory) {
+            self.lock().readdir(req, ino, fh, offset, reply);
+        }
+
+        fn open(&self, req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+            self.lock().open(req, ino, flags, reply);
+        }
+
+        fn read(
+            &self,
+            req: &Request,
+            ino: INodeNo,
+            fh: FileHandle,
+            offset: u64,
+            size: u32,
+            flags: OpenFlags,
+            lock_owner: Option<LockOwner>,
+            reply: ReplyData,
+        ) {
+            self.lock().read(req, ino, fh, offset, size, flags, lock_owner, reply);
+        }
+
+        fn create(
+            &self,
+            req: &Request,
+            parent: INodeNo,
+            name: &OsStr,
+            mode: u32,
+            umask: u32,
+            flags: i32,
+            reply: fuser::ReplyCreate,
+        ) {
+            self.lock().create(req, parent, name, mode, umask, flags, reply);
+        }
+
+        fn write(
+            &self,
+            req: &Request,
+            ino: INodeNo,
+            fh: FileHandle,
+            offset: u64,
+            data: &[u8],
+            write_flags: WriteFlags,
+            flags: OpenFlags,
+            lock_owner: Option<LockOwner>,
+            reply: fuser::ReplyWrite,
+        ) {
+            self.lock()
+                .write(req, ino, fh, offset, data, write_flags, flags, lock_owner, reply);
+        }
+
+        fn setattr(
+            &self,
+            req: &Request,
+            ino: INodeNo,
+            mode: Option<u32>,
+            uid: Option<u32>,
+            gid: Option<u32>,
+            size: Option<u64>,
+            atime: Option<fuser::TimeOrNow>,
+            mtime: Option<fuser::TimeOrNow>,
+            ctime: Option<SystemTime>,
+            fh: Option<FileHandle>,
+            crtime: Option<SystemTime>,
+            chgtime: Option<SystemTime>,
+            bkuptime: Option<SystemTime>,
+            flags: Option<BsdFileFlags>,
+            reply: ReplyAttr,
+        ) {
+            self.lock().setattr(
+                req, ino, mode, uid, gid, size, atime, mtime, ctime, fh, crtime, chgtime, bkuptime, flags, reply,
+            );
+        }
+
+        fn release(
+            &self,
+            req: &Request,
+            ino: INodeNo,
+            fh: FileHandle,
+            flags: OpenFlags,
+            lock_owner: Option<LockOwner>,
+            flush: bool,
+            reply: ReplyEmpty,
+        ) {
+            self.lock().release(req, ino, fh, flags, lock_owner, flush, reply);
+        }
+
+        fn mkdir(&self, req: &Request, parent: INodeNo, name: &OsStr, mode: u32, umask: u32, reply: ReplyEntry) {
+            self.lock().mkdir(req, parent, name, mode, umask, reply);
+        }
+
+        fn unlink(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+            self.lock().unlink(req, parent, name, reply);
+        }
+
+        fn rmdir(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+            self.lock().rmdir(req, parent, name, reply);
+        }
+
+        fn rename(
+            &self,
+            req: &Request,
+            parent: INodeNo,
+            name: &OsStr,
+            newparent: INodeNo,
+            newname: &OsStr,
+            flags: RenameFlags,
+            reply: ReplyEmpty,
+        ) {
+            self.lock().rename(req, parent, name, newparent, newname, flags, reply);
         }
     }
 
@@ -1228,14 +1390,17 @@ mod fuse_impl {
         };
         let fs = BeebeebFs::new(ApiClient::from_config(), master_key, ttl);
 
-        let options = vec![
+        // `Config` is `non_exhaustive`: build it from its default and set fields.
+        let mut options = Config::default();
+        options.mount_options = vec![
             MountOption::RW, // Day 2: full read-write
             MountOption::FSName("beebeeb".to_string()),
             MountOption::Subtype("beebeeb".to_string()),
             MountOption::AutoUnmount,
-            MountOption::AllowOther,
             MountOption::DefaultPermissions,
         ];
+        // `allow_other` is a session ACL in fuser 0.17+, not a MountOption.
+        options.acl = SessionACL::All;
 
         let mp = mountpoint.clone();
         println!();
@@ -1267,7 +1432,7 @@ mod fuse_impl {
             );
             println!();
             tokio::task::spawn_blocking(move || {
-                fuser::mount2(fs, &mountpoint, &options).map_err(|e| format!("FUSE mount failed: {e}"))
+                fuser::mount(fs, &mountpoint, &options).map_err(|e| format!("FUSE mount failed: {e}"))
             })
             .await
             .map_err(|e| format!("task panic: {e}"))??;
@@ -1278,7 +1443,7 @@ mod fuse_impl {
             );
             println!();
             tokio::task::spawn_blocking(move || {
-                if let Err(e) = fuser::mount2(fs, &mountpoint, &options) {
+                if let Err(e) = fuser::mount(fs, &mountpoint, &options) {
                     eprintln!("[mount] FUSE exited: {e}");
                 }
             });
