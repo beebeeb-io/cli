@@ -173,6 +173,15 @@ mod fuse_impl {
     // Chunk size is now computed dynamically via beebeeb_types::plan_chunks().
     // See the adaptive chunk-size ladder in beebeeb-types/src/chunk.rs.
 
+    /// Permission bits for one inode: `0o700` for directories, `0o600` for
+    /// files — owner only. The mount is the decrypted vault, so no other local
+    /// account may list a directory or read a file. Every attribute path goes
+    /// through here, so the mode cannot drift between `getattr`, `lookup`,
+    /// `create` and `setattr` replies.
+    fn node_perm(is_dir: bool) -> u16 {
+        if is_dir { 0o700 } else { 0o600 }
+    }
+
     // ── Inode table entry ─────────────────────────────────────────────────────
 
     #[derive(Clone)]
@@ -216,8 +225,8 @@ mod fuse_impl {
                 ctime: self.modified,
                 crtime: self.modified,
                 kind,
-                // rw-r--r-- for files, rwxr-xr-x for dirs — writable by owner
-                perm: if self.is_dir { 0o755 } else { 0o644 },
+                // Owner-only: this is the decrypted vault.
+                perm: node_perm(self.is_dir),
                 nlink: if self.is_dir { 2 } else { 1 },
                 uid: unsafe { libc::getuid() },
                 gid: unsafe { libc::getgid() },
@@ -550,7 +559,7 @@ mod fuse_impl {
                 ctime: SystemTime::now(),
                 crtime: SystemTime::now(),
                 kind: FileType::Directory,
-                perm: 0o755,
+                perm: node_perm(true),
                 nlink: 2,
                 uid: unsafe { libc::getuid() },
                 gid: unsafe { libc::getgid() },
@@ -790,6 +799,8 @@ mod fuse_impl {
             &mut self,
             _req: &Request,
             ino: INodeNo,
+            // Ignored: a requested mode is never applied, so `chmod` cannot widen
+            // the owner-only modes from `node_perm()`.
             _mode: Option<u32>,
             _uid: Option<u32>,
             _gid: Option<u32>,
@@ -1363,6 +1374,42 @@ mod fuse_impl {
 
     // ── CLI entry points ──────────────────────────────────────────────────────
 
+    /// The mount options and session ACL `bb mount` hands to fuser.
+    ///
+    /// Pulled out of [`run`] so a test can assert who is allowed to access the
+    /// mount without mounting anything.
+    fn mount_config() -> (Vec<MountOption>, SessionACL) {
+        let mount_options = vec![
+            MountOption::RW, // Day 2: full read-write
+            MountOption::FSName("beebeeb".to_string()),
+            MountOption::Subtype("beebeeb".to_string()),
+            MountOption::AutoUnmount,
+            MountOption::DefaultPermissions,
+        ];
+        // `allow_other` is a session ACL in fuser 0.17+, not a MountOption.
+        //
+        // `SessionACL::Owner` (fuser's default, no `allow_other`) is what we
+        // want, but fuser 0.18 refuses it together with `AutoUnmount`
+        // (src/session.rs:165-170):
+        //
+        //     if options.mount_options.contains(&MountOption::AutoUnmount)
+        //         && options.acl == SessionACL::Owner
+        //     {
+        //         return Err(io::Error::new(
+        //             io::ErrorKind::InvalidInput,
+        //             format!("auto_unmount requires acl != Owner, got: {:?}", options.acl),
+        //
+        // because fusermount needs `allow_other` to handle auto_unmount.
+        // `RootAndOwner` is the narrowest ACL that keeps `AutoUnmount`. Other
+        // local accounts are refused by the kernel: `DefaultPermissions` checks
+        // the owner-only modes from `node_perm` (EACCES). fuser also filters
+        // most request kinds from other uids (src/request.rs:73-90), but not
+        // read, write, readdir, fsync, release or forget. It still mounts with
+        // the kernel's allow_other, so root-run jobs can read the mount; the
+        // stricter `Owner` needs dropping `AutoUnmount` (follow-up task).
+        (mount_options, SessionACL::RootAndOwner)
+    }
+
     pub async fn run(mountpoint: PathBuf, foreground: bool, cache_ttl: u64) -> Result<(), String> {
         let config = load_config();
         if config.session_token.is_none() {
@@ -1392,15 +1439,9 @@ mod fuse_impl {
 
         // `Config` is `non_exhaustive`: build it from its default and set fields.
         let mut options = Config::default();
-        options.mount_options = vec![
-            MountOption::RW, // Day 2: full read-write
-            MountOption::FSName("beebeeb".to_string()),
-            MountOption::Subtype("beebeeb".to_string()),
-            MountOption::AutoUnmount,
-            MountOption::DefaultPermissions,
-        ];
-        // `allow_other` is a session ACL in fuser 0.17+, not a MountOption.
-        options.acl = SessionACL::All;
+        let (mount_options, acl) = mount_config();
+        options.mount_options = mount_options;
+        options.acl = acl;
 
         let mp = mountpoint.clone();
         println!();
@@ -1477,6 +1518,85 @@ mod fuse_impl {
             }
             Ok(s) => Err(format!("umount exit status {s}")),
             Err(e) => Err(format!("umount failed: {e}")),
+        }
+    }
+
+    // ── Owner-only tests ──────────────────────────────────────────────────────
+    //
+    // The mount is the decrypted vault, so no other local account may read it:
+    // the session ACL must not be `SessionACL::All` (fuser's `allow_other`) and
+    // every attribute the filesystem reports must be owner-only. These tests
+    // call the real builders; nothing is mounted and no API is touched.
+
+    #[cfg(test)]
+    mod owner_only_tests {
+        use super::*;
+
+        fn entry(is_dir: bool) -> InodeEntry {
+            InodeEntry {
+                file_id: None,
+                key_uuid: None,
+                name: "vault-item".to_string(),
+                is_dir,
+                size: if is_dir { 0 } else { 11 },
+                chunk_count: if is_dir { 0 } else { 1 },
+                modified: SystemTime::UNIX_EPOCH,
+                parent_ino: ROOT_INO,
+                pin: Err("a directory has no content".to_string()),
+            }
+        }
+
+        #[test]
+        fn acl_is_not_all() {
+            let (options, acl) = mount_config();
+            assert_ne!(acl, SessionACL::All, "the mount must not be open to every local user");
+            // fuser 0.18 `Session::new` rejects `AutoUnmount` with `SessionACL::Owner`
+            // (src/session.rs:165-170), so the ACL is also never `Owner` here.
+            if options.contains(&MountOption::AutoUnmount) {
+                assert_ne!(acl, SessionACL::Owner, "fuser 0.18: auto_unmount requires acl != Owner");
+            }
+        }
+
+        #[test]
+        fn acl_is_root_and_owner() {
+            let (_, acl) = mount_config();
+            assert_eq!(acl, SessionACL::RootAndOwner);
+        }
+
+        #[test]
+        fn default_permissions_is_present() {
+            let (options, _) = mount_config();
+            assert!(
+                options.contains(&MountOption::DefaultPermissions),
+                "the kernel must enforce the reported mode bits"
+            );
+        }
+
+        #[test]
+        fn node_perm_is_owner_only() {
+            assert_eq!(node_perm(true), 0o700, "a directory must not be listable by others");
+            assert_eq!(node_perm(false), 0o600, "a file must not be readable by others");
+        }
+
+        #[test]
+        fn file_attribute_is_owner_only() {
+            let dir = entry(true).file_attr(2);
+            assert_eq!(dir.perm, 0o700);
+            assert_eq!(dir.uid, unsafe { libc::getuid() });
+            assert_eq!(dir.gid, unsafe { libc::getgid() });
+
+            let file = entry(false).file_attr(3);
+            assert_eq!(file.perm, 0o600);
+            assert_eq!(file.uid, unsafe { libc::getuid() });
+            assert_eq!(file.gid, unsafe { libc::getgid() });
+        }
+
+        #[test]
+        fn root_attribute_is_owner_only() {
+            let root = BeebeebFsState::root_attr();
+            assert_eq!(root.perm, 0o700);
+            assert_eq!(root.uid, unsafe { libc::getuid() });
+            assert_eq!(root.gid, unsafe { libc::getgid() });
         }
     }
 }
