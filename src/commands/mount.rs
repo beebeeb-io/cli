@@ -1496,6 +1496,89 @@ mod fuse_impl {
             Err(e) => Err(format!("umount failed: {e}")),
         }
     }
+
+    // ── Owner-only tests ──────────────────────────────────────────────────────
+    //
+    // The mount is the decrypted vault, so no other local account may read it:
+    // the session ACL must not be `SessionACL::All` (fuser's `allow_other`) and
+    // every attribute the filesystem reports must be owner-only. These tests
+    // call the real builders; nothing is mounted and no API is touched.
+
+    #[cfg(test)]
+    mod owner_only_tests {
+        use super::*;
+
+        fn entry(is_dir: bool) -> InodeEntry {
+            InodeEntry {
+                file_id: None,
+                key_uuid: None,
+                name: "vault-item".to_string(),
+                is_dir,
+                size: if is_dir { 0 } else { 11 },
+                chunk_count: if is_dir { 0 } else { 1 },
+                modified: SystemTime::UNIX_EPOCH,
+                parent_ino: ROOT_INO,
+                pin: Err("a directory has no content".to_string()),
+            }
+        }
+
+        #[test]
+        fn acl_is_not_all() {
+            let (options, acl) = mount_config();
+            assert_ne!(acl, SessionACL::All, "the mount must not be open to every local user");
+            // fuser 0.18 `Session::new` rejects `AutoUnmount` with `SessionACL::Owner`
+            // (src/session.rs:165-170), so the ACL is also never `Owner` here.
+            if options.contains(&MountOption::AutoUnmount) {
+                assert_ne!(
+                    acl,
+                    SessionACL::Owner,
+                    "fuser 0.18: auto_unmount requires acl != Owner"
+                );
+            }
+        }
+
+        #[test]
+        fn acl_is_root_and_owner() {
+            let (_, acl) = mount_config();
+            assert_eq!(acl, SessionACL::RootAndOwner);
+        }
+
+        #[test]
+        fn default_permissions_is_present() {
+            let (options, _) = mount_config();
+            assert!(
+                options.contains(&MountOption::DefaultPermissions),
+                "the kernel must enforce the reported mode bits"
+            );
+        }
+
+        #[test]
+        fn node_perm_is_owner_only() {
+            assert_eq!(node_perm(true), 0o700, "a directory must not be listable by others");
+            assert_eq!(node_perm(false), 0o600, "a file must not be readable by others");
+        }
+
+        #[test]
+        fn file_attribute_is_owner_only() {
+            let dir = entry(true).file_attr(2);
+            assert_eq!(dir.perm, 0o700);
+            assert_eq!(dir.uid, unsafe { libc::getuid() });
+            assert_eq!(dir.gid, unsafe { libc::getgid() });
+
+            let file = entry(false).file_attr(3);
+            assert_eq!(file.perm, 0o600);
+            assert_eq!(file.uid, unsafe { libc::getuid() });
+            assert_eq!(file.gid, unsafe { libc::getgid() });
+        }
+
+        #[test]
+        fn root_attribute_is_owner_only() {
+            let root = BeebeebFsState::root_attr();
+            assert_eq!(root.perm, 0o700);
+            assert_eq!(root.uid, unsafe { libc::getuid() });
+            assert_eq!(root.gid, unsafe { libc::getgid() });
+        }
+    }
 }
 
 #[cfg(feature = "fuse")]
