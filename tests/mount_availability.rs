@@ -11,7 +11,10 @@
 //! (which ships in every release binary), never at a nonexistent download, and the
 //! README claim follows the dist feature list.
 
-use std::path::{Path, PathBuf};
+#[cfg(not(feature = "fuse"))]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(not(feature = "fuse"))]
 use std::process::{Command, Output, Stdio};
 
 fn repo_root() -> PathBuf {
@@ -19,6 +22,7 @@ fn repo_root() -> PathBuf {
 }
 
 /// A private scratch directory under the target dir (no tempfile dev-dep needed).
+#[cfg(not(feature = "fuse"))]
 fn scratch(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("mount-availability-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
@@ -29,6 +33,7 @@ fn scratch(name: &str) -> PathBuf {
 /// Run the built `bb` fully isolated: scratch HOME (the real config may hold a live
 /// session), no update check, no colour, stdin closed, and an EMPTY `PATH` so no
 /// version of the stub can shell out to brew / apt / sudo from a test.
+#[cfg(not(feature = "fuse"))]
 fn run_bb(home: &Path, args: &[&str]) -> Output {
     let empty_path = home.join("empty-path");
     std::fs::create_dir_all(&empty_path).expect("create empty PATH dir");
@@ -47,6 +52,7 @@ fn run_bb(home: &Path, args: &[&str]) -> Output {
         .expect("spawn bb")
 }
 
+#[cfg(not(feature = "fuse"))]
 fn strip_ansi(s: &str) -> String {
     regex::Regex::new(r"\x1b\[[0-9;]*m")
         .unwrap()
@@ -54,6 +60,7 @@ fn strip_ansi(s: &str) -> String {
         .into_owned()
 }
 
+#[cfg(not(feature = "fuse"))]
 fn combined(out: &Output) -> String {
     strip_ansi(&format!(
         "{}{}",
