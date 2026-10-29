@@ -45,8 +45,8 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 # (sha2 is retained below: still used for content hashing in sync.rs / update.rs.)
 sha2 = "0.10"
 open = "5"
-notify = "7"
-notify-debouncer-full = "0.4"
+notify = "8"
+notify-debouncer-full = "0.7"
 walkdir = "2"
 axum = "0.7"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "tiff"] }
