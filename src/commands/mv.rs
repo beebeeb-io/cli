@@ -160,6 +160,20 @@ async fn move_single(
         (parent_id, Some(leaf))
     };
 
+    // SF-0002: a row sealed by the old iOS File Provider is read-only: a move
+    // is fine (it re-encrypts nothing), a rename would rewrite its name under a
+    // convention the row does not use. The name may resolve normally while the
+    // CURRENT version's content is still uppercase-sealed (review round), so a
+    // rename checks chunk 0 as well.
+    if new_name.as_deref().is_some_and(|n| n != src.name) {
+        if src.read_only {
+            return Err(crate::crypto::OWNER_REPAIR_READ_ONLY.to_string());
+        }
+        // The listing that resolved this path already carries the version's
+        // geometry, so no second GET is made.
+        crate::owned_keys::ensure_content_writable(api, master_key, &src_id, src.size_bytes, src.chunk_count).await?;
+    }
+
     // Preserve omitted/NULL/UUID: a changed parent at root is an explicit
     // Some(None), while a rename within the same directory omits parent_id.
     let new_parent_send = (src.parent_id != new_parent_id).then_some(new_parent_id);
@@ -256,6 +270,9 @@ mod parent_target_tests {
             parent_id: None,
             name: name.into(),
             is_folder: true,
+            read_only: false,
+            size_bytes: None,
+            chunk_count: 1,
         }
     }
 

@@ -22,6 +22,9 @@ pub struct ResolvedCliKey {
     #[allow(dead_code)] // Consumed by Task 9 sync/index integration.
     pub shared_root_id: Option<String>,
     pub name: String,
+    /// SF-0002: the name resolved under the read-only uppercase repair
+    /// convention. No rename, no new version; an edit becomes a new file.
+    pub read_only: bool,
 }
 struct SharedRoot {
     key: Arc<FileKey>,
@@ -175,6 +178,7 @@ impl OwnedKeyResolver {
                         pending_owner_wrap: None,
                         shared_root_id: None,
                         name,
+                        read_only: false,
                     });
                 }
             }
@@ -191,6 +195,7 @@ impl OwnedKeyResolver {
                         pending_owner_wrap: Some(frame.clone()),
                         shared_root_id: None,
                         name,
+                        read_only: false,
                     });
                 }
             }
@@ -212,16 +217,35 @@ impl OwnedKeyResolver {
                 pending_owner_wrap: None,
                 shared_root_id: None,
                 name,
+                read_only: false,
             });
         }
         if !foreign && !has_owner {
-            let name = crate::crypto::decrypt_name(master, &id, text(&canonical, "name_encrypted")?)
-                .ok_or("can't decrypt item name")?;
+            let enc = text(&canonical, "name_encrypted")?;
+            let (name, read_only) = match crate::crypto::decrypt_name_with_convention(master, &id, enc) {
+                Some((name, convention)) => (name, convention == beebeeb_core::kdf::OwnerKeyConvention::UpperRepair),
+                None => return Err("can't decrypt item name".into()),
+            };
+            // SF-0002: the iOS File Provider sealed this row under the
+            // uppercase id. Only the owner can derive that key; hand it back
+            // read-only so every write path refuses.
+            if read_only {
+                let (key, _) = beebeeb_core::kdf::owner_file_key_for_name(master, &id, enc)
+                    .map_err(|_| "can't resolve item key")?;
+                return Ok(ResolvedCliKey {
+                    key: Arc::new(key),
+                    origin: KeyOrigin::Derived,
+                    canonical,
+                    pending_owner_wrap: None,
+                    shared_root_id: None,
+                    name,
+                    read_only: true,
+                });
+            }
             let mut resolved =
                 owned_keys::resolve_owned_key(master, &id, None, None, false).map_err(|_| "can't resolve item key")?;
             // Preserve the pre-string-UUID key convention when that is the key
             // which authenticated this ordinary legacy item's encrypted name.
-            let enc = text(&canonical, "name_encrypted")?;
             if enc.starts_with('{') && authenticated_name(&resolved.key, &canonical).is_err() {
                 let binary = beebeeb_core::kdf::derive_file_key(master, uuid::Uuid::parse_str(&id).unwrap().as_bytes());
                 authenticated_name(&binary, &canonical)?;
@@ -234,6 +258,7 @@ impl OwnedKeyResolver {
                 pending_owner_wrap: None,
                 shared_root_id: None,
                 name,
+                read_only: false,
             });
         }
         let mut parent = canonical["parent_id"].as_str().map(str::to_string);
@@ -284,6 +309,7 @@ impl OwnedKeyResolver {
                     pending_owner_wrap: Some(pending),
                     shared_root_id: Some(root_id),
                     name,
+                    read_only: false,
                 });
             }
             let ancestor = self.ancestor_row(api, &root_id).await?;
@@ -468,6 +494,103 @@ impl OwnedKeyResolver {
         }
     }
 }
+/// SF-0002 review: is the CURRENT version's content sealed under the read-only
+/// uppercase repair convention, even when the name resolved normally? Core's
+/// per-version owner resolver decides from chunk 0 alone; only a bounded prefix
+/// of the version is read.
+pub async fn content_is_upper_repair(
+    api: &ApiClient,
+    master: &MasterKey,
+    file_id: &str,
+    size_bytes: Option<u64>,
+    chunk_count: u32,
+) -> Result<bool, String> {
+    if chunk_count == 0 {
+        return Ok(false);
+    }
+    let (body, chunk_size, complete) =
+        crate::download::download_frame_prefix(api, file_id, size_bytes, chunk_count).await?;
+    let convention = first_chunk_convention(master, file_id, &body, size_bytes, chunk_count, chunk_size, complete);
+    Ok(convention == Some(beebeeb_core::kdf::OwnerKeyConvention::UpperRepair))
+}
+
+/// [`content_is_upper_repair`] as a write guard: `Err(OWNER_REPAIR_READ_ONLY)`
+/// when the current version must not be rewritten.
+pub async fn ensure_content_writable(
+    api: &ApiClient,
+    master: &MasterKey,
+    file_id: &str,
+    size_bytes: Option<u64>,
+    chunk_count: u32,
+) -> Result<(), String> {
+    match content_is_upper_repair(api, master, file_id, size_bytes, chunk_count).await {
+        Ok(true) => Err(crate::crypto::OWNER_REPAIR_READ_ONLY.to_string()),
+        // A version that cannot be read is not PROOF of the repair convention
+        // (the server may not serve it, or the row may be unreadable for another
+        // reason): keep the write behaviour this client had rather than refuse
+        // on a transient failure. Only a definite `upper_repair` refuses.
+        Ok(false) | Err(_) => Ok(()),
+    }
+}
+
+fn first_chunk_convention(
+    master: &MasterKey,
+    file_id: &str,
+    body: &[u8],
+    size_bytes: Option<u64>,
+    chunk_count: u32,
+    chunk_size: Option<u64>,
+    complete: bool,
+) -> Option<beebeeb_core::kdf::OwnerKeyConvention> {
+    for len in chunk0_lengths(body.len(), size_bytes, chunk_count, chunk_size, complete) {
+        if let Some((_, convention)) = crate::crypto::owner_content_key(master, file_id, &body[..len]) {
+            return Some(convention);
+        }
+    }
+    None
+}
+
+/// Candidate lengths for wire frame 0, from the version's geometry in its
+/// metadata (the server's plaintext chunk size is authoritative when present).
+fn chunk0_lengths(
+    have: usize,
+    size_bytes: Option<u64>,
+    chunk_count: u32,
+    chunk_size: Option<u64>,
+    complete: bool,
+) -> Vec<usize> {
+    const NONCE_AND_TAG: u64 = 28;
+    const FILE_PROVIDER_CHUNK: u64 = 1024 * 1024;
+    let mut out: Vec<usize> = Vec::new();
+    let mut push = |v: u64| {
+        if let Ok(v) = usize::try_from(v) {
+            if v > 0 && v <= have && !out.contains(&v) {
+                out.push(v);
+            }
+        }
+    };
+    if chunk_count <= 1 {
+        if complete {
+            push(have as u64);
+        } else if let Some(size) = size_bytes {
+            push(size.saturating_add(NONCE_AND_TAG));
+        }
+        return out;
+    }
+    if let Some(cs) = chunk_size {
+        push(cs.saturating_add(NONCE_AND_TAG));
+    }
+    if let Some(size) = size_bytes {
+        let total = size.saturating_add(NONCE_AND_TAG.saturating_mul(chunk_count as u64));
+        push(total / chunk_count as u64);
+    }
+    push(FILE_PROVIDER_CHUNK + NONCE_AND_TAG);
+    if complete {
+        push(have as u64);
+    }
+    out
+}
+
 fn text<'a>(row: &'a Value, key: &str) -> Result<&'a str, String> {
     row[key].as_str().ok_or_else(|| format!("missing {key}"))
 }

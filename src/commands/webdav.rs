@@ -674,6 +674,29 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
     // For versioning: reuse the existing file_id so the server creates a version
     // entry rather than a new file (keeps share links valid, builds history).
     let existing_file_id: Option<uuid::Uuid> = if let Ok(existing) = resolve_path(state, path).await {
+        // SF-0002: never version-replace a file sealed by the old iOS app.
+        if existing.read_only {
+            return (StatusCode::FORBIDDEN, crate::crypto::OWNER_REPAIR_READ_ONLY).into_response();
+        }
+        // SF-0002 review: the name may read normally while the CURRENT
+        // version's content is still uppercase-sealed. Never replace it.
+        if let (Some(eid), false) = (existing.file_id.as_deref(), existing.is_collection) {
+            match crate::owned_keys::ensure_content_writable(
+                &state.api,
+                &state.master_key,
+                eid,
+                existing.size_bytes,
+                existing.chunk_count,
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err(e) if e == crate::crypto::OWNER_REPAIR_READ_ONLY => {
+                    return (StatusCode::FORBIDDEN, e).into_response();
+                }
+                Err(e) => return (StatusCode::BAD_GATEWAY, e).into_response(),
+            }
+        }
         if let Some(ref eid) = existing.file_id {
             // If-Match precondition: client must supply current ETag
             if let Some(im) = if_match {
@@ -933,6 +956,32 @@ async fn move_response(state: &Arc<DavState>, src_path: &str, destination: &str)
     };
 
     let same_parent = src_parent_path == dst_parent_path;
+
+    // SF-0002: reparenting is a move, but renaming rewrites the name envelope.
+    if new_name != src.display_name {
+        if src.read_only {
+            return (StatusCode::FORBIDDEN, crate::crypto::OWNER_REPAIR_READ_ONLY).into_response();
+        }
+        // The name may read normally while the CURRENT version's content is
+        // still uppercase-sealed (review round): check chunk 0 too.
+        if let (Some(sid), false) = (src.file_id.as_deref(), src.is_collection) {
+            match crate::owned_keys::ensure_content_writable(
+                &state.api,
+                &state.master_key,
+                sid,
+                src.size_bytes,
+                src.chunk_count,
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err(e) if e == crate::crypto::OWNER_REPAIR_READ_ONLY => {
+                    return (StatusCode::FORBIDDEN, e).into_response();
+                }
+                Err(e) => return (StatusCode::BAD_GATEWAY, e).into_response(),
+            }
+        }
+    }
 
     // Compute new_name_encrypted if the name changed
     let new_name_encrypted = if new_name != src.display_name {
@@ -1254,6 +1303,9 @@ struct ResolvedEntry {
     /// (`crypto::content_pin`, task 1943). `Err` for a collection, or for a file
     /// whose metadata cannot be read (its content is then refused, never guessed).
     pin: Result<beebeeb_core::chunk_stream::ExpectedChunkFormat, String>,
+    /// SF-0002: the name resolved under the read-only uppercase repair
+    /// convention. PUT-overwrite and rename are refused; move-only is allowed.
+    read_only: bool,
 }
 
 /// What a collection carries in [`ResolvedEntry::pin`].
@@ -1275,8 +1327,11 @@ fn decode_file_entry(
 
     // Decrypt name
     let name_encrypted = file.get("name_encrypted").and_then(|v| v.as_str())?;
-    let display_name =
-        decrypt_name(master_key, &file_id, name_encrypted).unwrap_or_else(|| format!("[{}]", &file_id[..8]));
+    let (display_name, read_only) =
+        match crate::crypto::decrypt_name_with_convention(master_key, &file_id, name_encrypted) {
+            Some((name, convention)) => (name, convention == beebeeb_core::kdf::OwnerKeyConvention::UpperRepair),
+            None => (format!("[{}]", &file_id[..8]), false),
+        };
     let pin = if is_folder {
         no_content()
     } else {
@@ -1291,6 +1346,7 @@ fn decode_file_entry(
         chunk_count,
         modified,
         pin,
+        read_only,
     })
 }
 
@@ -1312,6 +1368,7 @@ async fn resolve_path(state: &Arc<DavState>, path: &str) -> Result<ResolvedEntry
             chunk_count: 0,
             modified: None,
             pin: no_content(),
+            read_only: false,
         });
     }
 
@@ -1362,10 +1419,6 @@ async fn resolve_path(state: &Arc<DavState>, path: &str) -> Result<ResolvedEntry
 }
 
 // ─── Decryption helpers ───────────────────────────────────────────────────────
-
-fn decrypt_name(master_key: &beebeeb_core::kdf::MasterKey, file_id: &str, name_encrypted: &str) -> Option<String> {
-    crate::crypto::decrypt_name(master_key, file_id, name_encrypted)
-}
 
 // ─── XML helpers ─────────────────────────────────────────────────────────────
 
@@ -1467,6 +1520,7 @@ mod parent_target_tests {
             chunk_count: 0,
             modified: None,
             pin: no_content(),
+            read_only: false,
         }
     }
 
