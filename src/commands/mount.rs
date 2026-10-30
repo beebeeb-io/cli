@@ -202,6 +202,10 @@ mod fuse_impl {
         /// (`crypto::content_pin`, task 1943). `Err` for a directory, or for a
         /// file whose metadata cannot be read (its content is then refused).
         pin: Result<beebeeb_core::chunk_stream::ExpectedChunkFormat, String>,
+        /// SF-0002: the name resolved under the read-only uppercase repair
+        /// convention. A rename is refused with EPERM; the content is checked
+        /// at rename time as well (the name alone does not decide).
+        read_only: bool,
     }
 
     /// What a directory carries in [`InodeEntry::pin`].
@@ -324,6 +328,7 @@ mod fuse_impl {
                     modified: SystemTime::now(),
                     parent_ino: ROOT_INO,
                     pin: no_content(),
+                    read_only: false,
                 },
             );
             fs
@@ -381,6 +386,9 @@ mod fuse_impl {
                     Some(enc) => decrypt_name(&self.master_key, &file_id, enc),
                     None => format!("[{}]", &file_id[..8.min(file_id.len())]),
                 };
+                let read_only = name_encrypted.is_some_and(|enc| {
+                    crate::crypto::name_is_upper_repair(&self.master_key, &file_id, enc)
+                });
                 let pin = match (is_folder, name_encrypted) {
                     (true, _) => no_content(),
                     (false, Some(enc)) => crate::crypto::content_pin(&self.master_key, &file_id, enc),
@@ -391,8 +399,10 @@ mod fuse_impl {
                     if let Some(entry) = self.inodes.get_mut(&existing) {
                         entry.name = name;
                         entry.size = size_bytes;
+                        entry.chunk_count = chunk_count;
                         entry.modified = modified;
                         entry.pin = pin;
+                        entry.read_only = read_only;
                     }
                     existing
                 } else {
@@ -412,6 +422,7 @@ mod fuse_impl {
                             modified,
                             parent_ino: dir_ino,
                             pin,
+                            read_only,
                         },
                     );
                     ino
@@ -737,6 +748,7 @@ mod fuse_impl {
                     // This mount uploads it as a NEW file, which never records a
                     // pin (task 1943: the new-file writer pin is Unrecorded).
                     pin: Ok(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded),
+                    read_only: false,
                 },
             );
             self.pending_creates.insert(
@@ -990,6 +1002,7 @@ mod fuse_impl {
                     modified: now,
                     parent_ino: parent,
                     pin: no_content(),
+                    read_only: false,
                 },
             );
             self.dir_cache.remove(&parent);
@@ -1129,8 +1142,15 @@ mod fuse_impl {
                 }
             };
 
-            let (file_id, key_uuid, old_name) = match self.inodes.get(&ino) {
-                Some(e) => (e.file_id.clone(), e.key_uuid, e.name.clone()),
+            let (file_id, key_uuid, old_name, entry_size, entry_chunks, entry_read_only) = match self.inodes.get(&ino) {
+                Some(e) => (
+                    e.file_id.clone(),
+                    e.key_uuid,
+                    e.name.clone(),
+                    e.size,
+                    e.chunk_count,
+                    e.read_only,
+                ),
                 None => {
                     reply.error(Errno::ENOENT);
                     return;
@@ -1177,6 +1197,35 @@ mod fuse_impl {
             // Determine what changed.
             let name_changed = old_name != newname_str;
             let parent_changed = parent != newparent;
+
+            // SF-0002: a rename rewrites the name envelope under the id's
+            // convention, so a row sealed read-only (name or CURRENT version's
+            // content) must be refused. Reparenting stays a pure move.
+            if name_changed {
+                let content_is_repair = if entry_read_only {
+                    true
+                } else {
+                    match self.rt.block_on(crate::owned_keys::content_is_upper_repair(
+                        &self.api,
+                        &self.master_key,
+                        &file_id,
+                        Some(entry_size),
+                        entry_chunks,
+                    )) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!("[mount] rename content check {file_id}: {e}");
+                            reply.error(Errno::EIO);
+                            return;
+                        }
+                    }
+                };
+                if content_is_repair {
+                    eprintln!("[mount] rename refused: {file_id} is read-only (SF-0002)");
+                    reply.error(Errno::EPERM);
+                    return;
+                }
+            }
 
             // Re-encrypt the name if it changed, using the file's existing key.
             let new_name_enc: Option<String> = if name_changed {
@@ -1543,6 +1592,7 @@ mod fuse_impl {
                 modified: SystemTime::UNIX_EPOCH,
                 parent_ino: ROOT_INO,
                 pin: Err("a directory has no content".to_string()),
+                read_only: false,
             }
         }
 

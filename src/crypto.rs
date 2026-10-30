@@ -129,6 +129,19 @@ pub fn decrypt_name_with_convention(
     None
 }
 
+/// SF-0002: does this row's NAME authenticate only under the read-only
+/// uppercase repair convention? The flag a mount entry carries; a caller that
+/// can also read content must check chunk 0 as well before a write.
+#[cfg_attr(not(feature = "fuse"), allow(dead_code))] // only the mount path asks
+pub fn name_is_upper_repair(
+    master_key: &beebeeb_core::kdf::MasterKey,
+    file_id_str: &str,
+    name_encrypted_str: &str,
+) -> bool {
+    decrypt_name_with_convention(master_key, file_id_str, name_encrypted_str)
+        .is_some_and(|(_, convention)| convention == beebeeb_core::kdf::OwnerKeyConvention::UpperRepair)
+}
+
 /// Resolve the owner's content key for ONE stored version from its first chunk
 /// frame (SF-0002). Only call this after the existing key failed to
 /// authenticate that version's first chunk: it is the read-only repair path,
@@ -1523,5 +1536,22 @@ mod tests {
             decrypt_name_with_convention(&m, FID, &name_enc),
             Some(("ordinary.txt".to_string(), OwnerKeyConvention::String))
         );
+    }
+
+    /// SF-0002 (mount): the flag a mounted entry carries comes from the name's
+    /// convention alone — true only for a name sealed under the uppercase id.
+    #[test]
+    fn the_mount_read_only_flag_follows_the_name_convention() {
+        use beebeeb_core::chunk_stream::ExpectedChunkFormat;
+        let m = mk();
+        let id = "5f0c2a9e-3b1d-4c7e-9a2f-6d8e1b4c7a30";
+        let upper = beebeeb_core::kdf::derive_file_key(&m, id.to_uppercase().as_bytes());
+        let normal = beebeeb_core::kdf::derive_file_key(&m, id.as_bytes());
+        let sealed =
+            beebeeb_core::encrypt::encrypt_name_for(&upper, "x.pdf", None, ExpectedChunkFormat::Unrecorded).unwrap();
+        let ordinary =
+            beebeeb_core::encrypt::encrypt_name_for(&normal, "x.pdf", None, ExpectedChunkFormat::Unrecorded).unwrap();
+        assert!(name_is_upper_repair(&m, id, &sealed));
+        assert!(!name_is_upper_repair(&m, id, &ordinary));
     }
 }
