@@ -971,7 +971,7 @@ mod fuse_impl {
 
             // L13 (SF-0001): only the id this client minted; a different echo
             // aborts before the folder is listed or used as a parent.
-            let server_id = match folder_create_reply(&resp, folder_uuid) {
+            let server_id = match super::folder_create_reply(&resp, folder_uuid) {
                 Ok(id) => id,
                 Err(e) => {
                     eprintln!("[mount] mkdir: {e}");
@@ -1684,10 +1684,7 @@ mod item_id_echo_tests {
     #[test]
     fn folder_create_echoing_the_clients_id_is_recorded() {
         let mine = uuid::Uuid::new_v4();
-        assert_eq!(
-            folder_create_reply(&json!({"id": mine}), mine),
-            Ok(mine.to_string())
-        );
+        assert_eq!(folder_create_reply(&json!({"id": mine}), mine), Ok(mine.to_string()));
     }
 
     #[test]

@@ -143,9 +143,11 @@ async fn create_leaf_folder(
     name: &str,
     parent: Option<Uuid>,
 ) -> Result<String, String> {
-    Ok(crate::item_id::create_owned_folder(api, master_key, name, parent, Uuid::new_v4())
-        .await?
-        .to_string())
+    Ok(
+        crate::item_id::create_owned_folder(api, master_key, name, parent, Uuid::new_v4())
+            .await?
+            .to_string(),
+    )
 }
 
 fn split_parent_and_leaf(path_arg: &str) -> Result<(Option<String>, String), String> {

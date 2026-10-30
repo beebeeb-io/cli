@@ -1638,7 +1638,10 @@ mod item_id_echo_tests {
     async fn mkcol_echoing_a_different_id_aborts() {
         let other = Uuid::new_v4();
         let app = Router::new()
-            .route("/api/v1/files", get(|| async { (StatusCode::NOT_FOUND, Json(json!({"error": "none"}))) }))
+            .route(
+                "/api/v1/files",
+                get(|| async { (StatusCode::NOT_FOUND, Json(json!({"error": "none"}))) }),
+            )
             .route(
                 "/api/v1/files/folder",
                 post(move |Json(body): Json<serde_json::Value>| async move {
@@ -1666,7 +1669,10 @@ mod item_id_echo_tests {
         let chunks = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&chunks);
         let app = Router::new()
-            .route("/api/v1/files", get(|| async { (StatusCode::NOT_FOUND, Json(json!({"error": "none"}))) }))
+            .route(
+                "/api/v1/files",
+                get(|| async { (StatusCode::NOT_FOUND, Json(json!({"error": "none"}))) }),
+            )
             .route(
                 "/api/v1/uploads/init",
                 post(|Json(body): Json<serde_json::Value>| async move {
@@ -1699,6 +1705,10 @@ mod item_id_echo_tests {
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
         assert_eq!(String::from_utf8_lossy(&body), crate::item_id::CHANGED_ID_MESSAGE);
-        assert_eq!(chunks.load(Ordering::SeqCst), 0, "no chunk may be PUT under the echoed id");
+        assert_eq!(
+            chunks.load(Ordering::SeqCst),
+            0,
+            "no chunk may be PUT under the echoed id"
+        );
     }
 }

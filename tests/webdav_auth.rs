@@ -40,11 +40,16 @@ async fn spawn_mock_api() -> (String, Hits) {
         )
         .route(
             "/api/v1/files/folder",
-            post(move || {
+            post(move |axum::Json(body): axum::Json<serde_json::Value>| {
                 let h = folder_hits.clone();
                 async move {
                     h.fetch_add(1, Ordering::SeqCst);
-                    axum::Json(serde_json::json!({ "id": "44444444-4444-4444-8444-444444444444" }))
+                    // L13 (SF-0001): the honest server echoes the client's own id.
+                    let id = body
+                        .get("folder_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("44444444-4444-4444-8444-444444444444");
+                    axum::Json(serde_json::json!({ "id": id }))
                 }
             }),
         )

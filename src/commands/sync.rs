@@ -4542,9 +4542,7 @@ mod item_id_echo_tests {
     async fn folder_create_echoing_the_clients_id_succeeds() {
         let (base, seen) = mock_create(None).await;
         let api = crate::api::ApiClient::new_for_test(base);
-        let id = create_folder(&api, &master(), "Folder", None)
-            .await
-            .expect("succeeds");
+        let id = create_folder(&api, &master(), "Folder", None).await.expect("succeeds");
         assert_eq!(Some(id.to_string()), *seen.lock().unwrap());
     }
 }

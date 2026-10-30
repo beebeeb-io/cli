@@ -574,7 +574,12 @@ pub async fn stream_encrypt_upload(
     if let Some(stale) = crate::resume::unminted_upload(&spec.path, size, mtime_ns) {
         crate::resume::clear(&spec.path);
         pending = None;
-        if let Err(e) = api.upload_abandon(&stale.file_id.to_string()).await
+        // An explicit replacement targets a row it listed: a record left under
+        // another identity is only discarded (never used, and never worth an
+        // abandon — it is not this write's session).
+        let abandon = spec.replace_file_key.is_none();
+        if abandon
+            && let Err(e) = api.upload_abandon(&stale.file_id.to_string()).await
             && e.status != 404
             && !crate::ui::is_quiet()
         {
@@ -584,7 +589,7 @@ pub async fn stream_encrypt_upload(
                 e.message
             );
         }
-        if !crate::ui::is_quiet() {
+        if abandon && !crate::ui::is_quiet() {
             eprintln!(
                 "  {}: the interrupted upload was not started by this version; starting it again under a new id",
                 display_name(&spec.file_name)
@@ -926,8 +931,7 @@ async fn upload_attempt(
         // different id means the server would store the content under another
         // item, whose derived key someone else may hold — abort before any
         // chunk goes out, any name is sealed under it or it is used as a parent.
-        crate::item_id::verify_echoed_id(file_id, Some(&init.file_id))
-            .map_err(|e| AttemptErr::Other(e.to_string()))?;
+        crate::item_id::verify_echoed_id(file_id, Some(&init.file_id)).map_err(|e| AttemptErr::Other(e.to_string()))?;
         // The server's plan is authoritative — frame the upload against it, not
         // a hardcoded local guess. We sent our `ChunkEncryptor` plan; the v2
         // server uses client `chunk_size_bytes`/`chunk_count` verbatim, so the
@@ -2423,7 +2427,11 @@ mod swept_session_reinit {
             "{:?}",
             m.chunk_puts
         );
-        assert_eq!(m.abandons, vec![stored_fid.to_string()], "the legacy session is abandoned");
+        assert_eq!(
+            m.abandons,
+            vec![stored_fid.to_string()],
+            "the legacy session is abandoned"
+        );
         assert_eq!(m.inits, vec![fresh.to_string()], "restarted under this run's own id");
         assert_eq!(m.chunk_puts[0].1, 0);
     }
@@ -2463,15 +2471,20 @@ mod swept_session_reinit {
         let (path, ..) = s.file(64 * 1024);
         let mine = Uuid::new_v4();
         let other = Uuid::new_v4();
-        let mut mock = Mock::default();
-        mock.init_echo = Some(other.to_string());
-        let state: Shared = Arc::new(Mutex::new(mock));
+        let state: Shared = Arc::new(Mutex::new(Mock {
+            init_echo: Some(other.to_string()),
+            ..Default::default()
+        }));
 
         let err = run(&state, spec(&path, mine)).await.expect_err("must abort");
         assert_eq!(err, CHANGED_ID_MESSAGE);
         let m = state.lock().unwrap();
         assert_eq!(m.inits, vec![mine.to_string()], "the client's own id was proposed");
-        assert!(m.chunk_puts.is_empty(), "no chunk under the echoed id: {:?}", m.chunk_puts);
+        assert!(
+            m.chunk_puts.is_empty(),
+            "no chunk under the echoed id: {:?}",
+            m.chunk_puts
+        );
         assert!(m.completed.is_empty());
         assert!(m.abandons.is_empty());
     }
@@ -2487,9 +2500,10 @@ mod swept_session_reinit {
         replace_spec.base_version_number = Some(2);
         replace_spec.replace_pin = Some(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded);
         replace_spec.replace_file_key = Some(Arc::new(beebeeb_core::kdf::FileKey::from_bytes([3u8; 32])));
-        let mut mock = Mock::default();
-        mock.init_echo = Some(Uuid::new_v4().to_string());
-        let state: Shared = Arc::new(Mutex::new(mock));
+        let state: Shared = Arc::new(Mutex::new(Mock {
+            init_echo: Some(Uuid::new_v4().to_string()),
+            ..Default::default()
+        }));
 
         let err = run(&state, replace_spec).await.expect_err("must abort");
         assert_eq!(err, CHANGED_ID_MESSAGE);
@@ -2506,9 +2520,10 @@ mod swept_session_reinit {
         let s = Scratch::new("a7-complete");
         let (path, size, mtime) = s.file(64 * 1024);
         let mine = Uuid::new_v4();
-        let mut mock = Mock::default();
-        mock.complete_echo = Some(Uuid::new_v4().to_string());
-        let state: Shared = Arc::new(Mutex::new(mock));
+        let state: Shared = Arc::new(Mutex::new(Mock {
+            complete_echo: Some(Uuid::new_v4().to_string()),
+            ..Default::default()
+        }));
 
         let err = run(&state, spec(&path, mine)).await.expect_err("must abort");
         assert_eq!(err, CHANGED_ID_MESSAGE);
@@ -2539,7 +2554,11 @@ mod swept_session_reinit {
         run(&state, spec(&path, fresh)).await.expect("restarts and succeeds");
 
         let m = state.lock().unwrap();
-        assert_eq!(m.abandons, vec![legacy_fid.to_string()], "the legacy session is abandoned");
+        assert_eq!(
+            m.abandons,
+            vec![legacy_fid.to_string()],
+            "the legacy session is abandoned"
+        );
         assert_eq!(m.inits, vec![fresh.to_string()], "restarted under the client's own id");
         assert!(
             m.chunk_puts.iter().all(|(sid, _)| *sid != legacy_sid.to_string()),
