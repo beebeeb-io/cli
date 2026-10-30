@@ -969,11 +969,16 @@ mod fuse_impl {
                 }
             };
 
-            let server_id = resp
-                .get("id")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-                .unwrap_or_else(|| folder_uuid.to_string());
+            // L13 (SF-0001): only the id this client minted; a different echo
+            // aborts before the folder is listed or used as a parent.
+            let server_id = match super::folder_create_reply(&resp, folder_uuid) {
+                Ok(id) => id,
+                Err(e) => {
+                    eprintln!("[mount] mkdir: {e}");
+                    reply.error(Errno::EIO);
+                    return;
+                }
+            };
 
             let ino = self.alloc_ino();
             let now = SystemTime::now();
@@ -1601,6 +1606,16 @@ mod fuse_impl {
     }
 }
 
+/// L13 (SF-0001): the folder id to record after a create — the one this client
+/// minted, confirmed against the answer's echo. Kept outside the FUSE module so
+/// the decision is unit-tested without a FUSE mount.
+#[cfg_attr(not(feature = "fuse"), allow(dead_code))]
+fn folder_create_reply(resp: &serde_json::Value, folder_uuid: uuid::Uuid) -> Result<String, String> {
+    crate::item_id::verify_echoed_id(folder_uuid, crate::item_id::echoed_id(resp))
+        .map(|id| id.to_string())
+        .map_err(|e| e.to_string())
+}
+
 #[cfg(feature = "fuse")]
 pub use fuse_impl::{run, unmount};
 
@@ -1646,6 +1661,38 @@ mod parent_target_tests {
         assert_eq!(
             rename_parent_target(ROOT_INO, 9, Some((false, Some("invalid")))),
             Err(ParentError::NotFolder)
+        );
+    }
+}
+
+#[cfg(test)]
+mod item_id_echo_tests {
+    use super::folder_create_reply;
+    use serde_json::json;
+
+    /// A8 (mount): the folder id recorded after a create is the client's own,
+    /// confirmed against the answer. A different echo aborts (the FUSE mkdir
+    /// turns this error into EIO); no id from the answer is ever used.
+    #[test]
+    fn folder_create_echoing_a_different_id_aborts() {
+        let mine = uuid::Uuid::new_v4();
+        let other = uuid::Uuid::new_v4();
+        let err = folder_create_reply(&json!({"id": other}), mine).expect_err("must abort");
+        assert_eq!(err, crate::item_id::CHANGED_ID_MESSAGE);
+    }
+
+    #[test]
+    fn folder_create_echoing_the_clients_id_is_recorded() {
+        let mine = uuid::Uuid::new_v4();
+        assert_eq!(folder_create_reply(&json!({"id": mine}), mine), Ok(mine.to_string()));
+    }
+
+    #[test]
+    fn folder_create_without_an_echo_aborts() {
+        let mine = uuid::Uuid::new_v4();
+        assert_eq!(
+            folder_create_reply(&json!({}), mine),
+            Err(crate::item_id::CHANGED_ID_MESSAGE.to_string())
         );
     }
 }
