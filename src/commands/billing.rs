@@ -49,20 +49,17 @@
 //!   `AuthUser` extractor and 404s a non-owned id). `--open <id>` downloads it
 //!   through the authenticated `ApiClient` (`download_invoice_pdf`) and opens
 //!   the SAVED FILE locally — a raw browser URL would just 401.
-//! - `stripe_configured` is hardcoded `false` on every response post-Mollie-
-//!   cutover (see the handler's own doc comment: "kept in the envelope … so
-//!   the existing web client shape doesn't break"). It is NEVER a live signal
-//!   of "no invoices exist" — the plan's gate (`if !stripe_configured { print
-//!   "Stripe is not configured" }`) would print that message on every single
-//!   account, including ones with real invoices. **Not implemented.**
-//!   Emptiness of the `invoices` array alone decides the "no invoices yet"
-//!   message.
+//! - The response envelope is `{ invoices: [...] }` with no provider-
+//!   configuration flag. Emptiness of the `invoices` array alone decides the
+//!   "no invoices yet" message — never a configuration field (a gate on one
+//!   would print "not configured" on every account, including ones with real
+//!   invoices). **Not implemented.**
 //! - `--open <id>` (from the task file's "Why", not in the plan's code
 //!   sketch) accepts a full UUID or a unique prefix, reusing the
 //!   `resolve_passkey_id`/`resolve_session_id` convention already established
 //!   in this repo (`short_id`/`resolve_invoice_id` below).
-//! - **Status vocabulary is `'draft' | 'issued' | 'void'`, not Stripe's
-//!   `'paid'/'open'`** (`invoices` table CHECK constraint, `beebeeb-api/src/db.rs`;
+//! - **Status vocabulary is `'draft' | 'issued' | 'void'`, not the
+//!   `'paid'/'open'` pair** (`invoices` table CHECK constraint, `beebeeb-api/src/db.rs`;
 //!   confirmed live by manual verification — every seeded row came back
 //!   `status: "issued"` and, before this fix, rendered red as an unmatched
 //!   status). See `invoice_status_color` for the live mapping.
@@ -574,7 +571,7 @@ fn invoice_row(inv: &Value) -> Vec<String> {
 
 /// Color for an invoice's `status` cell. Live vocabulary is
 /// `'draft' | 'issued' | 'void'` (the `invoices` table CHECK constraint,
-/// `beebeeb-api/src/db.rs`) — NOT the Stripe-style `'paid'`/`'open'` the
+/// `beebeeb-api/src/db.rs`) — NOT the `'paid'`/`'open'` pair the
 /// plan's Task 19 pseudocode assumed (eng-0487 deviation, caught in manual
 /// verification: every real seeded row rendered RED_ERR because none of them
 /// are `'paid'`). Every row the server inserts gets `status = 'issued'`
@@ -1125,7 +1122,7 @@ mod tests {
     }
 
     #[test]
-    fn invoice_status_color_maps_the_live_vocabulary_not_the_plans_stripe_style_one() {
+    fn invoice_status_color_maps_the_live_vocabulary() {
         // The invoices table CHECK constraint is 'draft' | 'issued' | 'void'.
         // 'issued' is the normal/good state (every real row is inserted with
         // it) — it must be green, not fall through to the red catch-all the
@@ -1134,7 +1131,7 @@ mod tests {
         assert_eq!(invoice_status_color("draft"), crate::colors::AMBER);
         assert_eq!(invoice_status_color("void"), crate::colors::RED_ERR);
         assert_eq!(invoice_status_color("something-unexpected"), crate::colors::AMBER);
-        // The plan's Stripe-style statuses are NOT in the live vocabulary and
+        // The `'paid'`/`'open'` statuses are NOT in the live vocabulary and
         // must not be specially colored — they fall through to the same
         // amber-for-unknown default as any other unrecognized string.
         assert_eq!(invoice_status_color("paid"), crate::colors::AMBER);

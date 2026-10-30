@@ -54,7 +54,6 @@ fn build_show_payload(
             "current_period_end": v.get("current_period_end"),
             "billing_state": v.get("billing_state"),
             "pending_downgrade_plan": v.get("pending_downgrade_plan"),
-            "stripe_configured": v.get("stripe_configured"),
         }),
         Err(e) => unavailable(e),
     };
@@ -386,7 +385,6 @@ mod tests {
             "plan": "pro", "billing_cycle": "monthly",
             "current_period_end": "2026-06-22T00:00:00Z",
             "billing_state": "active", "pending_downgrade_plan": null,
-            "stripe_configured": true,
             "used_bytes": 3_200_000_000_000i64, "quota_bytes": 5_000_000_000_000i64
         }));
         let region = Ok(json!({
