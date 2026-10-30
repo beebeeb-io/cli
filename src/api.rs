@@ -1723,12 +1723,11 @@ impl ApiClient {
     }
 
     /// GET /api/v1/billing/invoices — the caller's VAT-compliant invoices
-    /// (task 0916; the Mollie-backed `invoices` table, NOT the legacy Stripe
-    /// stub). Returns `{ invoices: [...], stripe_configured: false }` — see
-    /// `beebeeb-api/src/routes/billing.rs::invoices`. `stripe_configured` is
-    /// hardcoded `false` on every response post-Mollie-cutover; it is kept in
-    /// the envelope only for client-shape compatibility and is NEVER a live
-    /// signal of "no invoices" (see `commands::billing::invoices`, task 0487).
+    /// (task 0916; the Mollie-backed `invoices` table). Returns
+    /// `{ invoices: [...] }` — see
+    /// `beebeeb-api/src/routes/billing.rs::invoices`. Emptiness of the
+    /// `invoices` array alone decides "no invoices yet" (see
+    /// `commands::billing::invoices`, task 0487).
     pub async fn get_billing_invoices(&self) -> Result<Value, String> {
         let token = self.require_auth()?;
         let resp = self
@@ -3258,8 +3257,8 @@ mod billing_invoices_route_tests {
                     // Exact live-server field shape (billing.rs::invoices) —
                     // `number` (not `invoice_number`), `amount_gross_cents`
                     // (not `amount_paid`), ISO date strings (not epoch
-                    // seconds), and `stripe_configured: false` (vestigial,
-                    // always false post-Mollie-cutover — never gate on it).
+                    // seconds). The server sends no provider-configuration
+                    // flag in the envelope.
                     Json(json!({
                         "invoices": [{
                             "id": "11111111-1111-1111-1111-111111111111",
@@ -3277,7 +3276,6 @@ mod billing_invoices_route_tests {
                             "status": "paid",
                             "pdf_url": "/api/v1/billing/invoices/11111111-1111-1111-1111-111111111111/pdf",
                         }],
-                        "stripe_configured": false,
                     }))
                 }),
             )
@@ -3310,10 +3308,12 @@ mod billing_invoices_route_tests {
         assert_eq!(inv.get("number").and_then(|v| v.as_str()), Some("BB-2026-0001"));
         assert_eq!(inv.get("amount_gross_cents").and_then(|v| v.as_i64()), Some(1209));
         assert_eq!(inv.get("invoice_date").and_then(|v| v.as_str()), Some("2026-01-15"));
+        let envelope = body.as_object().expect("invoices envelope object");
         assert_eq!(
-            body.get("stripe_configured").and_then(|v| v.as_bool()),
-            Some(false),
-            "stripe_configured must round-trip as false — it's vestigial, never a live signal"
+            envelope.keys().collect::<Vec<_>>(),
+            vec!["invoices"],
+            "the envelope is {{ invoices: [...] }} — the client must parse a body with no \
+             provider-configuration flag: {body}"
         );
     }
 
