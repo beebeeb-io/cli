@@ -22,6 +22,9 @@ pub struct ResolvedCliKey {
     #[allow(dead_code)] // Consumed by Task 9 sync/index integration.
     pub shared_root_id: Option<String>,
     pub name: String,
+    /// SF-0002: the name resolved under the read-only uppercase repair
+    /// convention. No rename, no new version; an edit becomes a new file.
+    pub read_only: bool,
 }
 struct SharedRoot {
     key: Arc<FileKey>,
@@ -175,6 +178,7 @@ impl OwnedKeyResolver {
                         pending_owner_wrap: None,
                         shared_root_id: None,
                         name,
+                        read_only: false,
                     });
                 }
             }
@@ -191,6 +195,7 @@ impl OwnedKeyResolver {
                         pending_owner_wrap: Some(frame.clone()),
                         shared_root_id: None,
                         name,
+                        read_only: false,
                     });
                 }
             }
@@ -212,16 +217,35 @@ impl OwnedKeyResolver {
                 pending_owner_wrap: None,
                 shared_root_id: None,
                 name,
+                read_only: false,
             });
         }
         if !foreign && !has_owner {
-            let name = crate::crypto::decrypt_name(master, &id, text(&canonical, "name_encrypted")?)
-                .ok_or("can't decrypt item name")?;
+            let enc = text(&canonical, "name_encrypted")?;
+            let (name, read_only) = match crate::crypto::decrypt_name_with_convention(master, &id, enc) {
+                Some((name, convention)) => (name, convention == beebeeb_core::kdf::OwnerKeyConvention::UpperRepair),
+                None => return Err("can't decrypt item name".into()),
+            };
+            // SF-0002: the iOS File Provider sealed this row under the
+            // uppercase id. Only the owner can derive that key; hand it back
+            // read-only so every write path refuses.
+            if read_only {
+                let (key, _) = beebeeb_core::kdf::owner_file_key_for_name(master, &id, enc)
+                    .map_err(|_| "can't resolve item key")?;
+                return Ok(ResolvedCliKey {
+                    key: Arc::new(key),
+                    origin: KeyOrigin::Derived,
+                    canonical,
+                    pending_owner_wrap: None,
+                    shared_root_id: None,
+                    name,
+                    read_only: true,
+                });
+            }
             let mut resolved =
                 owned_keys::resolve_owned_key(master, &id, None, None, false).map_err(|_| "can't resolve item key")?;
             // Preserve the pre-string-UUID key convention when that is the key
             // which authenticated this ordinary legacy item's encrypted name.
-            let enc = text(&canonical, "name_encrypted")?;
             if enc.starts_with('{') && authenticated_name(&resolved.key, &canonical).is_err() {
                 let binary = beebeeb_core::kdf::derive_file_key(master, uuid::Uuid::parse_str(&id).unwrap().as_bytes());
                 authenticated_name(&binary, &canonical)?;
@@ -234,6 +258,7 @@ impl OwnedKeyResolver {
                 pending_owner_wrap: None,
                 shared_root_id: None,
                 name,
+                read_only: false,
             });
         }
         let mut parent = canonical["parent_id"].as_str().map(str::to_string);
@@ -284,6 +309,7 @@ impl OwnedKeyResolver {
                     pending_owner_wrap: Some(pending),
                     shared_root_id: Some(root_id),
                     name,
+                    read_only: false,
                 });
             }
             let ancestor = self.ancestor_row(api, &root_id).await?;

@@ -218,6 +218,7 @@ pub async fn stream_download_decrypt(
 #[allow(clippy::too_many_arguments)]
 pub async fn stream_download_decrypt_with_file_key(
     api: &ApiClient,
+    master_key: &MasterKey,
     file_key: std::sync::Arc<beebeeb_core::kdf::FileKey>,
     file_id: &str,
     pin: ExpectedChunkFormat,
@@ -228,7 +229,10 @@ pub async fn stream_download_decrypt_with_file_key(
 ) -> Result<DownloadStats, DownloadError> {
     stream_download_key(
         api,
-        DownloadKey::Explicit(file_key),
+        DownloadKey::Explicit {
+            key: file_key,
+            master: master_key,
+        },
         file_id,
         pin,
         chunk_count,
@@ -242,23 +246,32 @@ pub async fn stream_download_decrypt_with_file_key(
 
 enum DownloadKey<'a> {
     Legacy(&'a MasterKey),
-    Explicit(std::sync::Arc<beebeeb_core::kdf::FileKey>),
+    Explicit {
+        key: std::sync::Arc<beebeeb_core::kdf::FileKey>,
+        /// Kept so a first-frame failure can ask core's owner resolver for the
+        /// per-version read-only repair key (SF-0002).
+        master: &'a MasterKey,
+    },
 }
 impl DownloadKey<'_> {
     fn decryptor(&self, id: &str, pin: ExpectedChunkFormat) -> ChunkDecryptor {
         match self {
             Self::Legacy(master) => ChunkDecryptor::for_push(master, id, pin),
-            Self::Explicit(key) => {
+            Self::Explicit { key, .. } => {
                 ChunkDecryptor::for_push_with_file_key(beebeeb_core::kdf::FileKey::from_bytes(*key.as_bytes()), id, pin)
             }
         }
     }
-    fn legacy(&self) -> Result<&MasterKey, DownloadError> {
+    fn master(&self) -> &MasterKey {
         match self {
-            Self::Legacy(m) => Ok(m),
-            Self::Explicit(_) => Err(DownloadError::Unreadable(
-                "explicit-key content failed authentication".into(),
-            )),
+            Self::Legacy(master) => master,
+            Self::Explicit { master, .. } => master,
+        }
+    }
+    fn explicit(&self) -> Option<&beebeeb_core::kdf::FileKey> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Explicit { key, .. } => Some(key.as_ref()),
         }
     }
 }
@@ -322,7 +335,7 @@ async fn stream_download_key(
             )
             .await?
         }
-        DownloadKey::Explicit(file_key) => {
+        DownloadKey::Explicit { key: file_key, .. } => {
             crate::direct_download::try_download_with_file_key(
                 api,
                 file_key.clone(),
@@ -448,10 +461,9 @@ async fn stream_raw(
                 // legacy file served with a V2 header. Not a truncation —
                 // hand everything to the buffered path (capped).
                 writer.abort();
-                let master_key = key.legacy()?;
                 let mut full = std::mem::take(&mut carry);
                 drain_rest(resp, &mut full, fb_cap).await?;
-                return buffered_fallback(master_key, file_id, pin, &full, count, chunk_size, out_path, prog)
+                return buffered_fallback(key, file_id, pin, &full, count, chunk_size, out_path, prog)
                     .map_err(DownloadError::from);
             }
             if carry.len() < frame_size {
@@ -477,13 +489,12 @@ async fn stream_raw(
                 // was wrong. Reassemble the full payload and let the buffered
                 // path try both parsers, both keys and the frame-size probe.
                 writer.abort();
-                let master_key = key.legacy()?;
                 let mut full = frame; // the first frame we already read
                 // `carry` holds the bytes read past frame 0; append it once,
                 // then drain the remainder under the fallback cap.
                 full.append(&mut carry);
                 drain_rest(resp, &mut full, fb_cap).await?;
-                return buffered_fallback(master_key, file_id, pin, &full, count, chunk_size, out_path, prog)
+                return buffered_fallback(key, file_id, pin, &full, count, chunk_size, out_path, prog)
                     .map_err(DownloadError::from);
             }
             Err(e) => {
@@ -514,7 +525,7 @@ async fn stream_raw(
 /// atomically.
 #[allow(clippy::too_many_arguments)]
 fn buffered_fallback(
-    master_key: &MasterKey,
+    key: &DownloadKey<'_>,
     file_id: &str,
     pin: ExpectedChunkFormat,
     encrypted: &[u8],
@@ -523,8 +534,16 @@ fn buffered_fallback(
     out_path: &Path,
     prog: &dyn crate::upload::FileProgress,
 ) -> Result<DownloadStats, String> {
-    let plaintext =
-        crate::crypto::decrypt_file_chunks_with_chunk_size(master_key, file_id, pin, encrypted, count, chunk_size)?;
+    let plaintext = crate::crypto::decrypt_file_chunks_owned(
+        key.master(),
+        file_id,
+        pin,
+        key.explicit(),
+        encrypted,
+        count,
+        chunk_size,
+    )?
+    .0;
     let mut writer = AtomicFile::create(out_path)?;
     writer.write_all(&plaintext)?;
     writer.commit()?;

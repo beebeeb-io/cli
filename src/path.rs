@@ -120,6 +120,9 @@ pub struct ResolvedPath {
     pub name: String,
     /// Whether the resolved entry is a folder.
     pub is_folder: bool,
+    /// SF-0002: the owner key convention for this row is read-only
+    /// (`UpperRepair`); rename/new-version must be refused, a move is allowed.
+    pub read_only: bool,
 }
 
 /// Resolve a human-readable slash-separated path to an encrypted file entry.
@@ -167,6 +170,7 @@ async fn lookup_path(
             parent_id: None,
             name: "/".to_string(),
             is_folder: true,
+            read_only: false,
         }));
     }
 
@@ -177,6 +181,7 @@ async fn lookup_path(
         parent_id: None,
         name: "/".to_string(),
         is_folder: true,
+        read_only: false,
     };
 
     for segment in &segments {
@@ -206,6 +211,7 @@ async fn lookup_path(
                 continue;
             };
             let decrypted = resolved.name;
+            let read_only = resolved.read_only;
 
             if decrypted.eq_ignore_ascii_case(&decoded) {
                 current = ResolvedPath {
@@ -213,6 +219,7 @@ async fn lookup_path(
                     parent_id: current.file_id.as_deref().and_then(|s| s.parse().ok()),
                     name: decrypted,
                     is_folder,
+                    read_only,
                 };
                 found = true;
                 break;
@@ -248,7 +255,11 @@ pub async fn find_child_by_name(
         let name_enc = entry.get("name_encrypted").and_then(|v| v.as_str()).unwrap_or_default();
         let is_folder = entry.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
 
-        let decrypted = crate::crypto::decrypt_name(master_key, id, name_enc).unwrap_or_else(|| name_enc.to_string());
+        let decrypted = crate::crypto::decrypt_name_with_convention(master_key, id, name_enc);
+        let (decrypted, read_only) = match decrypted {
+            Some((name, convention)) => (name, convention == beebeeb_core::kdf::OwnerKeyConvention::UpperRepair),
+            None => (name_enc.to_string(), false),
+        };
 
         if decrypted.eq_ignore_ascii_case(name) {
             return Ok(Some(ResolvedPath {
@@ -256,6 +267,7 @@ pub async fn find_child_by_name(
                 parent_id: parent_id.and_then(|s| s.parse().ok()),
                 name: decrypted,
                 is_folder,
+                read_only,
             }));
         }
     }

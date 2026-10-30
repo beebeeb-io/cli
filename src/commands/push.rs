@@ -473,6 +473,11 @@ async fn push_single_file(
             let resolved = crate::owned_keys::OwnedKeyResolver::new()
                 .resolve(api, &master_key, &meta)
                 .await?;
+            // SF-0002: a row sealed by the old iOS app is read-only; refuse the
+            // version replace instead of rewriting an object we cannot re-key.
+            if resolved.read_only {
+                return Err(crate::crypto::OWNER_REPAIR_READ_ONLY.into());
+            }
             let pin = crate::crypto::content_pin_with_key(&resolved.key, &existing, name_encrypted)?;
             (Some(version), Some(pin), Some(resolved.key))
         }

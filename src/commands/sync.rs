@@ -1267,7 +1267,7 @@ pub async fn run(
                         ));
                     }
 
-                    let replacement = resolved.filter(|r| r.origin != KeyOrigin::Derived);
+                    let replacement = resolved.filter(|r| r.origin != KeyOrigin::Derived && !r.read_only);
                     if let Some(old_id) = replace_id.filter(|_| replacement.is_none()) {
                         let _ = api.trash_file(&old_id.to_string()).await;
                     }
@@ -3338,7 +3338,7 @@ async fn do_upload(
     let replacement = remote
         .as_ref()
         .and_then(|r| r.resolved.as_ref())
-        .filter(|r| r.origin != KeyOrigin::Derived);
+        .filter(|r| r.origin != KeyOrigin::Derived && !r.read_only);
     if let Some(old_id) = remote.as_ref().filter(|_| replacement.is_none()).map(|r| r.id) {
         let _ = api.trash_file(&old_id.to_string()).await;
     }
@@ -3591,6 +3591,7 @@ async fn download_to(
     if let Some(r) = remote.resolved.as_ref().filter(|r| r.origin != KeyOrigin::Derived) {
         crate::download::stream_download_decrypt_with_file_key(
             api,
+            master_key,
             r.key.clone(),
             &file_id_str,
             pin,
