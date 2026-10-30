@@ -182,6 +182,75 @@ mod fuse_impl {
         if is_dir { 0o700 } else { 0o600 }
     }
 
+    // ── Truncate ──────────────────────────────────────────────────────────────
+
+    /// Resize `existing` to `new_len` bytes: a grow zero-pads the tail, a
+    /// shrink keeps the prefix. The first `min(len)` bytes are never changed,
+    /// so a truncate cannot turn a file's content into zeros.
+    fn resized(existing: &[u8], new_len: u64) -> Vec<u8> {
+        let new_len = usize::try_from(new_len).unwrap_or(usize::MAX);
+        let keep = existing.len().min(new_len);
+        let mut out = Vec::with_capacity(new_len);
+        out.extend_from_slice(&existing[..keep]);
+        out.resize(new_len, 0);
+        out
+    }
+
+    /// What a `setattr(size = …)` resizes, decided before anything is read or
+    /// marked dirty.
+    ///
+    /// A stored file's content must be loaded before it is resized: starting
+    /// from an empty buffer and zero-filling replaces the file with zeros on
+    /// the next `release()` (task PV-0007). Only [`Unchanged`](Self::Unchanged)
+    /// leaves the file alone; every other outcome resizes and then marks the
+    /// file dirty.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum TruncateSource {
+        /// The requested size is already the current size: nothing changes and
+        /// `release()` uploads nothing.
+        Unchanged,
+        /// A write buffer is already resident (a create, a write, or an
+        /// earlier resize): resize it in place.
+        Buffer,
+        /// The read cache holds the decrypted content: resize that copy.
+        Cache,
+        /// Load the stored content (the same path `open`/`read` use), then
+        /// resize it.
+        Download,
+        /// There is no stored content behind the inode (a pending create, or a
+        /// directory, whose path is unchanged): resize an empty buffer.
+        Fresh,
+    }
+
+    /// Decide what a size request resizes. `known_size` is the length already
+    /// known without a download (the resident buffer's, else the inode's).
+    ///
+    /// Truncating to zero keeps nothing, so it never downloads — `O_TRUNC`
+    /// and `truncate -s 0` stay as cheap as they are today.
+    fn truncate_source(
+        has_buffer: bool,
+        has_stored_content: bool,
+        has_cache: bool,
+        known_size: u64,
+        new_size: u64,
+    ) -> TruncateSource {
+        if new_size == known_size {
+            // Nothing to resize: the file must not become dirty.
+            TruncateSource::Unchanged
+        } else if has_buffer {
+            TruncateSource::Buffer
+        } else if new_size == 0 {
+            // Truncating to zero keeps nothing, so it needs no content.
+            TruncateSource::Fresh
+        } else if has_cache {
+            TruncateSource::Cache
+        } else if has_stored_content {
+            TruncateSource::Download
+        } else {
+            TruncateSource::Fresh
+        }
+    }
+
     // ── Inode table entry ─────────────────────────────────────────────────────
 
     #[derive(Clone)]
@@ -792,9 +861,84 @@ mod fuse_impl {
             reply.written(data.len() as u32);
         }
 
+        /// Apply a `setattr(size = new_size)` to `ino`.
+        ///
+        /// A stored file's content is loaded first (the same path `read` uses)
+        /// and then resized, so `truncate -s N` keeps the file's first N bytes;
+        /// a grow zero-pads the tail. Only a resize that changes the length
+        /// marks the file dirty, so an unchanged size uploads nothing.
+        ///
+        /// `Err` means the stored content could not be read: the write buffer,
+        /// the inode size and the dirty set are then all left untouched, so
+        /// `release()` cannot replace the file with zeros.
+        fn resize_file(&mut self, ino: u64, new_size: u64) -> Result<TruncateSource, String> {
+            let (is_dir, inode_size, has_file_id) = match self.inodes.get(&ino) {
+                Some(e) => (e.is_dir, e.size, e.file_id.is_some()),
+                None => return Err("inode not found".to_string()),
+            };
+            let pending_create = self.pending_creates.contains_key(&ino);
+            let has_buffer = self.write_buffers.contains_key(&ino);
+            let has_cache = self.file_cache.contains_key(&ino);
+            let has_stored_content = !is_dir && !pending_create && has_file_id;
+            // The length already known without a download: the resident
+            // buffer's, else the read cache's, else the inode's.
+            let known_size = if let Some(buf) = self.write_buffers.get(&ino) {
+                buf.len() as u64
+            } else if let Some(cache) = self.file_cache.get(&ino) {
+                cache.len() as u64
+            } else {
+                inode_size
+            };
+
+            // Directories, and a pending create with nothing written yet, have
+            // no stored content to load: resize an empty buffer as before.
+            let source = if is_dir || (pending_create && !has_buffer) {
+                TruncateSource::Fresh
+            } else {
+                truncate_source(has_buffer, has_stored_content, has_cache, known_size, new_size)
+            };
+
+            // Same size: leave the buffer, the cache and the dirty set alone,
+            // so release() uploads nothing.
+            if source == TruncateSource::Unchanged {
+                // An `O_TRUNC` open of an already-empty file arrives as
+                // `size = 0 == 0`, and the following write() needs a buffer.
+                // Start an empty one, but keep the file clean: nothing is
+                // uploaded on release().
+                if new_size == 0 && !is_dir && !pending_create && !has_buffer {
+                    self.write_buffers.insert(ino, Vec::new());
+                }
+                return Ok(source);
+            }
+
+            let existing: Vec<u8> = match source {
+                TruncateSource::Buffer => self.write_buffers.get(&ino).cloned().unwrap_or_default(),
+                TruncateSource::Cache => self.file_cache.get(&ino).cloned().unwrap_or_default(),
+                TruncateSource::Download => {
+                    // The same download+decrypt path `read` uses. On failure it
+                    // returns before anything below, so the buffer, the inode
+                    // size and the dirty set are untouched.
+                    self.fetch_file(ino)?;
+                    self.file_cache.get(&ino).cloned().unwrap_or_default()
+                }
+                TruncateSource::Fresh | TruncateSource::Unchanged => Vec::new(),
+            };
+
+            let buf = resized(&existing, new_size);
+            self.write_buffers.insert(ino, buf);
+            self.file_cache.remove(&ino);
+            if !pending_create {
+                self.dirty_inodes.insert(ino);
+            }
+            if let Some(entry) = self.inodes.get_mut(&ino) {
+                entry.size = new_size;
+            }
+            Ok(source)
+        }
+
         /// Handle attribute changes:
         /// - chmod / chown → no-op, return current attr
-        /// - truncate → resize the write buffer (creates one if needed)
+        /// - truncate → load the stored content, then resize it
         fn setattr(
             &mut self,
             _req: &Request,
@@ -824,19 +968,18 @@ mod fuse_impl {
             // Handle truncation. This is called when a file is opened with
             // O_TRUNC so that writes can start from a clean slate.
             if let Some(new_size) = size {
-                let buf = self.write_buffers.entry(ino).or_default();
-                buf.resize(new_size as usize, 0);
-
-                // If this is an existing file (not a pending create) being
-                // truncated, mark it dirty so release() re-uploads it.
-                if !self.pending_creates.contains_key(&ino) {
-                    self.dirty_inodes.insert(ino);
-                }
-
-                if let Some(entry) = self.inodes.get_mut(&ino) {
-                    entry.size = new_size;
-                    // Evict the read cache — content is now different.
-                    self.file_cache.remove(&ino);
+                match self.resize_file(ino, new_size) {
+                    // Same size: the file was not touched, so release() has
+                    // nothing to upload.
+                    Ok(_) => {}
+                    Err(e) => {
+                        // The stored content could not be read. Nothing was
+                        // changed — in particular the buffer was not filled
+                        // with zeros, which would erase the file on release().
+                        eprintln!("[mount] setattr size ino={ino}: {e}");
+                        reply.error(Errno::EIO);
+                        return;
+                    }
                 }
             }
 
@@ -1597,6 +1740,196 @@ mod fuse_impl {
             assert_eq!(root.perm, 0o700);
             assert_eq!(root.uid, unsafe { libc::getuid() });
             assert_eq!(root.gid, unsafe { libc::getgid() });
+        }
+    }
+
+    // ── Truncate tests ────────────────────────────────────────────────────────
+    //
+    // A `setattr` size request must keep the file's content: load it (from the
+    // read cache or the server, the same path `read` uses), then resize it.
+    // Nothing is mounted and no server is reachable from these tests — the
+    // content lives in the read cache, as a previous `read` leaves it.
+
+    #[cfg(test)]
+    mod truncate_tests {
+        use super::*;
+
+        const INO: u64 = 7;
+        const FILE_ID: &str = "11111111-1111-4111-8111-111111111111";
+
+        fn file_entry(size: u64) -> InodeEntry {
+            InodeEntry {
+                file_id: Some(FILE_ID.to_string()),
+                key_uuid: None,
+                name: "report.bin".to_string(),
+                is_dir: false,
+                size,
+                chunk_count: 1,
+                modified: SystemTime::UNIX_EPOCH,
+                parent_ino: ROOT_INO,
+                pin: Err("this test never reaches the server".to_string()),
+            }
+        }
+
+        /// A filesystem state with one stored file whose decrypted content is
+        /// already in the read cache. `ApiClient::new_for_test` points at a
+        /// closed local port: nothing here may reach a server.
+        fn state_with_cached_file(content: &[u8]) -> BeebeebFsState {
+            let mut fs = BeebeebFsState::new(
+                ApiClient::new_for_test("http://127.0.0.1:9".to_string()),
+                beebeeb_core::kdf::MasterKey::from_bytes([7u8; 32]),
+                Duration::from_secs(5),
+            );
+            fs.inodes.insert(INO, file_entry(content.len() as u64));
+            fs.file_cache.insert(INO, content.to_vec());
+            fs
+        }
+
+        /// What `release()` uploads for `ino`, mirroring its decision: a
+        /// pending create uploads its buffer, else a dirty inode uploads it,
+        /// else nothing is uploaded (`release()` case 3).
+        fn what_release_uploads(fs: &mut BeebeebFsState, ino: u64) -> Option<Vec<u8>> {
+            let buf = fs.write_buffers.remove(&ino)?;
+            if fs.pending_creates.contains_key(&ino) || fs.dirty_inodes.remove(&ino) {
+                Some(buf)
+            } else {
+                None
+            }
+        }
+
+        #[test]
+        fn grow_keeps_the_prefix_and_zero_pads() {
+            assert_eq!(resized(b"hello", 9), b"hello\0\0\0\0".to_vec());
+        }
+
+        #[test]
+        fn shrink_keeps_the_prefix() {
+            assert_eq!(resized(b"hello world", 5), b"hello".to_vec());
+        }
+
+        #[test]
+        fn same_length_is_the_same_content() {
+            assert_eq!(resized(b"hello", 5), b"hello".to_vec());
+        }
+
+        #[test]
+        fn grow_through_setattr_keeps_the_content() {
+            let mut fs = state_with_cached_file(b"hello");
+
+            let source = fs.resize_file(INO, 9).expect("a cached file resizes");
+            assert_eq!(source, TruncateSource::Cache);
+            assert_eq!(fs.inodes[&INO].size, 9);
+            assert!(fs.dirty_inodes.contains(&INO), "a real resize must be re-uploaded");
+            assert_eq!(what_release_uploads(&mut fs, INO), Some(b"hello\0\0\0\0".to_vec()));
+        }
+
+        #[test]
+        fn shrink_through_setattr_keeps_the_prefix() {
+            let mut fs = state_with_cached_file(b"hello world");
+
+            let source = fs.resize_file(INO, 5).expect("a cached file resizes");
+            assert_eq!(source, TruncateSource::Cache);
+            assert_eq!(fs.inodes[&INO].size, 5);
+            assert_eq!(what_release_uploads(&mut fs, INO), Some(b"hello".to_vec()));
+        }
+
+        #[test]
+        fn the_same_size_is_unchanged_and_uploads_nothing() {
+            let mut fs = state_with_cached_file(b"hello");
+
+            let source = fs.resize_file(INO, 5).expect("an unchanged size is not an error");
+            assert_eq!(source, TruncateSource::Unchanged);
+            assert!(
+                !fs.dirty_inodes.contains(&INO),
+                "an unchanged size must not make the file dirty"
+            );
+            assert!(!fs.write_buffers.contains_key(&INO), "no write buffer is started");
+            assert_eq!(
+                what_release_uploads(&mut fs, INO),
+                None,
+                "release() must upload nothing"
+            );
+            assert_eq!(fs.inodes[&INO].size, 5);
+        }
+
+        #[test]
+        fn truncating_an_empty_file_starts_a_buffer_but_uploads_nothing() {
+            // `echo x > file` opens an existing empty file with O_TRUNC: the
+            // size request is 0 == 0, and the write that follows still needs a
+            // buffer. Starting it must not make the file dirty.
+            let mut fs = state_with_cached_file(b"");
+
+            let source = fs.resize_file(INO, 0).expect("zero on zero");
+            assert_eq!(source, TruncateSource::Unchanged);
+            assert!(!fs.dirty_inodes.contains(&INO), "nothing changed, so nothing is dirty");
+            assert_eq!(
+                fs.write_buffers.get(&INO).map(Vec::as_slice),
+                Some(&[][..]),
+                "the following write() gets an empty buffer"
+            );
+            assert_eq!(what_release_uploads(&mut fs, INO), None, "release() uploads nothing");
+        }
+
+        #[test]
+        fn stored_content_is_loaded_before_it_is_resized() {
+            // Neither a write buffer nor a cached copy: the stored content must
+            // be read first, never replaced by an empty buffer.
+            assert_eq!(truncate_source(false, true, false, 5, 9), TruncateSource::Download);
+            assert_eq!(truncate_source(false, true, false, 11, 5), TruncateSource::Download);
+        }
+
+        #[test]
+        fn a_resident_buffer_is_resized_in_place() {
+            assert_eq!(truncate_source(true, true, true, 5, 2), TruncateSource::Buffer);
+            assert_eq!(truncate_source(true, true, false, 5, 9), TruncateSource::Buffer);
+        }
+
+        #[test]
+        fn truncating_to_zero_keeps_nothing_so_it_downloads_nothing() {
+            assert_eq!(truncate_source(false, true, false, 1000, 0), TruncateSource::Fresh);
+
+            let mut fs = state_with_cached_file(b"hello");
+            assert_eq!(fs.resize_file(INO, 0).expect("truncate to zero"), TruncateSource::Fresh);
+            assert_eq!(what_release_uploads(&mut fs, INO), Some(Vec::new()));
+        }
+
+        #[test]
+        fn a_pending_create_starts_from_an_empty_buffer() {
+            assert_eq!(truncate_source(false, false, false, 0, 5), TruncateSource::Fresh);
+
+            let mut fs = state_with_cached_file(b"");
+            fs.pending_creates.remove(&INO);
+            fs.pending_creates.insert(
+                INO,
+                PendingCreate {
+                    parent_ino: ROOT_INO,
+                    name: "new.bin".to_string(),
+                },
+            );
+            fs.inodes.get_mut(&INO).expect("inode").file_id = None;
+            assert_eq!(fs.resize_file(INO, 3).expect("pad a new file"), TruncateSource::Fresh);
+            assert_eq!(what_release_uploads(&mut fs, INO), Some(vec![0u8; 3]));
+        }
+
+        #[test]
+        fn a_directory_keeps_its_path_and_downloads_nothing() {
+            assert_eq!(truncate_source(false, false, false, 0, 5), TruncateSource::Fresh);
+        }
+
+        #[test]
+        fn an_unreadable_stored_content_changes_nothing() {
+            // No cached copy and no buffer: the resize needs the server, which
+            // this state cannot reach. It must report the error and leave the
+            // file — and the dirty set — exactly as it was, so nothing is
+            // uploaded with zeros.
+            let mut fs = state_with_cached_file(b"");
+            fs.file_cache.remove(&INO);
+            fs.inodes.get_mut(&INO).expect("inode").size = 5;
+
+            assert!(fs.resize_file(INO, 9).is_err());
+            assert!(!fs.dirty_inodes.contains(&INO));
+            assert!(!fs.write_buffers.contains_key(&INO));
+            assert_eq!(fs.inodes[&INO].size, 5);
         }
     }
 }
