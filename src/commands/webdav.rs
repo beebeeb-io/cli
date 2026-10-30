@@ -770,6 +770,13 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
 
+    // L13 (SF-0001): the init must echo the id this client chose (a fresh one
+    // for a new file, the listed row's for a replace). A different id aborts
+    // before a single chunk is PUT under it.
+    if let Err(e) = crate::item_id::verify_echoed_id(file_uuid, Some(&init.file_id)) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+    }
+
     let session_id = init.upload_session_id.clone();
 
     for (idx, data) in encrypted_chunks {
@@ -779,7 +786,11 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
     }
 
     match state.api.upload_complete(&session_id).await {
-        Ok(_) => {
+        Ok(answer) => {
+            // L13 (SF-0001): the completion answer must name the same item.
+            if let Err(e) = crate::item_id::verify_echoed_id(file_uuid, crate::item_id::echoed_id(&answer)) {
+                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+            }
             let mut headers = HeaderMap::new();
             headers.insert("Location", path.parse().unwrap_or_else(|_| "/".parse().unwrap()));
             (StatusCode::CREATED, headers, "").into_response()
@@ -829,19 +840,16 @@ async fn mkcol_response(state: &Arc<DavState>, path: &str) -> Response {
 
     // Encrypt folder name — needs a UUID key. Use nil UUID for folders (consistent
     // with the server's convention: folder name is encrypted with the folder's own UUID).
-    let folder_uuid = uuid::Uuid::new_v4();
-    let name_encrypted =
-        match beebeeb_core::encrypt::encrypt_name(&state.master_key, &folder_uuid.to_string(), &folder_name, None) {
-            Ok(s) => s,
-            Err(e) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-            }
-        };
-
-    match state
-        .api
-        .create_folder(&name_encrypted, parent_id, Some(folder_uuid))
-        .await
+    // L13 (SF-0001): this client mints the folder id and seals the name under
+    // it; a different echo aborts before the folder is listed or written into.
+    match crate::item_id::create_owned_folder(
+        &state.api,
+        &state.master_key,
+        &folder_name,
+        parent_id,
+        uuid::Uuid::new_v4(),
+    )
+    .await
     {
         Ok(_) => {
             // Invalidate parent directory cache
@@ -1598,5 +1606,99 @@ mod windows_hint_tests {
             assert!(WINDOWS_EXPLORER_HINT.contains(needle), "hint lacks {needle:?}");
         }
         assert_eq!(windows_explorer_hint().is_some(), cfg!(windows));
+    }
+}
+
+#[cfg(test)]
+mod item_id_echo_tests {
+    use super::*;
+    use axum::routing::{get, post};
+    use axum::{Json, Router};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn state_for(base: String, chunks: Arc<AtomicUsize>) -> Arc<DavState> {
+        let _ = &chunks;
+        Arc::new(DavState {
+            api: ApiClient::new_for_test(base),
+            master_key: beebeeb_core::kdf::MasterKey::from_bytes([0; 32]),
+            read_only: false,
+            dir_cache: Mutex::new(HashMap::new()),
+            cache_ttl: Duration::ZERO,
+            locks: Mutex::new(HashMap::new()),
+            request_count: std::sync::atomic::AtomicU64::new(0),
+            error_count: std::sync::atomic::AtomicU64::new(0),
+            verbose: false,
+        })
+    }
+
+    /// A8 (webdav MKCOL): a folder create whose answer echoes a different id
+    /// aborts the request instead of listing/writing into it.
+    #[tokio::test]
+    async fn mkcol_echoing_a_different_id_aborts() {
+        let other = Uuid::new_v4();
+        let app = Router::new()
+            .route("/api/v1/files", get(|| async { (StatusCode::NOT_FOUND, Json(json!({"error": "none"}))) }))
+            .route(
+                "/api/v1/files/folder",
+                post(move |Json(body): Json<serde_json::Value>| async move {
+                    // The client's id was proposed; answer another one.
+                    assert!(body.get("folder_id").is_some(), "the client must propose its own id");
+                    Json(json!({"id": other}))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let state = state_for(base, Arc::new(AtomicUsize::new(0)));
+        let response = mkcol_response(&state, "/Folder").await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        assert_eq!(String::from_utf8_lossy(&body), crate::item_id::CHANGED_ID_MESSAGE);
+    }
+
+    /// A7 (webdav PUT): the upload init answers a different id — abort before a
+    /// single chunk is PUT under it.
+    #[tokio::test]
+    async fn put_init_echoing_a_different_id_aborts_before_any_chunk() {
+        let chunks = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&chunks);
+        let app = Router::new()
+            .route("/api/v1/files", get(|| async { (StatusCode::NOT_FOUND, Json(json!({"error": "none"}))) }))
+            .route(
+                "/api/v1/uploads/init",
+                post(|Json(body): Json<serde_json::Value>| async move {
+                    assert!(body.get("file_id").is_some(), "the client must propose its own id");
+                    Json(json!({
+                        "upload_session_id": Uuid::new_v4(),
+                        "file_id": Uuid::new_v4(),
+                        "chunk_size_bytes": body.get("chunk_size_bytes").cloned().unwrap_or(json!(0)),
+                        "chunk_count": body.get("chunk_count").cloned().unwrap_or(json!(0)),
+                    }))
+                }),
+            )
+            .route(
+                "/api/v1/uploads/:session/chunks/:idx",
+                axum::routing::put(move |_b: axum::body::Bytes| {
+                    let counted = Arc::clone(&counted);
+                    async move {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        Json(json!({"ok": true}))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let state = state_for(base, chunks.clone());
+        let response = put_response(&state, "/file.txt", b"hello".to_vec(), None).await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        assert_eq!(String::from_utf8_lossy(&body), crate::item_id::CHANGED_ID_MESSAGE);
+        assert_eq!(chunks.load(Ordering::SeqCst), 0, "no chunk may be PUT under the echoed id");
     }
 }

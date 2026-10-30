@@ -567,6 +567,30 @@ pub async fn stream_encrypt_upload(
         crate::resume::clear(&spec.path);
         pending = None;
     }
+    // L13 (SF-0001): a persisted create session whose id this client did not
+    // mint (a pre-update record, or one whose marker names another id) is
+    // abandoned on the server and restarted under this run's own id — never
+    // resumed. Runs once per file per run: the record is cleared either way.
+    if let Some(stale) = crate::resume::unminted_upload(&spec.path, size, mtime_ns) {
+        crate::resume::clear(&spec.path);
+        pending = None;
+        if let Err(e) = api.upload_abandon(&stale.file_id.to_string()).await
+            && e.status != 404
+            && !crate::ui::is_quiet()
+        {
+            eprintln!(
+                "  {}: could not abandon the interrupted upload ({})",
+                display_name(&spec.file_name),
+                e.message
+            );
+        }
+        if !crate::ui::is_quiet() {
+            eprintln!(
+                "  {}: the interrupted upload was not started by this version; starting it again under a new id",
+                display_name(&spec.file_name)
+            );
+        }
+    }
     let mut plan = match pending {
         Some(pending) => match beebeeb_core::chunk_stream::resume_policy(pending.chunk_format, writing) {
             SessionResume::ContinueSession => SessionPlan::Resume {
@@ -806,7 +830,7 @@ async fn upload_attempt(
     //
     //    The capabilities are asked only when the answer is used: a resumed API session has no use for it (and a
     //    slow capabilities route costs up to 15 s a try).
-    let (upload_session_id, server_id, direct) = if let Some(sid) = resumed_session {
+    let (upload_session_id, _server_id, direct) = if let Some(sid) = resumed_session {
         let direct = if resumed_direct {
             match api.direct_upload_offer().await {
                 DirectOffer::Offered(discovery) => Some(discovery),
@@ -898,6 +922,12 @@ async fn upload_attempt(
                 }
             }
         };
+        // L13 (SF-0001): the answer must echo the id THIS client minted. A
+        // different id means the server would store the content under another
+        // item, whose derived key someone else may hold — abort before any
+        // chunk goes out, any name is sealed under it or it is used as a parent.
+        crate::item_id::verify_echoed_id(file_id, Some(&init.file_id))
+            .map_err(|e| AttemptErr::Other(e.to_string()))?;
         // The server's plan is authoritative — frame the upload against it, not
         // a hardcoded local guess. We sent our `ChunkEncryptor` plan; the v2
         // server uses client `chunk_size_bytes`/`chunk_count` verbatim, so the
@@ -953,13 +983,26 @@ async fn upload_attempt(
     }
 
     // 7. Finalise the version.
-    if let Err(e) = api.upload_complete_typed(&upload_session_id).await {
-        // Every chunk was confirmed (we only reach here on `result == Ok(())`,
-        // which `run_pipeline` only returns once `confirmed_bytes ==
-        // expected_total`) — so a swept-session retry must roll back exactly
-        // `expected_total`, the full amount THIS attempt reported.
+    let completed = match api.upload_complete_typed(&upload_session_id).await {
+        Ok(v) => v,
+        Err(e) => {
+            // Every chunk was confirmed (we only reach here on `result == Ok(())`,
+            // which `run_pipeline` only returns once `confirmed_bytes ==
+            // expected_total`) — so a swept-session retry must roll back exactly
+            // `expected_total`, the full amount THIS attempt reported.
+            file_prog.finish(false);
+            return Err(session_err(None, e, expected_total));
+        }
+    };
+    // L13 (SF-0001): the completion answer must name the same item this client
+    // minted — before the thumbnail is sealed under it or the outcome reports it.
+    if let Err(e) = crate::item_id::verify_echoed_id(file_id, crate::item_id::echoed_id(&completed)) {
+        // The session answered another item; do not leave a record that would
+        // resume it. (No abandon: its content was written under OUR id, and an
+        // abandon names that id, not the one the server claimed.)
+        crate::resume::clear(&spec.path);
         file_prog.finish(false);
-        return Err(session_err(None, e, expected_total));
+        return Err(AttemptErr::Other(e.to_string()));
     }
     file_prog.finish(true);
 
@@ -973,7 +1016,7 @@ async fn upload_attempt(
         master_key,
         spec.replace_file_key.as_deref(),
         &file_id_str,
-        &server_id,
+        &file_id_str,
         &spec.path,
         mime,
         size,
@@ -981,9 +1024,8 @@ async fn upload_attempt(
     )
     .await;
 
-    let parsed: Uuid = server_id.parse().map_err(|e| format!("invalid server file id: {e}"))?;
     Ok(UploadOutcome {
-        server_id: parsed,
+        server_id: file_id,
         plaintext_bytes: size,
         ciphertext_bytes: expected_total,
         transport: if direct.is_some() { "direct" } else { "api" },
@@ -1455,6 +1497,10 @@ mod swept_session_reinit {
         chunk_bodies: HashMap<(String, u32), Vec<u8>>,
         /// file_id of every `POST /files/{id}/upload/abandon`, in order.
         abandons: Vec<String>,
+        /// L13 (SF-0001): init answers THIS id instead of the one it was sent.
+        init_echo: Option<String>,
+        /// L13 (SF-0001): complete answers THIS id instead of the session's file.
+        complete_echo: Option<String>,
     }
 
     type Shared = Arc<Mutex<Mock>>;
@@ -1501,10 +1547,12 @@ mod swept_session_reinit {
                         if !m.kill_new_sessions {
                             m.live.insert(sid.clone());
                         }
-                        m.session_file.insert(sid.clone(), file_id.clone());
+                        // L13: a malicious server answers a DIFFERENT id.
+                        let echoed = m.init_echo.clone().unwrap_or_else(|| file_id.clone());
+                        m.session_file.insert(sid.clone(), echoed.clone());
                         Json(json!({
                             "upload_session_id": sid,
-                            "file_id": file_id,
+                            "file_id": echoed,
                             "chunk_size_bytes": body.get("chunk_size_bytes").and_then(|v| v.as_u64()).unwrap_or(0),
                             "chunk_count": body.get("chunk_count").and_then(|v| v.as_u64()).unwrap_or(0),
                         }))
@@ -1565,7 +1613,11 @@ mod swept_session_reinit {
                         return gone_response(m.gone);
                     }
                     m.completed.push(sid.clone());
-                    let fid = m.session_file.get(&sid).cloned().unwrap_or_default();
+                    let fid = m
+                        .complete_echo
+                        .clone()
+                        .or_else(|| m.session_file.get(&sid).cloned())
+                        .unwrap_or_default();
                     Json(json!({ "id": fid, "size_bytes": 0, "chunk_count": 0 })).into_response()
                 }),
             )
@@ -2339,8 +2391,9 @@ mod swept_session_reinit {
         assert_eq!(out.server_id, fid);
     }
 
-    /// A record from an older CLI does not say its chunk format: core's rule
-    /// restarts it (never continues), also for a v1 writer.
+    /// A record from an older CLI does not say its chunk format (and, L13, no
+    /// self-minted marker): it is abandoned and restarted under a FRESH own id —
+    /// never continued.
     #[tokio::test]
     async fn a_record_without_a_chunk_format_restarts_instead_of_continuing() {
         let s = Scratch::new("1943-resume-legacy");
@@ -2361,7 +2414,8 @@ mod swept_session_reinit {
         mock.session_file.insert(old_sid.to_string(), stored_fid.to_string());
         let state: Shared = Arc::new(Mutex::new(mock));
 
-        run(&state, spec(&path, Uuid::new_v4())).await.expect("upload succeeds");
+        let fresh = Uuid::new_v4();
+        run(&state, spec(&path, fresh)).await.expect("upload succeeds");
 
         let m = state.lock().unwrap();
         assert!(
@@ -2369,8 +2423,8 @@ mod swept_session_reinit {
             "{:?}",
             m.chunk_puts
         );
-        assert_eq!(m.abandons, vec![stored_fid.to_string()]);
-        assert_eq!(m.inits, vec![stored_fid.to_string()]);
+        assert_eq!(m.abandons, vec![stored_fid.to_string()], "the legacy session is abandoned");
+        assert_eq!(m.inits, vec![fresh.to_string()], "restarted under this run's own id");
         assert_eq!(m.chunk_puts[0].1, 0);
     }
 
@@ -2395,5 +2449,149 @@ mod swept_session_reinit {
         assert!(m.inits.is_empty(), "{:?}", m.inits);
         assert!(m.chunk_puts.iter().all(|(s, _)| *s == sid.to_string()));
         assert_eq!(m.completed, vec![sid.to_string()]);
+    }
+
+    // ── L13 (SF-0001): writes only under ids the client chose ───────────────
+
+    use crate::item_id::CHANGED_ID_MESSAGE;
+
+    /// A7: a new upload's init answers a different id. Abort BEFORE any chunk
+    /// is PUT, nothing completed, nothing abandoned, and the message is plain.
+    #[tokio::test]
+    async fn init_echo_of_a_different_id_aborts_before_any_chunk_put() {
+        let s = Scratch::new("a7-init");
+        let (path, ..) = s.file(64 * 1024);
+        let mine = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let mut mock = Mock::default();
+        mock.init_echo = Some(other.to_string());
+        let state: Shared = Arc::new(Mutex::new(mock));
+
+        let err = run(&state, spec(&path, mine)).await.expect_err("must abort");
+        assert_eq!(err, CHANGED_ID_MESSAGE);
+        let m = state.lock().unwrap();
+        assert_eq!(m.inits, vec![mine.to_string()], "the client's own id was proposed");
+        assert!(m.chunk_puts.is_empty(), "no chunk under the echoed id: {:?}", m.chunk_puts);
+        assert!(m.completed.is_empty());
+        assert!(m.abandons.is_empty());
+    }
+
+    /// A7 for a replace: the listed row's id is sent, and a different echo
+    /// aborts before any chunk PUT (nothing new is sealed under the echo).
+    #[tokio::test]
+    async fn replace_init_echo_of_a_different_id_aborts_before_any_chunk_put() {
+        let s = Scratch::new("a7-replace");
+        let (path, ..) = s.file(64 * 1024);
+        let listed = Uuid::new_v4();
+        let mut replace_spec = spec(&path, listed);
+        replace_spec.base_version_number = Some(2);
+        replace_spec.replace_pin = Some(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded);
+        replace_spec.replace_file_key = Some(Arc::new(beebeeb_core::kdf::FileKey::from_bytes([3u8; 32])));
+        let mut mock = Mock::default();
+        mock.init_echo = Some(Uuid::new_v4().to_string());
+        let state: Shared = Arc::new(Mutex::new(mock));
+
+        let err = run(&state, replace_spec).await.expect_err("must abort");
+        assert_eq!(err, CHANGED_ID_MESSAGE);
+        let m = state.lock().unwrap();
+        assert_eq!(m.inits, vec![listed.to_string()], "the listed row's id was sent");
+        assert!(m.chunk_puts.is_empty());
+        assert!(m.completed.is_empty());
+    }
+
+    /// A7: the completion answer names a different item. Abort, drop the resume
+    /// record (never resume a session the server mislabels), report the message.
+    #[tokio::test]
+    async fn completion_echo_of_a_different_id_aborts() {
+        let s = Scratch::new("a7-complete");
+        let (path, size, mtime) = s.file(64 * 1024);
+        let mine = Uuid::new_v4();
+        let mut mock = Mock::default();
+        mock.complete_echo = Some(Uuid::new_v4().to_string());
+        let state: Shared = Arc::new(Mutex::new(mock));
+
+        let err = run(&state, spec(&path, mine)).await.expect_err("must abort");
+        assert_eq!(err, CHANGED_ID_MESSAGE);
+        let m = state.lock().unwrap();
+        assert_eq!(m.completed.len(), 1, "the session was completed before the check");
+        assert_eq!(
+            crate::resume::resumable_upload(&path, size, mtime),
+            None,
+            "a session the answer mislabels must not stay resumable"
+        );
+    }
+
+    /// A7c: a persisted create session from a pre-update CLI (no self-minted
+    /// marker) is abandoned and restarted under this run's own fresh id.
+    #[tokio::test]
+    async fn legacy_record_without_a_marker_is_abandoned_and_restarted() {
+        let s = Scratch::new("a7c-legacy");
+        let (path, size, mtime) = s.file(64 * 1024);
+        let legacy_fid = Uuid::new_v4();
+        let legacy_sid = Uuid::new_v4();
+        write_raw_record(&s, &path, legacy_fid, legacy_sid, size, mtime, None);
+        let mut mock = Mock::default();
+        mock.live.insert(legacy_sid.to_string());
+        mock.session_file.insert(legacy_sid.to_string(), legacy_fid.to_string());
+        let state: Shared = Arc::new(Mutex::new(mock));
+
+        let fresh = Uuid::new_v4();
+        run(&state, spec(&path, fresh)).await.expect("restarts and succeeds");
+
+        let m = state.lock().unwrap();
+        assert_eq!(m.abandons, vec![legacy_fid.to_string()], "the legacy session is abandoned");
+        assert_eq!(m.inits, vec![fresh.to_string()], "restarted under the client's own id");
+        assert!(
+            m.chunk_puts.iter().all(|(sid, _)| *sid != legacy_sid.to_string()),
+            "never resumed: {:?}",
+            m.chunk_puts
+        );
+        assert_eq!(m.completed.len(), 1);
+    }
+
+    /// A7c: a record whose self-minted marker names a DIFFERENT id is treated
+    /// the same way — abandoned, never resumed.
+    #[tokio::test]
+    async fn record_with_a_different_marker_is_abandoned_and_restarted() {
+        let s = Scratch::new("a7c-other-marker");
+        let (path, size, mtime) = s.file(64 * 1024);
+        let stored_fid = Uuid::new_v4();
+        let sid = Uuid::new_v4();
+        write_raw_record(&s, &path, stored_fid, sid, size, mtime, Some(Uuid::new_v4()));
+        let mut mock = Mock::default();
+        mock.live.insert(sid.to_string());
+        mock.session_file.insert(sid.to_string(), stored_fid.to_string());
+        let state: Shared = Arc::new(Mutex::new(mock));
+
+        let fresh = Uuid::new_v4();
+        run(&state, spec(&path, fresh)).await.expect("restarts and succeeds");
+        let m = state.lock().unwrap();
+        assert_eq!(m.abandons, vec![stored_fid.to_string()]);
+        assert_eq!(m.inits, vec![fresh.to_string()]);
+    }
+
+    /// Write exactly what a pre-update CLI left behind (or a record whose marker
+    /// names another id): the raw sidecar, no `self_minted` marker unless given.
+    fn write_raw_record(
+        s: &Scratch,
+        path: &std::path::Path,
+        file_id: Uuid,
+        session_id: Uuid,
+        size: u64,
+        mtime_ns: u128,
+        marker: Option<Uuid>,
+    ) {
+        let mut entry = serde_json::json!({
+            "file_id": file_id,
+            "upload_session_id": session_id,
+            "chunk_format": beebeeb_core::chunk_stream::ChunkFormat::V1Legacy.as_u8(),
+            "size": size,
+            "mtime_ns": mtime_ns,
+        });
+        if let Some(m) = marker {
+            entry["self_minted"] = serde_json::json!(m);
+        }
+        let db = serde_json::json!({"uploads": {crate::resume::key(path): entry}});
+        std::fs::write(s.dir.join("pending.json"), db.to_string()).unwrap();
     }
 }

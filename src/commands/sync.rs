@@ -3172,12 +3172,10 @@ async fn create_folder(
     name: &str,
     parent_id: Option<Uuid>,
 ) -> Result<Uuid, String> {
-    let new_id = Uuid::new_v4();
-    let name_enc = beebeeb_core::encrypt::encrypt_name(master_key, &new_id.to_string(), name, None)
-        .map_err(|e| format!("encrypt folder name: {e}"))?;
-    let result = api.create_folder(&name_enc, parent_id, Some(new_id)).await?;
-    let id_str = result.get("id").and_then(|v| v.as_str()).ok_or("missing folder id")?;
-    id_str.parse().map_err(|e| format!("invalid folder id: {e}"))
+    // L13 (SF-0001): this client mints the id, seals the name under it, and
+    // requires the answer to echo it; a different id aborts before it is used
+    // as a parent or anything is written into it.
+    crate::item_id::create_owned_folder(api, master_key, name, parent_id, Uuid::new_v4()).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4481,5 +4479,72 @@ mod tests {
         let (files, health) = walk(&api).await;
         assert_eq!(files.len(), 50_000);
         assert!(health.truncated, "a capped listing must be marked incomplete");
+    }
+}
+
+#[cfg(test)]
+mod item_id_echo_tests {
+    use super::*;
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+
+    /// A mock create route that records the `folder_id` it was sent and answers
+    /// `answer` (a fixed id, or the requested one when `None`).
+    async fn mock_create(answer: Option<uuid::Uuid>) -> (String, Arc<Mutex<Option<String>>>) {
+        let seen = Arc::new(Mutex::new(None::<String>));
+        let record = seen.clone();
+        let app = Router::new().route(
+            "/api/v1/files/folder",
+            post(move |Json(body): Json<serde_json::Value>| {
+                let record = record.clone();
+                async move {
+                    let requested = body.get("folder_id").and_then(|v| v.as_str()).map(String::from);
+                    *record.lock().unwrap() = requested.clone();
+                    let echoed = answer
+                        .map(|a| a.to_string())
+                        .or(requested)
+                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                    Json(json!({"id": echoed}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), seen)
+    }
+
+    fn master() -> beebeeb_core::kdf::MasterKey {
+        beebeeb_core::kdf::MasterKey::from_bytes([0u8; 32])
+    }
+
+    /// A8 (sync): a folder create whose answer echoes a different id aborts
+    /// with the plain message; nothing is returned for use as a parent.
+    #[tokio::test]
+    async fn folder_create_echoing_a_different_id_aborts() {
+        let other = uuid::Uuid::new_v4();
+        let (base, seen) = mock_create(Some(other)).await;
+        let api = crate::api::ApiClient::new_for_test(base);
+        let err = create_folder(&api, &master(), "Folder", None)
+            .await
+            .expect_err("must abort");
+        assert_eq!(err, crate::item_id::CHANGED_ID_MESSAGE);
+        let requested = seen.lock().unwrap().clone().expect("folder_id was sent");
+        assert_ne!(requested, other.to_string(), "client proposed its own id");
+    }
+
+    /// Normal flow: the answer echoes the client's id and it is used.
+    #[tokio::test]
+    async fn folder_create_echoing_the_clients_id_succeeds() {
+        let (base, seen) = mock_create(None).await;
+        let api = crate::api::ApiClient::new_for_test(base);
+        let id = create_folder(&api, &master(), "Folder", None)
+            .await
+            .expect("succeeds");
+        assert_eq!(Some(id.to_string()), *seen.lock().unwrap());
     }
 }
