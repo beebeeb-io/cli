@@ -170,6 +170,11 @@ mod fuse_impl {
 
     use super::{ROOT_INO, rename_parent_target};
     const ATTR_TTL: Duration = Duration::from_secs(5);
+    /// Largest size a single `setattr(size = …)` may produce. The CLI has no
+    /// mount-specific file limit, so this mirrors the buffered download ceiling
+    /// in `download.rs`: a resize above it is refused with `EFBIG` before any
+    /// allocation is attempted.
+    const MAX_FILE_SIZE: u64 = 4 * 1024 * 1024 * 1024;
     // Chunk size is now computed dynamically via beebeeb_types::plan_chunks().
     // See the adaptive chunk-size ladder in beebeeb-types/src/chunk.rs.
 
@@ -188,12 +193,43 @@ mod fuse_impl {
     /// shrink keeps the prefix. The first `min(len)` bytes are never changed,
     /// so a truncate cannot turn a file's content into zeros.
     fn resized(existing: &[u8], new_len: u64) -> Vec<u8> {
+        resize_owned(existing.to_vec(), new_len)
+    }
+
+    /// [`resized`] for a buffer the caller already owns: a shrink truncates in
+    /// place and a grow reuses the allocation, so a resident write buffer is
+    /// resized without an extra copy.
+    fn resize_owned(mut existing: Vec<u8>, new_len: u64) -> Vec<u8> {
         let new_len = usize::try_from(new_len).unwrap_or(usize::MAX);
-        let keep = existing.len().min(new_len);
-        let mut out = Vec::with_capacity(new_len);
-        out.extend_from_slice(&existing[..keep]);
-        out.resize(new_len, 0);
-        out
+        if new_len <= existing.len() {
+            existing.truncate(new_len);
+        } else {
+            existing.resize(new_len, 0);
+        }
+        existing
+    }
+
+    /// Why a `setattr(size = …)` was refused. The errno is what the kernel (and
+    /// therefore the application) sees.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ResizeError {
+        /// The inode is not in the table: `ENOENT`, not `EIO`.
+        NotFound,
+        /// The requested size is above [`MAX_FILE_SIZE`]: `EFBIG`.
+        TooLarge,
+        /// The file's content could not be loaded, so resizing it would replace
+        /// it with zeros: `EIO`, with nothing changed.
+        Unavailable,
+    }
+
+    impl ResizeError {
+        fn errno(self) -> Errno {
+            match self {
+                Self::NotFound => Errno::ENOENT,
+                Self::TooLarge => Errno::EFBIG,
+                Self::Unavailable => Errno::EIO,
+            }
+        }
     }
 
     /// What a `setattr(size = …)` resizes, decided before anything is read or
@@ -212,25 +248,33 @@ mod fuse_impl {
         /// A write buffer is already resident (a create, a write, or an
         /// earlier resize): resize it in place.
         Buffer,
-        /// The read cache holds the decrypted content: resize that copy.
+        /// The read cache holds the decrypted content at the inode's current
+        /// size: resize that copy.
         Cache,
         /// Load the stored content (the same path `open`/`read` use), then
         /// resize it.
         Download,
-        /// There is no stored content behind the inode (a pending create, or a
-        /// directory, whose path is unchanged): resize an empty buffer.
+        /// There is nothing to keep: a pending create, a directory, or a
+        /// truncate to zero. Resize an empty buffer.
         Fresh,
+        /// The file has stored content that is not resident (no buffer, no
+        /// matching cache) and the requested size is above zero, so it cannot
+        /// be resized without losing it: answer `EIO`.
+        Unavailable,
     }
 
     /// Decide what a size request resizes. `known_size` is the length already
     /// known without a download (the resident buffer's, else the inode's).
+    /// `cache_matches_size` says the read cache holds exactly the inode's
+    /// current length — a cache left by an earlier read of a since-truncated
+    /// file must never be treated as this file's content.
     ///
     /// Truncating to zero keeps nothing, so it never downloads — `O_TRUNC`
     /// and `truncate -s 0` stay as cheap as they are today.
     fn truncate_source(
         has_buffer: bool,
         has_stored_content: bool,
-        has_cache: bool,
+        cache_matches_size: bool,
         known_size: u64,
         new_size: u64,
     ) -> TruncateSource {
@@ -242,12 +286,16 @@ mod fuse_impl {
         } else if new_size == 0 {
             // Truncating to zero keeps nothing, so it needs no content.
             TruncateSource::Fresh
-        } else if has_cache {
+        } else if cache_matches_size {
             TruncateSource::Cache
         } else if has_stored_content {
             TruncateSource::Download
         } else {
-            TruncateSource::Fresh
+            // A file with no stored content and nothing resident (the state
+            // after a failed release upload) cannot grow without inventing
+            // bytes: only a genuinely new, empty file may start from nothing,
+            // and that arrives as a pending create.
+            TruncateSource::Unavailable
         }
     }
 
@@ -312,6 +360,32 @@ mod fuse_impl {
     struct PendingCreate {
         parent_ino: u64,
         name: String,
+    }
+
+    /// What `release()` does with the buffer it takes off an inode. One pure
+    /// decision, used both by `release()` and by the tests that assert what
+    /// would be uploaded.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ReleaseUpload {
+        /// No buffer, or a clean release: nothing is uploaded (`release()`
+        /// case 3).
+        Nothing,
+        /// A brand-new file created via `create()` (`release()` case 1).
+        NewFile,
+        /// An existing file that was written to or resized (`release()` case 2).
+        Overwrite,
+    }
+
+    fn release_upload(has_buffer: bool, is_pending_create: bool, is_dirty: bool) -> ReleaseUpload {
+        if !has_buffer {
+            ReleaseUpload::Nothing
+        } else if is_pending_create {
+            ReleaseUpload::NewFile
+        } else if is_dirty {
+            ReleaseUpload::Overwrite
+        } else {
+            ReleaseUpload::Nothing
+        }
     }
 
     // ── Directory cache entry ─────────────────────────────────────────────────
@@ -599,6 +673,10 @@ mod fuse_impl {
 
             self.rt.block_on(self.api.upload_complete(&session_id))?;
 
+            // The server now has this content: a cache entry from before the
+            // write describes the previous version and must not survive.
+            self.file_cache.remove(&ino);
+
             // Update inode: server_id for API calls, key_uuid for decryption.
             if let Some(entry) = self.inodes.get_mut(&ino) {
                 self.id_to_ino.remove(entry.file_id.as_deref().unwrap_or(""));
@@ -822,6 +900,49 @@ mod fuse_impl {
             reply.created(&ATTR_TTL, &attr, Generation(0), FileHandle(ino), FopenFlags::empty());
         }
 
+        /// Apply one write to `ino`'s buffer. Shared by `write()` and the tests,
+        /// so the dirty decision below is the one the mount actually makes.
+        ///
+        /// A write into an existing file marks it dirty: the buffer now holds
+        /// content the server does not have, so `release()` must upload it.
+        /// Writes into a pending create stay non-dirty (case 1 already uploads).
+        fn apply_write(&mut self, ino: u64, offset: u64, data: &[u8]) -> Result<(), Errno> {
+            if !self.write_buffers.contains_key(&ino) {
+                // A write needs a buffer. An existing empty file legitimately
+                // starts from nothing: `echo x > empty` opens it with O_TRUNC,
+                // which arrives as `setattr(size = 0)` on a size-0 file and
+                // changes nothing, so no buffer is created there. A non-empty
+                // stored file without a buffer would lose its content if we
+                // started one from zero, so it stays refused.
+                let empty_existing = self.inodes.get(&ino).is_some_and(|e| !e.is_dir && e.size == 0);
+                if !empty_existing {
+                    return Err(Errno::ENOTSUP);
+                }
+                self.write_buffers.insert(ino, Vec::new());
+            }
+
+            let offset = offset as usize;
+            let buf = self.write_buffers.get_mut(&ino).expect("buffer inserted above");
+
+            // Extend to cover offset + data.len(), filling gaps with zeros
+            // (supports sparse writes from tools like rsync).
+            let needed = offset.saturating_add(data.len());
+            if needed > buf.len() {
+                buf.resize(needed, 0);
+            }
+            buf[offset..offset + data.len()].copy_from_slice(data);
+
+            // Keep inode size in sync so getattr returns the right value.
+            if let Some(entry) = self.inodes.get_mut(&ino) {
+                entry.size = buf.len() as u64;
+            }
+
+            if !self.pending_creates.contains_key(&ino) {
+                self.dirty_inodes.insert(ino);
+            }
+            Ok(())
+        }
+
         /// Accumulate `data` at `offset` into the in-memory write buffer.
         fn write(
             &mut self,
@@ -835,30 +956,10 @@ mod fuse_impl {
             _lock_owner: Option<LockOwner>,
             reply: fuser::ReplyWrite,
         ) {
-            let ino = ino.0;
-            // Only files with an active write buffer accept writes.
-            if !self.write_buffers.contains_key(&ino) {
-                reply.error(Errno::ENOTSUP);
-                return;
+            match self.apply_write(ino.0, offset, data) {
+                Ok(()) => reply.written(data.len() as u32),
+                Err(e) => reply.error(e),
             }
-
-            let offset = offset as usize;
-            let buf = self.write_buffers.entry(ino).or_default();
-
-            // Extend to cover offset + data.len(), filling gaps with zeros
-            // (supports sparse writes from tools like rsync).
-            let needed = offset + data.len();
-            if needed > buf.len() {
-                buf.resize(needed, 0);
-            }
-            buf[offset..offset + data.len()].copy_from_slice(data);
-
-            // Keep inode size in sync so getattr returns the right value.
-            if let Some(entry) = self.inodes.get_mut(&ino) {
-                entry.size = buf.len() as u64;
-            }
-
-            reply.written(data.len() as u32);
         }
 
         /// Apply a `setattr(size = new_size)` to `ino`.
@@ -868,24 +969,32 @@ mod fuse_impl {
         /// a grow zero-pads the tail. Only a resize that changes the length
         /// marks the file dirty, so an unchanged size uploads nothing.
         ///
-        /// `Err` means the stored content could not be read: the write buffer,
-        /// the inode size and the dirty set are then all left untouched, so
-        /// `release()` cannot replace the file with zeros.
-        fn resize_file(&mut self, ino: u64, new_size: u64) -> Result<TruncateSource, String> {
+        /// `Err` means nothing was resized: the inode is unknown (`ENOENT`),
+        /// the size is past [`MAX_FILE_SIZE`] (`EFBIG`), or the stored content
+        /// could not be read (`EIO`). In every case the write buffer, the inode
+        /// size and the dirty set are left untouched, so `release()` cannot
+        /// replace the file with zeros.
+        fn resize_file(&mut self, ino: u64, new_size: u64) -> Result<TruncateSource, ResizeError> {
+            if new_size > MAX_FILE_SIZE {
+                // Refuse before touching the buffer: a resize may not be able
+                // to allocate what it was asked for.
+                return Err(ResizeError::TooLarge);
+            }
             let (is_dir, inode_size, has_file_id) = match self.inodes.get(&ino) {
                 Some(e) => (e.is_dir, e.size, e.file_id.is_some()),
-                None => return Err("inode not found".to_string()),
+                None => return Err(ResizeError::NotFound),
             };
             let pending_create = self.pending_creates.contains_key(&ino);
             let has_buffer = self.write_buffers.contains_key(&ino);
-            let has_cache = self.file_cache.contains_key(&ino);
+            // The read cache is this file's content only when its length is
+            // the length the inode says. A cache left by a read of the file
+            // before a truncate must not resurrect the removed tail.
+            let cache_matches_size = self.file_cache.get(&ino).is_some_and(|c| c.len() as u64 == inode_size);
             let has_stored_content = !is_dir && !pending_create && has_file_id;
             // The length already known without a download: the resident
-            // buffer's, else the read cache's, else the inode's.
+            // buffer's, else the inode's.
             let known_size = if let Some(buf) = self.write_buffers.get(&ino) {
                 buf.len() as u64
-            } else if let Some(cache) = self.file_cache.get(&ino) {
-                cache.len() as u64
             } else {
                 inode_size
             };
@@ -895,38 +1004,49 @@ mod fuse_impl {
             let source = if is_dir || (pending_create && !has_buffer) {
                 TruncateSource::Fresh
             } else {
-                truncate_source(has_buffer, has_stored_content, has_cache, known_size, new_size)
+                truncate_source(has_buffer, has_stored_content, cache_matches_size, known_size, new_size)
             };
 
             // Same size: leave the buffer, the cache and the dirty set alone,
             // so release() uploads nothing.
             if source == TruncateSource::Unchanged {
-                // An `O_TRUNC` open of an already-empty file arrives as
-                // `size = 0 == 0`, and the following write() needs a buffer.
-                // Start an empty one, but keep the file clean: nothing is
-                // uploaded on release().
-                if new_size == 0 && !is_dir && !pending_create && !has_buffer {
-                    self.write_buffers.insert(ino, Vec::new());
-                }
                 return Ok(source);
             }
 
+            if source == TruncateSource::Unavailable {
+                // Nothing to resize from, and the requested size is above
+                // zero: inventing zero bytes would replace the file. Leave
+                // everything as it was.
+                return Err(ResizeError::Unavailable);
+            }
+
             let existing: Vec<u8> = match source {
-                TruncateSource::Buffer => self.write_buffers.get(&ino).cloned().unwrap_or_default(),
-                TruncateSource::Cache => self.file_cache.get(&ino).cloned().unwrap_or_default(),
+                TruncateSource::Buffer => self.write_buffers.remove(&ino).unwrap_or_default(),
+                TruncateSource::Cache => self.file_cache.remove(&ino).unwrap_or_default(),
                 TruncateSource::Download => {
-                    // The same download+decrypt path `read` uses. On failure it
-                    // returns before anything below, so the buffer, the inode
-                    // size and the dirty set are untouched.
-                    self.fetch_file(ino)?;
-                    self.file_cache.get(&ino).cloned().unwrap_or_default()
+                    // A cache entry that does not match the inode's size is
+                    // not this file's content; drop it so `fetch_file` really
+                    // downloads instead of handing the stale copy back. On
+                    // failure it returns before anything below, so the buffer,
+                    // the inode size and the dirty set are untouched.
+                    self.file_cache.remove(&ino);
+                    self.fetch_file(ino).map_err(|e| {
+                        eprintln!("[mount] resize ino={ino}: content could not be loaded: {e}");
+                        ResizeError::Unavailable
+                    })?;
+                    self.file_cache.remove(&ino).unwrap_or_default()
                 }
-                TruncateSource::Fresh | TruncateSource::Unchanged => Vec::new(),
+                TruncateSource::Fresh | TruncateSource::Unchanged | TruncateSource::Unavailable => Vec::new(),
             };
 
-            let buf = resized(&existing, new_size);
+            // A resident buffer is resized in place (no extra copy); the
+            // others are copied out of their source.
+            let buf = if source == TruncateSource::Buffer {
+                resize_owned(existing, new_size)
+            } else {
+                resized(&existing, new_size)
+            };
             self.write_buffers.insert(ino, buf);
-            self.file_cache.remove(&ino);
             if !pending_create {
                 self.dirty_inodes.insert(ino);
             }
@@ -973,11 +1093,14 @@ mod fuse_impl {
                     // nothing to upload.
                     Ok(_) => {}
                     Err(e) => {
-                        // The stored content could not be read. Nothing was
+                        // The stored content could not be read, or the inode
+                        // is gone / the size is past the cap. Nothing was
                         // changed — in particular the buffer was not filled
                         // with zeros, which would erase the file on release().
-                        eprintln!("[mount] setattr size ino={ino}: {e}");
-                        reply.error(Errno::EIO);
+                        if e == ResizeError::Unavailable {
+                            eprintln!("[mount] setattr size ino={ino}: content could not be loaded");
+                        }
+                        reply.error(e.errno());
                         return;
                     }
                 }
@@ -1001,63 +1124,70 @@ mod fuse_impl {
             reply: ReplyEmpty,
         ) {
             let ino = ino.0;
-            // Take the write buffer — if absent, nothing to upload.
-            let buf = match self.write_buffers.remove(&ino) {
-                Some(b) => b,
-                None => {
-                    reply.ok();
-                    return;
+            // Take the buffer and the decision together, so the test drives the
+            // same code this handler does. Absent buffer → nothing to upload.
+            let (action, buf, pending) = self.take_release_upload(ino);
+
+            match action {
+                // ── Case 3: clean release (no write occurred) ─────────────────
+                ReleaseUpload::Nothing => reply.ok(),
+
+                // ── Case 1: brand-new file ────────────────────────────────────
+                ReleaseUpload::NewFile => {
+                    let pending = pending.expect("a pending create carries its metadata");
+                    match self.upload_file(ino, &pending.name, buf, pending.parent_ino) {
+                        Ok(_) => reply.ok(),
+                        Err(e) => {
+                            eprintln!("[mount] release upload (new file): {e}");
+                            reply.error(Errno::EIO);
+                        }
+                    }
                 }
+
+                // ── Case 2: existing file re-written (e.g. O_TRUNC overwrite) ──
+                ReleaseUpload::Overwrite => {
+                    let (name, parent_ino, old_file_id) = match self.inodes.get(&ino) {
+                        Some(e) => (e.name.clone(), e.parent_ino, e.file_id.clone()),
+                        None => {
+                            reply.error(Errno::ENOENT);
+                            return;
+                        }
+                    };
+
+                    // Trash the old server-side file before uploading the new one.
+                    if let Some(old_id) = old_file_id {
+                        if let Err(e) = self.rt.block_on(self.api.trash_file(&old_id)) {
+                            eprintln!("[mount] release: trash old file {old_id}: {e}");
+                            // Non-fatal — continue with upload.
+                        }
+                        self.id_to_ino.remove(&old_id);
+                        if let Some(e) = self.inodes.get_mut(&ino) {
+                            e.file_id = None;
+                        }
+                    }
+
+                    match self.upload_file(ino, &name, buf, parent_ino) {
+                        Ok(_) => reply.ok(),
+                        Err(e) => {
+                            eprintln!("[mount] release upload (overwrite): {e}");
+                            reply.error(Errno::EIO);
+                        }
+                    }
+                }
+            }
+        }
+
+        /// Take the buffer off `ino` and decide what `release()` does with it.
+        /// The buffer, the pending create and the dirty flag are consumed here
+        /// exactly as the handler consumes them.
+        fn take_release_upload(&mut self, ino: u64) -> (ReleaseUpload, Vec<u8>, Option<PendingCreate>) {
+            let Some(buf) = self.write_buffers.remove(&ino) else {
+                return (ReleaseUpload::Nothing, Vec::new(), None);
             };
-
-            // ── Case 1: brand-new file ────────────────────────────────────────
-            if let Some(pending) = self.pending_creates.remove(&ino) {
-                let name = pending.name.clone();
-                let parent_ino = pending.parent_ino;
-                match self.upload_file(ino, &name, buf, parent_ino) {
-                    Ok(_) => reply.ok(),
-                    Err(e) => {
-                        eprintln!("[mount] release upload (new file): {e}");
-                        reply.error(Errno::EIO);
-                    }
-                }
-                return;
-            }
-
-            // ── Case 2: existing file re-written (e.g. O_TRUNC overwrite) ────
-            if self.dirty_inodes.remove(&ino) {
-                let (name, parent_ino, old_file_id) = match self.inodes.get(&ino) {
-                    Some(e) => (e.name.clone(), e.parent_ino, e.file_id.clone()),
-                    None => {
-                        reply.error(Errno::ENOENT);
-                        return;
-                    }
-                };
-
-                // Trash the old server-side file before uploading the new one.
-                if let Some(old_id) = old_file_id {
-                    if let Err(e) = self.rt.block_on(self.api.trash_file(&old_id)) {
-                        eprintln!("[mount] release: trash old file {old_id}: {e}");
-                        // Non-fatal — continue with upload.
-                    }
-                    self.id_to_ino.remove(&old_id);
-                    if let Some(e) = self.inodes.get_mut(&ino) {
-                        e.file_id = None;
-                    }
-                }
-
-                match self.upload_file(ino, &name, buf, parent_ino) {
-                    Ok(_) => reply.ok(),
-                    Err(e) => {
-                        eprintln!("[mount] release upload (overwrite): {e}");
-                        reply.error(Errno::EIO);
-                    }
-                }
-                return;
-            }
-
-            // ── Case 3: clean release (no write occurred) ─────────────────────
-            reply.ok();
+            let pending = self.pending_creates.remove(&ino);
+            let dirty = self.dirty_inodes.remove(&ino);
+            let action = release_upload(true, pending.is_some(), dirty);
+            (action, buf, pending)
         }
 
         // ─── Directory write operations ───────────────────────────────────────
@@ -1757,7 +1887,18 @@ mod fuse_impl {
         const INO: u64 = 7;
         const FILE_ID: &str = "11111111-1111-4111-8111-111111111111";
 
+        fn master_key() -> beebeeb_core::kdf::MasterKey {
+            beebeeb_core::kdf::MasterKey::from_bytes([7u8; 32])
+        }
+
         fn file_entry(size: u64) -> InodeEntry {
+            file_entry_with_pin(size, Err("this test never reaches the server".to_string()))
+        }
+
+        fn file_entry_with_pin(
+            size: u64,
+            pin: Result<beebeeb_core::chunk_stream::ExpectedChunkFormat, String>,
+        ) -> InodeEntry {
             InodeEntry {
                 file_id: Some(FILE_ID.to_string()),
                 key_uuid: None,
@@ -1767,7 +1908,7 @@ mod fuse_impl {
                 chunk_count: 1,
                 modified: SystemTime::UNIX_EPOCH,
                 parent_ino: ROOT_INO,
-                pin: Err("this test never reaches the server".to_string()),
+                pin,
             }
         }
 
@@ -1777,7 +1918,7 @@ mod fuse_impl {
         fn state_with_cached_file(content: &[u8]) -> BeebeebFsState {
             let mut fs = BeebeebFsState::new(
                 ApiClient::new_for_test("http://127.0.0.1:9".to_string()),
-                beebeeb_core::kdf::MasterKey::from_bytes([7u8; 32]),
+                master_key(),
                 Duration::from_secs(5),
             );
             fs.inodes.insert(INO, file_entry(content.len() as u64));
@@ -1785,16 +1926,151 @@ mod fuse_impl {
             fs
         }
 
-        /// What `release()` uploads for `ino`, mirroring its decision: a
-        /// pending create uploads its buffer, else a dirty inode uploads it,
-        /// else nothing is uploaded (`release()` case 3).
+        /// A filesystem state with one stored file and no cache; `url` is a
+        /// local mock server.
+        fn state_with_stored_file(
+            url: String,
+            size: u64,
+            pin: beebeeb_core::chunk_stream::ExpectedChunkFormat,
+        ) -> BeebeebFsState {
+            let mut fs = BeebeebFsState::new(ApiClient::new_for_test(url), master_key(), Duration::from_secs(5));
+            fs.inodes.insert(INO, file_entry_with_pin(size, Ok(pin)));
+            fs
+        }
+
+        /// What `release()` uploads for `ino`: the production decision and the
+        /// buffer it consumes, not a copy of them.
         fn what_release_uploads(fs: &mut BeebeebFsState, ino: u64) -> Option<Vec<u8>> {
-            let buf = fs.write_buffers.remove(&ino)?;
-            if fs.pending_creates.contains_key(&ino) || fs.dirty_inodes.remove(&ino) {
-                Some(buf)
-            } else {
-                None
-            }
+            let (action, buf, _pending) = fs.take_release_upload(ino);
+            (action != ReleaseUpload::Nothing).then_some(buf)
+        }
+
+        /// A real v2 frame (`ChunkEncryptor` binds the file id as AAD) for a
+        /// single-chunk file: what a v2 download body contains.
+        fn v2_frame(plaintext: &[u8]) -> Vec<u8> {
+            let mut encryptor = beebeeb_core::chunk_stream::ChunkEncryptor::for_push(
+                &master_key(),
+                FILE_ID,
+                plaintext.len() as u64,
+                beebeeb_types::ChunkProfile::Cli,
+            )
+            .expect("v2 encryptor")
+            .with_recorded_pin(beebeeb_core::chunk_stream::ExpectedChunkFormat::V2)
+            .expect("pin the v2 format");
+            let chunk = encryptor.push_chunk(plaintext).expect("v2 frame");
+            encryptor.finish().expect("complete v2 stream");
+            chunk.data
+        }
+
+        /// A mock `GET /api/v1/files/:id/download` that answers `body`. Runs on
+        /// its own thread with its own runtime: `fetch_file` drives the client
+        /// runtime with `block_on`, so the server cannot share it.
+        fn spawn_download_server(body: Vec<u8>) -> String {
+            use std::sync::mpsc;
+
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("mock server runtime");
+                rt.block_on(async move {
+                    let app = axum::Router::new().route(
+                        "/api/v1/files/:file_id/download",
+                        axum::routing::get(move || {
+                            let body = body.clone();
+                            async move { axum::body::Body::from(body) }
+                        }),
+                    );
+                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                        .await
+                        .expect("bind mock download server");
+                    tx.send(format!("http://{}", listener.local_addr().expect("mock addr")))
+                        .expect("hand back the mock address");
+                    axum::serve(listener, app).await.expect("serve mock download");
+                });
+            });
+            rx.recv().expect("mock download server address")
+        }
+
+        /// A mock of the V2 upload routes that records every chunk body, so a
+        /// test can decrypt what the client actually sent.
+        fn spawn_upload_server() -> (String, std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>) {
+            use std::sync::{Arc, Mutex, mpsc};
+
+            let chunks: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+            let server_chunks = Arc::clone(&chunks);
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("mock server runtime");
+                rt.block_on(async move {
+                    let app = axum::Router::new()
+                        .route(
+                            "/api/v1/uploads/init",
+                            axum::routing::post(|axum::Json(body): axum::Json<serde_json::Value>| async move {
+                                let file_id = body
+                                    .get("file_id")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from)
+                                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                                axum::Json(serde_json::json!({
+                                    "upload_session_id": uuid::Uuid::new_v4().to_string(),
+                                    "file_id": file_id,
+                                    "chunk_size_bytes": body
+                                        .get("chunk_size_bytes")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0),
+                                    "chunk_count": body
+                                        .get("chunk_count")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0),
+                                }))
+                            }),
+                        )
+                        .route(
+                            "/api/v1/uploads/:session/chunks/:idx",
+                            axum::routing::put({
+                                let server_chunks = Arc::clone(&server_chunks);
+                                move |axum::extract::Path((_session, idx)): axum::extract::Path<(String, u32)>,
+                                      body: axum::body::Body| {
+                                    let server_chunks = Arc::clone(&server_chunks);
+                                    async move {
+                                        let bytes =
+                                            axum::body::to_bytes(body, 64 * 1024 * 1024).await.unwrap_or_default();
+                                        let mut stored = server_chunks.lock().expect("chunk store");
+                                        if stored.len() <= idx as usize {
+                                            stored.resize(idx as usize + 1, Vec::new());
+                                        }
+                                        stored[idx as usize] = bytes.to_vec();
+                                        axum::Json(serde_json::json!({
+                                            "index": idx,
+                                            "size": bytes.len(),
+                                            "skipped": false,
+                                        }))
+                                    }
+                                }
+                            }),
+                        )
+                        .route(
+                            "/api/v1/uploads/:session/complete",
+                            axum::routing::post(|axum::extract::Path(_session): axum::extract::Path<String>| async {
+                                axum::Json(serde_json::json!({
+                                    "id": uuid::Uuid::new_v4().to_string(),
+                                }))
+                            }),
+                        );
+                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                        .await
+                        .expect("bind mock upload server");
+                    tx.send(format!("http://{}", listener.local_addr().expect("mock addr")))
+                        .expect("hand back the mock address");
+                    axum::serve(listener, app).await.expect("serve mock upload");
+                });
+            });
+            (rx.recv().expect("mock upload server address"), chunks)
         }
 
         #[test]
@@ -1853,21 +2129,57 @@ mod fuse_impl {
         }
 
         #[test]
-        fn truncating_an_empty_file_starts_a_buffer_but_uploads_nothing() {
-            // `echo x > file` opens an existing empty file with O_TRUNC: the
-            // size request is 0 == 0, and the write that follows still needs a
-            // buffer. Starting it must not make the file dirty.
+        fn truncating_an_empty_file_keeps_the_following_write() {
+            // `echo hi > empty.txt` opens an existing empty file with O_TRUNC:
+            // the size request is 0 == 0, so nothing is resized. The write that
+            // follows must still be uploaded by release().
             let mut fs = state_with_cached_file(b"");
 
             let source = fs.resize_file(INO, 0).expect("zero on zero");
             assert_eq!(source, TruncateSource::Unchanged);
             assert!(!fs.dirty_inodes.contains(&INO), "nothing changed, so nothing is dirty");
-            assert_eq!(
-                fs.write_buffers.get(&INO).map(Vec::as_slice),
-                Some(&[][..]),
-                "the following write() gets an empty buffer"
+            assert!(
+                !fs.write_buffers.contains_key(&INO),
+                "an unchanged size starts no buffer"
             );
-            assert_eq!(what_release_uploads(&mut fs, INO), None, "release() uploads nothing");
+
+            fs.apply_write(INO, 0, b"hi").expect("the write gets a buffer");
+            assert!(fs.dirty_inodes.contains(&INO), "a write into a stored file is dirty");
+            assert_eq!(
+                what_release_uploads(&mut fs, INO),
+                Some(b"hi".to_vec()),
+                "release() must upload the written bytes"
+            );
+        }
+
+        #[test]
+        fn an_empty_file_overwritten_with_echo_uploads_the_written_bytes() {
+            // The same sequence through the real upload path, against a mock
+            // server: the bytes the server receives decrypt to "hi".
+            let (url, chunks) = spawn_upload_server();
+            let mut fs = state_with_stored_file(url, 0, beebeeb_core::chunk_stream::ExpectedChunkFormat::V2);
+
+            assert_eq!(
+                fs.resize_file(INO, 0).expect("O_TRUNC on an empty file"),
+                TruncateSource::Unchanged
+            );
+            fs.apply_write(INO, 0, b"hi").expect("write");
+            let (action, buf, _pending) = fs.take_release_upload(INO);
+            assert_eq!(action, ReleaseUpload::Overwrite);
+            fs.upload_file(INO, "empty.txt", buf, ROOT_INO).expect("upload");
+
+            let key_uuid = fs.inodes[&INO].key_uuid.expect("the upload assigns a key UUID");
+            let stored = chunks.lock().expect("chunk store");
+            assert_eq!(stored.len(), 1);
+            let plain = crate::crypto::decrypt_file_chunks(
+                &master_key(),
+                &key_uuid.to_string(),
+                beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+                &stored[0],
+                1,
+            )
+            .expect("the server's chunk decrypts");
+            assert_eq!(plain, b"hi", "the server received the written bytes");
         }
 
         #[test]
@@ -1895,7 +2207,9 @@ mod fuse_impl {
 
         #[test]
         fn a_pending_create_starts_from_an_empty_buffer() {
-            assert_eq!(truncate_source(false, false, false, 0, 5), TruncateSource::Fresh);
+            // The pure decision sees no stored content, so it refuses; the
+            // caller knows a pending create may start from nothing.
+            assert_eq!(truncate_source(false, false, false, 0, 5), TruncateSource::Unavailable);
 
             let mut fs = state_with_cached_file(b"");
             fs.pending_creates.remove(&INO);
@@ -1912,8 +2226,42 @@ mod fuse_impl {
         }
 
         #[test]
-        fn a_directory_keeps_its_path_and_downloads_nothing() {
-            assert_eq!(truncate_source(false, false, false, 0, 5), TruncateSource::Fresh);
+        fn a_write_to_a_pending_create_is_not_marked_dirty() {
+            let mut fs = state_with_cached_file(b"");
+            fs.inodes.get_mut(&INO).expect("inode").file_id = None;
+            fs.write_buffers.insert(INO, Vec::new());
+            fs.pending_creates.insert(
+                INO,
+                PendingCreate {
+                    parent_ino: ROOT_INO,
+                    name: "new.bin".to_string(),
+                },
+            );
+
+            fs.apply_write(INO, 0, b"hi").expect("write");
+            assert!(
+                !fs.dirty_inodes.contains(&INO),
+                "release() case 1 already uploads a pending create"
+            );
+            let (action, buf, _pending) = fs.take_release_upload(INO);
+            assert_eq!(action, ReleaseUpload::NewFile);
+            assert_eq!(buf, b"hi");
+        }
+
+        #[test]
+        fn a_directory_is_resized_as_an_empty_buffer_and_downloads_nothing() {
+            let mut fs = state_with_cached_file(b"");
+            fs.file_cache.remove(&INO);
+            let entry = fs.inodes.get_mut(&INO).expect("inode");
+            entry.is_dir = true;
+            entry.file_id = Some(FILE_ID.to_string());
+
+            assert_eq!(
+                fs.resize_file(INO, 5).expect("a directory resize"),
+                TruncateSource::Fresh
+            );
+            assert_eq!(fs.inodes[&INO].size, 5);
+            assert_eq!(what_release_uploads(&mut fs, INO), Some(vec![0u8; 5]));
         }
 
         #[test]
@@ -1926,10 +2274,117 @@ mod fuse_impl {
             fs.file_cache.remove(&INO);
             fs.inodes.get_mut(&INO).expect("inode").size = 5;
 
-            assert!(fs.resize_file(INO, 9).is_err());
+            assert_eq!(
+                fs.resize_file(INO, 9).expect_err("content cannot be loaded"),
+                ResizeError::Unavailable
+            );
             assert!(!fs.dirty_inodes.contains(&INO));
             assert!(!fs.write_buffers.contains_key(&INO));
             assert_eq!(fs.inodes[&INO].size, 5);
+        }
+
+        #[test]
+        fn a_file_without_stored_content_refuses_to_grow() {
+            // The state after a failed release upload: no file_id, no cache,
+            // no buffer. Growing it would have to invent zero bytes.
+            let mut fs = state_with_cached_file(b"");
+            fs.file_cache.remove(&INO);
+            fs.inodes.get_mut(&INO).expect("inode").file_id = None;
+
+            let err = fs.resize_file(INO, 5).expect_err("nothing to grow from");
+            assert_eq!(err, ResizeError::Unavailable);
+            assert_eq!(err.errno(), Errno::EIO);
+            assert!(!fs.dirty_inodes.contains(&INO));
+            assert!(!fs.write_buffers.contains_key(&INO));
+            assert_eq!(fs.inodes[&INO].size, 0);
+        }
+
+        #[test]
+        fn an_unknown_inode_is_not_found() {
+            let mut fs = state_with_cached_file(b"hello");
+
+            let err = fs.resize_file(99, 3).expect_err("unknown inode");
+            assert_eq!(err, ResizeError::NotFound);
+            assert_eq!(err.errno(), Errno::ENOENT, "an unknown inode is not an I/O error");
+        }
+
+        #[test]
+        fn a_resize_above_the_cap_is_refused_and_changes_nothing() {
+            let mut fs = state_with_cached_file(b"hello");
+
+            let err = fs.resize_file(INO, MAX_FILE_SIZE + 1).expect_err("above the cap");
+            assert_eq!(err, ResizeError::TooLarge);
+            assert_eq!(err.errno(), Errno::EFBIG);
+            assert!(!fs.dirty_inodes.contains(&INO));
+            assert!(!fs.write_buffers.contains_key(&INO));
+            assert_eq!(fs.inodes[&INO].size, 5);
+            assert_eq!(fs.file_cache[&INO], b"hello");
+        }
+
+        #[test]
+        fn a_successful_download_is_resized_instead_of_replaced_with_zeros() {
+            // The Download path with a server that actually answers: the cache
+            // is empty, so `fetch_file` must decrypt the stored frame and that
+            // content must be what is resized.
+            let plaintext = b"hello";
+            let mut fs = state_with_stored_file(
+                spawn_download_server(v2_frame(plaintext)),
+                plaintext.len() as u64,
+                beebeeb_core::chunk_stream::ExpectedChunkFormat::V2,
+            );
+            assert!(!fs.file_cache.contains_key(&INO));
+
+            assert_eq!(
+                fs.resize_file(INO, 8).expect("grow from a successful download"),
+                TruncateSource::Download
+            );
+            assert_eq!(
+                what_release_uploads(&mut fs, INO),
+                Some(b"hello\0\0\0".to_vec()),
+                "the downloaded content must be resized, not replaced by zeros"
+            );
+        }
+
+        #[test]
+        fn a_cache_that_does_not_match_the_size_is_not_used_as_content() {
+            // A read that raced a truncate leaves the old, longer copy in the
+            // cache while the inode says 2 bytes. Growing to 4 must download
+            // the real 2 bytes, never resurrect the removed tail.
+            let plaintext = b"ab";
+            let mut fs = state_with_stored_file(
+                spawn_download_server(v2_frame(plaintext)),
+                2,
+                beebeeb_core::chunk_stream::ExpectedChunkFormat::V2,
+            );
+            fs.file_cache.insert(INO, b"abcdef".to_vec());
+
+            assert_eq!(
+                truncate_source(false, true, false, 2, 4),
+                TruncateSource::Download,
+                "a cache of the wrong length is not this file's content"
+            );
+            assert_eq!(fs.resize_file(INO, 4).expect("grow"), TruncateSource::Download);
+            assert_eq!(
+                what_release_uploads(&mut fs, INO),
+                Some(b"ab\0\0".to_vec()),
+                "the removed tail must not come back"
+            );
+        }
+
+        #[test]
+        fn a_successful_upload_clears_the_read_cache() {
+            let (url, _chunks) = spawn_upload_server();
+            let mut fs = state_with_stored_file(url, 0, beebeeb_core::chunk_stream::ExpectedChunkFormat::V2);
+            fs.file_cache.insert(INO, b"stale".to_vec());
+            fs.apply_write(INO, 0, b"new").expect("write");
+            let (action, buf, _pending) = fs.take_release_upload(INO);
+            assert_eq!(action, ReleaseUpload::Overwrite);
+
+            fs.upload_file(INO, "x.txt", buf, ROOT_INO).expect("upload");
+            assert!(
+                !fs.file_cache.contains_key(&INO),
+                "a cache from before the write must not survive the upload"
+            );
         }
     }
 }
