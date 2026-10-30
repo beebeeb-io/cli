@@ -753,7 +753,7 @@ mod tests {
     use super::*;
     use beebeeb_core::chunk_stream::ChunkDecryptor;
     use beebeeb_core::encrypt::{encrypt_chunk, encrypt_chunk_raw};
-    use beebeeb_core::kdf::{MasterKey, derive_file_key, derive_master_key};
+    use beebeeb_core::kdf::{MasterKey, OwnerKeyConvention, derive_file_key, derive_master_key};
 
     /// Task 1759: a raw-format file whose random nonce starts with 0x7b must
     /// still decrypt (was misrouted to the JSON parser: "key must be a string").
@@ -1423,5 +1423,86 @@ mod tests {
         // A key that does not open the envelope is no pin either.
         let other = MasterKey::from_bytes([0x24u8; 32]);
         assert!(content_pin(&other, &fid, &name_enc).is_err());
+    }
+    fn repair_vectors() -> serde_json::Value {
+        serde_json::from_str(include_str!("../tests/fixtures/sf_0002_owner_repair.json")).unwrap()
+    }
+
+    fn repair_master(v: &serde_json::Value) -> MasterKey {
+        let mut mk = [0u8; 32];
+        mk.copy_from_slice(&unhex(v["master_key_hex"].as_str().unwrap()));
+        MasterKey::from_bytes(mk)
+    }
+
+    /// SF-0002: a row the old iOS File Provider sealed under the uppercase id
+    /// opens through the ordinary readers (name, pin, content) and reports the
+    /// read-only convention.
+    #[test]
+    fn owner_repair_v1_opens_and_reports_read_only() {
+        let v = &repair_vectors()["upper_repair_v1"];
+        let m = repair_master(v);
+        let fid = v["file_id"].as_str().unwrap();
+        let name_enc = v["name_encrypted"].as_str().unwrap();
+        let frame = unhex(v["content_frame_hex"].as_str().unwrap());
+        let plaintext = unhex(v["content_plaintext_hex"].as_str().unwrap());
+
+        assert_eq!(
+            decrypt_name_with_convention(&m, fid, name_enc),
+            Some((
+                v["expected_name"].as_str().unwrap().to_string(),
+                OwnerKeyConvention::UpperRepair
+            ))
+        );
+        assert_eq!(
+            decrypt_name(&m, fid, name_enc).as_deref(),
+            Some(v["expected_name"].as_str().unwrap())
+        );
+        let pin = content_pin(&m, fid, name_enc).expect("the repair metadata authenticates");
+        assert_eq!(pin, ExpectedChunkFormat::Unrecorded);
+        assert_eq!(decrypt_file_chunks(&m, fid, pin, &frame, 1).unwrap(), plaintext);
+        assert_eq!(
+            decrypt_file_chunks_owned(&m, fid, pin, None, &frame, 1, None).unwrap(),
+            (plaintext, Some(OwnerKeyConvention::UpperRepair))
+        );
+    }
+
+    /// SF-0002 split row: the name is sealed uppercase while each version uses
+    /// its own convention. Both versions must open, per version.
+    #[test]
+    fn owner_repair_split_opens_every_version() {
+        let v = &repair_vectors()["upper_repair_split_v1"];
+        let m = repair_master(v);
+        let fid = v["file_id"].as_str().unwrap();
+        let name_enc = v["name_encrypted"].as_str().unwrap();
+        assert_eq!(
+            decrypt_name_with_convention(&m, fid, name_enc),
+            Some((
+                v["expected_name"].as_str().unwrap().to_string(),
+                OwnerKeyConvention::UpperRepair
+            ))
+        );
+        for (frame_key, pt_key) in [
+            ("content_v1_frame_hex", "content_v1_plaintext_hex"),
+            ("content_v2_frame_hex", "content_v2_plaintext_hex"),
+        ] {
+            let frame = unhex(v[frame_key].as_str().unwrap());
+            let plaintext = unhex(v[pt_key].as_str().unwrap());
+            let pin = content_pin(&m, fid, name_enc).expect("the repair metadata authenticates");
+            let (out, _) = decrypt_file_chunks_owned(&m, fid, pin, None, &frame, 1, None)
+                .unwrap_or_else(|e| panic!("{frame_key}: {e}"));
+            assert_eq!(out, plaintext, "{frame_key}");
+        }
+    }
+
+    /// The fallback is a fallback: an ordinary owner row still resolves under
+    /// the string convention and is not marked read-only.
+    #[test]
+    fn an_ordinary_owner_row_is_not_read_only() {
+        let m = mk();
+        let name_enc = beebeeb_core::encrypt::encrypt_name(&m, FID, "ordinary.txt", None).unwrap();
+        assert_eq!(
+            decrypt_name_with_convention(&m, FID, &name_enc),
+            Some(("ordinary.txt".to_string(), OwnerKeyConvention::String))
+        );
     }
 }

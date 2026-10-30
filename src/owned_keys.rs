@@ -222,7 +222,12 @@ impl OwnedKeyResolver {
         }
         if !foreign && !has_owner {
             let enc = text(&canonical, "name_encrypted")?;
-            let (name, read_only) = match crate::crypto::decrypt_name_with_convention(master, &id, enc) {
+            let conv_dbg = crate::crypto::decrypt_name_with_convention(master, &id, enc);
+            eprintln!(
+                "DEBUG owned_keys id={id} conv={:?}",
+                conv_dbg.as_ref().map(|(n, c)| (n.clone(), format!("{c:?}")))
+            );
+            let (name, read_only) = match conv_dbg {
                 Some((name, convention)) => (name, convention == beebeeb_core::kdf::OwnerKeyConvention::UpperRepair),
                 None => return Err("can't decrypt item name".into()),
             };

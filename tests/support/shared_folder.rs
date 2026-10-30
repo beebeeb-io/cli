@@ -20,6 +20,8 @@ use std::{
 pub const ROOT: &str = "22222222-2222-4222-8222-222222222222";
 pub const SUB: &str = "33333333-3333-4333-8333-333333333333";
 pub const FILE: &str = "11111111-1111-4111-8111-111111111111";
+/// SF-0002: an id whose uppercase spelling differs, as the iOS File Provider wrote.
+pub const UPPER_FILE: &str = "5f0c2a9e-3b1d-4c7e-9a2f-6d8e1b4c7a30";
 pub const BAD: &str = "44444444-4444-4444-8444-444444444444";
 pub const ACCOUNT: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 /// The approved legacy invite of SUB, used when `Fixture::nested_legacy` puts SUB inside ROOT.
@@ -155,6 +157,31 @@ impl Fixture {
             self.stride = self.plaintext.len() as u64;
         }
         self.rows.push(r);
+    }
+    /// SF-0002: an owner row the old iOS File Provider sealed under the
+    /// uppercase id — name and its single legacy content frame both use the
+    /// uppercase owner key. Ordinary reads work; every write must refuse.
+    pub fn upper_repair() -> Self {
+        use beebeeb_core::chunk_stream::ExpectedChunkFormat;
+        let mut f = Self::basic();
+        let key = beebeeb_core::kdf::derive_file_key(&master(), UPPER_FILE.to_uppercase().as_bytes());
+        f.plaintext = b"SF-0002 read-only repair content".to_vec();
+        f.stride = f.plaintext.len() as u64;
+        f.frames = vec![beebeeb_core::encrypt::encrypt_chunk_raw(&key, &f.plaintext).unwrap()];
+        let mut r = row(UPPER_FILE, Some(ROOT), "uppercase-repair.pdf", false, false);
+        r["name_encrypted"] = json!(
+            beebeeb_core::encrypt::encrypt_name_for(
+                &key,
+                "uppercase-repair.pdf",
+                Some("application/pdf"),
+                ExpectedChunkFormat::Unrecorded
+            )
+            .unwrap()
+        );
+        r["size_bytes"] = json!(f.plaintext.len());
+        r["chunk_count"] = json!(1);
+        f.rows[1] = r;
+        f
     }
     pub fn basic() -> Self {
         Self {

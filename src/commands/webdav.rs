@@ -1380,10 +1380,6 @@ async fn resolve_path(state: &Arc<DavState>, path: &str) -> Result<ResolvedEntry
 
 // ─── Decryption helpers ───────────────────────────────────────────────────────
 
-fn decrypt_name(master_key: &beebeeb_core::kdf::MasterKey, file_id: &str, name_encrypted: &str) -> Option<String> {
-    crate::crypto::decrypt_name(master_key, file_id, name_encrypted)
-}
-
 // ─── XML helpers ─────────────────────────────────────────────────────────────
 
 fn child_href(parent: &str, name: &str, is_dir: bool) -> String {

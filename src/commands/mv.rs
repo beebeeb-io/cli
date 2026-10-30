@@ -163,6 +163,10 @@ async fn move_single(
     // SF-0002: a row sealed by the old iOS File Provider is read-only: a move
     // is fine (it re-encrypts nothing), a rename would rewrite its name under a
     // convention the row does not use.
+    eprintln!(
+        "DEBUG src.read_only={} src.name={} new_name={:?}",
+        src.read_only, src.name, new_name
+    );
     if src.read_only && new_name.as_deref().is_some_and(|n| n != src.name) {
         return Err(crate::crypto::OWNER_REPAIR_READ_ONLY.to_string());
     }
