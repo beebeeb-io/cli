@@ -523,10 +523,14 @@ pub async fn ensure_content_writable(
     size_bytes: Option<u64>,
     chunk_count: u32,
 ) -> Result<(), String> {
-    if content_is_upper_repair(api, master, file_id, size_bytes, chunk_count).await? {
-        return Err(crate::crypto::OWNER_REPAIR_READ_ONLY.to_string());
+    match content_is_upper_repair(api, master, file_id, size_bytes, chunk_count).await {
+        Ok(true) => Err(crate::crypto::OWNER_REPAIR_READ_ONLY.to_string()),
+        // A version that cannot be read is not PROOF of the repair convention
+        // (the server may not serve it, or the row may be unreadable for another
+        // reason): keep the write behaviour this client had rather than refuse
+        // on a transient failure. Only a definite `upper_repair` refuses.
+        Ok(false) | Err(_) => Ok(()),
     }
-    Ok(())
 }
 
 fn first_chunk_convention(

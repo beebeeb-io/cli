@@ -169,15 +169,9 @@ async fn move_single(
         if src.read_only {
             return Err(crate::crypto::OWNER_REPAIR_READ_ONLY.to_string());
         }
-        let meta = api.get_file(&src_id).await?;
-        crate::owned_keys::ensure_content_writable(
-            api,
-            master_key,
-            &src_id,
-            meta.get("size_bytes").and_then(|v| v.as_u64()),
-            meta.get("chunk_count").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
-        )
-        .await?;
+        // The listing that resolved this path already carries the version's
+        // geometry, so no second GET is made.
+        crate::owned_keys::ensure_content_writable(api, master_key, &src_id, src.size_bytes, src.chunk_count).await?;
     }
 
     // Preserve omitted/NULL/UUID: a changed parent at root is an explicit
@@ -277,6 +271,8 @@ mod parent_target_tests {
             name: name.into(),
             is_folder: true,
             read_only: false,
+            size_bytes: None,
+            chunk_count: 1,
         }
     }
 

@@ -1290,8 +1290,8 @@ pub async fn run(
                         }
                         None => false,
                     };
-                    let replacement = resolved
-                        .filter(|r| r.origin != KeyOrigin::Derived && !r.read_only && !content_read_only);
+                    let replacement =
+                        resolved.filter(|r| r.origin != KeyOrigin::Derived && !r.read_only && !content_read_only);
                     if let Some(old_id) = replace_id.filter(|_| replacement.is_none()) {
                         let _ = api.trash_file(&old_id.to_string()).await;
                     }
@@ -3377,8 +3377,7 @@ async fn do_upload(
         }
         None => false,
     };
-    let replacement =
-        candidate.filter(|r| r.origin != KeyOrigin::Derived && !r.read_only && !content_read_only);
+    let replacement = candidate.filter(|r| r.origin != KeyOrigin::Derived && !r.read_only && !content_read_only);
     if let Some(old_id) = remote.as_ref().filter(|_| replacement.is_none()).map(|r| r.id) {
         let _ = api.trash_file(&old_id.to_string()).await;
     }

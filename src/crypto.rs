@@ -418,7 +418,9 @@ pub fn decrypt_file_chunks_owned(
                 "failed to decrypt file {file_id_str}: its metadata records chunk format v2 and the content does not open under the key this row supplied"
             ),
             ExpectedChunkFormat::Unrecorded => {
-                format!("failed to decrypt file {file_id_str}: the content does not authenticate under the key this row supplied")
+                format!(
+                    "failed to decrypt file {file_id_str}: the content does not authenticate under the key this row supplied"
+                )
             }
         });
     }

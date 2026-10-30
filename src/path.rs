@@ -123,6 +123,11 @@ pub struct ResolvedPath {
     /// SF-0002: the owner key convention for this row is read-only
     /// (`UpperRepair`); rename/new-version must be refused, a move is allowed.
     pub read_only: bool,
+    /// The row's plaintext size, when the listing carried it (SF-0002 review:
+    /// the content check needs this version's geometry, without a second GET).
+    pub size_bytes: Option<u64>,
+    /// The row's chunk count from the listing (`1` when it did not say).
+    pub chunk_count: u32,
 }
 
 /// Resolve a human-readable slash-separated path to an encrypted file entry.
@@ -171,6 +176,8 @@ async fn lookup_path(
             name: "/".to_string(),
             is_folder: true,
             read_only: false,
+            size_bytes: None,
+            chunk_count: 1,
         }));
     }
 
@@ -182,6 +189,8 @@ async fn lookup_path(
         name: "/".to_string(),
         is_folder: true,
         read_only: false,
+        size_bytes: None,
+        chunk_count: 1,
     };
 
     for segment in &segments {
@@ -220,6 +229,8 @@ async fn lookup_path(
                     name: decrypted,
                     is_folder,
                     read_only,
+                    size_bytes: entry.get("size_bytes").and_then(|v| v.as_u64()),
+                    chunk_count: entry.get("chunk_count").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
                 };
                 found = true;
                 break;
@@ -268,6 +279,8 @@ pub async fn find_child_by_name(
                 name: decrypted,
                 is_folder,
                 read_only,
+                size_bytes: entry.get("size_bytes").and_then(|v| v.as_u64()),
+                chunk_count: entry.get("chunk_count").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
             }));
         }
     }

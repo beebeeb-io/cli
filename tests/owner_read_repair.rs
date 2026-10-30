@@ -235,9 +235,6 @@ async fn an_explicit_key_download_never_falls_back_to_the_owner_keys() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(
-        !out_path.exists(),
-        "the download wrote a file it must not have opened"
-    );
+    assert!(!out_path.exists(), "the download wrote a file it must not have opened");
     h.close().await;
 }
