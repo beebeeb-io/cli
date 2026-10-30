@@ -2628,7 +2628,10 @@ async fn print_session_status(api: &ApiClient, master: &MasterKey) -> Result<(),
             line1.push_str(&format!("  {}", text.device_name.custom_color(crate::colors::INK_DIM)));
         }
         if !text.remote_path.is_empty() {
-            line1.push_str(&format!(" \u{2192} {}", text.remote_path.custom_color(crate::colors::INK_DIM)));
+            line1.push_str(&format!(
+                " \u{2192} {}",
+                text.remote_path.custom_color(crate::colors::INK_DIM)
+            ));
         }
         line1.push_str(&format!("  {}", status_text.custom_color(status_color)));
         println!("{}", crate::ui::box_line(&line1, w));
@@ -2691,6 +2694,27 @@ async fn stop_session_best_effort(api: &ApiClient, session_id: &str) {
     }
 }
 
+/// A server older than 1922 (server#363) has no envelopes and still returns the
+/// plaintext `name`. An explicit stop command keeps working against it; the
+/// display paths never read this field (they show "(name hidden)" instead).
+fn legacy_plaintext_name(s: &serde_json::Value) -> Option<String> {
+    s.get("name")
+        .and_then(|v| v.as_str())
+        .filter(|n| !n.is_empty())
+        .map(String::from)
+}
+
+/// The name a stop command matches and slugs against: the decrypted one when the
+/// row opens, else the legacy plaintext name, else none.
+fn stop_match_name(master: &MasterKey, s: &serde_json::Value) -> Option<String> {
+    let text = session_text(master, s);
+    if text.name == HIDDEN_NAME {
+        legacy_plaintext_name(s)
+    } else {
+        Some(text.name)
+    }
+}
+
 async fn stop_session_by_name(api: &ApiClient, master: &MasterKey, name: &str) -> Result<(), String> {
     let resp = api.list_client_sessions().await?;
     let sessions = resp
@@ -2704,15 +2728,10 @@ async fn stop_session_by_name(api: &ApiClient, master: &MasterKey, name: &str) -
     let matching: Vec<(&serde_json::Value, String)> = sessions
         .iter()
         .filter_map(|s| {
-            let text = session_text(master, s);
-            if text.name == HIDDEN_NAME {
-                return None;
-            }
-            let n_lower = text.name.to_lowercase();
-            (n_lower == name_lower
-                || n_lower.ends_with(&format!("/{name_lower}"))
-                || n_lower.contains(&name_lower))
-            .then_some((s, text.name))
+            let candidate = stop_match_name(master, s)?;
+            let n_lower = candidate.to_lowercase();
+            (n_lower == name_lower || n_lower.ends_with(&format!("/{name_lower}")) || n_lower.contains(&name_lower))
+                .then_some((s, candidate))
         })
         .collect();
 
@@ -2753,8 +2772,13 @@ async fn stop_all_sessions(api: &ApiClient, master: &MasterKey) -> Result<(), St
     // listing, so this used to match nothing at all.
     let device_sessions: Vec<(&serde_json::Value, String)> = sessions
         .iter()
-        .filter(|s| row_uuid(s, "device_client_key") == Some(device_info.device_id))
-        .map(|s| (s, session_text(master, s).name))
+        .filter(|s| match row_uuid(s, "device_client_key") {
+            Some(key) => key == device_info.device_id,
+            // A server older than 1922 has no device key; its plaintext
+            // `device_name` was the only identity available.
+            None => s.get("device_name").and_then(|v| v.as_str()) == Some(device_info.hostname.as_str()),
+        })
+        .map(|s| (s, stop_match_name(master, s).unwrap_or_else(|| HIDDEN_NAME.to_string())))
         .collect();
 
     if device_sessions.is_empty() {

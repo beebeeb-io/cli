@@ -281,13 +281,13 @@ async fn sync_bodies_carry_no_plaintext_and_only_envelopes() {
     // The session registration carries one record key and three envelopes.
     let session = request_body(&world, "POST", "/api/v1/clients/sessions");
     assert!(
-        session["client_key"].as_str().is_some_and(|k| uuid::Uuid::parse_str(k).is_ok()),
+        session["client_key"]
+            .as_str()
+            .is_some_and(|k| uuid::Uuid::parse_str(k).is_ok()),
         "session body has no record key: {session}"
     );
     for key in ["name_encrypted", "local_path_encrypted", "remote_path_encrypted"] {
-        let env = session[key]
-            .as_str()
-            .unwrap_or_else(|| panic!("no {key} in {session}"));
+        let env = session[key].as_str().unwrap_or_else(|| panic!("no {key} in {session}"));
         assert!(env.starts_with("bbcm1."), "{key} is not shaped: {env}");
     }
     for key in ["name", "local_path", "remote_path"] {
@@ -367,7 +367,11 @@ async fn session_reuse_matches_on_client_key() {
         captured(&world)
     );
     assert!(
-        has_request(&world, "PATCH", "/api/v1/clients/sessions/66666666-6666-4666-8666-666666666666"),
+        has_request(
+            &world,
+            "PATCH",
+            "/api/v1/clients/sessions/66666666-6666-4666-8666-666666666666"
+        ),
         "the reused session was never stopped: {:?}",
         captured(&world)
     );
@@ -428,14 +432,24 @@ async fn status_decrypts_names_paths_and_device_hostname() {
 
     let out = bb(&home, &["--api", &api, "sync", "--status"]).await;
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "status failed: {stdout}{}", String::from_utf8_lossy(&out.stderr));
-    assert!(stdout.contains(&name), "decrypted name missing from status output:\n{stdout}");
+    assert!(
+        out.status.success(),
+        "status failed: {stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains(&name),
+        "decrypted name missing from status output:\n{stdout}"
+    );
     assert!(stdout.contains(&remote), "decrypted remote path missing:\n{stdout}");
     assert!(stdout.contains(&local), "decrypted local path missing:\n{stdout}");
     assert!(
         stdout.contains(&format!("{SENTINEL}-host")),
         "decrypted device hostname missing:\n{stdout}"
     );
-    assert!(stdout.contains("(name hidden)"), "nulled row is not marked hidden:\n{stdout}");
+    assert!(
+        stdout.contains("(name hidden)"),
+        "nulled row is not marked hidden:\n{stdout}"
+    );
     assert!(!stdout.contains("bbcm1."), "status printed an envelope:\n{stdout}");
 }
