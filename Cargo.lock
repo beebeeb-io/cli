@@ -318,7 +318,7 @@ dependencies = [
 [[package]]
 name = "beebeeb-core"
 version = "0.1.0"
-source = "git+https://github.com/beebeeb-io/core?rev=3831a05acc228e510d6f4131cd5b586b1b102cde#3831a05acc228e510d6f4131cd5b586b1b102cde"
+source = "git+https://github.com/beebeeb-io/core?rev=d9a70885f6306fc5b4da0163a7690ed4200eff1f#d9a70885f6306fc5b4da0163a7690ed4200eff1f"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -353,7 +353,7 @@ dependencies = [
 [[package]]
 name = "beebeeb-types"
 version = "0.1.0"
-source = "git+https://github.com/beebeeb-io/core?rev=3831a05acc228e510d6f4131cd5b586b1b102cde#3831a05acc228e510d6f4131cd5b586b1b102cde"
+source = "git+https://github.com/beebeeb-io/core?rev=d9a70885f6306fc5b4da0163a7690ed4200eff1f#d9a70885f6306fc5b4da0163a7690ed4200eff1f"
 dependencies = [
  "serde",
 ]

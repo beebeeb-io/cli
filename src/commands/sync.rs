@@ -17,6 +17,8 @@ use crate::api::ApiClient;
 use crate::config::load_config;
 use crate::owned_keys::{CUSTODY_UNAVAILABLE, OwnedKeyResolver, ResolvedCliKey};
 use crate::ui;
+use beebeeb_core::client_meta::{ClientMetaField, fit_for_seal, open_client_meta, seal_client_meta};
+use beebeeb_core::kdf::MasterKey;
 use beebeeb_core::owned_keys::KeyOrigin;
 
 const STATE_FILE: &str = ".bb-sync.json";
@@ -107,6 +109,10 @@ struct SyncState {
     last_sync: Option<DateTime<Utc>>,
     #[serde(default)]
     session_id: Option<String>,
+    /// The session's client-generated record key (task 1922). Persisted next to
+    /// `session_id` so reuse finds the server row by key, never by plaintext.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session_client_key: Option<Uuid>,
     #[serde(default)]
     files: HashMap<String, FileEntry>,
     #[serde(default)]
@@ -584,15 +590,16 @@ pub async fn run(
     if status || stop_session.is_some() || stop_all {
         let api = ApiClient::from_config();
         api.require_auth()?;
+        let master_key = load_master_key()?;
 
         if let Some(ref name) = stop_session {
-            return stop_session_by_name(&api, name).await;
+            return stop_session_by_name(&api, &master_key, name).await;
         }
         if stop_all {
-            return stop_all_sessions(&api).await;
+            return stop_all_sessions(&api, &master_key).await;
         }
         // --status
-        return print_session_status(&api).await;
+        return print_session_status(&api, &master_key).await;
     }
 
     // If no local_dir and no control flags, show status + hint (Task 4)
@@ -601,7 +608,8 @@ pub async fn run(
         None => {
             let api = ApiClient::from_config();
             api.require_auth()?;
-            print_session_status(&api).await?;
+            let master_key = load_master_key()?;
+            print_session_status(&api, &master_key).await?;
             println!();
             println!(
                 "  {} {}",
@@ -775,8 +783,23 @@ pub async fn run(
     let device_resp = if dry_run {
         None
     } else {
+        // Task 1922: the device's client key IS its persisted `device_id`, and
+        // the hostname leaves the machine only as a field-1 envelope sealed
+        // under that key (field 1 takes no device key in the AAD).
+        let hostname_envelope = seal_meta(
+            &master_key,
+            &device_info.device_id,
+            None,
+            ClientMetaField::DeviceHostname,
+            &device_info.hostname,
+        )?;
         match api
-            .register_device(&device_info.hostname, &device_info.platform, env!("CARGO_PKG_VERSION"))
+            .register_device(
+                &device_info.device_id,
+                &hostname_envelope,
+                &device_info.platform,
+                env!("CARGO_PKG_VERSION"),
+            )
             .await
         {
             Ok(v) => Some(v),
@@ -792,12 +815,18 @@ pub async fn run(
         .and_then(|v| v.as_str())
         .map(String::from);
 
-    // Create or reuse a client session for this sync pair
+    // Create or reuse a client session for this sync pair. Task 1922: the
+    // record key is client-generated and persisted with the manifest; reuse
+    // matches that key, and the three text fields leave only as envelopes.
     let session_id: Option<String> = if let Some(ref device_id) = server_device_id {
+        let session_client_key = *state.session_client_key.get_or_insert_with(Uuid::new_v4);
+        let session_client_key_str = session_client_key.to_string();
         if let Some(ref existing) = state.session_id {
             Some(existing.clone())
         } else {
-            // Check if a session already exists for this remote_path on this device
+            // Look for this folder's row by the client-side key. The plaintext
+            // `remote_path` is always "" on a 1922 server, so it cannot be the
+            // identity even when it happens to be present.
             let existing_session = api
                 .list_client_sessions()
                 .await
@@ -805,7 +834,7 @@ pub async fn run(
                 .and_then(|resp| resp.get("sessions").and_then(|v| v.as_array()).cloned())
                 .and_then(|sessions| {
                     sessions.into_iter().find(|s| {
-                        s.get("remote_path").and_then(|v| v.as_str()) == Some(&remote_path)
+                        s.get("client_key").and_then(|v| v.as_str()) == Some(&session_client_key_str)
                             && s.get("device_id").and_then(|v| v.as_str()) == Some(device_id)
                             && s.get("status").and_then(|v| v.as_str()) != Some("stopped")
                     })
@@ -823,13 +852,35 @@ pub async fn run(
                     device_info.hostname,
                     remote_path.trim_start_matches('/').replace('/', "-")
                 );
+                let name_envelope = seal_meta(
+                    &master_key,
+                    &session_client_key,
+                    Some(&device_info.device_id),
+                    ClientMetaField::SessionName,
+                    &default_name,
+                )?;
+                let local_envelope = seal_meta(
+                    &master_key,
+                    &session_client_key,
+                    Some(&device_info.device_id),
+                    ClientMetaField::SessionLocalPath,
+                    &local_dir.display().to_string(),
+                )?;
+                let remote_envelope = seal_meta(
+                    &master_key,
+                    &session_client_key,
+                    Some(&device_info.device_id),
+                    ClientMetaField::SessionRemotePath,
+                    &remote_path,
+                )?;
                 match api
                     .create_client_session(
                         device_id,
-                        &default_name,
+                        &session_client_key,
+                        &name_envelope,
                         "sync",
-                        Some(&local_dir.display().to_string()),
-                        &remote_path,
+                        &local_envelope,
+                        &remote_envelope,
                     )
                     .await
                 {
@@ -1483,7 +1534,7 @@ pub async fn run(
         if let Some(ref sid) = session_id {
             let file_count = local_files.len() as u64;
             let _ = api
-                .send_heartbeat(sid, "idle", Some(file_count), None, Some(total_bytes), None, None, None)
+                .send_heartbeat(sid, "idle", Some(file_count), None, Some(total_bytes), None, None)
                 .await;
         }
     }
@@ -1742,7 +1793,7 @@ async fn run_plain_watch(
             loop {
                 interval.tick().await;
                 let _ = hb_api
-                    .send_heartbeat(&hb_sid, "watching", None, None, None, None, None, None)
+                    .send_heartbeat(&hb_sid, "watching", None, None, None, None, None)
                     .await;
             }
         });
@@ -2008,7 +2059,7 @@ async fn run_tui_watch(
             loop {
                 interval.tick().await;
                 let _ = hb_api
-                    .send_heartbeat(&hb_sid, "watching", None, None, None, None, None, None)
+                    .send_heartbeat(&hb_sid, "watching", None, None, None, None, None)
                     .await;
             }
         });
@@ -2019,11 +2070,14 @@ async fn run_tui_watch(
         let tx = tui_tx.clone();
         tokio::spawn(async move {
             let refresh_api = ApiClient::from_config();
+            // Session text is ciphertext to the server; the dashboard needs the
+            // master key to show it (task 1922).
+            let Ok(master_key) = load_master_key() else { return };
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
             loop {
                 interval.tick().await;
                 if let Ok(resp) = refresh_api.list_client_sessions().await {
-                    let sessions = parse_sessions_from_json(&resp);
+                    let sessions = parse_sessions_from_json(&resp, &master_key);
                     let _ = tx.send(TuiEvent::SessionsRefresh(sessions));
                 }
             }
@@ -2035,8 +2089,9 @@ async fn run_tui_watch(
         let tx = tui_tx.clone();
         tokio::spawn(async move {
             let api = ApiClient::from_config();
+            let Ok(master_key) = load_master_key() else { return };
             if let Ok(resp) = api.list_client_sessions().await {
-                let sessions = parse_sessions_from_json(&resp);
+                let sessions = parse_sessions_from_json(&resp, &master_key);
                 let _ = tx.send(TuiEvent::SessionsRefresh(sessions));
             }
         });
@@ -2370,8 +2425,101 @@ async fn run_tui_watch(
     Ok(daemonized)
 }
 
+// ── Client-metadata envelopes (task 1922) ─────────────────────────────────
+//
+// The server stores and returns device/session text only as `bbcm1.` envelopes.
+// Sealing uses the locally persisted record keys; opening uses the master key
+// from the config. A row that does not open — a pre-1922 row the server nulled,
+// another account's key, a corrupt envelope — is shown as hidden and never
+// fails the command.
+
+const HIDDEN_NAME: &str = "(name hidden)";
+
+/// Seal one client-meta field. `record_key` is the row's own client key;
+/// `device_key` is the parent device's client key for session fields (2-4) and
+/// `None` for the device hostname (field 1). Text is fitted to the padding
+/// limit before it is sealed.
+fn seal_meta(
+    master: &MasterKey,
+    record_key: &Uuid,
+    device_key: Option<&Uuid>,
+    field: ClientMetaField,
+    plaintext: &str,
+) -> Result<String, String> {
+    seal_client_meta(master, record_key, device_key, field, &fit_for_seal(plaintext))
+        .map_err(|e| format!("seal client metadata: {e}"))
+}
+
+fn row_uuid(row: &serde_json::Value, field: &str) -> Option<Uuid> {
+    row.get(field)
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+}
+
+/// Open one envelope from a session/device row. `None` means "nothing to show":
+/// no record key, no envelope (the server nulls anything it cannot validate),
+/// or the envelope does not open under this master key.
+fn open_meta(
+    master: &MasterKey,
+    record_key: Option<Uuid>,
+    device_key: Option<&Uuid>,
+    field: ClientMetaField,
+    envelope: Option<&serde_json::Value>,
+) -> Option<String> {
+    let record_key = record_key?;
+    let envelope = envelope?.as_str().filter(|s| !s.is_empty())?;
+    open_client_meta(master, &record_key, device_key, field, envelope).ok()
+}
+
+/// The decrypted text of one session row, already labelled for display.
+struct SessionText {
+    name: String,
+    local_path: String,
+    remote_path: String,
+    device_name: String,
+}
+
+fn session_text(master: &MasterKey, s: &serde_json::Value) -> SessionText {
+    let record_key = row_uuid(s, "client_key");
+    let device_key = row_uuid(s, "device_client_key");
+    SessionText {
+        name: open_meta(
+            master,
+            record_key,
+            device_key.as_ref(),
+            ClientMetaField::SessionName,
+            s.get("name_encrypted"),
+        )
+        .unwrap_or_else(|| HIDDEN_NAME.to_string()),
+        local_path: open_meta(
+            master,
+            record_key,
+            device_key.as_ref(),
+            ClientMetaField::SessionLocalPath,
+            s.get("local_path_encrypted"),
+        )
+        .unwrap_or_default(),
+        remote_path: open_meta(
+            master,
+            record_key,
+            device_key.as_ref(),
+            ClientMetaField::SessionRemotePath,
+            s.get("remote_path_encrypted"),
+        )
+        .unwrap_or_default(),
+        device_name: open_meta(
+            master,
+            device_key,
+            None,
+            ClientMetaField::DeviceHostname,
+            s.get("device_hostname_encrypted"),
+        )
+        .unwrap_or_default(),
+    }
+}
+
 /// Parse the JSON response from list_client_sessions into SessionInfo structs.
-fn parse_sessions_from_json(resp: &serde_json::Value) -> Vec<crate::tui::state::SessionInfo> {
+fn parse_sessions_from_json(resp: &serde_json::Value, master: &MasterKey) -> Vec<crate::tui::state::SessionInfo> {
     use crate::tui::state::SessionInfo;
     let sessions = match resp.get("sessions").and_then(|v| v.as_array()) {
         Some(arr) => arr,
@@ -2395,11 +2543,12 @@ fn parse_sessions_from_json(resp: &serde_json::Value) -> Vec<crate::tui::state::
                         format!("{}h ago", elapsed.num_hours())
                     }
                 });
+            let text = session_text(master, s);
 
             SessionInfo {
-                name: s.get("name").and_then(|v| v.as_str()).unwrap_or("unnamed").to_string(),
-                device_name: s.get("device_name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                remote_path: s.get("remote_path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                name: text.name,
+                device_name: text.device_name,
+                remote_path: text.remote_path,
                 status: s
                     .get("status")
                     .and_then(|v| v.as_str())
@@ -2408,7 +2557,6 @@ fn parse_sessions_from_json(resp: &serde_json::Value) -> Vec<crate::tui::state::
                 files_synced: s.get("files_synced").and_then(|v| v.as_u64()).unwrap_or(0),
                 bytes_synced: s.get("bytes_synced").and_then(|v| v.as_u64()).unwrap_or(0),
                 last_heartbeat: heartbeat_ago,
-                current_file: s.get("current_file").and_then(|v| v.as_str()).map(String::from),
                 speed_bps: s.get("speed_bps").and_then(|v| v.as_u64()),
             }
         })
@@ -2417,7 +2565,7 @@ fn parse_sessions_from_json(resp: &serde_json::Value) -> Vec<crate::tui::state::
 
 // ── Session management helpers ─────────────────────────────────────────────
 
-async fn print_session_status(api: &ApiClient) -> Result<(), String> {
+async fn print_session_status(api: &ApiClient, master: &MasterKey) -> Result<(), String> {
     let resp = api.list_client_sessions().await?;
     let sessions = resp
         .get("sessions")
@@ -2437,13 +2585,10 @@ async fn print_session_status(api: &ApiClient) -> Result<(), String> {
     println!("{}", crate::ui::box_header("SESSIONS", w));
 
     for session in sessions {
-        let name = session.get("name").and_then(|v| v.as_str()).unwrap_or("unnamed");
+        let text = session_text(master, session);
         let session_status = session.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
-        let remote_path = session.get("remote_path").and_then(|v| v.as_str()).unwrap_or("");
-        let device_name = session.get("device_name").and_then(|v| v.as_str()).unwrap_or("");
         let files_synced = session.get("files_synced").and_then(|v| v.as_u64()).unwrap_or(0);
         let bytes_synced = session.get("bytes_synced").and_then(|v| v.as_u64()).unwrap_or(0);
-        let current_file = session.get("current_file").and_then(|v| v.as_str());
         let speed_bps = session.get("speed_bps").and_then(|v| v.as_u64());
 
         // Compute time since last heartbeat
@@ -2471,27 +2616,21 @@ async fn print_session_status(api: &ApiClient) -> Result<(), String> {
             _ => ("\u{25CF}", session_status, crate::colors::INK_DIM),
         };
 
-        // Line 1: indicator + name + device → remote + status
-        let path_display = remote_path.to_string();
-
-        let line1 = if !device_name.is_empty() {
-            format!(
-                "  {} {}  {} \u{2192} {}  {}",
-                indicator.custom_color(status_color),
-                name.custom_color(crate::colors::INK),
-                device_name.custom_color(crate::colors::INK_DIM),
-                path_display.custom_color(crate::colors::INK_DIM),
-                status_text.custom_color(status_color),
-            )
-        } else {
-            format!(
-                "  {} {}  \u{2192} {}  {}",
-                indicator.custom_color(status_color),
-                name.custom_color(crate::colors::INK),
-                path_display.custom_color(crate::colors::INK_DIM),
-                status_text.custom_color(status_color),
-            )
-        };
+        // Line 1: indicator + name + device → remote + status. Every text field
+        // here is decrypted locally; a row that opened nothing shows
+        // "(name hidden)" and drops the empty device/path segments.
+        let mut line1 = format!(
+            "  {} {}",
+            indicator.custom_color(status_color),
+            text.name.custom_color(crate::colors::INK),
+        );
+        if !text.device_name.is_empty() {
+            line1.push_str(&format!("  {}", text.device_name.custom_color(crate::colors::INK_DIM)));
+        }
+        if !text.remote_path.is_empty() {
+            line1.push_str(&format!(" \u{2192} {}", text.remote_path.custom_color(crate::colors::INK_DIM)));
+        }
+        line1.push_str(&format!("  {}", status_text.custom_color(status_color)));
         println!("{}", crate::ui::box_line(&line1, w));
 
         // Line 2: stats
@@ -2502,24 +2641,17 @@ async fn print_session_status(api: &ApiClient) -> Result<(), String> {
         if bytes_synced > 0 {
             detail_parts.push(crate::ui::human_size(bytes_synced));
         }
+        if !text.local_path.is_empty() {
+            detail_parts.push(format!("local {}", text.local_path));
+        }
         if let Some(ref ago) = heartbeat_ago {
             detail_parts.push(format!("last heartbeat {ago}"));
         }
+        if let Some(speed) = speed_bps.filter(|s| *s > 0) {
+            detail_parts.push(format!("{}/s", crate::ui::human_speed(speed as f64)));
+        }
 
-        // If syncing, show current file + speed
-        if let Some(file) = current_file {
-            let speed_str = speed_bps
-                .map(|s| format!(" \u{00b7} {}", crate::ui::human_speed(s as f64)))
-                .unwrap_or_default();
-            let line2 = format!(
-                "    {} {file}{speed_str}",
-                "uploading".custom_color(crate::colors::INK_DIM),
-            );
-            println!(
-                "{}",
-                crate::ui::box_line(&line2.custom_color(crate::colors::INK_DIM).to_string(), w,)
-            );
-        } else if !detail_parts.is_empty() {
+        if !detail_parts.is_empty() {
             let line2 = format!("    {}", detail_parts.join(" \u{00b7} "));
             println!(
                 "{}",
@@ -2559,26 +2691,28 @@ async fn stop_session_best_effort(api: &ApiClient, session_id: &str) {
     }
 }
 
-async fn stop_session_by_name(api: &ApiClient, name: &str) -> Result<(), String> {
+async fn stop_session_by_name(api: &ApiClient, master: &MasterKey, name: &str) -> Result<(), String> {
     let resp = api.list_client_sessions().await?;
     let sessions = resp
         .get("sessions")
         .and_then(|v| v.as_array())
         .ok_or("invalid session listing")?;
 
+    // Match on the DECRYPTED name (task 1922). An unreadable row has no name to
+    // match, so it is never stopped by accident.
     let name_lower = name.to_lowercase();
-    let matching: Vec<&serde_json::Value> = sessions
+    let matching: Vec<(&serde_json::Value, String)> = sessions
         .iter()
-        .filter(|s| {
-            s.get("name")
-                .and_then(|v| v.as_str())
-                .map(|n| {
-                    let n_lower = n.to_lowercase();
-                    n_lower == name_lower
-                        || n_lower.ends_with(&format!("/{name_lower}"))
-                        || n_lower.contains(&name_lower)
-                })
-                .unwrap_or(false)
+        .filter_map(|s| {
+            let text = session_text(master, s);
+            if text.name == HIDDEN_NAME {
+                return None;
+            }
+            let n_lower = text.name.to_lowercase();
+            (n_lower == name_lower
+                || n_lower.ends_with(&format!("/{name_lower}"))
+                || n_lower.contains(&name_lower))
+            .then_some((s, text.name))
         })
         .collect();
 
@@ -2586,15 +2720,14 @@ async fn stop_session_by_name(api: &ApiClient, name: &str) -> Result<(), String>
         return Err(format!("no session found with name \"{name}\""));
     }
 
-    for session in matching {
+    for (session, session_name) in matching {
         let id = session.get("id").and_then(|v| v.as_str()).ok_or("session missing id")?;
-        let session_name = session.get("name").and_then(|v| v.as_str()).unwrap_or("unnamed");
 
         // Stop the server-side session
         api.stop_client_session(id).await?;
 
         // Kill the local daemon process + remove auto-start
-        let slug = crate::daemon::slugify(session_name);
+        let slug = crate::daemon::slugify(&session_name);
         let _ = crate::daemon::stop_daemon(&slug);
 
         println!(
@@ -2607,7 +2740,7 @@ async fn stop_session_by_name(api: &ApiClient, name: &str) -> Result<(), String>
     Ok(())
 }
 
-async fn stop_all_sessions(api: &ApiClient) -> Result<(), String> {
+async fn stop_all_sessions(api: &ApiClient, master: &MasterKey) -> Result<(), String> {
     let device_info = crate::device::load_or_create();
     let resp = api.list_client_sessions().await?;
     let sessions = resp
@@ -2615,15 +2748,13 @@ async fn stop_all_sessions(api: &ApiClient) -> Result<(), String> {
         .and_then(|v| v.as_array())
         .ok_or("invalid session listing")?;
 
-    // Filter to sessions on this device (match by device_name == hostname)
-    let device_sessions: Vec<&serde_json::Value> = sessions
+    // Filter to sessions on this device by the device's own client key — the
+    // exact identity. The old plaintext `device_name` never existed in the
+    // listing, so this used to match nothing at all.
+    let device_sessions: Vec<(&serde_json::Value, String)> = sessions
         .iter()
-        .filter(|s| {
-            s.get("device_name")
-                .and_then(|v| v.as_str())
-                .map(|n| n == device_info.hostname)
-                .unwrap_or(false)
-        })
+        .filter(|s| row_uuid(s, "device_client_key") == Some(device_info.device_id))
+        .map(|s| (s, session_text(master, s).name))
         .collect();
 
     if device_sessions.is_empty() {
@@ -2638,9 +2769,8 @@ async fn stop_all_sessions(api: &ApiClient) -> Result<(), String> {
     }
 
     let mut stopped = 0u32;
-    for session in &device_sessions {
+    for (session, name) in &device_sessions {
         let id = session.get("id").and_then(|v| v.as_str()).ok_or("session missing id")?;
-        let name = session.get("name").and_then(|v| v.as_str()).unwrap_or("unnamed");
 
         // Stop server-side session
         api.stop_client_session(id).await?;
