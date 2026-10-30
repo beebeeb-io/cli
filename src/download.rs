@@ -183,6 +183,43 @@ pub async fn download_buffered(api: &ApiClient, file_id: &str) -> Result<(Vec<u8
     Ok((bytes.to_vec(), chunk_size))
 }
 
+/// Read only as much of a file's current version as the first wire frame needs
+/// (never the whole file), for the SF-0002 read-only content check. Returns the
+/// prefix, the server's `X-Chunk-Size` when present, and whether the body ended
+/// before the requested length.
+pub async fn download_frame_prefix(
+    api: &ApiClient,
+    file_id: &str,
+    size_bytes: Option<u64>,
+    chunk_count: u32,
+) -> Result<(Vec<u8>, Option<u64>, bool), String> {
+    let mut resp = api.download_stream(file_id).await?;
+    let chunk_size = header_u64(&resp, "X-Chunk-Size").filter(|&v| v > 0 && v <= MAX_CHUNK_SIZE);
+    let want = frame_probe_len(size_bytes.unwrap_or(0), chunk_count.max(1), chunk_size);
+    let mut buf = Vec::new();
+    fill_to(&mut resp, &mut buf, want).await?;
+    let complete = buf.len() < want;
+    Ok((buf, chunk_size, complete))
+}
+
+/// The longest plausible first-frame length for a version of `count` chunks,
+/// bounded by core's maximum chunk size. Only a prefix of this length is read.
+fn frame_probe_len(size_bytes: u64, chunk_count: u32, chunk_size: Option<u64>) -> usize {
+    const NONCE_AND_TAG: u64 = 28;
+    const FILE_PROVIDER_CHUNK: u64 = 1024 * 1024;
+    let total = size_bytes.saturating_add(NONCE_AND_TAG.saturating_mul(chunk_count as u64));
+    let want = if chunk_count <= 1 {
+        total
+    } else {
+        let mut m = (FILE_PROVIDER_CHUNK + NONCE_AND_TAG).max(total / chunk_count as u64);
+        if let Some(cs) = chunk_size {
+            m = m.max(cs.saturating_add(NONCE_AND_TAG));
+        }
+        m
+    };
+    usize::try_from(want.min(MAX_CHUNK_SIZE.saturating_add(NONCE_AND_TAG))).unwrap_or(usize::MAX)
+}
+
 /// Stream-download `file_id`, decrypt to `out_path` with constant memory, and
 /// report progress. Falls back to the buffered legacy decrypt for JSON-blob /
 /// binary-UUID / unknown-frame-size files (see module docs).

@@ -162,9 +162,22 @@ async fn move_single(
 
     // SF-0002: a row sealed by the old iOS File Provider is read-only: a move
     // is fine (it re-encrypts nothing), a rename would rewrite its name under a
-    // convention the row does not use.
-    if src.read_only && new_name.as_deref().is_some_and(|n| n != src.name) {
-        return Err(crate::crypto::OWNER_REPAIR_READ_ONLY.to_string());
+    // convention the row does not use. The name may resolve normally while the
+    // CURRENT version's content is still uppercase-sealed (review round), so a
+    // rename checks chunk 0 as well.
+    if new_name.as_deref().is_some_and(|n| n != src.name) {
+        if src.read_only {
+            return Err(crate::crypto::OWNER_REPAIR_READ_ONLY.to_string());
+        }
+        let meta = api.get_file(&src_id).await?;
+        crate::owned_keys::ensure_content_writable(
+            api,
+            master_key,
+            &src_id,
+            meta.get("size_bytes").and_then(|v| v.as_u64()),
+            meta.get("chunk_count").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
+        )
+        .await?;
     }
 
     // Preserve omitted/NULL/UUID: a changed parent at root is an explicit

@@ -1267,7 +1267,31 @@ pub async fn run(
                         ));
                     }
 
-                    let replacement = resolved.filter(|r| r.origin != KeyOrigin::Derived && !r.read_only);
+                    // SF-0002 review: a version replace needs the CURRENT
+                    // version's content writable too, not just its name. An
+                    // unreadable check is treated as read-only: the edit then
+                    // becomes a new file instead of rewriting an object we
+                    // cannot prove writable.
+                    let content_read_only = match resolved
+                        .as_ref()
+                        .filter(|r| r.origin != KeyOrigin::Derived && !r.read_only)
+                    {
+                        Some(r) => {
+                            let id = r.canonical["id"].as_str().unwrap_or_default();
+                            crate::owned_keys::content_is_upper_repair(
+                                api,
+                                &master_key,
+                                id,
+                                r.canonical["size_bytes"].as_u64(),
+                                r.canonical["chunk_count"].as_u64().unwrap_or(1) as u32,
+                            )
+                            .await
+                            .unwrap_or(true)
+                        }
+                        None => false,
+                    };
+                    let replacement = resolved
+                        .filter(|r| r.origin != KeyOrigin::Derived && !r.read_only && !content_read_only);
                     if let Some(old_id) = replace_id.filter(|_| replacement.is_none()) {
                         let _ = api.trash_file(&old_id.to_string()).await;
                     }
@@ -3335,10 +3359,26 @@ async fn do_upload(
         return Ok(());
     }
 
-    let replacement = remote
-        .as_ref()
-        .and_then(|r| r.resolved.as_ref())
-        .filter(|r| r.origin != KeyOrigin::Derived && !r.read_only);
+    // SF-0002 review: the name may read normally while the CURRENT version's
+    // content is still uppercase-sealed; such an edit becomes a new file.
+    let candidate = remote.as_ref().and_then(|r| r.resolved.as_ref());
+    let content_read_only = match candidate.filter(|r| r.origin != KeyOrigin::Derived && !r.read_only) {
+        Some(r) => {
+            let id = r.canonical["id"].as_str().unwrap_or_default();
+            crate::owned_keys::content_is_upper_repair(
+                api,
+                &master_key,
+                id,
+                r.canonical["size_bytes"].as_u64(),
+                r.canonical["chunk_count"].as_u64().unwrap_or(1) as u32,
+            )
+            .await
+            .unwrap_or(true)
+        }
+        None => false,
+    };
+    let replacement =
+        candidate.filter(|r| r.origin != KeyOrigin::Derived && !r.read_only && !content_read_only);
     if let Some(old_id) = remote.as_ref().filter(|_| replacement.is_none()).map(|r| r.id) {
         let _ = api.trash_file(&old_id.to_string()).await;
     }

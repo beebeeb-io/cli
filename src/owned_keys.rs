@@ -494,6 +494,99 @@ impl OwnedKeyResolver {
         }
     }
 }
+/// SF-0002 review: is the CURRENT version's content sealed under the read-only
+/// uppercase repair convention, even when the name resolved normally? Core's
+/// per-version owner resolver decides from chunk 0 alone; only a bounded prefix
+/// of the version is read.
+pub async fn content_is_upper_repair(
+    api: &ApiClient,
+    master: &MasterKey,
+    file_id: &str,
+    size_bytes: Option<u64>,
+    chunk_count: u32,
+) -> Result<bool, String> {
+    if chunk_count == 0 {
+        return Ok(false);
+    }
+    let (body, chunk_size, complete) =
+        crate::download::download_frame_prefix(api, file_id, size_bytes, chunk_count).await?;
+    let convention = first_chunk_convention(master, file_id, &body, size_bytes, chunk_count, chunk_size, complete);
+    Ok(convention == Some(beebeeb_core::kdf::OwnerKeyConvention::UpperRepair))
+}
+
+/// [`content_is_upper_repair`] as a write guard: `Err(OWNER_REPAIR_READ_ONLY)`
+/// when the current version must not be rewritten.
+pub async fn ensure_content_writable(
+    api: &ApiClient,
+    master: &MasterKey,
+    file_id: &str,
+    size_bytes: Option<u64>,
+    chunk_count: u32,
+) -> Result<(), String> {
+    if content_is_upper_repair(api, master, file_id, size_bytes, chunk_count).await? {
+        return Err(crate::crypto::OWNER_REPAIR_READ_ONLY.to_string());
+    }
+    Ok(())
+}
+
+fn first_chunk_convention(
+    master: &MasterKey,
+    file_id: &str,
+    body: &[u8],
+    size_bytes: Option<u64>,
+    chunk_count: u32,
+    chunk_size: Option<u64>,
+    complete: bool,
+) -> Option<beebeeb_core::kdf::OwnerKeyConvention> {
+    for len in chunk0_lengths(body.len(), size_bytes, chunk_count, chunk_size, complete) {
+        if let Some((_, convention)) = crate::crypto::owner_content_key(master, file_id, &body[..len]) {
+            return Some(convention);
+        }
+    }
+    None
+}
+
+/// Candidate lengths for wire frame 0, from the version's geometry in its
+/// metadata (the server's plaintext chunk size is authoritative when present).
+fn chunk0_lengths(
+    have: usize,
+    size_bytes: Option<u64>,
+    chunk_count: u32,
+    chunk_size: Option<u64>,
+    complete: bool,
+) -> Vec<usize> {
+    const NONCE_AND_TAG: u64 = 28;
+    const FILE_PROVIDER_CHUNK: u64 = 1024 * 1024;
+    let mut out: Vec<usize> = Vec::new();
+    let mut push = |v: u64| {
+        if let Ok(v) = usize::try_from(v) {
+            if v > 0 && v <= have && !out.contains(&v) {
+                out.push(v);
+            }
+        }
+    };
+    if chunk_count <= 1 {
+        if complete {
+            push(have as u64);
+        } else if let Some(size) = size_bytes {
+            push(size.saturating_add(NONCE_AND_TAG));
+        }
+        return out;
+    }
+    if let Some(cs) = chunk_size {
+        push(cs.saturating_add(NONCE_AND_TAG));
+    }
+    if let Some(size) = size_bytes {
+        let total = size.saturating_add(NONCE_AND_TAG.saturating_mul(chunk_count as u64));
+        push(total / chunk_count as u64);
+    }
+    push(FILE_PROVIDER_CHUNK + NONCE_AND_TAG);
+    if complete {
+        push(have as u64);
+    }
+    out
+}
+
 fn text<'a>(row: &'a Value, key: &str) -> Result<&'a str, String> {
     row[key].as_str().ok_or_else(|| format!("missing {key}"))
 }

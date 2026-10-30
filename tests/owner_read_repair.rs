@@ -161,6 +161,53 @@ async fn a_repaired_row_converges_after_the_copy() {
     assert_eq!(state(&dir)["account_id"], ACCOUNT);
 }
 
+/// SF-0002 review P2: a name re-sealed under the normal convention does not
+/// make the row writable while its CURRENT version's content is still sealed
+/// under the uppercase id. Rename is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rename_is_refused_when_only_the_content_is_uppercase() {
+    let h = Harness::new(Fixture::upper_repair_content_only()).await;
+    let out = h
+        .run(&["mv", "Shared/uppercase-repair.pdf", "Shared/renamed.pdf"])
+        .await;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "rename of a content-repair row succeeded: stdout={} stderr={stderr}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        stderr.contains("This file was saved by an older version of the iOS app"),
+        "stderr={stderr}"
+    );
+    assert_eq!(h.count("PATCH", &format!("/api/v1/files/{UPPER_FILE}")), 0);
+    h.close().await;
+}
+
+/// SF-0002 review P2: `push --replace` of a content-repair row is refused: no
+/// upload session is started and no version is written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replace_is_refused_when_only_the_content_is_uppercase() {
+    let h = Harness::new(Fixture::upper_repair_content_only()).await;
+    let local = h.home.join("uppercase-repair.pdf");
+    std::fs::write(&local, b"replacement bytes").unwrap();
+    let out = h
+        .run(&["push", local.to_str().unwrap(), "--folder", "Shared", "--replace"])
+        .await;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "replace of a content-repair row succeeded: stdout={} stderr={stderr}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        stderr.contains("This file was saved by an older version of the iOS app"),
+        "stderr={stderr}"
+    );
+    assert_eq!(h.count("POST", "/api/v1/uploads/init"), 0);
+    h.close().await;
+}
+
 /// SF-0002 review P1: a shared reader's row whose NAME opens under the folder
 /// key but whose CONTENT is sealed under the owner's string convention must
 /// not open. The explicit (folder) key is the only key such a download may

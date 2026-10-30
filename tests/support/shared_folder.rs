@@ -183,6 +183,31 @@ impl Fixture {
         f.rows[1] = r;
         f
     }
+    /// SF-0002 review: the name was re-sealed under the normal convention but
+    /// the single content frame is still sealed under the uppercase id.
+    pub fn upper_repair_content_only() -> Self {
+        use beebeeb_core::chunk_stream::ExpectedChunkFormat;
+        let mut f = Self::basic();
+        let normal = beebeeb_core::kdf::derive_file_key(&master(), UPPER_FILE.as_bytes());
+        let upper = beebeeb_core::kdf::derive_file_key(&master(), UPPER_FILE.to_uppercase().as_bytes());
+        f.plaintext = b"SF-0002 content-only repair payload".to_vec();
+        f.stride = f.plaintext.len() as u64;
+        f.frames = vec![beebeeb_core::encrypt::encrypt_chunk_raw(&upper, &f.plaintext).unwrap()];
+        let mut r = row(UPPER_FILE, Some(ROOT), "uppercase-repair.pdf", false, false);
+        r["name_encrypted"] = json!(
+            beebeeb_core::encrypt::encrypt_name_for(
+                &normal,
+                "uppercase-repair.pdf",
+                Some("application/pdf"),
+                ExpectedChunkFormat::Unrecorded
+            )
+            .unwrap()
+        );
+        r["size_bytes"] = json!(f.plaintext.len());
+        r["chunk_count"] = json!(1);
+        f.rows[1] = r;
+        f
+    }
     pub fn basic() -> Self {
         Self {
             rows: vec![
