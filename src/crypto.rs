@@ -366,15 +366,22 @@ pub fn decrypt_file_chunks_owned(
     // A v2 file is written by core, which derives its key from the UUID STRING:
     // that key only. A legacy file may be under either derivation: binary-UUID
     // first (CLI origin), then string-UUID (web origin). An explicit owner key
-    // (resolved from the name) goes first.
-    let mut keys: Vec<FileKey> = explicit_key.map(key_copy).into_iter().collect();
-    match pin {
-        ExpectedChunkFormat::V2 => keys.push(beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes())),
-        ExpectedChunkFormat::Unrecorded => {
-            keys.push(beebeeb_core::kdf::derive_file_key(master_key, file_uuid.as_bytes()));
-            keys.push(beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes()));
-        }
-    }
+    // (a shared-folder or owner-wrap key resolved from the row) authenticates
+    // the content on its own: try ONLY that key. Falling back to the owner's
+    // derived or repair keys would let a shared reader open content that is not
+    // sealed under the key the row handed it (SF-0002 review).
+    let keys: Vec<FileKey> = match explicit_key {
+        Some(key) => vec![key_copy(key)],
+        None => match pin {
+            ExpectedChunkFormat::V2 => {
+                vec![beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes())]
+            }
+            ExpectedChunkFormat::Unrecorded => vec![
+                beebeeb_core::kdf::derive_file_key(master_key, file_uuid.as_bytes()),
+                beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes()),
+            ],
+        },
+    };
 
     // Attempt decryption with each key. The first successful full decryption wins.
     for file_key in &keys {
@@ -389,7 +396,19 @@ pub fn decrypt_file_chunks_owned(
     // which read-only owner convention authenticates THIS version, then retry
     // that version under the returned key. A split file (name under the
     // uppercase convention, this version under the string one, or the reverse)
-    // resolves per version.
+    // resolves per version. Only the owner's own (master-derived) path may take
+    // this fallback; a row opened with an explicit key must never switch to an
+    // owner key.
+    if explicit_key.is_some() {
+        return Err(match pin {
+            ExpectedChunkFormat::V2 => format!(
+                "failed to decrypt file {file_id_str}: its metadata records chunk format v2 and the content does not open under the key this row supplied"
+            ),
+            ExpectedChunkFormat::Unrecorded => {
+                format!("failed to decrypt file {file_id_str}: the content does not authenticate under the key this row supplied")
+            }
+        });
+    }
     for len in first_frame_candidates(encrypted_bytes, chunk_count, chunk_size) {
         let Some((key, convention)) = owner_content_key(master_key, file_id_str, &encrypted_bytes[..len]) else {
             continue;

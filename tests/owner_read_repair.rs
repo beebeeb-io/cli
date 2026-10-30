@@ -160,3 +160,37 @@ async fn a_repaired_row_converges_after_the_copy() {
     assert_eq!(h.count("POST", "/api/v1/uploads/init"), 1);
     assert_eq!(state(&dir)["account_id"], ACCOUNT);
 }
+
+/// SF-0002 review P1: a shared reader's row whose NAME opens under the folder
+/// key but whose CONTENT is sealed under the owner's string convention must
+/// not open. The explicit (folder) key is the only key such a download may
+/// try; the owner's derived and repair keys are not its to use.
+fn explicit_key_row_with_owner_content() -> Fixture {
+    let mut f = Fixture::transfer(false);
+    let owner_key = beebeeb_core::kdf::derive_file_key(&master(), FILE.as_bytes());
+    f.frames = vec![beebeeb_core::encrypt::encrypt_chunk_raw(&owner_key, &f.plaintext).unwrap()];
+    f.stride = f.plaintext.len() as u64;
+    f.rows[1]["chunk_count"] = serde_json::json!(1);
+    f.rows[1]["size_bytes"] = serde_json::json!(f.plaintext.len());
+    f
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_explicit_key_download_never_falls_back_to_the_owner_keys() {
+    let h = Harness::new(explicit_key_row_with_owner_content()).await;
+    let out_path = h.home.join("must-not-exist.bin");
+    let out = h
+        .run(&["pull", "Shared/guest.txt", "-o", out_path.to_str().unwrap()])
+        .await;
+    assert!(
+        !out.status.success(),
+        "a shared-folder key opened content sealed under the owner's key: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out_path.exists(),
+        "the download wrote a file it must not have opened"
+    );
+    h.close().await;
+}
