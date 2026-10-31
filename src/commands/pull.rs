@@ -218,7 +218,6 @@ async fn run_once(
     let stats = if let Some(key) = explicit_key {
         crate::download::stream_download_decrypt_with_file_key(
             &api,
-            &master_key,
             key,
             &file_id,
             pin,
@@ -639,7 +638,6 @@ async fn pull_single_file(
     let stats = if let Some(key) = explicit_key {
         crate::download::stream_download_decrypt_with_file_key(
             api,
-            &master_key,
             key,
             file_id,
             pin,
@@ -815,7 +813,6 @@ async fn run_zip(api: &ApiClient, path_arg: &str, output: Option<PathBuf>, force
             drop(staged.take_file());
             let result = crate::download::stream_download_decrypt_with_file_key(
                 api,
-                &master_key,
                 key.clone(),
                 &item.entry.file_id,
                 item.entry.chunk_format,

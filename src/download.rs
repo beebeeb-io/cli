@@ -255,7 +255,6 @@ pub async fn stream_download_decrypt(
 #[allow(clippy::too_many_arguments)]
 pub async fn stream_download_decrypt_with_file_key(
     api: &ApiClient,
-    master_key: &MasterKey,
     file_key: std::sync::Arc<beebeeb_core::kdf::FileKey>,
     file_id: &str,
     pin: ExpectedChunkFormat,
@@ -266,10 +265,7 @@ pub async fn stream_download_decrypt_with_file_key(
 ) -> Result<DownloadStats, DownloadError> {
     stream_download_key(
         api,
-        DownloadKey::Explicit {
-            key: file_key,
-            master: master_key,
-        },
+        DownloadKey::Explicit(file_key),
         file_id,
         pin,
         chunk_count,
@@ -283,32 +279,26 @@ pub async fn stream_download_decrypt_with_file_key(
 
 enum DownloadKey<'a> {
     Legacy(&'a MasterKey),
-    Explicit {
-        key: std::sync::Arc<beebeeb_core::kdf::FileKey>,
-        /// Kept so a first-frame failure can ask core's owner resolver for the
-        /// per-version read-only repair key (SF-0002).
-        master: &'a MasterKey,
-    },
+    Explicit(std::sync::Arc<beebeeb_core::kdf::FileKey>),
 }
 impl DownloadKey<'_> {
     fn decryptor(&self, id: &str, pin: ExpectedChunkFormat) -> ChunkDecryptor {
         match self {
             Self::Legacy(master) => ChunkDecryptor::for_push(master, id, pin),
-            Self::Explicit { key, .. } => {
-                ChunkDecryptor::for_push_with_file_key(beebeeb_core::kdf::FileKey::from_bytes(*key.as_bytes()), id, pin)
-            }
+            // The decryptor owns its copy; `key_copy` wipes the by-value bytes it passes through.
+            Self::Explicit(key) => ChunkDecryptor::for_push_with_file_key(crate::crypto::key_copy(key), id, pin),
         }
     }
-    fn master(&self) -> &MasterKey {
+    /// The owner path's master key, for the buffered fallback. An explicit key
+    /// (shared folder, owner wrap, file request) has no fallback: its content
+    /// opens under that key or not at all, so a frame-0 failure ends the download
+    /// at once, before the rest of the body is read (SF-0002 round 2, C6).
+    fn legacy(&self) -> Result<&MasterKey, DownloadError> {
         match self {
-            Self::Legacy(master) => master,
-            Self::Explicit { master, .. } => master,
-        }
-    }
-    fn explicit(&self) -> Option<&beebeeb_core::kdf::FileKey> {
-        match self {
-            Self::Legacy(_) => None,
-            Self::Explicit { key, .. } => Some(key.as_ref()),
+            Self::Legacy(m) => Ok(m),
+            Self::Explicit(_) => Err(DownloadError::Unreadable(
+                "explicit-key content failed authentication".into(),
+            )),
         }
     }
 }
@@ -372,7 +362,7 @@ async fn stream_download_key(
             )
             .await?
         }
-        DownloadKey::Explicit { key: file_key, .. } => {
+        DownloadKey::Explicit(file_key) => {
             crate::direct_download::try_download_with_file_key(
                 api,
                 file_key.clone(),
@@ -498,9 +488,10 @@ async fn stream_raw(
                 // legacy file served with a V2 header. Not a truncation —
                 // hand everything to the buffered path (capped).
                 writer.abort();
+                let master_key = key.legacy()?;
                 let mut full = std::mem::take(&mut carry);
                 drain_rest(resp, &mut full, fb_cap).await?;
-                return buffered_fallback(key, file_id, pin, &full, count, chunk_size, out_path, prog)
+                return buffered_fallback(master_key, file_id, pin, &full, count, chunk_size, out_path, prog)
                     .map_err(DownloadError::from);
             }
             if carry.len() < frame_size {
@@ -526,12 +517,13 @@ async fn stream_raw(
                 // was wrong. Reassemble the full payload and let the buffered
                 // path try both parsers, both keys and the frame-size probe.
                 writer.abort();
+                let master_key = key.legacy()?;
                 let mut full = frame; // the first frame we already read
                 // `carry` holds the bytes read past frame 0; append it once,
                 // then drain the remainder under the fallback cap.
                 full.append(&mut carry);
                 drain_rest(resp, &mut full, fb_cap).await?;
-                return buffered_fallback(key, file_id, pin, &full, count, chunk_size, out_path, prog)
+                return buffered_fallback(master_key, file_id, pin, &full, count, chunk_size, out_path, prog)
                     .map_err(DownloadError::from);
             }
             Err(e) => {
@@ -562,7 +554,7 @@ async fn stream_raw(
 /// atomically.
 #[allow(clippy::too_many_arguments)]
 fn buffered_fallback(
-    key: &DownloadKey<'_>,
+    master_key: &MasterKey,
     file_id: &str,
     pin: ExpectedChunkFormat,
     encrypted: &[u8],
@@ -571,16 +563,8 @@ fn buffered_fallback(
     out_path: &Path,
     prog: &dyn crate::upload::FileProgress,
 ) -> Result<DownloadStats, String> {
-    let plaintext = crate::crypto::decrypt_file_chunks_owned(
-        key.master(),
-        file_id,
-        pin,
-        key.explicit(),
-        encrypted,
-        count,
-        chunk_size,
-    )?
-    .0;
+    let plaintext =
+        crate::crypto::decrypt_file_chunks_with_chunk_size(master_key, file_id, pin, encrypted, count, chunk_size)?;
     let mut writer = AtomicFile::create(out_path)?;
     writer.write_all(&plaintext)?;
     writer.commit()?;
@@ -1380,5 +1364,69 @@ mod tests {
         }
         eprintln!("measured JSON envelope overhead = {envelope} bytes; max wire/plaintext ratio = {max_ratio:.2}");
         assert!(envelope as u64 <= JSON_CHUNK_ENVELOPE);
+    }
+
+    /// SF-0002 round 2 (C6): a download opened with an explicit key (shared
+    /// folder, owner wrap, file request) whose frame 0 does not authenticate
+    /// fails at once. The body after frame 0 never ends here, so a download that
+    /// buffers the rest before failing hangs, and the timeout turns that into a
+    /// failure of this test.
+    #[tokio::test]
+    async fn an_explicit_key_frame0_failure_fails_before_reading_the_rest() {
+        use futures_util::StreamExt as _;
+        let sealed_under = derive_file_key(&mk(), FID.as_bytes());
+        let pt = payload(3 * 4096 + 77);
+        let wire: Vec<u8> = pt
+            .chunks(4096)
+            .flat_map(|c| encrypt_chunk_raw(&sealed_under, c).unwrap())
+            .collect();
+        // Frame 0 and a little of frame 1, then a body that never ends.
+        let head = bytes::Bytes::from(wire[..4096 + 28 + 100].to_vec());
+        let app = Router::new().route(
+            "/api/v1/files/:id/download",
+            get(move || {
+                let head = head.clone();
+                async move {
+                    let mut h = axum::http::HeaderMap::new();
+                    h.insert("x-chunk-size", "4096".parse().unwrap());
+                    h.insert("x-chunk-count", "4".parse().unwrap());
+                    let body = futures_util::stream::once(async move { Ok::<_, std::convert::Infallible>(head) })
+                        .chain(futures_util::stream::pending());
+                    (h, axum::body::Body::from_stream(body))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let api = ApiClient::new_for_test(format!("http://{addr}"));
+        let dir = std::env::temp_dir().join(format!("bb-dl-c6-{}-{}", std::process::id(), rand::random::<u32>()));
+        let out = dir.join("out.bin");
+        let not_this_rows_key = Arc::new(beebeeb_core::kdf::FileKey::from_bytes([9u8; 32]));
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            stream_download_decrypt_with_file_key(
+                &api,
+                not_this_rows_key,
+                FID,
+                ExpectedChunkFormat::Unrecorded,
+                4,
+                &out,
+                &Counting(Arc::new(AtomicUsize::new(0))),
+                "out.bin",
+            ),
+        )
+        .await;
+        let exists = out.exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        let result = result.expect("an explicit-key frame-0 failure must not wait for the rest of the body");
+        match result {
+            Err(DownloadError::Unreadable(_)) => {}
+            Err(other) => panic!("an explicit key that does not open frame 0 is unreadable, got {other:?}"),
+            Ok(_) => panic!("a key that does not open frame 0 downloaded the file"),
+        }
+        assert!(!exists, "nothing is published for a failed download");
     }
 }

@@ -3630,7 +3630,6 @@ async fn download_to(
     if let Some(r) = remote.resolved.as_ref().filter(|r| r.origin != KeyOrigin::Derived) {
         crate::download::stream_download_decrypt_with_file_key(
             api,
-            master_key,
             r.key.clone(),
             &file_id_str,
             pin,

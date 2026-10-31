@@ -299,9 +299,12 @@ fn pin_error(file_id: &str, e: impl std::fmt::Display) -> String {
     )
 }
 
-/// A second owned handle on a file key, for the decryptor that takes one by value.
-fn key_copy(file_key: &FileKey) -> FileKey {
-    FileKey::from_bytes(*file_key.as_bytes())
+/// A second owned copy of `file_key` (core's `FileKey` is not `Clone`). The
+/// by-value bytes it passes through are wiped on drop (SF-0002 round 2, C6);
+/// `FileKey::from_bytes` wipes its own argument and the copy zeroizes on drop.
+pub(crate) fn key_copy(file_key: &FileKey) -> FileKey {
+    let bytes = zeroize::Zeroizing::new(*file_key.as_bytes());
+    FileKey::from_bytes(*bytes)
 }
 
 /// Decrypt all chunks of a downloaded file under its read `pin`
