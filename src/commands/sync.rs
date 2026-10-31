@@ -1267,31 +1267,16 @@ pub async fn run(
                         ));
                     }
 
-                    // SF-0002 review: a version replace needs the CURRENT
-                    // version's content writable too, not just its name. An
-                    // unreadable check is treated as read-only: the edit then
-                    // becomes a new file instead of rewriting an object we
-                    // cannot prove writable.
-                    let content_read_only = match resolved
-                        .as_ref()
-                        .filter(|r| r.origin != KeyOrigin::Derived && !r.read_only)
-                    {
-                        Some(r) => {
-                            let target = crate::owned_keys::WriteTarget {
-                                file_id: r.canonical["id"].as_str().unwrap_or_default(),
-                                is_folder: false,
-                                name_read_only: r.read_only,
-                                row_key: Some(r.key.as_ref()),
-                                size_bytes: r.canonical["size_bytes"].as_u64(),
-                                chunk_count: r.canonical["chunk_count"].as_u64().unwrap_or(1) as u32,
-                            };
-                            crate::owned_keys::write_check(api, &master_key, &target).await
-                                != crate::owned_keys::WriteCheck::Writable
-                        }
-                        None => false,
-                    };
+                    // SF-0002: ask the write check before touching the remote
+                    // row. A read-only row or one the check could not read is
+                    // left alone (never trashed) and this edit is not uploaded
+                    // this pass; the next pass asks again.
                     let replacement =
-                        resolved.filter(|r| r.origin != KeyOrigin::Derived && !r.read_only && !content_read_only);
+                        match replace_decision(api, &master_key, resolved.as_ref(), replace_id.is_some()).await {
+                            Replace::Skip(why) => return Err(format!("{rel}: {why}")),
+                            Replace::InPlace(r) => Some(r.clone()),
+                            Replace::NewFile => None,
+                        };
                     if let Some(old_id) = replace_id.filter(|_| replacement.is_none()) {
                         let _ = api.trash_file(&old_id.to_string()).await;
                     }
@@ -1949,7 +1934,7 @@ async fn run_plain_watch(
                                 None => remote.is_none(),
                             };
                             if local_changed {
-                                do_upload(
+                                match do_upload(
                                     &resync_api,
                                     Arc::clone(&resync_master),
                                     local_dir,
@@ -1961,8 +1946,18 @@ async fn run_plain_watch(
                                     state,
                                     false,
                                 )
-                                .await?;
-                                resync_bytes += l.size;
+                                .await
+                                {
+                                    // SF-0002: a read-only or unchecked row is left as it is and
+                                    // asked again next pass; it does not end the watch.
+                                    Err(e) if crate::owned_keys::is_write_refusal(&e) => {
+                                        eprintln!("  {} {rel}: {e}", "!".custom_color(crate::colors::AMBER));
+                                    }
+                                    other => {
+                                        other?;
+                                        resync_bytes += l.size;
+                                    }
+                                }
                             }
                         }
                     }
@@ -3332,6 +3327,52 @@ async fn walk_remote(
     Ok(())
 }
 
+/// SF-0002 round 2 (C2): what a sync upload may do with the remote row it
+/// would replace. One decision for the pass's upload phase and the watch-mode
+/// resync, from the one write check ([`crate::owned_keys::write_check`]).
+enum Replace<'a> {
+    /// Version-replace the row in place under its own key (a shared-folder,
+    /// owner-wrap or file-request row).
+    InPlace(&'a ResolvedCliKey),
+    /// Trash the old row and upload the edit under a fresh id: an ordinary owner
+    /// row, as sync always did, or a path with no remote row at all.
+    NewFile,
+    /// Leave the remote row untouched (never trashed) and upload nothing this
+    /// pass: it is read-only, or the check could not read it. The text says
+    /// which; the next pass asks again.
+    Skip(&'static str),
+}
+
+async fn replace_decision<'a>(
+    api: &ApiClient,
+    master_key: &beebeeb_core::kdf::MasterKey,
+    resolved: Option<&'a ResolvedCliKey>,
+    has_remote: bool,
+) -> Replace<'a> {
+    use crate::owned_keys::{WRITE_CHECK_UNKNOWN, WriteCheck, WriteTarget};
+    if !has_remote {
+        return Replace::NewFile;
+    }
+    // A remote row this pass did not resolve cannot be checked.
+    let Some(r) = resolved else {
+        return Replace::Skip(WRITE_CHECK_UNKNOWN);
+    };
+    let target = WriteTarget {
+        file_id: r.canonical["id"].as_str().unwrap_or_default(),
+        is_folder: false,
+        name_read_only: r.read_only,
+        row_key: Some(r.key.as_ref()),
+        size_bytes: r.canonical["size_bytes"].as_u64(),
+        chunk_count: r.canonical["chunk_count"].as_u64().unwrap_or(1) as u32,
+    };
+    match crate::owned_keys::write_check(api, master_key, &target).await {
+        WriteCheck::Writable if r.origin != KeyOrigin::Derived => Replace::InPlace(r),
+        WriteCheck::Writable => Replace::NewFile,
+        WriteCheck::UpperRepair => Replace::Skip(crate::crypto::OWNER_REPAIR_READ_ONLY),
+        WriteCheck::Unknown => Replace::Skip(WRITE_CHECK_UNKNOWN),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn do_upload(
     api: &ApiClient,
@@ -3359,24 +3400,14 @@ async fn do_upload(
         return Ok(());
     }
 
-    // SF-0002 review: the name may read normally while the CURRENT version's
-    // content is still uppercase-sealed; such an edit becomes a new file.
+    // SF-0002: the same write check as the pass above (one helper). A skipped
+    // file is the bare refusal text, so the callers can tell it from a failure.
     let candidate = remote.as_ref().and_then(|r| r.resolved.as_ref());
-    let content_read_only = match candidate.filter(|r| r.origin != KeyOrigin::Derived && !r.read_only) {
-        Some(r) => {
-            let target = crate::owned_keys::WriteTarget {
-                file_id: r.canonical["id"].as_str().unwrap_or_default(),
-                is_folder: false,
-                name_read_only: r.read_only,
-                row_key: Some(r.key.as_ref()),
-                size_bytes: r.canonical["size_bytes"].as_u64(),
-                chunk_count: r.canonical["chunk_count"].as_u64().unwrap_or(1) as u32,
-            };
-            crate::owned_keys::write_check(api, &master_key, &target).await != crate::owned_keys::WriteCheck::Writable
-        }
-        None => false,
+    let replacement = match replace_decision(api, &master_key, candidate, remote.is_some()).await {
+        Replace::Skip(why) => return Err(why.to_string()),
+        Replace::InPlace(r) => Some(r),
+        Replace::NewFile => None,
     };
-    let replacement = candidate.filter(|r| r.origin != KeyOrigin::Derived && !r.read_only && !content_read_only);
     if let Some(old_id) = remote.as_ref().filter(|_| replacement.is_none()).map(|r| r.id) {
         let _ = api.trash_file(&old_id.to_string()).await;
     }

@@ -526,6 +526,12 @@ pub enum WriteCheck {
 /// row is not marked read-only.
 pub const WRITE_CHECK_UNKNOWN: &str = "Couldn't check this file before changing it. Try again.";
 
+/// Is `e` one of the two refusals a write check gives (the row was left
+/// untouched on purpose), rather than a failed request?
+pub fn is_write_refusal(e: &str) -> bool {
+    e == crate::crypto::OWNER_REPAIR_READ_ONLY || e == WRITE_CHECK_UNKNOWN
+}
+
 impl WriteCheck {
     /// The guard form for an interactive write (`bb push --replace`, `bb mv`):
     /// only [`WriteCheck::Writable`] proceeds; the error is the user-facing text.

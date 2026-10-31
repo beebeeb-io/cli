@@ -88,10 +88,13 @@ async fn rename_is_refused_with_the_plain_message() {
     h.close().await;
 }
 
-/// `bb sync` may not version-replace the row: it trashes it and uploads a new
-/// file under a fresh id, exactly like any other edit it cannot write back.
+/// `bb sync` may not version-replace the row, and it may not trash it either:
+/// the read-only message promises the original stays ("save a copy"). The
+/// edit is not uploaded, the pass reports it (exit 3) and the local edit is
+/// left exactly as the user wrote it. (Round 1 trashed the row and uploaded
+/// the edit under a fresh id; SF-0002 round 2, C2, keeps the original.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sync_edit_uploads_a_new_file_instead_of_a_version() {
+async fn sync_keeps_a_read_only_row_and_the_local_edit() {
     let h = Harness::new(Fixture::upper_repair()).await;
     let dir = h.home.join("sync");
     std::fs::create_dir(&dir).unwrap();
@@ -101,26 +104,21 @@ async fn sync_edit_uploads_a_new_file_instead_of_a_version() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(std::fs::read(dir.join("uppercase-repair.pdf")).unwrap(), plaintext(&h));
 
-    let edited = b"edited locally, must become a copy";
+    let edited = b"edited locally, the original must stay";
     std::fs::write(dir.join("uppercase-repair.pdf"), edited).unwrap();
     let out = h
         .run(&["sync", dir.to_str().unwrap(), "/Shared", "--once", "--rehash"])
         .await;
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-
-    let f = h.state.lock().unwrap();
-    let upload = &f.upload_request;
-    assert_ne!(
-        upload["file_id"].as_str(),
-        Some(UPPER_FILE),
-        "upload reused the read-only id"
+    assert_eq!(out.status.code(), Some(3), "a pass that left the edit unsynced must say so: {}", stderr(&out));
+    assert!(
+        stderr(&out).contains("This file was saved by an older version of the iOS app"),
+        "stderr={}",
+        stderr(&out)
     );
-    assert_eq!(upload["base_version_number"], Value::Null, "uploaded as a version");
-    let trashed = f
-        .requests
-        .iter()
-        .any(|(m, p, _)| m == "DELETE" && p.contains(UPPER_FILE));
-    assert!(trashed, "the old row was neither trashed nor replaced");
+    assert_eq!(h.count("DELETE", &format!("/api/v1/files/{UPPER_FILE}")), 0, "the original was trashed");
+    assert_eq!(h.count("POST", "/api/v1/uploads/init"), 0, "the edit was uploaded");
+    assert_eq!(std::fs::read(dir.join("uppercase-repair.pdf")).unwrap(), edited);
+    h.close().await;
 }
 
 /// Ordinary owner rows keep working: a normal transfer row still lists and
@@ -139,10 +137,11 @@ async fn ordinary_rows_still_resolve_the_old_way() {
     h.close().await;
 }
 
-/// A repaired row converges: after the first sync saved the edit as a copy,
-/// a second run of the same tree uploads nothing more.
+/// Later passes stay the same: the read-only row is never trashed and the
+/// edit is never uploaded, however often sync runs, and the local edit
+/// survives every pass.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_repaired_row_converges_after_the_copy() {
+async fn a_read_only_row_is_left_alone_on_every_pass() {
     let h = Harness::new(Fixture::upper_repair()).await;
     let dir = h.home.join("sync");
     std::fs::create_dir(&dir).unwrap();
@@ -150,15 +149,19 @@ async fn a_repaired_row_converges_after_the_copy() {
         .run(&["sync", dir.to_str().unwrap(), "/Shared", "--once", "--rehash"])
         .await;
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    std::fs::write(dir.join("uppercase-repair.pdf"), b"edited locally, must become a copy").unwrap();
+    let edited = b"edited locally, the original must stay";
+    std::fs::write(dir.join("uppercase-repair.pdf"), edited).unwrap();
     for _ in 0..2 {
         let out = h
             .run(&["sync", dir.to_str().unwrap(), "/Shared", "--once", "--rehash"])
             .await;
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
     }
-    assert_eq!(h.count("POST", "/api/v1/uploads/init"), 1);
+    assert_eq!(h.count("POST", "/api/v1/uploads/init"), 0);
+    assert_eq!(h.count("DELETE", &format!("/api/v1/files/{UPPER_FILE}")), 0);
+    assert_eq!(std::fs::read(dir.join("uppercase-repair.pdf")).unwrap(), edited);
     assert_eq!(state(&dir)["account_id"], ACCOUNT);
+    h.close().await;
 }
 
 /// SF-0002 review P2: a name re-sealed under the normal convention does not
@@ -354,5 +357,73 @@ async fn an_owner_wrap_of_the_uppercase_key_is_read_only() {
     );
     assert_eq!(h.count("POST", "/api/v1/uploads/init"), 0);
     assert_eq!(downloads(&h), 0, "the name decides; no content probe is needed");
+    h.close().await;
+}
+
+/// SF-0002 round 2 (C2, data safety): a sync whose write check cannot read
+/// the version (a 5xx probe) leaves the remote row untouched (no trash) and
+/// uploads nothing this pass; it is not marked read-only either. The next pass
+/// with the version readable replaces it IN PLACE (same id, next version).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sync_skips_a_row_it_cannot_check_and_replaces_it_in_place_next_pass() {
+    let h = Harness::new(Fixture::transfer(true)).await;
+    let dir = h.home.join("sync");
+    std::fs::create_dir(&dir).unwrap();
+    let out = h
+        .run(&["sync", dir.to_str().unwrap(), "/Shared", "--once", "--rehash"])
+        .await;
+    assert!(out.status.success(), "{}", stderr(&out));
+    let edited = b"a shared-folder edit that must replace in place";
+    std::fs::write(dir.join("guest.txt"), edited).unwrap();
+
+    h.state.lock().unwrap().download_status = Some(503);
+    let out = h
+        .run(&["sync", dir.to_str().unwrap(), "/Shared", "--once", "--rehash"])
+        .await;
+    assert_eq!(out.status.code(), Some(3), "a skipped upload must not report synced: {}", stderr(&out));
+    assert!(stderr(&out).contains(COULD_NOT_CHECK), "stderr={}", stderr(&out));
+    assert_eq!(h.count("DELETE", &format!("/api/v1/files/{FILE}")), 0, "an unchecked row was trashed");
+    assert_eq!(h.count("POST", "/api/v1/uploads/init"), 0, "an unchecked row was re-uploaded");
+    assert_eq!(std::fs::read(dir.join("guest.txt")).unwrap(), edited);
+
+    h.state.lock().unwrap().download_status = None;
+    let out = h
+        .run(&["sync", dir.to_str().unwrap(), "/Shared", "--once", "--rehash"])
+        .await;
+    assert!(out.status.success(), "{}", stderr(&out));
+    {
+        let f = h.state.lock().unwrap();
+        assert_eq!(f.upload_request["file_id"], FILE, "the edit must replace the same row");
+        assert_eq!(f.upload_request["base_version_number"], 1, "as its next version");
+    }
+    assert_eq!(h.count("POST", "/api/v1/uploads/init"), 1);
+    assert_eq!(h.count("DELETE", &format!("/api/v1/files/{FILE}")), 0);
+    h.close().await;
+}
+
+/// SF-0002 round 2 (C2): an ordinary owner row (name lowercase) whose CURRENT
+/// version is still uppercase-sealed is read-only for sync too: it is not
+/// trashed and replaced by a fresh id, as an ordinary owner edit would be.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sync_keeps_a_row_whose_content_is_uppercase() {
+    let h = Harness::new(Fixture::upper_repair_content_only()).await;
+    let dir = h.home.join("sync");
+    std::fs::create_dir(&dir).unwrap();
+    let out = h
+        .run(&["sync", dir.to_str().unwrap(), "/Shared", "--once", "--rehash"])
+        .await;
+    assert!(out.status.success(), "{}", stderr(&out));
+    std::fs::write(dir.join("uppercase-repair.pdf"), b"edited locally").unwrap();
+    let out = h
+        .run(&["sync", dir.to_str().unwrap(), "/Shared", "--once", "--rehash"])
+        .await;
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("This file was saved by an older version of the iOS app"),
+        "stderr={}",
+        stderr(&out)
+    );
+    assert_eq!(h.count("DELETE", &format!("/api/v1/files/{UPPER_FILE}")), 0, "the original was trashed");
+    assert_eq!(h.count("POST", "/api/v1/uploads/init"), 0);
     h.close().await;
 }
