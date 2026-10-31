@@ -155,6 +155,17 @@ pub fn owner_content_key(
     beebeeb_core::kdf::owner_file_key_for_content(master_key, file_id_str, first_chunk_frame).ok()
 }
 
+/// SF-0002 write check: does `frame` open as chunk 0 of a version under `key`?
+/// The same reader core's per-version owner resolver uses (frame 0 decides
+/// the format: v1 legacy or v2, either `is_last`); only the verdict is kept and
+/// the opened bytes are wiped.
+pub fn first_frame_opens(key: &FileKey, file_id_str: &str, frame: &[u8]) -> bool {
+    ChunkDecryptor::for_push_with_file_key(key_copy(key), file_id_str, ExpectedChunkFormat::Unrecorded)
+        .push_frame(frame)
+        .map(|chunk| zeroize::Zeroizing::new(chunk.data))
+        .is_ok()
+}
+
 /// Batch [`decrypt_name`] — decrypt many `(file_id, name_encrypted)` pairs in
 /// PARALLEL (rayon, task 0810). Per-item semantics are IDENTICAL to
 /// [`decrypt_name`] (all three blob formats + both UUID-key derivations + the

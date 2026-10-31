@@ -113,8 +113,10 @@ async fn move_single(
     src_arg: &str,
     dst_arg: &str,
 ) -> Result<(), String> {
-    // Resolve src.
-    let src = path::resolve_path(api, master_key, src_arg).await?;
+    // Resolve src. Its resolver keeps the key the row opened under, for the
+    // SF-0002 write check below.
+    let mut src_keys = crate::owned_keys::OwnedKeyResolver::new();
+    let src = path::resolve_path_with_keys(api, master_key, src_arg, &mut src_keys).await?;
     let Some(src_id) = src.file_id.clone() else {
         return Err("cannot move the vault root".to_string());
     };
@@ -168,12 +170,14 @@ async fn move_single(
     if new_name.as_deref().is_some_and(|n| n != src.name) {
         // The listing that resolved this path already carries the version's
         // geometry, so no second GET is made.
+        let row_key = src_keys.key_for(&src_id);
         crate::owned_keys::write_check(
             api,
             master_key,
             &crate::owned_keys::WriteTarget {
                 file_id: &src_id,
                 name_read_only: src.read_only,
+                row_key: row_key.as_deref(),
                 size_bytes: src.size_bytes,
                 chunk_count: src.chunk_count,
             },

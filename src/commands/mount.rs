@@ -1391,6 +1391,8 @@ mod fuse_impl {
             let target = crate::owned_keys::WriteTarget {
                 file_id,
                 name_read_only: entry.read_only,
+                // Rows here open under the owner's own conventions (the master key).
+                row_key: None,
                 size_bytes: Some(entry.size),
                 chunk_count: entry.chunk_count,
             };

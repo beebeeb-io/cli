@@ -78,6 +78,10 @@ impl OwnedKeyResolver {
     pub fn resolved(&self) -> Vec<ResolvedCliKey> {
         self.resolved.values().cloned().collect()
     }
+    /// The key `id` resolved to in this resolver, if it was resolved here.
+    pub fn key_for(&self, id: &str) -> Option<Arc<FileKey>> {
+        self.resolved.get(id).map(|r| r.key.clone())
+    }
     pub fn pending(&self, id: &str) -> Option<Vec<u8>> {
         self.pending.get(id).cloned()
     }
@@ -506,7 +510,8 @@ pub enum WriteCheck {
     /// over it ([`crate::crypto::OWNER_REPAIR_READ_ONLY`]).
     UpperRepair,
     /// The check could not decide: a download error, a timeout, a 5xx, a short
-    /// body. It never proceeds and never marks the row read-only: an interactive
+    /// body, missing geometry, or no key authenticated chunk 0. It never
+    /// proceeds and never marks the row read-only: an interactive
     /// write is refused with [`WRITE_CHECK_UNKNOWN`], sync leaves the row alone
     /// and asks again on its next pass.
     Unknown,
@@ -535,6 +540,13 @@ pub struct WriteTarget<'a> {
     /// The name verdict: [`crate::crypto::name_is_upper_repair`], which is what
     /// the resolver's `read_only` and every listing's flag carry.
     pub name_read_only: bool,
+    /// The key the row resolved to, when the surface resolved one (a shared
+    /// folder, owner-wrap or file-request key). Chunk 0 opening under it proves
+    /// the version is not uppercase-sealed: core's owner resolver is asked
+    /// first, so the owner's uppercase key is reported as `UpperRepair` before
+    /// this key is tried. Without it, only the owner conventions can prove a
+    /// version writable.
+    pub row_key: Option<&'a FileKey>,
     /// The plaintext size the listing carried, if any.
     pub size_bytes: Option<u64>,
     /// The chunk count the listing carried (`1` when it did not say).
@@ -561,6 +573,7 @@ pub async fn write_check(api: &ApiClient, master: &MasterKey, target: &WriteTarg
     first_chunk_check(
         master,
         target.file_id,
+        target.row_key,
         &body,
         target.size_bytes,
         target.chunk_count,
@@ -569,9 +582,16 @@ pub async fn write_check(api: &ApiClient, master: &MasterKey, target: &WriteTarg
     )
 }
 
+/// Decide from the prefix of the current version. Writable needs PROOF: chunk 0
+/// authenticated under a write-capable key. No candidate length (missing
+/// geometry: a single-chunk row whose size the listing did not carry, a body
+/// cut short) or no key that opens chunk 0 is [`WriteCheck::Unknown`], never
+/// writable and never read-only.
+#[allow(clippy::too_many_arguments)]
 fn first_chunk_check(
     master: &MasterKey,
     file_id: &str,
+    row_key: Option<&FileKey>,
     body: &[u8],
     size_bytes: Option<u64>,
     chunk_count: u32,
@@ -579,15 +599,19 @@ fn first_chunk_check(
     complete: bool,
 ) -> WriteCheck {
     for len in chunk0_lengths(body.len(), size_bytes, chunk_count, chunk_size, complete) {
-        if let Some((_, convention)) = crate::crypto::owner_content_key(master, file_id, &body[..len]) {
+        let frame = &body[..len];
+        if let Some((_, convention)) = crate::crypto::owner_content_key(master, file_id, frame) {
             return if convention == beebeeb_core::kdf::OwnerKeyConvention::UpperRepair {
                 WriteCheck::UpperRepair
             } else {
                 WriteCheck::Writable
             };
         }
+        if row_key.is_some_and(|key| crate::crypto::first_frame_opens(key, file_id, frame)) {
+            return WriteCheck::Writable;
+        }
     }
-    WriteCheck::Writable
+    WriteCheck::Unknown
 }
 
 /// Candidate lengths for wire frame 0, from the version's geometry in its
@@ -701,4 +725,86 @@ fn open_invite_owner_copy(
         frame,
         rows.iter().map(|(id, wrap)| (id.as_bytes(), wrap.as_slice())),
     )
+}
+
+#[cfg(test)]
+mod write_check_tests {
+    use super::*;
+    use beebeeb_core::kdf::derive_file_key;
+
+    const ID: &str = "5f0c2a9e-3b1d-4c7e-9a2f-6d8e1b4c7a30";
+
+    fn master() -> MasterKey {
+        MasterKey::from_bytes([7u8; 32])
+    }
+
+    fn frame(key: &FileKey, plaintext: &[u8]) -> Vec<u8> {
+        beebeeb_core::encrypt::encrypt_chunk_raw(key, plaintext).unwrap()
+    }
+
+    /// SF-0002 round 2 (C3): geometry that gives no frame-0 candidate is
+    /// Unknown. A single-chunk row whose size the listing did not carry, read
+    /// as a prefix that is not the whole body, has no candidate length; the
+    /// mount's `size_bytes = 0` default gives a 28-byte candidate that cannot
+    /// authenticate a longer frame. Neither may pass as writable.
+    #[test]
+    fn missing_geometry_is_unknown_not_writable() {
+        let m = master();
+        let wire = frame(&derive_file_key(&m, ID.as_bytes()), b"an ordinary single-chunk version");
+        let prefix = &wire[..28];
+        assert_eq!(
+            first_chunk_check(&m, ID, None, prefix, None, 1, None, false),
+            WriteCheck::Unknown,
+            "no size, partial body"
+        );
+        assert_eq!(
+            first_chunk_check(&m, ID, None, prefix, Some(0), 1, None, false),
+            WriteCheck::Unknown,
+            "the mount's size 0 for a size the listing did not carry"
+        );
+        assert_eq!(
+            first_chunk_check(&m, ID, None, &[], Some(4), 1, None, true),
+            WriteCheck::Unknown,
+            "an empty body"
+        );
+    }
+
+    /// No key opens chunk 0: Unknown (a version this client cannot read is
+    /// neither proof of the repair convention nor of a writable row).
+    #[test]
+    fn a_frame_no_key_opens_is_unknown() {
+        let m = master();
+        let stranger = FileKey::from_bytes([3u8; 32]);
+        let wire = frame(&stranger, b"sealed under a key the owner does not hold");
+        let size = Some(wire.len() as u64 - 28);
+        assert_eq!(first_chunk_check(&m, ID, None, &wire, size, 1, None, true), WriteCheck::Unknown);
+        let other = FileKey::from_bytes([4u8; 32]);
+        assert_eq!(
+            first_chunk_check(&m, ID, Some(&other), &wire, size, 1, None, true),
+            WriteCheck::Unknown,
+            "a row key that does not open the frame proves nothing"
+        );
+    }
+
+    /// The controls: the canonical owner key and a row's own key prove a
+    /// version writable; the owner's uppercase-id key is read-only, also when it
+    /// is the row's own key (an owner wrap of the uppercase key).
+    #[test]
+    fn proven_answers_with_full_geometry() {
+        let m = master();
+        let pt = b"single chunk";
+        let size = Some(pt.len() as u64);
+        let ordinary = frame(&derive_file_key(&m, ID.as_bytes()), pt);
+        assert_eq!(first_chunk_check(&m, ID, None, &ordinary, size, 1, None, false), WriteCheck::Writable);
+        let item = FileKey::from_bytes([5u8; 32]);
+        let shared = frame(&item, pt);
+        assert_eq!(first_chunk_check(&m, ID, Some(&item), &shared, size, 1, None, false), WriteCheck::Writable);
+        let upper = derive_file_key(&m, ID.to_ascii_uppercase().as_bytes());
+        let sealed = frame(&upper, pt);
+        assert_eq!(first_chunk_check(&m, ID, None, &sealed, size, 1, None, false), WriteCheck::UpperRepair);
+        assert_eq!(
+            first_chunk_check(&m, ID, Some(&upper), &sealed, size, 1, None, false),
+            WriteCheck::UpperRepair
+        );
+    }
 }

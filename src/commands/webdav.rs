@@ -1264,6 +1264,8 @@ async fn write_refusal(state: &Arc<DavState>, entry: &ResolvedEntry) -> Result<(
     let target = crate::owned_keys::WriteTarget {
         file_id,
         name_read_only: entry.read_only,
+        // Rows here open under the owner's own conventions (the master key).
+        row_key: None,
         size_bytes: entry.size_bytes,
         chunk_count: entry.chunk_count,
     };
