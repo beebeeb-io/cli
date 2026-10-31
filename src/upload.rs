@@ -575,55 +575,45 @@ pub async fn stream_encrypt_upload(
     //     format) the session is abandoned — never PUT to again — and the SAME
     //     file id is inited fresh and uploaded from chunk 0.
     let writing = beebeeb_core::chunk_stream::chunk_format_for_pin(writer_pin(&spec));
-    let mut pending = crate::resume::resumable_upload(&spec.path, size, mtime_ns);
-    // Explicit replacement key/base/pin all belong to spec.file_id. A path
-    // sidecar from another destination must neither redirect this write nor
-    // abandon that other file's server session.
-    if spec.replace_file_key.is_some() && pending.is_some_and(|p| p.file_id != spec.file_id) {
-        crate::resume::clear(&spec.path);
-        pending = None;
-    }
-    // L13 (SF-0001): a persisted create session whose id this client did not
-    // mint (a pre-update record, or one whose marker names another id) is
-    // abandoned on the server and restarted under this run's own id — never
-    // resumed. Runs once per file per run: the record is cleared either way.
-    if let Some(stale) = crate::resume::unminted_upload(&spec.path, size, mtime_ns) {
-        pending = None;
-        // An explicit replacement targets a row it listed. A record left under
-        // THAT row's id is that row's session: end it, or its live lease 409s
-        // every retry of this replacement. A record left under another identity
-        // is not this write's session and is only discarded (never used, and not
-        // worth an abandon).
-        let abandon = spec.replace_file_key.is_none() || stale.file_id == spec.file_id;
-        if abandon {
-            // Abandon BEFORE the record goes: cleared first, a transient
-            // failure would leave a live session nothing ever ends again.
-            let ended = match api.upload_abandon(&stale.file_id.to_string()).await {
-                Ok(_) => true,
-                Err(e) if e.status == 404 => true,
+    // L13 (SF-0001): a create continues only a record of an id this client
+    // minted, a replace only this CLI's replace record of the row it lists
+    // (`resume::resumable_by`). A record for another destination never
+    // redirects this write.
+    let replacing = replacing(&spec);
+    let pending = crate::resume::resumable_upload_for(&spec.path, size, mtime_ns, replacing);
+    // Any other record for this path (same size and mtime) is one this write may
+    // not continue: a pre-update CLI's, one whose marker names another id, or
+    // another write's. It is never resumed. Runs once per file per run.
+    if let Some(stale) = crate::resume::unresumable_upload(&spec.path, size, mtime_ns, replacing) {
+        // A create ends it: its session would otherwise hold its lease. A
+        // replace ends it only when it names the row this replace lists (that
+        // row's live lease 409s every retry of this replacement, L7a); a record
+        // under another identity is another file's session and is only
+        // discarded, never abandoned.
+        if replacing.is_none_or(|row| stale.file_id == row) {
+            // Abandon BEFORE the record goes, and drop it only once the session
+            // is gone (or never existed). A transient failure keeps the record
+            // and fails this file for this run: an upload now would overwrite
+            // the record (one per path), and nothing would end that session.
+            match api.upload_abandon(&stale.file_id.to_string()).await {
+                Ok(_) => {}
+                Err(e) if e.status == 404 => {}
                 Err(e) => {
-                    if !crate::ui::is_quiet() {
-                        eprintln!(
-                            "  {}: could not abandon the interrupted upload ({}); it will be tried again next run",
-                            display_name(&spec.file_name),
-                            e.message
-                        );
-                    }
-                    false
-                }
-            };
-            if ended {
-                crate::resume::clear(&spec.path);
-                if !crate::ui::is_quiet() {
-                    eprintln!(
-                        "  {}: the interrupted upload was not started by this version; starting it again under a new id",
-                        display_name(&spec.file_name)
-                    );
+                    return Err(format!(
+                        "{}: could not end the interrupted upload ({}); it is tried again next run",
+                        display_name(&spec.file_name),
+                        e.message
+                    ));
                 }
             }
-        } else {
-            crate::resume::clear(&spec.path);
+            if !crate::ui::is_quiet() {
+                eprintln!(
+                    "  {}: the interrupted upload cannot be continued by this upload; starting it again",
+                    display_name(&spec.file_name)
+                );
+            }
         }
+        crate::resume::clear(&spec.path);
     }
     let mut plan = match pending {
         Some(pending) => match beebeeb_core::chunk_stream::resume_policy(pending.chunk_format, writing) {
@@ -986,10 +976,18 @@ async fn upload_attempt(
         // next run can pick up.
         let session_direct = init.is_direct();
         if let Ok(sid) = init.upload_session_id.parse::<Uuid>() {
-            crate::resume::record_with_transport(&spec.path, file_id, sid, format, size, mtime_ns, session_direct);
+            crate::resume::record_with_transport(
+                &spec.path,
+                proposed(spec, file_id),
+                sid,
+                format,
+                size,
+                mtime_ns,
+                session_direct,
+            );
         }
         let direct = if session_direct { offer } else { None };
-        (init.upload_session_id, init.file_id, direct)
+        (init.upload_session_id, direct)
     };
 
     // 6. Run the look-ahead pipeline. Every chunk is PUT to the session; on a
@@ -1891,13 +1889,16 @@ mod swept_session_reinit {
         let s = Scratch::new("replace-5xx-retry");
         let (path, size, mtime) = s.file(64 * 1024);
         let target_fid = Uuid::new_v4();
-        crate::resume::record(
+        // The record a replace leaves behind names the row it lists (L13 L6:
+        // not a self-minted create record).
+        crate::resume::record_with_transport(
             &path,
-            target_fid,
+            crate::item_id::Proposed::Listed(target_fid),
             Uuid::new_v4(),
             beebeeb_core::chunk_stream::ChunkFormat::V1Legacy,
             size,
             mtime,
+            false,
         );
         let mut mock = Mock::default();
         mock.init_fail_then_succeed.insert(target_fid.to_string(), (500, 2));
@@ -2468,9 +2469,10 @@ mod swept_session_reinit {
         assert_eq!(m.completed.len(), 1);
     }
 
-    /// L7b: abandon runs BEFORE the record is cleared, and the record is kept
-    /// when the abandon fails transiently — the next run retries it instead of
-    /// leaving a live lease behind.
+    /// L7b: the abandon runs BEFORE the record is cleared, and a transient
+    /// failure keeps the record and fails the file for this run (an upload now
+    /// would overwrite the record, and nothing would end that session). The
+    /// next run retries the abandon, then uploads under its own fresh id.
     #[tokio::test]
     async fn a_transient_abandon_failure_keeps_the_record_for_the_next_run() {
         let s = Scratch::new("l7b-abandon-503");
@@ -2482,26 +2484,25 @@ mod swept_session_reinit {
         mock.live.insert(legacy_sid.to_string());
         mock.session_file.insert(legacy_sid.to_string(), legacy_fid.to_string());
         mock.abandon_status = Some(503);
-        // The live lease refuses a re-init of the same id, as the server does.
-        mock.init_refuse.insert(legacy_fid.to_string(), 409);
         let state: Shared = Arc::new(Mutex::new(mock));
 
-        run(&state, spec(&path, legacy_fid))
+        // As every caller does, each run brings a fresh id of its own.
+        let first = Uuid::new_v4();
+        let err = run(&state, spec(&path, first))
             .await
-            .expect_err("the lease is still there, so the re-init is refused");
+            .expect_err("the session could not be ended");
+        assert!(err.contains("tried again next run"), "{err}");
         assert!(
-            crate::resume::unminted_upload(&path, size, mtime).is_some(),
+            crate::resume::unresumable_upload(&path, size, mtime, None).is_some(),
             "the record is kept so the next run retries the abandon"
         );
+        assert!(state.lock().unwrap().inits.is_empty(), "nothing is uploaded over it");
 
-        {
-            let mut m = state.lock().unwrap();
-            m.abandon_status = None;
-            m.init_refuse.clear();
-        }
-        run(&state, spec(&path, legacy_fid)).await.expect("retried and completed");
+        state.lock().unwrap().abandon_status = None;
+        let second = Uuid::new_v4();
+        run(&state, spec(&path, second)).await.expect("retried and completed");
         assert!(
-            crate::resume::unminted_upload(&path, size, mtime).is_none(),
+            crate::resume::unresumable_upload(&path, size, mtime, None).is_none(),
             "cleared only once the abandon succeeded"
         );
         let m = state.lock().unwrap();
@@ -2510,7 +2511,85 @@ mod swept_session_reinit {
             vec![legacy_fid.to_string(), legacy_fid.to_string()],
             "one abandon attempt per run"
         );
+        assert_eq!(
+            m.inits,
+            vec![second.to_string()],
+            "uploaded under the second run's own id"
+        );
         assert_eq!(m.completed.len(), 1);
+    }
+
+    /// L6: an interrupted REPLACE leaves a record that names the row it lists,
+    /// an id this client did not mint. A later create of the same path never
+    /// resumes it: it ends that session and uploads under its own id.
+    #[tokio::test]
+    async fn an_interrupted_replace_record_is_not_resumed_by_a_later_create() {
+        let s = Scratch::new("l6-replace-then-create");
+        let (path, size, mtime) = s.file(64 * 1024);
+        let listed = Uuid::new_v4();
+        let replace_sid = Uuid::new_v4();
+        crate::resume::record_with_transport(
+            &path,
+            crate::item_id::Proposed::Listed(listed),
+            replace_sid,
+            beebeeb_core::chunk_stream::ChunkFormat::V1Legacy,
+            size,
+            mtime,
+            false,
+        );
+        let mut mock = Mock::default();
+        mock.live.insert(replace_sid.to_string());
+        mock.session_file.insert(replace_sid.to_string(), listed.to_string());
+        let state: Shared = Arc::new(Mutex::new(mock));
+
+        let fresh = Uuid::new_v4();
+        run(&state, spec(&path, fresh)).await.expect("the create uploads");
+        let m = state.lock().unwrap();
+        assert!(
+            m.chunk_puts.iter().all(|(sid, _)| *sid != replace_sid.to_string()),
+            "the replace's session is never PUT to: {:?}",
+            m.chunk_puts
+        );
+        assert_eq!(m.inits, vec![fresh.to_string()], "the create runs under its own id");
+        assert_eq!(
+            m.abandons,
+            vec![listed.to_string()],
+            "the replace's session is ended once"
+        );
+        assert_eq!(m.completed.len(), 1);
+    }
+
+    /// L6: the same record IS resumed by a replace of the row it names.
+    #[tokio::test]
+    async fn an_interrupted_replace_record_is_resumed_by_the_same_replace() {
+        let s = Scratch::new("l6-replace-resume");
+        let (path, size, mtime) = s.file(64 * 1024);
+        let listed = Uuid::new_v4();
+        let replace_sid = Uuid::new_v4();
+        crate::resume::record_with_transport(
+            &path,
+            crate::item_id::Proposed::Listed(listed),
+            replace_sid,
+            beebeeb_core::chunk_stream::ChunkFormat::V1Legacy,
+            size,
+            mtime,
+            false,
+        );
+        let mut mock = Mock::default();
+        mock.live.insert(replace_sid.to_string());
+        mock.session_file.insert(replace_sid.to_string(), listed.to_string());
+        let state: Shared = Arc::new(Mutex::new(mock));
+
+        let mut replace_spec = spec(&path, listed);
+        replace_spec.base_version_number = Some(2);
+        replace_spec.replace_pin = Some(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded);
+        replace_spec.replace_file_key = Some(Arc::new(beebeeb_core::kdf::FileKey::from_bytes([3u8; 32])));
+        run(&state, replace_spec).await.expect("the replacement resumes");
+        let m = state.lock().unwrap();
+        assert!(m.inits.is_empty(), "resumed, not re-inited: {:?}", m.inits);
+        assert!(m.abandons.is_empty());
+        assert!(m.chunk_puts.iter().all(|(sid, _)| *sid == replace_sid.to_string()));
+        assert_eq!(m.completed, vec![replace_sid.to_string()]);
     }
 
     /// Write exactly what a pre-update CLI left behind (or a record whose marker

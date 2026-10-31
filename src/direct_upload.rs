@@ -956,7 +956,7 @@ mod tests {
         }
         crate::resume::record_with_transport(
             path,
-            file_id,
+            crate::item_id::Proposed::Minted(file_id),
             sid,
             beebeeb_core::chunk_stream::ChunkFormat::V1Legacy,
             size,
