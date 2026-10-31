@@ -487,3 +487,61 @@ async fn sync_keeps_a_row_whose_content_is_uppercase() {
     assert_eq!(h.count("POST", "/api/v1/uploads/init"), 0);
     h.close().await;
 }
+
+/// SF-0002 round 3 (K1): an old-CLI row whose chunk is a JSON blob was
+/// permanently Unknown (only raw frames were tried). It is writable again:
+/// `push --replace` versions it in place.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_json_blob_row_is_replaceable() {
+    let h = Harness::new(Fixture::owner_file_json_blob()).await;
+    let local = h.home.join("legacy.txt");
+    std::fs::write(&local, b"replacement bytes").unwrap();
+    let out = h
+        .run(&["push", local.to_str().unwrap(), "--folder", "Shared", "--replace"])
+        .await;
+    assert!(out.status.success(), "a JSON-blob row must be replaceable: {}", stderr(&out));
+    {
+        let f = h.state.lock().unwrap();
+        assert_eq!(f.upload_request["file_id"], FILE);
+        assert_eq!(f.upload_request["base_version_number"], 1);
+    }
+    h.close().await;
+}
+
+/// SF-0002 round 3 (K1): the same row syncs. The edit is uploaded as a new file
+/// under a fresh id and the old row is trashed only after that (L5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_json_blob_row_syncs_an_edit() {
+    let mut fixture = Fixture::owner_file_json_blob();
+    fixture.review_complete_requested_id = true; // an honest server echoes the id it was sent
+    let h = Harness::new(fixture).await;
+    let dir = h.home.join("sync");
+    std::fs::create_dir(&dir).unwrap();
+    let out = h
+        .run(&["sync", dir.to_str().unwrap(), "/Shared", "--once", "--rehash"])
+        .await;
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(std::fs::read(dir.join("legacy.txt")).unwrap(), plaintext(&h));
+    std::fs::write(dir.join("legacy.txt"), b"edited locally").unwrap();
+    let out = h
+        .run(&["sync", dir.to_str().unwrap(), "/Shared", "--once", "--rehash"])
+        .await;
+    assert!(out.status.success(), "a JSON-blob row must sync an edit: {}", stderr(&out));
+    assert_eq!(h.count("POST", "/api/v1/uploads/init"), 1);
+    let f = h.state.lock().unwrap();
+    assert_ne!(f.upload_request["file_id"].as_str(), Some(FILE), "a new file, as sync does for owner rows");
+    let order: Vec<_> = f
+        .requests
+        .iter()
+        .filter_map(|(m, p, _)| {
+            if m == "DELETE" && p.contains(FILE) {
+                Some("trash")
+            } else if m == "POST" && p.ends_with("/complete") {
+                Some("complete")
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(order, ["complete", "trash"], "the old row is trashed after the new one completed");
+}

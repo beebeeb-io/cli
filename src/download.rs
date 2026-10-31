@@ -195,11 +195,37 @@ pub async fn download_frame_prefix(
 ) -> Result<(Vec<u8>, Option<u64>, bool), String> {
     let mut resp = api.download_stream(file_id).await?;
     let chunk_size = header_u64(&resp, "X-Chunk-Size").filter(|&v| v > 0 && v <= MAX_CHUNK_SIZE);
-    let want = frame_probe_len(size_bytes.unwrap_or(0), chunk_count.max(1), chunk_size);
+    let count = chunk_count.max(1);
+    let mut want = frame_probe_len(size_bytes.unwrap_or(0), count, chunk_size);
     let mut buf = Vec::new();
     fill_to(&mut resp, &mut buf, want).await?;
+    // Round 3 (K1): a legacy JSON-blob chunk 0 is about 4x its plaintext. Read
+    // until a whole blob 0 can be in hand (a raw frame whose nonce happens to
+    // start with '{' reads a little more and is decided the same way).
+    if buf.first() == Some(&b'{') {
+        let json_want = json_chunk0_probe_len(size_bytes, count);
+        if buf.len() < json_want {
+            fill_to(&mut resp, &mut buf, json_want).await?;
+        }
+        want = want.max(json_want);
+    }
     let complete = buf.len() < want;
     Ok((buf, chunk_size, complete))
+}
+
+/// The longest legacy JSON-blob chunk 0 a version of this geometry can have:
+/// [`json_wire_bound`] of chunk 0's largest possible plaintext. With `n > 1`
+/// uniform chunks `(n-1)·cs < size`, so chunk 0 holds at most
+/// `ceil(size / (n-1))` bytes (and never more than the file).
+fn json_chunk0_probe_len(size_bytes: Option<u64>, chunk_count: u32) -> usize {
+    const FILE_PROVIDER_CHUNK: u64 = 1024 * 1024;
+    let plain = match size_bytes {
+        Some(size) if chunk_count <= 1 => size,
+        Some(size) => size.div_ceil(u64::from(chunk_count - 1)).min(size),
+        None => FILE_PROVIDER_CHUNK,
+    }
+    .min(MAX_CHUNK_SIZE);
+    usize::try_from(json_wire_bound(plain, 1)).unwrap_or(usize::MAX)
 }
 
 /// The longest plausible first-frame length for a version of `count` chunks,
@@ -1364,6 +1390,29 @@ mod tests {
         }
         eprintln!("measured JSON envelope overhead = {envelope} bytes; max wire/plaintext ratio = {max_ratio:.2}");
         assert!(envelope as u64 <= JSON_CHUNK_ENVELOPE);
+    }
+
+    /// SF-0002 round 3 (K1): the probe reads at least a whole legacy JSON blob 0
+    /// for the geometry the listing gives (single chunk, uniform chunks with a
+    /// shorter last one, a last chunk of one byte).
+    #[test]
+    fn json_chunk0_probe_len_covers_blob_zero() {
+        let fk = derive_file_key(&mk(), FID.as_bytes());
+        for (size, count, chunk0) in [
+            (0u64, 1u32, 0usize),
+            (500, 1, 500),
+            (605, 3, 300),
+            (3 * 4096 + 77, 4, 4096),
+            (10, 2, 9),
+        ] {
+            let blob0 = serde_json::to_vec(&encrypt_chunk(&fk, &payload(chunk0)).unwrap()).unwrap();
+            let want = json_chunk0_probe_len(Some(size), count);
+            assert!(
+                blob0.len() <= want,
+                "size={size} count={count}: blob 0 is {} bytes, the probe reads {want}",
+                blob0.len()
+            );
+        }
     }
 
     /// SF-0002 round 2 (C6): a download opened with an explicit key (shared

@@ -625,7 +625,33 @@ fn first_chunk_check(
             return WriteCheck::Writable;
         }
     }
+    // Round 3 (K1): a legacy CLI JSON-blob chunk 0. Only the old iOS File
+    // Provider sealed under the uppercase id, and it wrote raw frames, so a JSON
+    // blob is never UpperRepair: it is writable once blob 0 authenticates under
+    // the owner's string or binary key, or the row's own key.
+    if let Some(frame) = crate::crypto::first_json_blob_frame(body) {
+        if json_blob_opens(master, file_id, row_key, &frame) {
+            return WriteCheck::Writable;
+        }
+    }
     WriteCheck::Unknown
+}
+
+/// Does a JSON-blob chunk-0 frame open under a write-capable key: the owner's
+/// string-id key, its legacy binary-id key (the old CLI's), or the row's own?
+/// One key at a time, each dropped (zeroized) before the next is derived.
+fn json_blob_opens(master: &MasterKey, file_id: &str, row_key: Option<&FileKey>, frame: &[u8]) -> bool {
+    let Ok(uuid) = uuid::Uuid::parse_str(file_id) else {
+        return false;
+    };
+    if crate::crypto::first_frame_opens(&beebeeb_core::kdf::derive_file_key(master, file_id.as_bytes()), file_id, frame)
+    {
+        return true;
+    }
+    if crate::crypto::first_frame_opens(&beebeeb_core::kdf::derive_file_key(master, uuid.as_bytes()), file_id, frame) {
+        return true;
+    }
+    row_key.is_some_and(|key| crate::crypto::first_frame_opens(key, file_id, frame))
 }
 
 /// Candidate lengths for wire frame 0, from the version's geometry in its
@@ -834,6 +860,45 @@ mod write_check_tests {
             WriteCheck::UpperRepair
         );
         assert_eq!(write_check(&api, &m, &target(false, false)).await, WriteCheck::Unknown);
+    }
+
+    /// Round 3 (K1): a legacy CLI JSON-blob chunk 0 is writable once blob 0
+    /// authenticates under the owner's binary or string key or the row's own
+    /// key. A blob no write-capable key opens, or one cut short, is Unknown; a
+    /// JSON blob is never read as the repair convention.
+    #[test]
+    fn a_json_blob_chunk0_is_writable_once_it_authenticates() {
+        let m = master();
+        let uuid = uuid::Uuid::parse_str(ID).unwrap();
+        let json = |key: &FileKey, pt: &[u8]| {
+            serde_json::to_vec(&beebeeb_core::encrypt::encrypt_chunk(key, pt).unwrap()).unwrap()
+        };
+        let pt = b"a legacy CLI chunk";
+        let size = Some(pt.len() as u64);
+        let check = |row_key: Option<&FileKey>, body: &[u8], complete: bool| {
+            first_chunk_check(&m, ID, row_key, body, size, 1, None, complete)
+        };
+        for key in [derive_file_key(&m, uuid.as_bytes()), derive_file_key(&m, ID.as_bytes())] {
+            assert_eq!(check(None, &json(&key, pt), true), WriteCheck::Writable);
+        }
+        let item = FileKey::from_bytes([5u8; 32]);
+        let shared = json(&item, pt);
+        assert_eq!(check(Some(&item), &shared, true), WriteCheck::Writable, "the row's own key");
+        assert_eq!(check(None, &shared, true), WriteCheck::Unknown, "no write-capable key opens it");
+        let upper = json(&derive_file_key(&m, ID.to_ascii_uppercase().as_bytes()), pt);
+        assert_eq!(check(None, &upper, true), WriteCheck::Unknown, "never the repair convention");
+        let binary = json(&derive_file_key(&m, uuid.as_bytes()), pt);
+        assert_eq!(check(None, &binary[..binary.len() / 2], false), WriteCheck::Unknown, "cut short");
+
+        // Multi-chunk: blob 0 followed by the rest of the version.
+        let key = derive_file_key(&m, uuid.as_bytes());
+        let mut multi = json(&key, &[1u8; 300]);
+        multi.extend(json(&key, &[2u8; 300]));
+        multi.extend(json(&key, &[3u8; 5]));
+        assert_eq!(
+            first_chunk_check(&m, ID, None, &multi, Some(605), 3, None, true),
+            WriteCheck::Writable
+        );
     }
 
     /// The controls: the canonical owner key and a row's own key prove a

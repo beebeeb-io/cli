@@ -166,6 +166,23 @@ pub fn first_frame_opens(key: &FileKey, file_id_str: &str, frame: &[u8]) -> bool
         .is_ok()
 }
 
+/// SF-0002 write check (round 3, K1): the frame (`nonce || ciphertext`) of a
+/// legacy CLI JSON-blob chunk 0 at the start of `prefix`, when one whole
+/// `EncryptedBlob` is there. The same parse the read path's JSON parser does
+/// (`decrypt_json_chunks`); nothing is authenticated here.
+pub fn first_json_blob_frame(prefix: &[u8]) -> Option<Vec<u8>> {
+    if prefix.first() != Some(&b'{') {
+        return None;
+    }
+    let blob = serde_json::Deserializer::from_slice(prefix)
+        .into_iter::<EncryptedBlob>()
+        .next()?
+        .ok()?;
+    let mut frame = blob.nonce;
+    frame.extend_from_slice(&blob.ciphertext);
+    Some(frame)
+}
+
 /// Batch [`decrypt_name`] — decrypt many `(file_id, name_encrypted)` pairs in
 /// PARALLEL (rayon, task 0810). Per-item semantics are IDENTICAL to
 /// [`decrypt_name`] (all three blob formats + both UUID-key derivations + the

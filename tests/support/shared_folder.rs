@@ -221,6 +221,27 @@ impl Fixture {
         f.rows[1] = r;
         f
     }
+    /// SF-0002 round 3 (K1): an old-CLI owner row (id `FILE`): name and its single
+    /// content chunk sealed under the legacy binary-id key, the chunk stored as
+    /// a JSON `EncryptedBlob` (what the CLI wrote before raw frames).
+    pub fn owner_file_json_blob() -> Self {
+        use beebeeb_core::chunk_stream::ExpectedChunkFormat;
+        let mut f = Self::basic();
+        let uuid = uuid::Uuid::parse_str(FILE).unwrap();
+        let key = beebeeb_core::kdf::derive_file_key(&master(), uuid.as_bytes());
+        f.plaintext = b"an old CLI upload, stored as a JSON blob".to_vec();
+        f.stride = f.plaintext.len() as u64;
+        f.frames = vec![serde_json::to_vec(&beebeeb_core::encrypt::encrypt_chunk(&key, &f.plaintext).unwrap()).unwrap()];
+        let mut r = row(FILE, Some(ROOT), "legacy.txt", false, false);
+        r["name_encrypted"] = json!(
+            beebeeb_core::encrypt::encrypt_name_for(&key, "legacy.txt", Some("text/plain"), ExpectedChunkFormat::Unrecorded)
+                .unwrap()
+        );
+        r["size_bytes"] = json!(f.plaintext.len());
+        r["chunk_count"] = json!(1);
+        f.rows[1] = r;
+        f
+    }
     /// SF-0002 review: the name was re-sealed under the normal convention but
     /// the single content frame is still sealed under the uppercase id.
     pub fn upper_repair_content_only() -> Self {
