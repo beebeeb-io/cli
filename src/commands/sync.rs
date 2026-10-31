@@ -4630,8 +4630,9 @@ mod l13_trash_after_upload_tests {
 
     /// Upload the scratch file through `do_upload` as the NEW copy of the remote
     /// `old` (its key is derived, so it is not versioned: the old one is to be
-    /// trashed).
-    async fn upload_over(mock: Mock, s: &Scratch, old: Uuid) -> (Result<(), String>, SyncState, Shared) {
+    /// trashed). SF-0002 r3: `old` is resolved as the walk resolves it, and its
+    /// version is served, so the write check proves it writable first.
+    async fn upload_over(mut mock: Mock, s: &Scratch, old: Uuid) -> (Result<(), String>, SyncState, Shared) {
         let (path, size, _mtime) = s.file(4096);
         let mtime = std::fs::metadata(&path)
             .unwrap()
@@ -4645,16 +4646,34 @@ mod l13_trash_after_upload_tests {
             size,
             content_hash: compute_file_hash(&path).unwrap(),
         };
+        let master = Arc::new(beebeeb_core::kdf::MasterKey::from_bytes([5u8; 32]));
+        let old_version = b"the old remote's content";
+        let old_key = || beebeeb_core::kdf::derive_file_key(&master, old.to_string().as_bytes());
+        mock.downloads.insert(
+            old.to_string(),
+            beebeeb_core::encrypt::encrypt_chunk_raw(&old_key(), old_version).unwrap(),
+        );
         let remote = RemoteFile {
             id: old,
-            resolved: None,
+            resolved: Some(ResolvedCliKey {
+                key: Arc::new(old_key()),
+                origin: KeyOrigin::Derived,
+                canonical: serde_json::json!({
+                    "id": old.to_string(),
+                    "size_bytes": old_version.len(),
+                    "chunk_count": 1,
+                }),
+                pending_owner_wrap: None,
+                shared_root_id: None,
+                name: REL.to_string(),
+                read_only: false,
+            }),
             chunk_count: 1,
             updated_at: Utc::now(),
             pin: Ok(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded),
         };
         let mock = shared(mock);
         let api = ApiClient::new_for_test(spawn(mock.clone()).await);
-        let master = Arc::new(beebeeb_core::kdf::MasterKey::from_bytes([5u8; 32]));
         let mut state = SyncState::default();
         let result = do_upload(
             &api,
