@@ -34,11 +34,17 @@ impl std::fmt::Display for ServerChangedItemId {
 impl std::error::Error for ServerChangedItemId {}
 
 /// Compare the id an init, create or completion answer echoed with the id this
-/// client minted. A missing or unparsable echo is a difference (fail closed).
-/// Returns the client's own id on a match, so callers keep using it.
+/// client minted. The echo is compared byte for byte with the canonical
+/// lowercase hyphenated v4 spelling — an uppercase, braced, simple or
+/// `urn:uuid:` spelling of the same id is a different answer, because a client
+/// that accepted it would have to trust a second parser to agree with the
+/// first. A missing or unparsable echo is a difference, and so is an `expected`
+/// that is not a v4 id this client could have minted (fail closed). Returns the
+/// client's own id on a match, so callers keep using it.
 pub fn verify_echoed_id(expected: Uuid, echoed: Option<&str>) -> Result<Uuid, ServerChangedItemId> {
-    match echoed.and_then(|s| s.parse::<Uuid>().ok()) {
-        Some(got) if got == expected => Ok(expected),
+    let canonical = (expected.get_version_num() == 4).then(|| expected.hyphenated().to_string());
+    match (canonical.as_deref(), echoed) {
+        (Some(canonical), Some(got)) if got == canonical => Ok(expected),
         _ => Err(ServerChangedItemId {
             expected,
             received: echoed.map(str::to_string),
@@ -72,15 +78,51 @@ pub async fn create_owned_folder(
 mod tests {
     use super::*;
 
+    /// The canonical v4 id the tests mint: lowercase, hyphenated.
+    const MINE: &str = "3f2b1c9d-8a7e-4f6b-9c5d-4e3a2b1c0d9e";
+
+    fn mine() -> Uuid {
+        Uuid::parse_str(MINE).expect("test id parses")
+    }
+
     #[test]
     fn matching_echo_is_accepted_and_returns_the_clients_id() {
-        let id = Uuid::nil();
-        assert_eq!(verify_echoed_id(id, Some(&id.to_string())), Ok(id));
+        let id = mine();
+        assert_eq!(verify_echoed_id(id, Some(MINE)), Ok(id));
+    }
+
+    #[test]
+    fn the_same_id_in_another_spelling_is_a_different_answer() {
+        // Uuid::parse accepts all of these; the L13 check must not.
+        let id = mine();
+        for echoed in [
+            MINE.to_uppercase(),
+            format!("{{{MINE}}}"),
+            id.simple().to_string(),
+            format!("urn:uuid:{MINE}"),
+            format!("{MINE} "),
+        ] {
+            let err = verify_echoed_id(id, Some(&echoed)).unwrap_err();
+            assert_eq!(err.to_string(), CHANGED_ID_MESSAGE, "{echoed:?}");
+        }
+    }
+
+    #[test]
+    fn an_id_that_is_not_v4_is_refused_even_when_echoed_verbatim() {
+        // A v1 id and the nil id are not ids this client could have minted.
+        for not_v4 in [
+            Uuid::nil(),
+            Uuid::parse_str("3f2b1c9d-8a7e-1f6b-9c5d-4e3a2b1c0d9e").unwrap(),
+        ] {
+            let echoed = not_v4.hyphenated().to_string();
+            let err = verify_echoed_id(not_v4, Some(&echoed)).unwrap_err();
+            assert_eq!(err.to_string(), CHANGED_ID_MESSAGE, "{not_v4}");
+        }
     }
 
     #[test]
     fn a_different_echo_aborts_with_the_plain_message() {
-        let mine = Uuid::nil();
+        let mine = mine();
         let other = Uuid::from_u128(7);
         let err = verify_echoed_id(mine, Some(&other.to_string())).unwrap_err();
         assert_eq!(err.expected, mine);
@@ -90,7 +132,7 @@ mod tests {
 
     #[test]
     fn a_missing_or_unparsable_echo_aborts() {
-        let mine = Uuid::nil();
+        let mine = mine();
         for echoed in [None, Some("not-a-uuid"), Some("")] {
             let err = verify_echoed_id(mine, echoed).unwrap_err();
             assert_eq!(err.to_string(), CHANGED_ID_MESSAGE, "{echoed:?}");
