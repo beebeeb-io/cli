@@ -774,6 +774,9 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
     // for a new file, the listed row's for a replace). A different id aborts
     // before a single chunk is PUT under it.
     if let Err(e) = crate::item_id::verify_echoed_id(file_uuid, Some(&init.file_id)) {
+        // The session it just opened is not a session for our item: end it
+        // (best effort, by the id WE chose) so it cannot hold a lease over it.
+        let _ = state.api.upload_abandon(&file_uuid.to_string()).await;
         return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
     }
 
@@ -789,6 +792,8 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
         Ok(answer) => {
             // L13 (SF-0001): the completion answer must name the same item.
             if let Err(e) = crate::item_id::verify_echoed_id(file_uuid, crate::item_id::echoed_id(&answer)) {
+                // End the mislabelled session once, by the id this client chose.
+                let _ = state.api.upload_abandon(&file_uuid.to_string()).await;
                 return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
             }
             let mut headers = HeaderMap::new();
@@ -1663,11 +1668,13 @@ mod item_id_echo_tests {
     }
 
     /// A7 (webdav PUT): the upload init answers a different id — abort before a
-    /// single chunk is PUT under it.
+    /// single chunk is PUT under it, and end the session it opened (once).
     #[tokio::test]
     async fn put_init_echoing_a_different_id_aborts_before_any_chunk() {
         let chunks = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&chunks);
+        let abandons: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let abandoned = Arc::clone(&abandons);
         let app = Router::new()
             .route(
                 "/api/v1/files",
@@ -1683,6 +1690,16 @@ mod item_id_echo_tests {
                         "chunk_size_bytes": body.get("chunk_size_bytes").cloned().unwrap_or(json!(0)),
                         "chunk_count": body.get("chunk_count").cloned().unwrap_or(json!(0)),
                     }))
+                }),
+            )
+            .route(
+                "/api/v1/files/:id/upload/abandon",
+                post(move |axum::extract::Path(id): axum::extract::Path<String>| {
+                    let abandoned = Arc::clone(&abandoned);
+                    async move {
+                        abandoned.lock().await.push(id);
+                        Json(json!({"ok": true}))
+                    }
                 }),
             )
             .route(
@@ -1709,6 +1726,73 @@ mod item_id_echo_tests {
             chunks.load(Ordering::SeqCst),
             0,
             "no chunk may be PUT under the echoed id"
+        );
+        assert_eq!(abandons.lock().await.len(), 1, "exactly one abandon");
+    }
+
+    /// A7 (webdav PUT): the completion answer names another item — abort and end
+    /// the session it opened, once, by the id this client chose.
+    #[tokio::test]
+    async fn put_completion_echoing_a_different_id_abandons_once() {
+        let abandons: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let abandoned = Arc::clone(&abandons);
+        let proposed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sent = Arc::clone(&proposed);
+        let app = Router::new()
+            .route(
+                "/api/v1/files",
+                get(|| async { (StatusCode::NOT_FOUND, Json(json!({"error": "none"}))) }),
+            )
+            .route(
+                "/api/v1/uploads/init",
+                post(move |Json(body): Json<serde_json::Value>| {
+                    let sent = Arc::clone(&sent);
+                    async move {
+                        let mine = body.get("file_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                        sent.lock().await.push(mine.clone());
+                        Json(json!({
+                            "upload_session_id": Uuid::new_v4(),
+                            "file_id": mine,
+                            "chunk_size_bytes": body.get("chunk_size_bytes").cloned().unwrap_or(json!(0)),
+                            "chunk_count": body.get("chunk_count").cloned().unwrap_or(json!(0)),
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/api/v1/files/:id/upload/abandon",
+                post(move |axum::extract::Path(id): axum::extract::Path<String>| {
+                    let abandoned = Arc::clone(&abandoned);
+                    async move {
+                        abandoned.lock().await.push(id);
+                        Json(json!({"ok": true}))
+                    }
+                }),
+            )
+            .route(
+                "/api/v1/uploads/:session/chunks/:idx",
+                axum::routing::put(|_b: axum::body::Bytes| async { Json(json!({"ok": true})) }),
+            )
+            .route(
+                "/api/v1/uploads/:session/complete",
+                post(|_b: axum::body::Bytes| async { Json(json!({"id": Uuid::new_v4()})) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let state = state_for(base, Arc::new(AtomicUsize::new(0)));
+        let response = put_response(&state, "/file.txt", b"hello".to_vec(), None).await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        assert_eq!(String::from_utf8_lossy(&body), crate::item_id::CHANGED_ID_MESSAGE);
+        let proposed = proposed.lock().await.clone();
+        assert_eq!(proposed.len(), 1);
+        assert_eq!(
+            *abandons.lock().await,
+            proposed,
+            "the session is ended by the id this client chose"
         );
     }
 }

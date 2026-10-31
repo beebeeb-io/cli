@@ -931,7 +931,13 @@ async fn upload_attempt(
         // different id means the server would store the content under another
         // item, whose derived key someone else may hold — abort before any
         // chunk goes out, any name is sealed under it or it is used as a parent.
-        crate::item_id::verify_echoed_id(file_id, Some(&init.file_id)).map_err(|e| AttemptErr::Other(e.to_string()))?;
+        if let Err(e) = crate::item_id::verify_echoed_id(file_id, Some(&init.file_id)) {
+            // The session this attempt just opened is not a session for our
+            // item: end it (best effort, by the id WE sent — never the echoed
+            // one) so it cannot hold a lease over our id.
+            let _ = api.upload_abandon(&file_id_str).await;
+            return Err(AttemptErr::Other(e.to_string()));
+        }
         // The server's plan is authoritative — frame the upload against it, not
         // a hardcoded local guess. We sent our `ChunkEncryptor` plan; the v2
         // server uses client `chunk_size_bytes`/`chunk_count` verbatim, so the
@@ -1001,9 +1007,10 @@ async fn upload_attempt(
     // L13 (SF-0001): the completion answer must name the same item this client
     // minted — before the thumbnail is sealed under it or the outcome reports it.
     if let Err(e) = crate::item_id::verify_echoed_id(file_id, crate::item_id::echoed_id(&completed)) {
-        // The session answered another item; do not leave a record that would
-        // resume it. (No abandon: its content was written under OUR id, and an
-        // abandon names that id, not the one the server claimed.)
+        // The session answered another item: end it (best effort, by the id WE
+        // minted) and drop the record, so neither this run nor a later one
+        // resumes a session the server mislabels.
+        let _ = api.upload_abandon(&file_id_str).await;
         crate::resume::clear(&spec.path);
         file_prog.finish(false);
         return Err(AttemptErr::Other(e.to_string()));
@@ -2486,7 +2493,11 @@ mod swept_session_reinit {
             m.chunk_puts
         );
         assert!(m.completed.is_empty());
-        assert!(m.abandons.is_empty());
+        assert_eq!(
+            m.abandons,
+            vec![mine.to_string()],
+            "the session it opened is ended, by our owner id, exactly once"
+        );
     }
 
     /// A7 for a replace: the listed row's id is sent, and a different echo
@@ -2511,6 +2522,7 @@ mod swept_session_reinit {
         assert_eq!(m.inits, vec![listed.to_string()], "the listed row's id was sent");
         assert!(m.chunk_puts.is_empty());
         assert!(m.completed.is_empty());
+        assert_eq!(m.abandons, vec![listed.to_string()], "exactly one abandon");
     }
 
     /// A7: the completion answer names a different item. Abort, drop the resume
@@ -2529,6 +2541,11 @@ mod swept_session_reinit {
         assert_eq!(err, CHANGED_ID_MESSAGE);
         let m = state.lock().unwrap();
         assert_eq!(m.completed.len(), 1, "the session was completed before the check");
+        assert_eq!(
+            m.abandons,
+            vec![mine.to_string()],
+            "the mislabelled session is ended exactly once, by our id"
+        );
         assert_eq!(
             crate::resume::resumable_upload(&path, size, mtime),
             None,
