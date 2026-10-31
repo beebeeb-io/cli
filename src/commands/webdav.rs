@@ -674,28 +674,10 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
     // For versioning: reuse the existing file_id so the server creates a version
     // entry rather than a new file (keeps share links valid, builds history).
     let existing_file_id: Option<uuid::Uuid> = if let Ok(existing) = resolve_path(state, path).await {
-        // SF-0002: never version-replace a file sealed by the old iOS app.
-        if existing.read_only {
-            return (StatusCode::FORBIDDEN, crate::crypto::OWNER_REPAIR_READ_ONLY).into_response();
-        }
-        // SF-0002 review: the name may read normally while the CURRENT
-        // version's content is still uppercase-sealed. Never replace it.
-        if let (Some(eid), false) = (existing.file_id.as_deref(), existing.is_collection) {
-            match crate::owned_keys::ensure_content_writable(
-                &state.api,
-                &state.master_key,
-                eid,
-                existing.size_bytes,
-                existing.chunk_count,
-            )
-            .await
-            {
-                Ok(()) => {}
-                Err(e) if e == crate::crypto::OWNER_REPAIR_READ_ONLY => {
-                    return (StatusCode::FORBIDDEN, e).into_response();
-                }
-                Err(e) => return (StatusCode::BAD_GATEWAY, e).into_response(),
-            }
+        // SF-0002: never version-replace a file sealed by the old iOS app (its
+        // name or its CURRENT version), and never one the check could not read.
+        if let Err(refusal) = write_refusal(state, &existing).await {
+            return refusal;
         }
         if let Some(ref eid) = existing.file_id {
             // If-Match precondition: client must supply current ETag
@@ -959,27 +941,8 @@ async fn move_response(state: &Arc<DavState>, src_path: &str, destination: &str)
 
     // SF-0002: reparenting is a move, but renaming rewrites the name envelope.
     if new_name != src.display_name {
-        if src.read_only {
-            return (StatusCode::FORBIDDEN, crate::crypto::OWNER_REPAIR_READ_ONLY).into_response();
-        }
-        // The name may read normally while the CURRENT version's content is
-        // still uppercase-sealed (review round): check chunk 0 too.
-        if let (Some(sid), false) = (src.file_id.as_deref(), src.is_collection) {
-            match crate::owned_keys::ensure_content_writable(
-                &state.api,
-                &state.master_key,
-                sid,
-                src.size_bytes,
-                src.chunk_count,
-            )
-            .await
-            {
-                Ok(()) => {}
-                Err(e) if e == crate::crypto::OWNER_REPAIR_READ_ONLY => {
-                    return (StatusCode::FORBIDDEN, e).into_response();
-                }
-                Err(e) => return (StatusCode::BAD_GATEWAY, e).into_response(),
-            }
+        if let Err(refusal) = write_refusal(state, &src).await {
+            return refusal;
         }
     }
 
@@ -1285,6 +1248,33 @@ fn make_etag(file_id: &str, modified: Option<&str>) -> String {
         format!("\"{file_id}\"")
     } else {
         format!("\"{file_id}-{suffix}\"")
+    }
+}
+
+/// SF-0002: the one write check for a PUT-overwrite or a rename of `entry`.
+/// `Err` is the response: 403 for a read-only row, 503 when the check could not
+/// decide (retryable; the row is not marked read-only).
+async fn write_refusal(state: &Arc<DavState>, entry: &ResolvedEntry) -> Result<(), Response> {
+    if entry.is_collection && !entry.read_only {
+        return Ok(());
+    }
+    let Some(file_id) = entry.file_id.as_deref() else {
+        return Ok(());
+    };
+    let target = crate::owned_keys::WriteTarget {
+        file_id,
+        name_read_only: entry.read_only,
+        size_bytes: entry.size_bytes,
+        chunk_count: entry.chunk_count,
+    };
+    match crate::owned_keys::write_check(&state.api, &state.master_key, &target).await {
+        crate::owned_keys::WriteCheck::Writable => Ok(()),
+        crate::owned_keys::WriteCheck::UpperRepair => {
+            Err((StatusCode::FORBIDDEN, crate::crypto::OWNER_REPAIR_READ_ONLY).into_response())
+        }
+        crate::owned_keys::WriteCheck::Unknown => {
+            Err((StatusCode::SERVICE_UNAVAILABLE, crate::owned_keys::WRITE_CHECK_UNKNOWN).into_response())
+        }
     }
 }
 
@@ -1652,5 +1642,136 @@ mod windows_hint_tests {
             assert!(WINDOWS_EXPLORER_HINT.contains(needle), "hint lacks {needle:?}");
         }
         assert_eq!(windows_explorer_hint().is_some(), cfg!(windows));
+    }
+}
+
+/// SF-0002 round 2: WebDAV asks the one write check before a PUT-overwrite or a
+/// rename. These run the real handlers against an in-process API mock that
+/// counts every request that is not a GET (a write).
+#[cfg(test)]
+mod sf_0002_write_check_tests {
+    use super::*;
+    use axum::{Json, routing::get};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
+
+    const OWNED: &str = "11111111-1111-4111-8111-111111111111";
+
+    fn master() -> beebeeb_core::kdf::MasterKey {
+        beebeeb_core::kdf::MasterKey::from_bytes([7u8; 32])
+    }
+
+    /// A root-level file row: `name` and its single legacy frame sealed under `key`.
+    fn file_row(id: &str, name: &str, key: &beebeeb_core::kdf::FileKey, plaintext: &[u8]) -> serde_json::Value {
+        let sealed = beebeeb_core::encrypt::encrypt_name_for(
+            key,
+            name,
+            Some("text/plain"),
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+        )
+        .unwrap();
+        json!({"id": id, "parent_id": null, "name_encrypted": sealed, "is_folder": false,
+               "size_bytes": plaintext.len(), "chunk_count": 1, "updated_at": "2026-10-31T10:00:00Z"})
+    }
+
+    struct Mock {
+        state: Arc<DavState>,
+        download_status: Arc<AtomicU16>,
+        downloads: Arc<AtomicUsize>,
+        writes: Arc<AtomicUsize>,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    async fn mock(rows: Vec<serde_json::Value>, frame: Vec<u8>) -> Mock {
+        let download_status = Arc::new(AtomicU16::new(200));
+        let downloads = Arc::new(AtomicUsize::new(0));
+        let writes = Arc::new(AtomicUsize::new(0));
+        let (status, served, written) = (download_status.clone(), downloads.clone(), writes.clone());
+        let app = Router::new()
+            .route(
+                "/api/v1/files",
+                get(move || {
+                    let rows = rows.clone();
+                    async move { Json(json!({ "files": rows })) }
+                }),
+            )
+            .route(
+                "/api/v1/files/:id/download",
+                get(move || {
+                    let (frame, status, served) = (frame.clone(), status.clone(), served.clone());
+                    async move {
+                        served.fetch_add(1, Ordering::SeqCst);
+                        match status.load(Ordering::SeqCst) {
+                            200 => frame.into_response(),
+                            s => StatusCode::from_u16(s).unwrap().into_response(),
+                        }
+                    }
+                }),
+            )
+            .fallback(move |req: Request| {
+                let written = written.clone();
+                async move {
+                    if req.method() != Method::GET {
+                        written.fetch_add(1, Ordering::SeqCst);
+                    }
+                    (StatusCode::INTERNAL_SERVER_ERROR, "mock: unhandled")
+                }
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let state = Arc::new(DavState {
+            api: ApiClient::new_for_test(format!("http://{}", listener.local_addr().unwrap())),
+            master_key: master(),
+            read_only: false,
+            dir_cache: Mutex::new(HashMap::new()),
+            cache_ttl: Duration::ZERO,
+            locks: Mutex::new(HashMap::new()),
+            request_count: std::sync::atomic::AtomicU64::new(0),
+            error_count: std::sync::atomic::AtomicU64::new(0),
+            verbose: false,
+        });
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        Mock {
+            state,
+            download_status,
+            downloads,
+            writes,
+            server,
+        }
+    }
+
+    async fn body_text(r: Response) -> String {
+        String::from_utf8_lossy(&axum::body::to_bytes(r.into_body(), 4096).await.unwrap()).into_owned()
+    }
+
+    /// C1: a 5xx probe refuses a PUT-overwrite and a rename with 503 and the
+    /// retryable message, and no write is sent. With the version readable, the
+    /// same PUT gets past the check (it reaches the upload init).
+    #[tokio::test]
+    async fn put_and_rename_refuse_with_503_when_the_check_cannot_read_the_version() {
+        let key = beebeeb_core::kdf::derive_file_key(&master(), OWNED.as_bytes());
+        let plaintext = b"an ordinary owner file";
+        let frame = beebeeb_core::encrypt::encrypt_chunk_raw(&key, plaintext).unwrap();
+        let m = mock(vec![file_row(OWNED, "owned.txt", &key, plaintext)], frame).await;
+        m.download_status.store(503, Ordering::SeqCst);
+
+        let put = put_response(&m.state, "/owned.txt", b"edited".to_vec(), None).await;
+        assert_eq!(put.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body_text(put).await, crate::owned_keys::WRITE_CHECK_UNKNOWN);
+        let rename = move_response(&m.state, "/owned.txt", "/renamed.txt").await;
+        assert_eq!(rename.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(m.writes.load(Ordering::SeqCst), 0, "a refused write sent a request");
+        assert_eq!(m.downloads.load(Ordering::SeqCst), 2, "each write asked the check once");
+
+        m.download_status.store(200, Ordering::SeqCst);
+        let put = put_response(&m.state, "/owned.txt", b"edited".to_vec(), None).await;
+        assert_ne!(put.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_ne!(put.status(), StatusCode::FORBIDDEN);
+        assert!(
+            m.writes.load(Ordering::SeqCst) >= 1,
+            "a readable ordinary row must get past the check to the upload"
+        );
+        m.server.abort();
     }
 }

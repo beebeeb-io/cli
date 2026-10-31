@@ -1378,6 +1378,38 @@ mod fuse_impl {
             reply.ok();
         }
 
+        /// SF-0002: may the stored row behind `ino` be renamed? The one write
+        /// check: `EPERM` for a read-only row, `EAGAIN` when the check could not
+        /// decide (retryable; the row is not marked read-only).
+        fn rename_check(&self, ino: u64) -> Result<(), Errno> {
+            let Some(entry) = self.inodes.get(&ino) else {
+                return Err(Errno::ENOENT);
+            };
+            let Some(file_id) = entry.file_id.as_deref() else {
+                return Ok(()); // not uploaded yet: the rename is local
+            };
+            let target = crate::owned_keys::WriteTarget {
+                file_id,
+                name_read_only: entry.read_only,
+                size_bytes: Some(entry.size),
+                chunk_count: entry.chunk_count,
+            };
+            match self
+                .rt
+                .block_on(crate::owned_keys::write_check(&self.api, &self.master_key, &target))
+            {
+                crate::owned_keys::WriteCheck::Writable => Ok(()),
+                crate::owned_keys::WriteCheck::UpperRepair => {
+                    eprintln!("[mount] rename refused: {file_id} is read-only (SF-0002)");
+                    Err(Errno::EPERM)
+                }
+                crate::owned_keys::WriteCheck::Unknown => {
+                    eprintln!("[mount] rename refused: {file_id} could not be checked (SF-0002), try again");
+                    Err(Errno::EAGAIN)
+                }
+            }
+        }
+
         /// Move and/or rename a file or folder.
         fn rename(
             &mut self,
@@ -1414,15 +1446,8 @@ mod fuse_impl {
                 }
             };
 
-            let (file_id, key_uuid, old_name, entry_size, entry_chunks, entry_read_only) = match self.inodes.get(&ino) {
-                Some(e) => (
-                    e.file_id.clone(),
-                    e.key_uuid,
-                    e.name.clone(),
-                    e.size,
-                    e.chunk_count,
-                    e.read_only,
-                ),
+            let (file_id, key_uuid, old_name) = match self.inodes.get(&ino) {
+                Some(e) => (e.file_id.clone(), e.key_uuid, e.name.clone()),
                 None => {
                     reply.error(Errno::ENOENT);
                     return;
@@ -1471,30 +1496,12 @@ mod fuse_impl {
             let parent_changed = parent != newparent;
 
             // SF-0002: a rename rewrites the name envelope under the id's
-            // convention, so a row sealed read-only (name or CURRENT version's
-            // content) must be refused. Reparenting stays a pure move.
+            // convention, so a read-only row (name or CURRENT version) is
+            // refused, and so is one the check could not read. Reparenting
+            // stays a pure move.
             if name_changed {
-                let content_is_repair = if entry_read_only {
-                    true
-                } else {
-                    match self.rt.block_on(crate::owned_keys::content_is_upper_repair(
-                        &self.api,
-                        &self.master_key,
-                        &file_id,
-                        Some(entry_size),
-                        entry_chunks,
-                    )) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            eprintln!("[mount] rename content check {file_id}: {e}");
-                            reply.error(Errno::EIO);
-                            return;
-                        }
-                    }
-                };
-                if content_is_repair {
-                    eprintln!("[mount] rename refused: {file_id} is read-only (SF-0002)");
-                    reply.error(Errno::EPERM);
+                if let Err(errno) = self.rename_check(ino) {
+                    reply.error(errno);
                     return;
                 }
             }

@@ -473,22 +473,21 @@ async fn push_single_file(
             let resolved = crate::owned_keys::OwnedKeyResolver::new()
                 .resolve(api, &master_key, &meta)
                 .await?;
-            // SF-0002: a row sealed by the old iOS app is read-only; refuse the
-            // version replace instead of rewriting an object we cannot re-key.
-            if resolved.read_only {
-                return Err(crate::crypto::OWNER_REPAIR_READ_ONLY.into());
-            }
-            // The name resolved normally, but the CURRENT version's content may
-            // still be sealed under the read-only uppercase convention (SF-0002
-            // review). Check chunk 0 with core's per-version resolver.
-            crate::owned_keys::ensure_content_writable(
+            // SF-0002: a row sealed by the old iOS app (its name or its CURRENT
+            // version) is read-only, and a check that could not decide refuses
+            // too: only a proven-writable row gets a new version.
+            crate::owned_keys::write_check(
                 api,
                 &master_key,
-                &existing,
-                meta.get("size_bytes").and_then(|v| v.as_u64()),
-                meta.get("chunk_count").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
+                &crate::owned_keys::WriteTarget {
+                    file_id: &existing,
+                    name_read_only: resolved.read_only,
+                    size_bytes: meta.get("size_bytes").and_then(|v| v.as_u64()),
+                    chunk_count: meta.get("chunk_count").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
+                },
             )
-            .await?;
+            .await
+            .ensure()?;
             let pin = crate::crypto::content_pin_with_key(&resolved.key, &existing, name_encrypted)?;
             (Some(version), Some(pin), Some(resolved.key))
         }

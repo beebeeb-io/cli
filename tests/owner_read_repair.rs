@@ -238,3 +238,60 @@ async fn an_explicit_key_download_never_falls_back_to_the_owner_keys() {
     assert!(!out_path.exists(), "the download wrote a file it must not have opened");
     h.close().await;
 }
+
+/// What `bb` says when the read-only check could not read the version
+/// (`owned_keys::WRITE_CHECK_UNKNOWN`).
+const COULD_NOT_CHECK: &str = "Couldn't check this file before changing it. Try again.";
+
+fn stderr(out: &std::process::Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// SF-0002 round 2 (C1): `push --replace` asks the read-only check first. A
+/// probe the server answers with a 5xx is not proof of anything: the replace is
+/// refused with the retryable message and no upload session starts. With the
+/// version readable, the same replace goes through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replace_refuses_when_the_check_cannot_read_the_version() {
+    let h = Harness::new(Fixture::owner_file()).await;
+    let local = h.home.join("owned.txt");
+    std::fs::write(&local, b"replacement bytes").unwrap();
+    h.state.lock().unwrap().download_status = Some(503);
+    let out = h
+        .run(&["push", local.to_str().unwrap(), "--folder", "Shared", "--replace"])
+        .await;
+    assert!(!out.status.success(), "a replace went ahead without a check: {}", stderr(&out));
+    assert!(stderr(&out).contains(COULD_NOT_CHECK), "stderr={}", stderr(&out));
+    assert_eq!(h.count("POST", "/api/v1/uploads/init"), 0, "an upload session was started");
+    assert!(h.count("GET", &format!("/api/v1/files/{FILE}/download")) >= 1, "the check never asked");
+
+    h.state.lock().unwrap().download_status = None;
+    let out = h
+        .run(&["push", local.to_str().unwrap(), "--folder", "Shared", "--replace"])
+        .await;
+    assert!(out.status.success(), "a readable ordinary row must stay replaceable: {}", stderr(&out));
+    {
+        let f = h.state.lock().unwrap();
+        assert_eq!(f.upload_request["file_id"], FILE, "the replace must version the same id");
+        assert_eq!(f.upload_request["base_version_number"], 1);
+    }
+    h.close().await;
+}
+
+/// SF-0002 round 2 (C1): `bb mv` asks the same check before a rename. A 5xx
+/// probe refuses it and sends no PATCH; a readable version lets it through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rename_refuses_when_the_check_cannot_read_the_version() {
+    let h = Harness::new(Fixture::owner_file()).await;
+    h.state.lock().unwrap().download_status = Some(503);
+    let out = h.run(&["mv", "Shared/owned.txt", "Shared/renamed.txt"]).await;
+    assert!(!out.status.success(), "a rename went ahead without a check: {}", stderr(&out));
+    assert!(stderr(&out).contains(COULD_NOT_CHECK), "stderr={}", stderr(&out));
+    assert_eq!(h.count("PATCH", &format!("/api/v1/files/{FILE}")), 0, "a rename was sent");
+
+    h.state.lock().unwrap().download_status = None;
+    let out = h.run(&["mv", "Shared/owned.txt", "Shared/renamed.txt"]).await;
+    assert!(out.status.success(), "a readable ordinary row must stay renamable: {}", stderr(&out));
+    assert_eq!(h.count("PATCH", &format!("/api/v1/files/{FILE}")), 1);
+    h.close().await;
+}

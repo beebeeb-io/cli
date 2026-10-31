@@ -100,6 +100,9 @@ pub struct Fixture {
     pub owner_index: HashMap<(u32, u32), (u64, Vec<u8>)>,
     pub upload_request: Value,
     pub uploaded_chunks: Vec<Vec<u8>>,
+    /// SF-0002 round 2: when set, `GET /files/{id}/download` answers this status
+    /// (the read-only check's probe cannot read the version).
+    pub download_status: Option<u16>,
 }
 impl Fixture {
     pub fn transfer(v2: bool) -> Self {
@@ -177,6 +180,26 @@ impl Fixture {
                 ExpectedChunkFormat::Unrecorded
             )
             .unwrap()
+        );
+        r["size_bytes"] = json!(f.plaintext.len());
+        r["chunk_count"] = json!(1);
+        f.rows[1] = r;
+        f
+    }
+    /// SF-0002 round 2: an ordinary owner row (id `FILE`, under ROOT): its name
+    /// and its single legacy content frame use the canonical string key, so it
+    /// is writable once the check can read it.
+    pub fn owner_file() -> Self {
+        use beebeeb_core::chunk_stream::ExpectedChunkFormat;
+        let mut f = Self::basic();
+        let key = beebeeb_core::kdf::derive_file_key(&master(), FILE.as_bytes());
+        f.plaintext = b"an ordinary owner file".to_vec();
+        f.stride = f.plaintext.len() as u64;
+        f.frames = vec![beebeeb_core::encrypt::encrypt_chunk_raw(&key, &f.plaintext).unwrap()];
+        let mut r = row(FILE, Some(ROOT), "owned.txt", false, false);
+        r["name_encrypted"] = json!(
+            beebeeb_core::encrypt::encrypt_name_for(&key, "owned.txt", Some("text/plain"), ExpectedChunkFormat::Unrecorded)
+                .unwrap()
         );
         r["size_bytes"] = json!(f.plaintext.len());
         r["chunk_count"] = json!(1);
@@ -401,6 +424,9 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
         let i = path.rsplit('/').next().unwrap().parse::<usize>().unwrap();
         return f.frames[i].clone().into_response();
     } else if method == "GET" && path.ends_with("/download") {
+        if let Some(status) = f.download_status {
+            return StatusCode::from_u16(status).unwrap().into_response();
+        }
         return (
             [
                 ("X-Chunk-Size", f.stride.to_string()),
@@ -518,6 +544,10 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
         let second = query.contains_key("cursor");
         let cut = f.inventory.len().min(500);
         json!({"keys": if second {&f.inventory[cut..]} else {&f.inventory[..cut]},"next_cursor":if f.cycle || (!second && cut<f.inventory.len()) {Some("opaque+cursor/=")} else {None}})
+    } else if method == "PATCH" && path.starts_with("/api/v1/files/") {
+        // A rename/move: answered so a write the client is allowed to make succeeds.
+        let id = path.trim_start_matches("/api/v1/files/").to_string();
+        json!({ "id": id })
     } else if method == "GET" && path.starts_with("/api/v1/files/") {
         let id = path.trim_start_matches("/api/v1/files/");
         if let Some(row) = f.canonical.get(id).or_else(|| f.rows.iter().find(|r| r["id"] == id)) {

@@ -494,46 +494,82 @@ impl OwnedKeyResolver {
         }
     }
 }
-/// SF-0002 review: is the CURRENT version's content sealed under the read-only
-/// uppercase repair convention, even when the name resolved normally? Core's
-/// per-version owner resolver decides from chunk 0 alone; only a bounded prefix
-/// of the version is read.
-pub async fn content_is_upper_repair(
-    api: &ApiClient,
-    master: &MasterKey,
-    file_id: &str,
-    size_bytes: Option<u64>,
-    chunk_count: u32,
-) -> Result<bool, String> {
-    if chunk_count == 0 {
-        return Ok(false);
-    }
-    let (body, chunk_size, complete) =
-        crate::download::download_frame_prefix(api, file_id, size_bytes, chunk_count).await?;
-    let convention = first_chunk_convention(master, file_id, &body, size_bytes, chunk_count, chunk_size, complete);
-    Ok(convention == Some(beebeeb_core::kdf::OwnerKeyConvention::UpperRepair))
+/// SF-0002 round 2: the three answers of the read-only check a write asks
+/// before it renames a row or writes a version under its id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteCheck {
+    /// Neither the name nor the current version is sealed under the read-only
+    /// uppercase repair convention: the write may go ahead.
+    Writable,
+    /// The name or the current version resolves as core's `UpperRepair`: the
+    /// row is read-only. No rename, no new version, and an edit is not written
+    /// over it ([`crate::crypto::OWNER_REPAIR_READ_ONLY`]).
+    UpperRepair,
+    /// The check could not decide: a download error, a timeout, a 5xx, a short
+    /// body. It never proceeds and never marks the row read-only: an interactive
+    /// write is refused with [`WRITE_CHECK_UNKNOWN`], sync leaves the row alone
+    /// and asks again on its next pass.
+    Unknown,
 }
 
-/// [`content_is_upper_repair`] as a write guard: `Err(OWNER_REPAIR_READ_ONLY)`
-/// when the current version must not be rewritten.
-pub async fn ensure_content_writable(
-    api: &ApiClient,
-    master: &MasterKey,
-    file_id: &str,
-    size_bytes: Option<u64>,
-    chunk_count: u32,
-) -> Result<(), String> {
-    match content_is_upper_repair(api, master, file_id, size_bytes, chunk_count).await {
-        Ok(true) => Err(crate::crypto::OWNER_REPAIR_READ_ONLY.to_string()),
-        // A version that cannot be read is not PROOF of the repair convention
-        // (the server may not serve it, or the row may be unreadable for another
-        // reason): keep the write behaviour this client had rather than refuse
-        // on a transient failure. Only a definite `upper_repair` refuses.
-        Ok(false) | Err(_) => Ok(()),
+/// What a write says when [`WriteCheck::Unknown`] refused it. Retryable: the
+/// row is not marked read-only.
+pub const WRITE_CHECK_UNKNOWN: &str = "Couldn't check this file before changing it. Try again.";
+
+impl WriteCheck {
+    /// The guard form for an interactive write (`bb push --replace`, `bb mv`):
+    /// only [`WriteCheck::Writable`] proceeds; the error is the user-facing text.
+    pub fn ensure(self) -> Result<(), String> {
+        match self {
+            Self::Writable => Ok(()),
+            Self::UpperRepair => Err(crate::crypto::OWNER_REPAIR_READ_ONLY.to_string()),
+            Self::Unknown => Err(WRITE_CHECK_UNKNOWN.to_string()),
+        }
     }
 }
 
-fn first_chunk_convention(
+/// What one row's write check is decided from. Each surface fills it from the
+/// listing or metadata that resolved the row, so no second GET is made.
+pub struct WriteTarget<'a> {
+    pub file_id: &'a str,
+    /// The name verdict: [`crate::crypto::name_is_upper_repair`], which is what
+    /// the resolver's `read_only` and every listing's flag carry.
+    pub name_read_only: bool,
+    /// The plaintext size the listing carried, if any.
+    pub size_bytes: Option<u64>,
+    /// The chunk count the listing carried (`1` when it did not say).
+    pub chunk_count: u32,
+}
+
+/// SF-0002: the ONE read-only decision every write surface asks first (`bb
+/// push --replace`, `bb mv`, WebDAV PUT and MOVE, the mount's rename, `bb
+/// sync`). The name decides first; otherwise the CURRENT version's chunk 0 is
+/// read (a bounded prefix, never the whole file) and core's per-version owner
+/// resolver decides.
+pub async fn write_check(api: &ApiClient, master: &MasterKey, target: &WriteTarget<'_>) -> WriteCheck {
+    if target.name_read_only {
+        return WriteCheck::UpperRepair;
+    }
+    if target.chunk_count == 0 {
+        return WriteCheck::Writable;
+    }
+    let Ok((body, chunk_size, complete)) =
+        crate::download::download_frame_prefix(api, target.file_id, target.size_bytes, target.chunk_count).await
+    else {
+        return WriteCheck::Unknown;
+    };
+    first_chunk_check(
+        master,
+        target.file_id,
+        &body,
+        target.size_bytes,
+        target.chunk_count,
+        chunk_size,
+        complete,
+    )
+}
+
+fn first_chunk_check(
     master: &MasterKey,
     file_id: &str,
     body: &[u8],
@@ -541,13 +577,17 @@ fn first_chunk_convention(
     chunk_count: u32,
     chunk_size: Option<u64>,
     complete: bool,
-) -> Option<beebeeb_core::kdf::OwnerKeyConvention> {
+) -> WriteCheck {
     for len in chunk0_lengths(body.len(), size_bytes, chunk_count, chunk_size, complete) {
         if let Some((_, convention)) = crate::crypto::owner_content_key(master, file_id, &body[..len]) {
-            return Some(convention);
+            return if convention == beebeeb_core::kdf::OwnerKeyConvention::UpperRepair {
+                WriteCheck::UpperRepair
+            } else {
+                WriteCheck::Writable
+            };
         }
     }
-    None
+    WriteCheck::Writable
 }
 
 /// Candidate lengths for wire frame 0, from the version's geometry in its

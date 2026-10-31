@@ -1277,16 +1277,14 @@ pub async fn run(
                         .filter(|r| r.origin != KeyOrigin::Derived && !r.read_only)
                     {
                         Some(r) => {
-                            let id = r.canonical["id"].as_str().unwrap_or_default();
-                            crate::owned_keys::content_is_upper_repair(
-                                api,
-                                &master_key,
-                                id,
-                                r.canonical["size_bytes"].as_u64(),
-                                r.canonical["chunk_count"].as_u64().unwrap_or(1) as u32,
-                            )
-                            .await
-                            .unwrap_or(true)
+                            let target = crate::owned_keys::WriteTarget {
+                                file_id: r.canonical["id"].as_str().unwrap_or_default(),
+                                name_read_only: r.read_only,
+                                size_bytes: r.canonical["size_bytes"].as_u64(),
+                                chunk_count: r.canonical["chunk_count"].as_u64().unwrap_or(1) as u32,
+                            };
+                            crate::owned_keys::write_check(api, &master_key, &target).await
+                                != crate::owned_keys::WriteCheck::Writable
                         }
                         None => false,
                     };
@@ -3364,16 +3362,13 @@ async fn do_upload(
     let candidate = remote.as_ref().and_then(|r| r.resolved.as_ref());
     let content_read_only = match candidate.filter(|r| r.origin != KeyOrigin::Derived && !r.read_only) {
         Some(r) => {
-            let id = r.canonical["id"].as_str().unwrap_or_default();
-            crate::owned_keys::content_is_upper_repair(
-                api,
-                &master_key,
-                id,
-                r.canonical["size_bytes"].as_u64(),
-                r.canonical["chunk_count"].as_u64().unwrap_or(1) as u32,
-            )
-            .await
-            .unwrap_or(true)
+            let target = crate::owned_keys::WriteTarget {
+                file_id: r.canonical["id"].as_str().unwrap_or_default(),
+                name_read_only: r.read_only,
+                size_bytes: r.canonical["size_bytes"].as_u64(),
+                chunk_count: r.canonical["chunk_count"].as_u64().unwrap_or(1) as u32,
+            };
+            crate::owned_keys::write_check(api, &master_key, &target).await != crate::owned_keys::WriteCheck::Writable
         }
         None => false,
     };
