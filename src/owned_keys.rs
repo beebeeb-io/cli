@@ -579,21 +579,38 @@ pub async fn write_check(api: &ApiClient, master: &MasterKey, target: &WriteTarg
     if target.is_folder || target.chunk_count == 0 {
         return WriteCheck::Writable;
     }
-    let Ok((body, chunk_size, complete)) =
-        crate::download::download_frame_prefix(api, target.file_id, target.size_bytes, target.chunk_count).await
-    else {
+    let probe = |wide| crate::download::download_frame_prefix(api, target.file_id, target.size_bytes, target.chunk_count, wide);
+    let Ok((body, chunk_size, complete)) = probe(false).await else {
         return WriteCheck::Unknown;
     };
-    first_chunk_check(
-        master,
-        target.file_id,
-        target.row_key,
-        &body,
-        target.size_bytes,
-        target.chunk_count,
-        chunk_size,
-        complete,
-    )
+    let check = |body: &[u8], chunk_size: Option<u64>, complete: bool| {
+        first_chunk_check(
+            master,
+            target.file_id,
+            target.row_key,
+            body,
+            target.size_bytes,
+            target.chunk_count,
+            chunk_size,
+            complete,
+        )
+    };
+    let verdict = check(&body, chunk_size, complete);
+    // Round 3 (K2): a legacy multi-chunk raw file without X-Chunk-Size whose
+    // first frame is longer than the ordinary prefix. Read every feasible
+    // frame-0 length once (a second request, only in this case) and probe again.
+    if verdict == WriteCheck::Unknown
+        && target.chunk_count > 1
+        && target.size_bytes.is_some()
+        && chunk_size.is_none()
+        && !complete
+    {
+        let Ok((body, chunk_size, complete)) = probe(true).await else {
+            return WriteCheck::Unknown;
+        };
+        return check(&body, chunk_size, complete);
+    }
+    verdict
 }
 
 /// Decide from the prefix of the current version. Writable needs PROOF: chunk 0
@@ -613,16 +630,25 @@ fn first_chunk_check(
     complete: bool,
 ) -> WriteCheck {
     for len in chunk0_lengths(body.len(), size_bytes, chunk_count, chunk_size, complete) {
-        let frame = &body[..len];
-        if let Some((_, convention)) = crate::crypto::owner_content_key(master, file_id, frame) {
-            return if convention == beebeeb_core::kdf::OwnerKeyConvention::UpperRepair {
-                WriteCheck::UpperRepair
-            } else {
-                WriteCheck::Writable
-            };
+        if let Some(verdict) = frame_check(master, file_id, row_key, &body[..len]) {
+            return verdict;
         }
-        if row_key.is_some_and(|key| crate::crypto::first_frame_opens(key, file_id, frame)) {
-            return WriteCheck::Writable;
+    }
+    // Round 3 (K2): a legacy multi-chunk raw file served without X-Chunk-Size.
+    // The read path's AEAD-validated frame-size search (same order, bounds and
+    // budget), over the prefix in hand and bounded by the version's length from
+    // the listing.
+    if chunk_count > 1 {
+        if let Some(size) = size_bytes {
+            let total = size.saturating_add(28u64.saturating_mul(u64::from(chunk_count)));
+            let mut verdict = None;
+            let _ = crate::crypto::probe_first_frame_len(body, total, chunk_count as usize, chunk_size, &mut |frame| {
+                verdict = frame_check(master, file_id, row_key, frame);
+                verdict.is_some()
+            });
+            if let Some(verdict) = verdict {
+                return verdict;
+            }
         }
     }
     // Round 3 (K1): a legacy CLI JSON-blob chunk 0. Only the old iOS File
@@ -635,6 +661,22 @@ fn first_chunk_check(
         }
     }
     WriteCheck::Unknown
+}
+
+/// One candidate frame 0: core's owner resolver first (`UpperRepair`, or a
+/// writable String/Binary convention), then the row's own key. `None`: no key
+/// opens it.
+fn frame_check(master: &MasterKey, file_id: &str, row_key: Option<&FileKey>, frame: &[u8]) -> Option<WriteCheck> {
+    if let Some((_, convention)) = crate::crypto::owner_content_key(master, file_id, frame) {
+        return Some(if convention == beebeeb_core::kdf::OwnerKeyConvention::UpperRepair {
+            WriteCheck::UpperRepair
+        } else {
+            WriteCheck::Writable
+        });
+    }
+    row_key
+        .is_some_and(|key| crate::crypto::first_frame_opens(key, file_id, frame))
+        .then_some(WriteCheck::Writable)
 }
 
 /// Does a JSON-blob chunk-0 frame open under a write-capable key: the owner's
@@ -899,6 +941,57 @@ mod write_check_tests {
             first_chunk_check(&m, ID, None, &multi, Some(605), 3, None, true),
             WriteCheck::Writable
         );
+    }
+
+    /// Round 3 (K2): a legacy multi-chunk raw file served without X-Chunk-Size,
+    /// whose chunk size is not a power of two and whose last chunk is shorter,
+    /// is found by the read path's frame-size probe: writable under the owner's
+    /// key, read-only under the uppercase-id key.
+    #[test]
+    fn a_legacy_multi_chunk_file_without_a_chunk_size_is_probed() {
+        let m = master();
+        let pt: Vec<u8> = (0..3 * 3000 + 77).map(|i| (i % 251) as u8).collect();
+        let wire = |key: &FileKey| -> Vec<u8> { pt.chunks(3000).flat_map(|c| frame(key, c)).collect() };
+        let size = Some(pt.len() as u64);
+        let ordinary = wire(&derive_file_key(&m, ID.as_bytes()));
+        assert_eq!(
+            first_chunk_check(&m, ID, None, &ordinary, size, 4, None, true),
+            WriteCheck::Writable
+        );
+        let sealed = wire(&derive_file_key(&m, ID.to_ascii_uppercase().as_bytes()));
+        assert_eq!(
+            first_chunk_check(&m, ID, None, &sealed, size, 4, None, true),
+            WriteCheck::UpperRepair
+        );
+        let item = FileKey::from_bytes([5u8; 32]);
+        assert_eq!(
+            first_chunk_check(&m, ID, Some(&item), &wire(&item), size, 4, None, true),
+            WriteCheck::Writable,
+            "the row's own key, probed the same way"
+        );
+    }
+
+    /// Round 3 (K2), through the real probe: chunk 0 is 2 MiB (longer than the
+    /// ordinary prefix) and the server sends no X-Chunk-Size. The check reads
+    /// the feasible frame lengths in a second request and decides Writable.
+    #[tokio::test]
+    async fn a_frame_longer_than_the_first_prefix_is_found_by_a_second_read() {
+        let m = master();
+        let key = derive_file_key(&m, ID.as_bytes());
+        let pt: Vec<u8> = (0..2 * 1024 * 1024 + 100).map(|i| (i % 251) as u8).collect();
+        let wire: Vec<u8> = pt.chunks(2 * 1024 * 1024).flat_map(|c| frame(&key, c)).collect();
+        let mock = crate::test_server::shared(crate::test_server::Mock::default());
+        mock.lock().unwrap().downloads.insert(ID.to_string(), wire);
+        let api = ApiClient::new_for_test(crate::test_server::spawn(mock.clone()).await);
+        let target = WriteTarget {
+            file_id: ID,
+            is_folder: false,
+            name_read_only: false,
+            row_key: None,
+            size_bytes: Some(pt.len() as u64),
+            chunk_count: 2,
+        };
+        assert_eq!(write_check(&api, &m, &target).await, WriteCheck::Writable);
     }
 
     /// The controls: the canonical owner key and a row's own key prove a

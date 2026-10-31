@@ -665,7 +665,25 @@ fn raw_frame_size(
     count: usize,
     chunk_size: Option<u64>,
 ) -> Result<usize, String> {
-    let total = data.len() as u64;
+    probe_first_frame_len(data, data.len() as u64, count, chunk_size, &mut |frame| {
+        opens_as_first_frame(file_key, file_id_str, pin, frame)
+    })
+}
+
+/// The frame-size search of [`raw_frame_size`] (same order, same bounds, same
+/// budget), over `data` that may be only a PREFIX of the version: `total` is
+/// the whole encrypted length, which bounds the feasible sizes, and a size past
+/// the bytes in hand is skipped. `opens` is asked whether a candidate first
+/// frame authenticates; the first size it accepts is returned. Shared by the
+/// read path and the SF-0002 write check (round 3, K2), so both find the same
+/// frame for a legacy multi-chunk file served without `X-Chunk-Size`.
+pub(crate) fn probe_first_frame_len(
+    data: &[u8],
+    total: u64,
+    count: usize,
+    chunk_size: Option<u64>,
+    opens: &mut dyn FnMut(&[u8]) -> bool,
+) -> Result<usize, String> {
     let n = count as u64;
     // total = (n-1)*F + last, 28 <= last <= F  =>  F in [ceil(total/n), (total-28)/(n-1)].
     let lo = total.div_ceil(n);
@@ -677,9 +695,7 @@ fn raw_frame_size(
     }
 
     let mut probe = FrameProbe {
-        file_key,
-        file_id_str,
-        pin,
+        opens,
         data,
         lo,
         hi,
@@ -714,11 +730,9 @@ fn raw_frame_size(
     ))
 }
 
-/// Candidate-frame-size prober for [`raw_frame_size`].
+/// Candidate-frame-size prober for [`probe_first_frame_len`].
 struct FrameProbe<'a> {
-    file_key: &'a FileKey,
-    file_id_str: &'a str,
-    pin: ExpectedChunkFormat,
+    opens: &'a mut dyn FnMut(&[u8]) -> bool,
     data: &'a [u8],
     lo: u64,
     hi: u64,
@@ -728,15 +742,16 @@ struct FrameProbe<'a> {
 }
 
 impl FrameProbe<'_> {
-    /// True if `f` is a feasible frame size (the byte count allows it) whose
-    /// first frame authenticates. Each size is tried at most once.
+    /// True if `f` is a feasible frame size (the byte count allows it, and the
+    /// bytes are in hand) whose first frame authenticates. Each size is tried
+    /// at most once.
     fn accepts(&mut self, f: u64) -> bool {
-        if f < self.lo || f > self.hi || self.tried.contains(&f) {
+        if f < self.lo || f > self.hi || f > self.data.len() as u64 || self.tried.contains(&f) {
             return false;
         }
         self.tried.push(f);
         self.spent = self.spent.saturating_add(f);
-        opens_as_first_frame(self.file_key, self.file_id_str, self.pin, &self.data[..f as usize])
+        (self.opens)(&self.data[..f as usize])
     }
 }
 
