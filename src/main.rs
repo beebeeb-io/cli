@@ -32,6 +32,8 @@ mod web_url;
 
 #[cfg(test)]
 mod readme_flags_tests;
+#[cfg(test)]
+mod test_server;
 
 // Peak-heap tracking allocator, active ONLY in test builds (`#[cfg(test)]`), so
 // the shipped `bb` binary keeps the default system allocator. Used by the
