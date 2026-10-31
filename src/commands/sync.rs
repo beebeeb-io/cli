@@ -895,7 +895,7 @@ pub async fn run(
                     folder_rel.custom_color(crate::colors::INK),
                 );
             } else {
-                let new_id = create_folder(&api, &master_key, folder_name, parent_id).await?;
+                let new_id = crate::item_id::create_owned_folder(&api, &master_key, folder_name, parent_id).await?;
                 remote_folders.insert(folder_rel.clone(), new_id);
                 println!(
                     "  {} {} {}",
@@ -1277,9 +1277,9 @@ pub async fn run(
                             Replace::InPlace(r) => Some(r.clone()),
                             Replace::NewFile => None,
                         };
-                    if let Some(old_id) = replace_id.filter(|_| replacement.is_none()) {
-                        let _ = api.trash_file(&old_id.to_string()).await;
-                    }
+                    // Not a version of the old remote: it is uploaded as a new
+                    // file and the old one trashed only AFTER that (L5).
+                    let replaced = replace_id.filter(|_| replacement.is_none());
 
                     let parent_id = match rel.rsplit_once('/') {
                         Some((parent_rel, _)) => remote_folders.get(parent_rel).copied(),
@@ -1296,8 +1296,9 @@ pub async fn run(
                         } else {
                             Uuid::new_v4()
                         },
-                        // Sync trashes the old file (above) and uploads a fresh
-                        // id, so this is always a new file — no version replace.
+                        // A version replace only when the old remote's key is
+                        // owned; otherwise a new file under a fresh id (the old
+                        // one is trashed once it exists).
                         base_version_number: replacement
                             .as_ref()
                             .map(|r| replacement_version(&r.canonical))
@@ -1319,7 +1320,7 @@ pub async fn run(
                     };
                     // Name the file in the error: "upload failed: <server
                     // message>" alone doesn't say which file to look at (flow-6).
-                    let outcome = crate::upload::stream_encrypt_upload(api, master_key, spec, progress)
+                    let outcome = upload_then_trash_replaced(api, master_key, spec, progress, replaced)
                         .await
                         .map_err(|e| {
                             if e == crate::upload::INTERRUPTED {
@@ -1849,7 +1850,8 @@ async fn run_plain_watch(
                         if !resync_remote_folders.contains_key(folder_rel) && listing_healthy(&resync_health) {
                             let pid = parent_remote_id(folder_rel, &resync_remote_folders, remote_folder_id);
                             let fname = folder_rel.rsplit('/').next().unwrap_or(folder_rel);
-                            let new_id = create_folder(&resync_api, &resync_master, fname, pid).await?;
+                            let new_id =
+                                crate::item_id::create_owned_folder(&resync_api, &resync_master, fname, pid).await?;
                             resync_remote_folders.insert(folder_rel.clone(), new_id);
                         }
                     }
@@ -2189,7 +2191,7 @@ async fn run_tui_watch(
                 if !resync_remote_folders.contains_key(folder_rel) && listing_healthy(&resync_health) {
                     let pid = parent_remote_id(folder_rel, &resync_remote_folders, remote_folder_id);
                     let fname = folder_rel.rsplit('/').next().unwrap_or(folder_rel);
-                    match create_folder(&resync_api, &resync_master, fname, pid).await {
+                    match crate::item_id::create_owned_folder(&resync_api, &resync_master, fname, pid).await {
                         Ok(new_id) => {
                             resync_remote_folders.insert(folder_rel.clone(), new_id);
                         }
@@ -3170,7 +3172,7 @@ async fn resolve_remote_folder(
                 if dry_run {
                     return Err(format!("remote folder '{seg}' does not exist (dry-run, cannot create)"));
                 }
-                let new_id = create_folder(api, master_key, seg, current_parent).await?;
+                let new_id = crate::item_id::create_owned_folder(api, master_key, seg, current_parent).await?;
                 println!(
                     "  {} {} {}",
                     "+".custom_color(crate::colors::GREEN_OK),
@@ -3183,20 +3185,6 @@ async fn resolve_remote_folder(
     }
 
     current_parent.ok_or_else(|| "path resolution failed".to_string())
-}
-
-async fn create_folder(
-    api: &ApiClient,
-    master_key: &beebeeb_core::kdf::MasterKey,
-    name: &str,
-    parent_id: Option<Uuid>,
-) -> Result<Uuid, String> {
-    let new_id = Uuid::new_v4();
-    let name_enc = beebeeb_core::encrypt::encrypt_name(master_key, &new_id.to_string(), name, None)
-        .map_err(|e| format!("encrypt folder name: {e}"))?;
-    let result = api.create_folder(&name_enc, parent_id, Some(new_id)).await?;
-    let id_str = result.get("id").and_then(|v| v.as_str()).ok_or("missing folder id")?;
-    id_str.parse().map_err(|e| format!("invalid folder id: {e}"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3408,9 +3396,9 @@ async fn do_upload(
         Replace::InPlace(r) => Some(r),
         Replace::NewFile => None,
     };
-    if let Some(old_id) = remote.as_ref().filter(|_| replacement.is_none()).map(|r| r.id) {
-        let _ = api.trash_file(&old_id.to_string()).await;
-    }
+    // Not a version of the old remote: uploaded as a new file, and the old one
+    // trashed only AFTER that (L5).
+    let replaced = remote.as_ref().filter(|_| replacement.is_none()).map(|r| r.id);
 
     let parent_id = match rel.rsplit_once('/') {
         Some((parent_rel, _)) => remote_folders.get(parent_rel).copied(),
@@ -3420,8 +3408,8 @@ async fn do_upload(
 
     let file_name = rel.rsplit('/').next().unwrap_or(rel);
     let local_path = local_dir.join(rel);
-    let new_id = if let Some(r) = replacement {
-        let spec = crate::upload::UploadSpec {
+    let spec = match replacement {
+        Some(r) => crate::upload::UploadSpec {
             path: local_path,
             file_name: file_name.into(),
             file_id: remote.as_ref().unwrap().id,
@@ -3431,13 +3419,12 @@ async fn do_upload(
             parent_id,
             concurrency: 1,
             shutdown: Arc::new(AtomicBool::new(false)),
-        };
-        crate::upload::stream_encrypt_upload(api, master_key, spec, &crate::upload::NoopProgress)
-            .await?
-            .server_id
-    } else {
-        upload_file_to(api, master_key, &local_path, file_name, parent_id).await?
+        },
+        None => new_file_spec(&local_path, file_name, parent_id),
     };
+    let new_id = upload_then_trash_replaced(api, master_key, spec, &crate::upload::NoopProgress, replaced)
+        .await?
+        .server_id;
 
     state.files.insert(
         rel.to_string(),
@@ -3613,22 +3600,16 @@ async fn do_download(
     Ok(DownloadOutcome::Downloaded)
 }
 
-/// Streaming, constant-memory upload of a single file. Thin wrapper over
-/// [`crate::upload::stream_encrypt_upload`] used by the watch loops; the main
-/// sync path calls the driver directly so it can attach progress bars. Uploads
-/// here are not tied to the main Ctrl-C flag (watch-mode Ctrl-C hard-exits), so
-/// a fresh, never-tripped shutdown flag is used.
-async fn upload_file_to(
-    api: &ApiClient,
-    master_key: Arc<beebeeb_core::kdf::MasterKey>,
-    file_path: &Path,
-    file_name: &str,
-    parent_id: Option<Uuid>,
-) -> Result<Uuid, String> {
-    let spec = crate::upload::UploadSpec {
+/// The upload of a local file as a NEW remote file: a fresh id of its own, no
+/// version replace. Used by the watch loops (`do_upload`); the main sync path
+/// builds its spec inline so it can attach progress bars. Uploads here are not
+/// tied to the main Ctrl-C flag (watch-mode Ctrl-C hard-exits), so a fresh,
+/// never-tripped shutdown flag is used.
+fn new_file_spec(file_path: &Path, file_name: &str, parent_id: Option<Uuid>) -> crate::upload::UploadSpec {
+    crate::upload::UploadSpec {
         path: file_path.to_path_buf(),
         file_name: file_name.to_string(),
-        file_id: Uuid::new_v4(),
+        file_id: crate::item_id::mint(),
         // Watch-loop uploads are always new files (fresh id) → no replace.
         base_version_number: None,
         replace_pin: None,
@@ -3637,9 +3618,28 @@ async fn upload_file_to(
         // Single in-flight file in this watch-loop wrapper → full Cli cap.
         concurrency: 1,
         shutdown: Arc::new(AtomicBool::new(false)),
-    };
-    let outcome = crate::upload::stream_encrypt_upload(api, master_key, spec, &crate::upload::NoopProgress).await?;
-    Ok(outcome.server_id)
+    }
+}
+
+/// Upload `spec`, then trash `replaced` (the old remote this upload replaces as
+/// a new file, when it is not a version of it). L13 round 2 (L5): the trash
+/// runs only once the upload returned, and the upload returns only after its
+/// init and completion both echoed this client's id (`stream_encrypt_upload`
+/// checks both). An L13 abort, or any other failure, leaves the old remote
+/// untouched: never in the trash with nothing in its place. Best effort, as
+/// before: a failed trash leaves both copies listed.
+async fn upload_then_trash_replaced(
+    api: &ApiClient,
+    master_key: Arc<beebeeb_core::kdf::MasterKey>,
+    spec: crate::upload::UploadSpec,
+    progress: &dyn crate::upload::ChunkProgress,
+    replaced: Option<Uuid>,
+) -> Result<crate::upload::UploadOutcome, String> {
+    let outcome = crate::upload::stream_encrypt_upload(api, master_key, spec, progress).await?;
+    if let Some(old_id) = replaced {
+        let _ = api.trash_file(&old_id.to_string()).await;
+    }
+    Ok(outcome)
 }
 
 async fn download_to(
@@ -4550,5 +4550,126 @@ mod tests {
         let (files, health) = walk(&api).await;
         assert_eq!(files.len(), 50_000);
         assert!(health.truncated, "a capped listing must be marked incomplete");
+    }
+}
+
+#[cfg(test)]
+mod l13_trash_after_upload_tests {
+    use super::*;
+    use crate::test_server::{Mock, Scratch, Shared, shared, spawn};
+
+    const REL: &str = "payload.bin";
+
+    /// Upload the scratch file through `do_upload` as the NEW copy of the remote
+    /// `old` (its key is derived, so it is not versioned: the old one is to be
+    /// trashed).
+    async fn upload_over(mock: Mock, s: &Scratch, old: Uuid) -> (Result<(), String>, SyncState, Shared) {
+        let (path, size, _mtime) = s.file(4096);
+        let mtime = std::fs::metadata(&path)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let local = LocalFile {
+            mtime,
+            size,
+            content_hash: compute_file_hash(&path).unwrap(),
+        };
+        let remote = RemoteFile {
+            id: old,
+            resolved: None,
+            chunk_count: 1,
+            updated_at: Utc::now(),
+            pin: Ok(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded),
+        };
+        let mock = shared(mock);
+        let api = ApiClient::new_for_test(spawn(mock.clone()).await);
+        let master = Arc::new(beebeeb_core::kdf::MasterKey::from_bytes([5u8; 32]));
+        let mut state = SyncState::default();
+        let result = do_upload(
+            &api,
+            master,
+            &s.dir,
+            REL,
+            &local,
+            Some(remote),
+            Uuid::new_v4(),
+            &HashMap::new(),
+            &mut state,
+            false,
+        )
+        .await;
+        (result, state, mock)
+    }
+
+    /// L5: the new copy's init echoes another id. The old remote is NOT
+    /// trashed, nothing is PUT, and the state keeps no entry for the path.
+    #[tokio::test]
+    async fn an_init_echo_mismatch_leaves_the_old_remote_untrashed() {
+        let s = Scratch::new("l5-init");
+        let old = Uuid::new_v4();
+        let (result, state, mock) = upload_over(
+            Mock {
+                init_echo: Some(Uuid::new_v4().to_string()),
+                ..Default::default()
+            },
+            &s,
+            old,
+        )
+        .await;
+        let err = result.expect_err("the upload aborts");
+        assert!(err.contains(crate::item_id::CHANGED_ID_MESSAGE), "{err}");
+        let m = mock.lock().unwrap();
+        assert!(m.trashed.is_empty(), "the old remote is not trashed: {:?}", m.trashed);
+        assert!(m.chunk_puts.is_empty());
+        assert!(!state.files.contains_key(REL));
+    }
+
+    /// L5: the completion answer names another item. The old remote is still
+    /// not trashed.
+    #[tokio::test]
+    async fn a_completion_echo_mismatch_leaves_the_old_remote_untrashed() {
+        let s = Scratch::new("l5-complete");
+        let old = Uuid::new_v4();
+        let (result, state, mock) = upload_over(
+            Mock {
+                complete_echo: Some(Uuid::new_v4().to_string()),
+                ..Default::default()
+            },
+            &s,
+            old,
+        )
+        .await;
+        result.expect_err("the upload aborts");
+        let m = mock.lock().unwrap();
+        assert_eq!(m.completed.len(), 1);
+        assert!(m.trashed.is_empty(), "the old remote is not trashed: {:?}", m.trashed);
+        assert!(!state.files.contains_key(REL));
+    }
+
+    /// Normal flow: the old remote is trashed, once, AFTER the new copy
+    /// completed under the client's own id, which the state records.
+    #[tokio::test]
+    async fn the_old_remote_is_trashed_only_after_the_new_copy_completed() {
+        let s = Scratch::new("l5-ok");
+        let old = Uuid::new_v4();
+        let (result, state, mock) = upload_over(Mock::default(), &s, old).await;
+        result.expect("uploads");
+        let m = mock.lock().unwrap();
+        assert_eq!(m.trashed, vec![old.to_string()]);
+        let complete = m
+            .events
+            .iter()
+            .position(|e| e.starts_with("complete:"))
+            .expect("completed");
+        let trash = m
+            .events
+            .iter()
+            .position(|e| *e == format!("trash:{old}"))
+            .expect("trashed");
+        assert!(complete < trash, "trash after completion: {:?}", m.events);
+        assert_eq!(state.files[REL].remote_id.to_string(), m.inits[0]);
     }
 }

@@ -70,7 +70,7 @@ Account-less links for uploads into your vault; crypto via core's `file_request`
 
 `bb update` — explicit check/install of the latest CLI release; bypasses the automatic-check cooldown and `BB_NO_UPDATE`, while automatic startup updates keep honoring that opt-out; Homebrew/Scoop installs stay package-manager managed.
 
-`bb speedtest` / `bb repair [--dry-run]` (re-encrypt legacy binary-UUID derivation files) / `bb completions <shell>`.
+`bb speedtest` / `bb repair [--dry-run]` (re-encrypt legacy binary-UUID derivation files as a new version of the same file id; never trashes the original) / `bb completions <shell>`.
 
 ## Upload pipeline (`src/upload.rs`)
 
@@ -78,6 +78,7 @@ Account-less links for uploads into your vault; crypto via core's `file_request`
 
 - **Replace** = versioning by file_id (`base_version_number`); sync/mount/webdav mint fresh ids (`None`). Init body sends plaintext `file_size_bytes`; `profile` sent as `"desktop"` with an explicit chunk plan (the server uses it verbatim); the driver asserts the response plan equals what it sent.
 - **Resume** (`resume.rs`): persists `(file_id, upload_session_id)` keyed by path; unchanged size+mtime skips init and re-PUTs every chunk (v2 chunk route is idempotent: `{skipped:true}`); pre-v2 entries are non-resumable.
+- **Own ids (L13, SF-0001, `item_id.rs`)**: every create (upload, folder, webdav PUT/MKCOL, mount, repair) proposes its own id and requires every init / create / completion answer to echo it byte for byte in canonical lowercase spelling (`item_id::Proposed`: a minted id must also be v4; a replace's listed row id is compared by spelling only). A mismatch fails the op with `CHANGED_ID_MESSAGE`, abandons the session it opened (by the client's id, never the echoed one) and seals nothing under the echoed id. Resume records say which write they are (`self_minted` for a create, `replaces` for a replace): a create resumes only its own, a replace only its row's; any other record is abandoned before it is cleared, and a failed abandon fails the file for that run. A completion mismatch keeps the record (the retry stays on the same id). A replaced remote is trashed only after the new copy completed (sync, mount overwrite). Tests share one loopback mock: `src/test_server.rs`.
 - Consumes core's `ChunkEncryptor` in a producer task (`spawn_blocking`) feeding a bounded `tokio::mpsc` (cap 1); constant memory (peak ≈ concurrency × ~4 × chunk_size); `expected_total_ciphertext()` = size + 28·chunk_count; `finish()` guards shrink, re-stat guards size change. Cancellation via shared `AtomicBool` + `rx.close()`. Progress via `indicatif` (amber accent, bytes only on server-confirmed chunks; `--json`/`--quiet`/non-TTY → no-op progress). Thumbnails (image/*, ≤64 MiB read) best-effort, non-fatal. `ApiClient` 300 s timeout (SSE stream 24 h). Provenance headers: `X-Beebeeb-Client: cli` + `X-Beebeeb-Client-Version: <CARGO_PKG_VERSION>` on every request (`build_client()`); the self-update checker's GitHub client intentionally does not send them.
 
 ## Server-provided names become local paths only via `src/safe_path.rs`
