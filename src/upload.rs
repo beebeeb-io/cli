@@ -1036,12 +1036,16 @@ async fn upload_attempt(
     };
     // L13 (SF-0001): the completion answer must name the same item this client
     // minted — before the thumbnail is sealed under it or the outcome reports it.
-    if let Err(e) = crate::item_id::verify_echoed_id(file_id, crate::item_id::echoed_id(&completed)) {
+    if let Err(e) = proposed(spec, file_id).verify(crate::item_id::echoed_id(&completed)) {
         // The session answered another item: end it (best effort, by the id WE
-        // minted) and drop the record, so neither this run nor a later one
-        // resumes a session the server mislabels.
+        // proposed — the server may already hold the content under it, and an
+        // abandon of a completed upload is a no-op). The resume record is KEPT
+        // (L5): it names this client's own id, so the next attempt continues or
+        // re-inits under that same id. Dropping it would make the next run mint
+        // a fresh id and upload the file again beside a copy the server may
+        // already hold — a duplicate on every pass of a daemon. Nothing is
+        // sealed under the echoed id either way.
         let _ = api.upload_abandon(&file_id_str).await;
-        crate::resume::clear(&spec.path);
         file_prog.finish(false);
         return Err(AttemptErr::Other(e.to_string()));
     }
@@ -2326,10 +2330,12 @@ mod swept_session_reinit {
         assert_eq!(m.abandons, vec![listed.to_string()], "exactly one abandon");
     }
 
-    /// A7: the completion answer names a different item. Abort, drop the resume
-    /// record (never resume a session the server mislabels), report the message.
+    /// A7 + L4 + L5: the completion answer names a different item. Abort with
+    /// the message and end the session once, by our id. The resume record is
+    /// KEPT, so the next run stays on this client's own id: it never mints a
+    /// fresh one and uploads the file a second time beside the first.
     #[tokio::test]
-    async fn completion_echo_of_a_different_id_aborts() {
+    async fn completion_echo_of_a_different_id_aborts_and_keeps_the_retry_on_our_id() {
         let s = Scratch::new("a7-complete");
         let (path, size, mtime) = s.file(64 * 1024);
         let mine = Uuid::new_v4();
@@ -2340,17 +2346,37 @@ mod swept_session_reinit {
 
         let err = run(&state, spec(&path, mine)).await.expect_err("must abort");
         assert_eq!(err, CHANGED_ID_MESSAGE);
-        let m = state.lock().unwrap();
-        assert_eq!(m.completed.len(), 1, "the session was completed before the check");
+        {
+            let m = state.lock().unwrap();
+            assert_eq!(m.completed.len(), 1, "the session was completed before the check");
+            assert_eq!(
+                m.abandons,
+                vec![mine.to_string()],
+                "the mislabelled session is ended exactly once, by our id"
+            );
+        }
         assert_eq!(
-            m.abandons,
-            vec![mine.to_string()],
-            "the mislabelled session is ended exactly once, by our id"
+            crate::resume::resumable_upload(&path, size, mtime).map(|p| p.file_id),
+            Some(mine),
+            "the record still names this client's id"
+        );
+
+        // The next run (the server answers honestly now) gets a fresh id from
+        // its caller, as every sync pass does. It must not use it.
+        state.lock().unwrap().complete_echo = None;
+        let fresh = Uuid::new_v4();
+        let outcome = run(&state, spec(&path, fresh)).await.expect("the retry completes");
+        assert_eq!(outcome.server_id, mine);
+        let m = state.lock().unwrap();
+        assert!(
+            m.inits.iter().all(|id| *id == mine.to_string()),
+            "every init is under our first id, none under a new one: {:?}",
+            m.inits
         );
         assert_eq!(
             crate::resume::resumable_upload(&path, size, mtime),
             None,
-            "a session the answer mislabels must not stay resumable"
+            "cleared on success"
         );
     }
 
