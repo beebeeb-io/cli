@@ -231,11 +231,17 @@ impl Fixture {
         let key = beebeeb_core::kdf::derive_file_key(&master(), uuid.as_bytes());
         f.plaintext = b"an old CLI upload, stored as a JSON blob".to_vec();
         f.stride = f.plaintext.len() as u64;
-        f.frames = vec![serde_json::to_vec(&beebeeb_core::encrypt::encrypt_chunk(&key, &f.plaintext).unwrap()).unwrap()];
+        f.frames =
+            vec![serde_json::to_vec(&beebeeb_core::encrypt::encrypt_chunk(&key, &f.plaintext).unwrap()).unwrap()];
         let mut r = row(FILE, Some(ROOT), "legacy.txt", false, false);
         r["name_encrypted"] = json!(
-            beebeeb_core::encrypt::encrypt_name_for(&key, "legacy.txt", Some("text/plain"), ExpectedChunkFormat::Unrecorded)
-                .unwrap()
+            beebeeb_core::encrypt::encrypt_name_for(
+                &key,
+                "legacy.txt",
+                Some("text/plain"),
+                ExpectedChunkFormat::Unrecorded
+            )
+            .unwrap()
         );
         r["size_bytes"] = json!(f.plaintext.len());
         r["chunk_count"] = json!(1);

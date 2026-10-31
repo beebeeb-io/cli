@@ -1590,10 +1590,10 @@ mod fuse_impl {
                 _ => None,
             };
 
-            if let Err(e) = self.rt.block_on(
-                self.api
-                    .move_file(file_id, new_name_enc.as_deref(), new_parent_file_id),
-            ) {
+            if let Err(e) = self
+                .rt
+                .block_on(self.api.move_file(file_id, new_name_enc.as_deref(), new_parent_file_id))
+            {
                 eprintln!("[mount] rename move_file: {e}");
                 return Err(Errno::EIO);
             }
@@ -2642,8 +2642,10 @@ mod fuse_impl {
         fn setup(mut mock: Mock) -> (BeebeebFsState, Shared) {
             for id in [OK_ID, SRC_ID] {
                 let key = beebeeb_core::kdf::derive_file_key(&master(), id.as_bytes());
-                mock.downloads
-                    .insert(id.to_string(), beebeeb_core::encrypt::encrypt_chunk_raw(&key, b"").unwrap());
+                mock.downloads.insert(
+                    id.to_string(),
+                    beebeeb_core::encrypt::encrypt_chunk_raw(&key, b"").unwrap(),
+                );
             }
             let mock = shared(mock);
             let url = spawn_on_own_thread(mock.clone());
@@ -2778,7 +2780,10 @@ mod fuse_impl {
 
             mock.lock().unwrap().move_status = Some(500);
             assert_eq!(rename(&mut fs, "ok.txt"), Err(Errno::EIO));
-            assert!(mock.lock().unwrap().trashed.is_empty(), "a failed move trashed the target");
+            assert!(
+                mock.lock().unwrap().trashed.is_empty(),
+                "a failed move trashed the target"
+            );
 
             mock.lock().unwrap().move_status = None;
             rename(&mut fs, "ok.txt").expect("a rename onto a writable row");

@@ -579,7 +579,8 @@ pub async fn write_check(api: &ApiClient, master: &MasterKey, target: &WriteTarg
     if target.is_folder || target.chunk_count == 0 {
         return WriteCheck::Writable;
     }
-    let probe = |wide| crate::download::download_frame_prefix(api, target.file_id, target.size_bytes, target.chunk_count, wide);
+    let probe =
+        |wide| crate::download::download_frame_prefix(api, target.file_id, target.size_bytes, target.chunk_count, wide);
     let Ok((body, chunk_size, complete)) = probe(false).await else {
         return WriteCheck::Unknown;
     };
@@ -686,11 +687,18 @@ fn json_blob_opens(master: &MasterKey, file_id: &str, row_key: Option<&FileKey>,
     let Ok(uuid) = uuid::Uuid::parse_str(file_id) else {
         return false;
     };
-    if crate::crypto::first_frame_opens(&beebeeb_core::kdf::derive_file_key(master, file_id.as_bytes()), file_id, frame)
-    {
+    if crate::crypto::first_frame_opens(
+        &beebeeb_core::kdf::derive_file_key(master, file_id.as_bytes()),
+        file_id,
+        frame,
+    ) {
         return true;
     }
-    if crate::crypto::first_frame_opens(&beebeeb_core::kdf::derive_file_key(master, uuid.as_bytes()), file_id, frame) {
+    if crate::crypto::first_frame_opens(
+        &beebeeb_core::kdf::derive_file_key(master, uuid.as_bytes()),
+        file_id,
+        frame,
+    ) {
         return true;
     }
     row_key.is_some_and(|key| crate::crypto::first_frame_opens(key, file_id, frame))
@@ -925,12 +933,28 @@ mod write_check_tests {
         }
         let item = FileKey::from_bytes([5u8; 32]);
         let shared = json(&item, pt);
-        assert_eq!(check(Some(&item), &shared, true), WriteCheck::Writable, "the row's own key");
-        assert_eq!(check(None, &shared, true), WriteCheck::Unknown, "no write-capable key opens it");
+        assert_eq!(
+            check(Some(&item), &shared, true),
+            WriteCheck::Writable,
+            "the row's own key"
+        );
+        assert_eq!(
+            check(None, &shared, true),
+            WriteCheck::Unknown,
+            "no write-capable key opens it"
+        );
         let upper = json(&derive_file_key(&m, ID.to_ascii_uppercase().as_bytes()), pt);
-        assert_eq!(check(None, &upper, true), WriteCheck::Unknown, "never the repair convention");
+        assert_eq!(
+            check(None, &upper, true),
+            WriteCheck::Unknown,
+            "never the repair convention"
+        );
         let binary = json(&derive_file_key(&m, uuid.as_bytes()), pt);
-        assert_eq!(check(None, &binary[..binary.len() / 2], false), WriteCheck::Unknown, "cut short");
+        assert_eq!(
+            check(None, &binary[..binary.len() / 2], false),
+            WriteCheck::Unknown,
+            "cut short"
+        );
 
         // Multi-chunk: blob 0 followed by the rest of the version.
         let key = derive_file_key(&m, uuid.as_bytes());

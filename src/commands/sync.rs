@@ -3872,7 +3872,10 @@ mod tests {
              and sync uploads that as a new file."
         );
         assert_eq!(incomplete_summary(0, 0, 0, 1), "1 read-only edit kept");
-        assert_eq!(incomplete_summary(1, 0, 0, 2), "1 failed \u{00b7} 2 read-only edits kept");
+        assert_eq!(
+            incomplete_summary(1, 0, 0, 2),
+            "1 failed \u{00b7} 2 read-only edits kept"
+        );
     }
 
     /// Make a unique scratch directory under the system temp dir (no extra

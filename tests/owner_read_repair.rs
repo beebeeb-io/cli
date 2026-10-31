@@ -517,7 +517,11 @@ async fn a_json_blob_row_is_replaceable() {
     let out = h
         .run(&["push", local.to_str().unwrap(), "--folder", "Shared", "--replace"])
         .await;
-    assert!(out.status.success(), "a JSON-blob row must be replaceable: {}", stderr(&out));
+    assert!(
+        out.status.success(),
+        "a JSON-blob row must be replaceable: {}",
+        stderr(&out)
+    );
     {
         let f = h.state.lock().unwrap();
         assert_eq!(f.upload_request["file_id"], FILE);
@@ -544,10 +548,18 @@ async fn a_json_blob_row_syncs_an_edit() {
     let out = h
         .run(&["sync", dir.to_str().unwrap(), "/Shared", "--once", "--rehash"])
         .await;
-    assert!(out.status.success(), "a JSON-blob row must sync an edit: {}", stderr(&out));
+    assert!(
+        out.status.success(),
+        "a JSON-blob row must sync an edit: {}",
+        stderr(&out)
+    );
     assert_eq!(h.count("POST", "/api/v1/uploads/init"), 1);
     let f = h.state.lock().unwrap();
-    assert_ne!(f.upload_request["file_id"].as_str(), Some(FILE), "a new file, as sync does for owner rows");
+    assert_ne!(
+        f.upload_request["file_id"].as_str(),
+        Some(FILE),
+        "a new file, as sync does for owner rows"
+    );
     let order: Vec<_> = f
         .requests
         .iter()
@@ -561,5 +573,9 @@ async fn a_json_blob_row_syncs_an_edit() {
             }
         })
         .collect();
-    assert_eq!(order, ["complete", "trash"], "the old row is trashed after the new one completed");
+    assert_eq!(
+        order,
+        ["complete", "trash"],
+        "the old row is trashed after the new one completed"
+    );
 }
