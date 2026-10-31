@@ -105,7 +105,7 @@ pub fn echoed_id(answer: &serde_json::Value) -> Option<&str> {
     answer.get("id").and_then(|v| v.as_str())
 }
 
-/// Create one owner folder named under `new_id` (minted by the caller), require
+/// Create one owner folder: mint its id here, seal the name under it, require
 /// the answer to echo that same id, and return it. The name is sealed under the
 /// client's id, never under the one the answer carries.
 pub async fn create_owned_folder(
@@ -113,12 +113,12 @@ pub async fn create_owned_folder(
     master_key: &beebeeb_core::kdf::MasterKey,
     name: &str,
     parent: Option<Uuid>,
-    new_id: Uuid,
 ) -> Result<Uuid, String> {
+    let new_id = mint();
     let name_encrypted = beebeeb_core::encrypt::encrypt_name(master_key, &new_id.to_string(), name, None)
         .map_err(|e| format!("failed to encrypt folder name: {e}"))?;
     let answer = api.create_folder(&name_encrypted, parent, Some(new_id)).await?;
-    verify_echoed_id(new_id, echoed_id(&answer)).map_err(|e| e.to_string())
+    verify_minted_echo(new_id, echoed_id(&answer)).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -244,5 +244,42 @@ mod tests {
         assert_eq!(echoed_id(&serde_json::json!({"id": "abc"})), Some("abc"));
         assert_eq!(echoed_id(&serde_json::json!({"file_id": "abc"})), None);
         assert_eq!(echoed_id(&serde_json::json!({"id": 3})), None);
+    }
+
+    fn master() -> beebeeb_core::kdf::MasterKey {
+        beebeeb_core::kdf::MasterKey::from_bytes([0u8; 32])
+    }
+
+    /// A8 (every folder create: mkdir, push, sync, webdav MKCOL): the answer
+    /// echoes a different id. The create aborts with the plain message and no
+    /// id is returned for use as a parent.
+    #[tokio::test]
+    async fn folder_create_echoing_a_different_id_aborts() {
+        let other = Uuid::new_v4();
+        let state = crate::test_server::shared(crate::test_server::Mock {
+            folder_echo: Some(other.to_string()),
+            ..Default::default()
+        });
+        let api = crate::api::ApiClient::new_for_test(crate::test_server::spawn(state.clone()).await);
+        let err = create_owned_folder(&api, &master(), "Folder", None)
+            .await
+            .expect_err("must abort");
+        assert_eq!(err, CHANGED_ID_MESSAGE);
+        let sent = state.lock().unwrap().folder_requests.clone();
+        assert_eq!(sent.len(), 1, "one create");
+        assert_ne!(sent[0], other.to_string(), "the client proposed its own id");
+    }
+
+    /// Normal flow: the client mints a canonical v4 id, sends it, and the
+    /// answer's echo of it is what the caller gets.
+    #[tokio::test]
+    async fn folder_create_echoing_the_clients_id_succeeds() {
+        let state = crate::test_server::shared(crate::test_server::Mock::default());
+        let api = crate::api::ApiClient::new_for_test(crate::test_server::spawn(state.clone()).await);
+        let id = create_owned_folder(&api, &master(), "Folder", None)
+            .await
+            .expect("succeeds");
+        assert_eq!(id.get_version(), Some(uuid::Version::Random));
+        assert_eq!(state.lock().unwrap().folder_requests, vec![id.hyphenated().to_string()]);
     }
 }

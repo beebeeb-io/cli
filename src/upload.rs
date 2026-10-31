@@ -843,8 +843,8 @@ async fn upload_attempt(
     //    resume the session already exists, so reuse the stored session id and
     //    skip straight to the pipeline.
     //
-    //    `upload_session_id` keys the chunk PUTs + complete; `server_id` is the
-    //    durable file id returned by init (equals `file_id` on replace).
+    //    `upload_session_id` keys the chunk PUTs + complete. L13: the durable
+    //    file id is the one this client proposed; init must echo it exactly.
     //
     //    Task 2173: when the server offers the direct upload (discovery says `object-upload-v1`; not forced
     //    off with `BB_TRANSPORT=api`; none given up for this file in this run or in this process within the
@@ -854,7 +854,7 @@ async fn upload_attempt(
     //
     //    The capabilities are asked only when the answer is used: a resumed API session has no use for it (and a
     //    slow capabilities route costs up to 15 s a try).
-    let (upload_session_id, _server_id, direct) = if let Some(sid) = resumed_session {
+    let (upload_session_id, direct) = if let Some(sid) = resumed_session {
         let direct = if resumed_direct {
             match api.direct_upload_offer().await {
                 DirectOffer::Offered(discovery) => Some(discovery),
@@ -884,7 +884,7 @@ async fn upload_attempt(
         } else {
             None
         };
-        (sid.to_string(), file_id_str.clone(), direct)
+        (sid.to_string(), direct)
     } else {
         // The STORED-id recovery init (a re-init after a swept session) gets a
         // bounded, backed-off retry on a `5xx` before anything else runs: a
@@ -2276,8 +2276,9 @@ mod swept_session_reinit {
 
     use crate::item_id::CHANGED_ID_MESSAGE;
 
-    /// A7: a new upload's init answers a different id. Abort BEFORE any chunk
-    /// is PUT, nothing completed, nothing abandoned, and the message is plain.
+    /// A7 + L4: a new upload's init answers a different id. Abort BEFORE any
+    /// chunk is PUT, nothing completed, the session it opened ended once by our
+    /// id, and the message is plain.
     #[tokio::test]
     async fn init_echo_of_a_different_id_aborts_before_any_chunk_put() {
         let s = Scratch::new("a7-init");
@@ -2306,8 +2307,9 @@ mod swept_session_reinit {
         );
     }
 
-    /// A7 for a replace: the listed row's id is sent, and a different echo
-    /// aborts before any chunk PUT (nothing new is sealed under the echo).
+    /// A7 + L4 for a replace: the listed row's id is sent, and a different echo
+    /// aborts before any chunk PUT (nothing new is sealed under the echo); the
+    /// session it opened is ended once, by the listed row's id.
     #[tokio::test]
     async fn replace_init_echo_of_a_different_id_aborts_before_any_chunk_put() {
         let s = Scratch::new("a7-replace");

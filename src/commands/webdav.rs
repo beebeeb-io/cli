@@ -848,19 +848,10 @@ async fn mkcol_response(state: &Arc<DavState>, path: &str) -> Response {
         return (StatusCode::METHOD_NOT_ALLOWED, "already exists").into_response();
     }
 
-    // Encrypt folder name — needs a UUID key. Use nil UUID for folders (consistent
-    // with the server's convention: folder name is encrypted with the folder's own UUID).
-    // L13 (SF-0001): this client mints the folder id and seals the name under
-    // it; a different echo aborts before the folder is listed or written into.
-    match crate::item_id::create_owned_folder(
-        &state.api,
-        &state.master_key,
-        &folder_name,
-        parent_id,
-        uuid::Uuid::new_v4(),
-    )
-    .await
-    {
+    // The folder name is sealed under the folder's own id. L13 (SF-0001): this
+    // client mints that id; a different echo aborts before the folder is listed
+    // or written into.
+    match crate::item_id::create_owned_folder(&state.api, &state.master_key, &folder_name, parent_id).await {
         Ok(_) => {
             // Invalidate parent directory cache
             invalidate_cache(state, &normalise_cache_key(parent_path)).await;
@@ -1622,13 +1613,9 @@ mod windows_hint_tests {
 #[cfg(test)]
 mod item_id_echo_tests {
     use super::*;
-    use axum::routing::{get, post};
-    use axum::{Json, Router};
-    use serde_json::json;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use crate::test_server::{Mock, Shared, shared, spawn};
 
-    fn state_for(base: String, chunks: Arc<AtomicUsize>) -> Arc<DavState> {
-        let _ = &chunks;
+    fn state_for(base: String) -> Arc<DavState> {
         Arc::new(DavState {
             api: ApiClient::new_for_test(base),
             master_key: beebeeb_core::kdf::MasterKey::from_bytes([0; 32]),
@@ -1642,162 +1629,87 @@ mod item_id_echo_tests {
         })
     }
 
+    async fn dav(mock: Mock) -> (Arc<DavState>, Shared) {
+        let mock = shared(mock);
+        (state_for(spawn(mock.clone()).await), mock)
+    }
+
+    async fn body_text(response: Response) -> String {
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        String::from_utf8_lossy(&body).into_owned()
+    }
+
     /// A8 (webdav MKCOL): a folder create whose answer echoes a different id
     /// aborts the request instead of listing/writing into it.
     #[tokio::test]
     async fn mkcol_echoing_a_different_id_aborts() {
         let other = Uuid::new_v4();
-        let app = Router::new()
-            .route(
-                "/api/v1/files",
-                get(|| async { (StatusCode::NOT_FOUND, Json(json!({"error": "none"}))) }),
-            )
-            .route(
-                "/api/v1/files/folder",
-                post(move |Json(body): Json<serde_json::Value>| async move {
-                    // The client's id was proposed; answer another one.
-                    assert!(body.get("folder_id").is_some(), "the client must propose its own id");
-                    Json(json!({"id": other}))
-                }),
-            );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        let state = state_for(base, Arc::new(AtomicUsize::new(0)));
+        let (state, mock) = dav(Mock {
+            folder_echo: Some(other.to_string()),
+            ..Default::default()
+        })
+        .await;
         let response = mkcol_response(&state, "/Folder").await;
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
-        assert_eq!(String::from_utf8_lossy(&body), crate::item_id::CHANGED_ID_MESSAGE);
+        assert_eq!(body_text(response).await, crate::item_id::CHANGED_ID_MESSAGE);
+        let m = mock.lock().unwrap();
+        assert_eq!(m.folder_requests.len(), 1);
+        assert_ne!(
+            m.folder_requests[0],
+            other.to_string(),
+            "the client proposed its own id"
+        );
     }
 
-    /// A7 (webdav PUT): the upload init answers a different id — abort before a
-    /// single chunk is PUT under it, and end the session it opened (once).
+    /// A7 + L4 (webdav PUT): the upload init answers a different id. Abort
+    /// before a single chunk is PUT under it, and end the session it opened,
+    /// once, by the id this client minted.
     #[tokio::test]
     async fn put_init_echoing_a_different_id_aborts_before_any_chunk() {
-        let chunks = Arc::new(AtomicUsize::new(0));
-        let counted = Arc::clone(&chunks);
-        let abandons: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let abandoned = Arc::clone(&abandons);
-        let app = Router::new()
-            .route(
-                "/api/v1/files",
-                get(|| async { (StatusCode::NOT_FOUND, Json(json!({"error": "none"}))) }),
-            )
-            .route(
-                "/api/v1/uploads/init",
-                post(|Json(body): Json<serde_json::Value>| async move {
-                    assert!(body.get("file_id").is_some(), "the client must propose its own id");
-                    Json(json!({
-                        "upload_session_id": Uuid::new_v4(),
-                        "file_id": Uuid::new_v4(),
-                        "chunk_size_bytes": body.get("chunk_size_bytes").cloned().unwrap_or(json!(0)),
-                        "chunk_count": body.get("chunk_count").cloned().unwrap_or(json!(0)),
-                    }))
-                }),
-            )
-            .route(
-                "/api/v1/files/:id/upload/abandon",
-                post(move |axum::extract::Path(id): axum::extract::Path<String>| {
-                    let abandoned = Arc::clone(&abandoned);
-                    async move {
-                        abandoned.lock().await.push(id);
-                        Json(json!({"ok": true}))
-                    }
-                }),
-            )
-            .route(
-                "/api/v1/uploads/:session/chunks/:idx",
-                axum::routing::put(move |_b: axum::body::Bytes| {
-                    let counted = Arc::clone(&counted);
-                    async move {
-                        counted.fetch_add(1, Ordering::SeqCst);
-                        Json(json!({"ok": true}))
-                    }
-                }),
-            );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        let state = state_for(base, chunks.clone());
+        let (state, mock) = dav(Mock {
+            init_echo: Some(Uuid::new_v4().to_string()),
+            ..Default::default()
+        })
+        .await;
         let response = put_response(&state, "/file.txt", b"hello".to_vec(), None).await;
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
-        assert_eq!(String::from_utf8_lossy(&body), crate::item_id::CHANGED_ID_MESSAGE);
-        assert_eq!(
-            chunks.load(Ordering::SeqCst),
-            0,
-            "no chunk may be PUT under the echoed id"
-        );
-        assert_eq!(abandons.lock().await.len(), 1, "exactly one abandon");
+        assert_eq!(body_text(response).await, crate::item_id::CHANGED_ID_MESSAGE);
+        let m = mock.lock().unwrap();
+        assert_eq!(m.inits.len(), 1);
+        assert!(m.chunk_puts.is_empty(), "no chunk may be PUT under the echoed id");
+        assert!(m.completed.is_empty());
+        assert_eq!(m.abandons, m.inits, "exactly one abandon, by the id this client minted");
     }
 
-    /// A7 (webdav PUT): the completion answer names another item — abort and end
-    /// the session it opened, once, by the id this client chose.
+    /// L4 (webdav PUT): the completion answer names another item. Abort and end
+    /// the session it opened, once, by the id this client minted.
     #[tokio::test]
     async fn put_completion_echoing_a_different_id_abandons_once() {
-        let abandons: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let abandoned = Arc::clone(&abandons);
-        let proposed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let sent = Arc::clone(&proposed);
-        let app = Router::new()
-            .route(
-                "/api/v1/files",
-                get(|| async { (StatusCode::NOT_FOUND, Json(json!({"error": "none"}))) }),
-            )
-            .route(
-                "/api/v1/uploads/init",
-                post(move |Json(body): Json<serde_json::Value>| {
-                    let sent = Arc::clone(&sent);
-                    async move {
-                        let mine = body.get("file_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                        sent.lock().await.push(mine.clone());
-                        Json(json!({
-                            "upload_session_id": Uuid::new_v4(),
-                            "file_id": mine,
-                            "chunk_size_bytes": body.get("chunk_size_bytes").cloned().unwrap_or(json!(0)),
-                            "chunk_count": body.get("chunk_count").cloned().unwrap_or(json!(0)),
-                        }))
-                    }
-                }),
-            )
-            .route(
-                "/api/v1/files/:id/upload/abandon",
-                post(move |axum::extract::Path(id): axum::extract::Path<String>| {
-                    let abandoned = Arc::clone(&abandoned);
-                    async move {
-                        abandoned.lock().await.push(id);
-                        Json(json!({"ok": true}))
-                    }
-                }),
-            )
-            .route(
-                "/api/v1/uploads/:session/chunks/:idx",
-                axum::routing::put(|_b: axum::body::Bytes| async { Json(json!({"ok": true})) }),
-            )
-            .route(
-                "/api/v1/uploads/:session/complete",
-                post(|_b: axum::body::Bytes| async { Json(json!({"id": Uuid::new_v4()})) }),
-            );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        let state = state_for(base, Arc::new(AtomicUsize::new(0)));
+        let (state, mock) = dav(Mock {
+            complete_echo: Some(Uuid::new_v4().to_string()),
+            ..Default::default()
+        })
+        .await;
         let response = put_response(&state, "/file.txt", b"hello".to_vec(), None).await;
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
-        assert_eq!(String::from_utf8_lossy(&body), crate::item_id::CHANGED_ID_MESSAGE);
-        let proposed = proposed.lock().await.clone();
-        assert_eq!(proposed.len(), 1);
-        assert_eq!(
-            *abandons.lock().await,
-            proposed,
-            "the session is ended by the id this client chose"
-        );
+        assert_eq!(body_text(response).await, crate::item_id::CHANGED_ID_MESSAGE);
+        let m = mock.lock().unwrap();
+        assert_eq!(m.inits.len(), 1);
+        assert_eq!(m.completed.len(), 1, "the check runs on the completion answer");
+        assert_eq!(m.abandons, m.inits, "exactly one abandon, by the id this client minted");
+    }
+
+    /// Normal flow: every answer echoes the minted id; nothing is abandoned.
+    #[tokio::test]
+    async fn put_echoing_the_clients_id_creates_the_file() {
+        let (state, mock) = dav(Mock::default()).await;
+        let response = put_response(&state, "/file.txt", b"hello".to_vec(), None).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let m = mock.lock().unwrap();
+        assert_eq!(m.inits.len(), 1);
+        let minted = Uuid::parse_str(&m.inits[0]).expect("a uuid was proposed");
+        assert_eq!(minted.get_version(), Some(uuid::Version::Random));
+        assert_eq!(m.completed.len(), 1);
+        assert!(m.abandons.is_empty());
     }
 }

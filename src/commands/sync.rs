@@ -895,7 +895,7 @@ pub async fn run(
                     folder_rel.custom_color(crate::colors::INK),
                 );
             } else {
-                let new_id = create_folder(&api, &master_key, folder_name, parent_id).await?;
+                let new_id = crate::item_id::create_owned_folder(&api, &master_key, folder_name, parent_id).await?;
                 remote_folders.insert(folder_rel.clone(), new_id);
                 println!(
                     "  {} {} {}",
@@ -1841,7 +1841,8 @@ async fn run_plain_watch(
                         if !resync_remote_folders.contains_key(folder_rel) && listing_healthy(&resync_health) {
                             let pid = parent_remote_id(folder_rel, &resync_remote_folders, remote_folder_id);
                             let fname = folder_rel.rsplit('/').next().unwrap_or(folder_rel);
-                            let new_id = create_folder(&resync_api, &resync_master, fname, pid).await?;
+                            let new_id =
+                                crate::item_id::create_owned_folder(&resync_api, &resync_master, fname, pid).await?;
                             resync_remote_folders.insert(folder_rel.clone(), new_id);
                         }
                     }
@@ -2171,7 +2172,7 @@ async fn run_tui_watch(
                 if !resync_remote_folders.contains_key(folder_rel) && listing_healthy(&resync_health) {
                     let pid = parent_remote_id(folder_rel, &resync_remote_folders, remote_folder_id);
                     let fname = folder_rel.rsplit('/').next().unwrap_or(folder_rel);
-                    match create_folder(&resync_api, &resync_master, fname, pid).await {
+                    match crate::item_id::create_owned_folder(&resync_api, &resync_master, fname, pid).await {
                         Ok(new_id) => {
                             resync_remote_folders.insert(folder_rel.clone(), new_id);
                         }
@@ -3152,7 +3153,7 @@ async fn resolve_remote_folder(
                 if dry_run {
                     return Err(format!("remote folder '{seg}' does not exist (dry-run, cannot create)"));
                 }
-                let new_id = create_folder(api, master_key, seg, current_parent).await?;
+                let new_id = crate::item_id::create_owned_folder(api, master_key, seg, current_parent).await?;
                 println!(
                     "  {} {} {}",
                     "+".custom_color(crate::colors::GREEN_OK),
@@ -3165,18 +3166,6 @@ async fn resolve_remote_folder(
     }
 
     current_parent.ok_or_else(|| "path resolution failed".to_string())
-}
-
-async fn create_folder(
-    api: &ApiClient,
-    master_key: &beebeeb_core::kdf::MasterKey,
-    name: &str,
-    parent_id: Option<Uuid>,
-) -> Result<Uuid, String> {
-    // L13 (SF-0001): this client mints the id, seals the name under it, and
-    // requires the answer to echo it; a different id aborts before it is used
-    // as a parent or anything is written into it.
-    crate::item_id::create_owned_folder(api, master_key, name, parent_id, Uuid::new_v4()).await
 }
 
 #[allow(clippy::too_many_arguments)]
