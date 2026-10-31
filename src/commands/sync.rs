@@ -949,6 +949,9 @@ pub async fn run(
     // Uploads that errored (not Ctrl-C). Together with `conflicts` this decides
     // whether a one-shot pass may report "synced" and exit 0.
     let mut failed = listing_health.unreadable + u32::from(listing_health.truncated);
+    // SF-0002 r3 (K6): local edits of read-only rows, kept here and reported as
+    // a notice (not a failure). They still leave the pass incomplete.
+    let mut read_only_kept = 0u32;
 
     // ── Phase 1: classify each file into an action ─────────────────────────
     enum SyncAction {
@@ -1273,6 +1276,9 @@ pub async fn run(
                     // this pass; the next pass asks again.
                     let replacement =
                         match replace_decision(api, &master_key, resolved.as_ref(), replace_id.is_some()).await {
+                            Replace::Skip(why) if why == crate::crypto::OWNER_REPAIR_READ_ONLY => {
+                                return Err(format!("{READ_ONLY_KEPT}{rel}"));
+                            }
                             Replace::Skip(why) => return Err(format!("{rel}: {why}")),
                             Replace::InPlace(r) => Some(r.clone()),
                             Replace::NewFile => None,
@@ -1362,6 +1368,10 @@ pub async fn run(
                 }
                 Err(e) if e == crate::upload::INTERRUPTED => {
                     interrupted_count += 1;
+                }
+                Err(e) if e.starts_with(READ_ONLY_KEPT) => {
+                    print_notice(&read_only_notice(&e[READ_ONLY_KEPT.len()..]));
+                    read_only_kept += 1;
                 }
                 Err(e) => {
                     eprintln!("  {} upload failed: {}", "!".custom_color(crate::colors::RED_ERR), e);
@@ -1518,13 +1528,13 @@ pub async fn run(
     // A one-shot run (`--once`, json/quiet, …) exits 3 so scripts and cron jobs
     // notice (flow-6: it used to print "✓ synced" and exit 0). A dry run only
     // previews, and the watch loop keeps retrying, so neither fails here.
-    let incomplete = failed > 0 || conflicts > 0 || held_back > 0 || delete_refused;
+    let incomplete = failed > 0 || conflicts > 0 || held_back > 0 || read_only_kept > 0 || delete_refused;
     let incomplete_err = || {
         crate::exit::with_code(
             crate::exit::INCOMPLETE,
             format!(
                 "sync incomplete: {} \u{2014} fix the cause and re-run{}",
-                match incomplete_summary(failed, conflicts, held_back) {
+                match incomplete_summary(failed, conflicts, held_back, read_only_kept) {
                     s if s.is_empty() && delete_refused => "--delete refused on a changed remote folder".to_string(),
                     s => s,
                 },
@@ -1534,6 +1544,8 @@ pub async fn run(
                     " (`--allow-mass-delete` confirms the held-back removals)"
                 } else if conflicts > 0 {
                     " (`--force` overwrites conflicts with the local copy)"
+                } else if read_only_kept > 0 {
+                    " (save each read-only file's edit under a new name; sync uploads it as a new file)"
                 } else {
                     ""
                 }
@@ -1551,6 +1563,7 @@ pub async fn run(
             "conflicts": conflicts,
             "deleted": deletes,
             "held_back": held_back,
+            "read_only_kept": read_only_kept,
             "skipped": skipped,
             "index_written": index_report.written,
             "index_deferred": index_report.deferred,
@@ -1619,6 +1632,12 @@ pub async fn run(
         parts.push(format!(
             "{}",
             format!("{held_back} held back").custom_color(crate::colors::AMBER)
+        ));
+    }
+    if read_only_kept > 0 {
+        parts.push(format!(
+            "{}",
+            format!("{read_only_kept} read-only").custom_color(crate::colors::AMBER)
         ));
     }
     if deletes > 0 {
@@ -1952,6 +1971,9 @@ async fn run_plain_watch(
                                 {
                                     // SF-0002: a read-only or unchecked row is left as it is and
                                     // asked again next pass; it does not end the watch.
+                                    Err(e) if e == crate::crypto::OWNER_REPAIR_READ_ONLY => {
+                                        print_notice(&read_only_notice(rel));
+                                    }
                                     Err(e) if crate::owned_keys::is_write_refusal(&e) => {
                                         eprintln!("  {} {rel}: {e}", "!".custom_color(crate::colors::AMBER));
                                     }
@@ -2319,6 +2341,16 @@ async fn run_tui_watch(
                                     size: l.size,
                                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                                 }));
+                            }
+                            // SF-0002 r3 (K6): a read-only row's edit is kept, not failed.
+                            Err(e) if e == crate::crypto::OWNER_REPAIR_READ_ONLY => {
+                                let _ = sync_tx.send(TuiEvent::SyncUpdate(SyncFileEvent {
+                                    status: FileEventStatus::Skipped,
+                                    filename: file_name,
+                                    size: l.size,
+                                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                                }));
+                                let _ = sync_tx.send(TuiEvent::SyncNotice(read_only_notice(rel)));
                             }
                             Err(e) => {
                                 let _ = sync_tx.send(TuiEvent::SyncUpdate(SyncFileEvent {
@@ -3094,10 +3126,14 @@ fn parent_remote_id(rel: &str, folders: &HashMap<String, Uuid>, root_id: Uuid) -
 }
 
 /// "1 failed · 2 conflicts" — the counts a non-clean sync pass reports.
-fn incomplete_summary(failed: u32, conflicts: u32, held_back: u32) -> String {
+fn incomplete_summary(failed: u32, conflicts: u32, held_back: u32, read_only_kept: u32) -> String {
     let mut parts = Vec::new();
     if failed > 0 {
         parts.push(format!("{failed} failed"));
+    }
+    if read_only_kept > 0 {
+        let s = if read_only_kept == 1 { "" } else { "s" };
+        parts.push(format!("{read_only_kept} read-only edit{s} kept"));
     }
     if held_back > 0 {
         parts.push(format!(
@@ -3313,6 +3349,20 @@ async fn walk_remote(
     }
 
     Ok(())
+}
+
+/// Marks a pass upload that left a read-only row's edit local (SF-0002 r3 K6):
+/// the upload result is `Err(READ_ONLY_KEPT + rel)`, reported as a notice.
+const READ_ONLY_KEPT: &str = "\u{0}sf-0002-read-only-kept\u{0}";
+
+/// What sync says when it keeps a local edit of a read-only (SF-0002) row: a
+/// notice, not a failure, with what the user can do. Every sync path (the pass,
+/// the plain watch loop, the TUI) says exactly this.
+fn read_only_notice(rel: &str) -> String {
+    format!(
+        "{rel}: {} Your edit stays on this computer: save it under a new name and sync uploads that as a new file.",
+        crate::crypto::OWNER_REPAIR_READ_ONLY
+    )
 }
 
 /// SF-0002 round 2 (C2): what a sync upload may do with the remote row it
@@ -3809,6 +3859,21 @@ fn spawn_sync_daemon(local_dir: &Path, remote_path: Option<&str>) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SF-0002 r3 (K6): the notice every sync path prints for a kept edit of a
+    /// read-only row, word for word, and the pass summary counts it as kept,
+    /// not failed.
+    #[test]
+    fn a_read_only_edit_is_a_notice_with_guidance() {
+        assert_eq!(
+            read_only_notice("Scans/receipt.pdf"),
+            "Scans/receipt.pdf: This file was saved by an older version of the iOS app. You can open and \
+             download it. To change it, save a copy. Your edit stays on this computer: save it under a new name \
+             and sync uploads that as a new file."
+        );
+        assert_eq!(incomplete_summary(0, 0, 0, 1), "1 read-only edit kept");
+        assert_eq!(incomplete_summary(1, 0, 0, 2), "1 failed \u{00b7} 2 read-only edits kept");
+    }
 
     /// Make a unique scratch directory under the system temp dir (no extra
     /// test-only dependency). Caller removes it.

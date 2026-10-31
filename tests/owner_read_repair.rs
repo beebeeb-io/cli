@@ -120,6 +120,20 @@ async fn sync_keeps_a_read_only_row_and_the_local_edit() {
         "stderr={}",
         stderr(&out)
     );
+    // Round 3 (K6): a notice with guidance, not a failed upload.
+    assert!(
+        stderr(&out).contains(READ_ONLY_GUIDANCE),
+        "the notice must say what to do: {}",
+        stderr(&out)
+    );
+    assert!(
+        !stderr(&out).contains("upload failed"),
+        "a kept read-only edit is not a failure: {}",
+        stderr(&out)
+    );
+    let summary: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(summary["read_only_kept"], 1);
+    assert_eq!(summary["failed"], 0);
     assert_eq!(
         h.count("DELETE", &format!("/api/v1/files/{UPPER_FILE}")),
         0,
@@ -250,6 +264,10 @@ async fn an_explicit_key_download_never_falls_back_to_the_owner_keys() {
     assert!(!out_path.exists(), "the download wrote a file it must not have opened");
     h.close().await;
 }
+
+/// The guidance sync adds to a kept read-only edit (round 3, K6).
+const READ_ONLY_GUIDANCE: &str =
+    "Your edit stays on this computer: save it under a new name and sync uploads that as a new file.";
 
 /// What `bb` says when the read-only check could not read the version
 /// (`owned_keys::WRITE_CHECK_UNKNOWN`).
