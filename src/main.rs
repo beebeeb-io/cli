@@ -12,6 +12,7 @@ mod direct_upload;
 mod download;
 mod env_detect;
 mod exit;
+mod item_id;
 mod loopback;
 mod owned_keys;
 mod path;
@@ -31,6 +32,8 @@ mod web_url;
 
 #[cfg(test)]
 mod readme_flags_tests;
+#[cfg(test)]
+mod test_server;
 
 // Peak-heap tracking allocator, active ONLY in test builds (`#[cfg(test)]`), so
 // the shipped `bb` binary keeps the default system allocator. Used by the

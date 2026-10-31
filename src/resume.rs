@@ -59,6 +59,16 @@ struct PendingEntry {
     /// core's resume rule restart the upload.
     #[serde(default)]
     chunk_format: Option<u8>,
+    /// L13 (SF-0001): the id this client minted for this write (a create).
+    /// `Some(file_id)` only when THIS CLI generated it; a record written before
+    /// the update (or one whose marker names another id) is never resumed by a
+    /// create.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    self_minted: Option<Uuid>,
+    /// L13 (SF-0001 round 2, L6): the listed row this write REPLACES (an id this
+    /// client did not mint). Only a replace of that same row may resume it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replaces: Option<Uuid>,
     /// Task 2173: the session is a direct one (`object-upload-v1`). A direct session takes no proxy
     /// chunk PUT and an API session takes no grant, so a resumed upload must continue on the
     /// transport it began on. Absent on records from an older CLI, which only had the API route.
@@ -127,25 +137,65 @@ fn save(db: &PendingDb) {
     }
 }
 
-/// Return the stored in-progress upload for `path`, but only if the recorded
-/// `(size, mtime_ns)` still match AND a v2 session id is present — otherwise the
-/// local content changed (stale partial) or the entry predates the v2 driver,
-/// and the caller mints a fresh id + session. Whether the session may then be
-/// CONTINUED is core's resume rule, applied by the caller to `chunk_format`.
+/// Whether the write asking (`replacing`: the listed row a replace versions,
+/// `None` for a create) may continue `e`'s session. L13 (SF-0001): a create
+/// continues only a create record whose id this client minted; a replace only
+/// this CLI's replace record of the same row. A record from a pre-update CLI
+/// (neither marker) continues nothing.
+fn resumable_by(e: &PendingEntry, replacing: Option<Uuid>) -> bool {
+    match replacing {
+        None => e.self_minted == Some(e.file_id),
+        Some(row) => e.file_id == row && e.replaces == Some(row),
+    }
+}
+
+/// Return the stored in-progress upload of a CREATE for `path`, but only if the
+/// recorded `(size, mtime_ns)` still match, a v2 session id is present, and the
+/// record carries L13's self-minted marker naming its own id — otherwise the
+/// local content changed (stale partial), the entry predates the v2 driver, or
+/// it is not a create this client minted (a pre-update CLI's record, or a
+/// replace's), and the caller mints a fresh id + session (abandoning the old one
+/// through [`unresumable_upload`]). Whether the session may then be CONTINUED is
+/// core's resume rule, applied by the caller to `chunk_format`.
 pub fn resumable_upload(path: &Path, size: u64, mtime_ns: u128) -> Option<PendingUpload> {
+    resumable_upload_for(path, size, mtime_ns, None)
+}
+
+/// [`resumable_upload`] for the write that asks: `replacing` is the listed row a
+/// replace versions (`None` for a create). See [`resumable_by`].
+pub fn resumable_upload_for(path: &Path, size: u64, mtime_ns: u128, replacing: Option<Uuid>) -> Option<PendingUpload> {
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     load()
         .uploads
         .get(&key(path))
-        .filter(|e| e.size == size && e.mtime_ns == mtime_ns)
-        .and_then(|e| {
-            e.upload_session_id.map(|session_id| PendingUpload {
-                file_id: e.file_id,
-                session_id,
-                chunk_format: e.chunk_format.and_then(|c| ChunkFormat::from_u8(c).ok()),
-                direct: e.direct,
-            })
+        .filter(|e| e.size == size && e.mtime_ns == mtime_ns && resumable_by(e, replacing))
+        .and_then(PendingUpload::from_entry)
+}
+
+/// L13 (SF-0001): the record for `path` (same `(size, mtime_ns)` signature) that
+/// the write asking may NOT resume (see [`resumable_by`]): a record from a
+/// pre-update CLI (no marker), one whose marker names a different id, or another
+/// write's (a replace record met by a create, a create record met by a replace,
+/// or a replace of another row). The caller ends or discards it and starts under
+/// its own id; it is never resumed and never left looping.
+pub fn unresumable_upload(path: &Path, size: u64, mtime_ns: u128, replacing: Option<Uuid>) -> Option<PendingUpload> {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    load()
+        .uploads
+        .get(&key(path))
+        .filter(|e| e.size == size && e.mtime_ns == mtime_ns && !resumable_by(e, replacing))
+        .and_then(PendingUpload::from_entry)
+}
+
+impl PendingUpload {
+    fn from_entry(e: &PendingEntry) -> Option<Self> {
+        e.upload_session_id.map(|session_id| PendingUpload {
+            file_id: e.file_id,
+            session_id,
+            chunk_format: e.chunk_format.and_then(|c| ChunkFormat::from_u8(c).ok()),
+            direct: e.direct,
         })
+    }
 }
 
 /// [`resumable_upload`] for `path` as it is on disk right now (same size and
@@ -174,25 +224,39 @@ pub fn record(
     size: u64,
     mtime_ns: u128,
 ) {
-    record_with_transport(path, file_id, upload_session_id, chunk_format, size, mtime_ns, false);
+    record_with_transport(
+        path,
+        crate::item_id::Proposed::Minted(file_id),
+        upload_session_id,
+        chunk_format,
+        size,
+        mtime_ns,
+        false,
+    );
 }
 
-/// [`record`], saying whether the session is a direct upload (task 2173).
+/// [`record`] for the write `proposed` names (a create's minted id, or the row a
+/// replace lists: L13 marks only the first as self-minted), saying whether the
+/// session is a direct upload (task 2173).
 pub fn record_with_transport(
     path: &Path,
-    file_id: Uuid,
+    proposed: crate::item_id::Proposed,
     upload_session_id: Uuid,
     chunk_format: ChunkFormat,
     size: u64,
     mtime_ns: u128,
     direct: bool,
 ) {
+    use crate::item_id::Proposed;
+    let file_id = proposed.id();
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut db = load();
     db.uploads.insert(
         key(path),
         PendingEntry {
             file_id,
+            self_minted: matches!(proposed, Proposed::Minted(_)).then_some(file_id),
+            replaces: matches!(proposed, Proposed::Listed(_)).then_some(file_id),
             upload_session_id: Some(upload_session_id),
             chunk_format: Some(chunk_format.as_u8()),
             direct,
@@ -254,7 +318,15 @@ mod tests {
         );
 
         // Task 2173: a direct session is remembered as one (a proxy PUT would be refused on it).
-        record_with_transport(&f, id, sid, ChunkFormat::V1Legacy, 5, 100, true);
+        record_with_transport(
+            &f,
+            crate::item_id::Proposed::Minted(id),
+            sid,
+            ChunkFormat::V1Legacy,
+            5,
+            100,
+            true,
+        );
         assert_eq!(
             resumable_upload(&f, 5, 100),
             Some(PendingUpload {
@@ -282,17 +354,75 @@ mod tests {
         clear(&f);
         assert_eq!(resumable_upload(&f, 5, 100), None);
 
+        // L13 (SF-0001): this CLI's own records carry the self-minted marker,
+        // so they stay resumable.
+        record(&f, id, sid, ChunkFormat::V1Legacy, 5, 100);
+        assert_eq!(unresumable_upload(&f, 5, 100, None), None);
+        let raw_own = serde_json::to_value(load().uploads.get(&key(&f)).unwrap()).unwrap();
+        assert_eq!(raw_own["self_minted"], serde_json::json!(id));
+
         // Task 1943: a record from an older CLI (no `chunk_format`) or with a
         // code this CLI does not know still resumes the ids, but WITHOUT a
-        // format, which core's resume rule restarts.
+        // format, which core's resume rule restarts — provided it carries
+        // L13's self-minted marker.
         let key = key(&f);
         for raw in [
-            serde_json::json!({"file_id": id, "upload_session_id": sid, "size": 5, "mtime_ns": 100}),
-            serde_json::json!({"file_id": id, "upload_session_id": sid, "chunk_format": 9, "size": 5, "mtime_ns": 100}),
+            serde_json::json!({"file_id": id, "upload_session_id": sid, "self_minted": id, "size": 5, "mtime_ns": 100}),
+            serde_json::json!({"file_id": id, "upload_session_id": sid, "self_minted": id, "chunk_format": 9, "size": 5, "mtime_ns": 100}),
         ] {
             std::fs::write(&db, serde_json::json!({"uploads": {&key: raw}}).to_string()).unwrap();
             assert_eq!(resumable_upload(&f, 5, 100), Some(pending(id, sid, None)), "{raw}");
         }
+
+        // L13 (SF-0001): a pre-update record (no marker) or one whose marker
+        // names a different id is NEVER resumable — the caller abandons it.
+        for raw in [
+            serde_json::json!({"file_id": id, "upload_session_id": sid, "size": 5, "mtime_ns": 100}),
+            serde_json::json!({"file_id": id, "upload_session_id": sid, "self_minted": Uuid::new_v4(), "size": 5, "mtime_ns": 100}),
+        ] {
+            std::fs::write(&db, serde_json::json!({"uploads": {&key: raw}}).to_string()).unwrap();
+            assert_eq!(resumable_upload(&f, 5, 100), None, "must not resume: {raw}");
+            assert_eq!(
+                unresumable_upload(&f, 5, 100, None),
+                Some(pending(id, sid, None)),
+                "must be found for abandoning: {raw}"
+            );
+        }
+        // A changed signature is not a stale record, just a different file state.
+        assert_eq!(unresumable_upload(&f, 6, 100, None), None);
+
+        // L13 round 2 (L6): a REPLACE record names a row this client listed,
+        // not one it minted. It is never marked self-minted, a create never
+        // resumes it, and only a replace of that same row does.
+        let row = Uuid::new_v4();
+        record_with_transport(
+            &f,
+            crate::item_id::Proposed::Listed(row),
+            sid,
+            ChunkFormat::V1Legacy,
+            5,
+            100,
+            false,
+        );
+        let raw_replace = serde_json::to_value(load().uploads.get(&key).unwrap()).unwrap();
+        assert!(raw_replace.get("self_minted").is_none(), "{raw_replace}");
+        assert_eq!(raw_replace["replaces"], serde_json::json!(row));
+        assert_eq!(resumable_upload(&f, 5, 100), None, "a create never resumes a replace");
+        assert_eq!(
+            unresumable_upload(&f, 5, 100, None),
+            Some(pending(row, sid, Some(ChunkFormat::V1Legacy)))
+        );
+        assert_eq!(
+            resumable_upload_for(&f, 5, 100, Some(row)),
+            Some(pending(row, sid, Some(ChunkFormat::V1Legacy))),
+            "the replace of the same row resumes it"
+        );
+        assert_eq!(resumable_upload_for(&f, 5, 100, Some(Uuid::new_v4())), None);
+        // ...and a replace never resumes a create record (nor a pre-update one)
+        // of its row.
+        record(&f, row, sid, ChunkFormat::V1Legacy, 5, 100);
+        assert_eq!(resumable_upload_for(&f, 5, 100, Some(row)), None);
+        assert!(unresumable_upload(&f, 5, 100, Some(row)).is_some());
 
         unsafe {
             std::env::remove_var("BB_PENDING_UPLOADS_PATH");

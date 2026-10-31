@@ -52,18 +52,10 @@ pub async fn run(path_arg: String, parents: bool) -> Result<(), String> {
         }
     }
 
-    let folder_id = Uuid::new_v4();
-    let name_encrypted = beebeeb_core::encrypt::encrypt_name(&master_key, &folder_id.to_string(), &leaf, None)
-        .map_err(|e| format!("failed to encrypt folder name: {e}"))?;
-
     let parent_uuid_typed: Option<Uuid> = parent_uuid.as_deref().and_then(|s| s.parse().ok());
-    let created = api
-        .create_folder(&name_encrypted, parent_uuid_typed, Some(folder_id))
-        .await?;
-    let created_id = created
-        .get("id")
-        .and_then(|v| v.as_str())
-        .ok_or("server response missing id")?
+    // L13 (SF-0001): the folder's id is minted by the client and echoed unchanged.
+    let created_id = crate::item_id::create_owned_folder(&api, &master_key, &leaf, parent_uuid_typed)
+        .await?
         .to_string();
 
     path::invalidate_cache();
@@ -114,18 +106,10 @@ async fn run_recursive(
         }
 
         // Create it.
-        let folder_id = Uuid::new_v4();
-        let name_encrypted = beebeeb_core::encrypt::encrypt_name(master_key, &folder_id.to_string(), segment, None)
-            .map_err(|e| format!("failed to encrypt folder name '{segment}': {e}"))?;
-
         let parent_uuid_typed: Option<Uuid> = parent_id.as_deref().and_then(|s| s.parse().ok());
-        let resp = api
-            .create_folder(&name_encrypted, parent_uuid_typed, Some(folder_id))
-            .await?;
-        let new_id = resp
-            .get("id")
-            .and_then(|v| v.as_str())
-            .ok_or("server response missing id")?
+        // L13 (SF-0001): the folder's id is minted by the client and echoed unchanged.
+        let new_id = crate::item_id::create_owned_folder(api, master_key, segment, parent_uuid_typed)
+            .await?
             .to_string();
 
         // Invalidate immediately so the next loop iteration finds the new child.

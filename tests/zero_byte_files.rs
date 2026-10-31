@@ -19,6 +19,7 @@
 //! Every run uses a scratch `HOME` / `XDG_CONFIG_HOME` (the developer's real
 //! config may hold a live session) and `BB_NO_UPDATE=1`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
@@ -45,6 +46,8 @@ struct Mock {
     chunk_sizes: Arc<Mutex<Vec<usize>>>,
     /// Number of `/uploads/:session/complete` calls.
     completes: Arc<Mutex<usize>>,
+    /// session id -> the file id the init was given (L13: complete echoes it).
+    sessions: Arc<Mutex<HashMap<String, String>>>,
 }
 
 async fn start_mock(mock: Mock) -> String {
@@ -103,8 +106,12 @@ async fn start_mock(mock: Mock) -> String {
                     .and_then(|v| v.as_str())
                     .map(String::from)
                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                let session_id = uuid::Uuid::new_v4().to_string();
+                // L13 (SF-0001): an honest server echoes the client's own id,
+                // at init and again at complete.
+                m.sessions.lock().unwrap().insert(session_id.clone(), file_id.clone());
                 Json(json!({
-                    "upload_session_id": uuid::Uuid::new_v4().to_string(),
+                    "upload_session_id": session_id,
                     "file_id": file_id,
                     "chunk_size_bytes": body.get("chunk_size_bytes").and_then(|v| v.as_u64()).unwrap_or(0),
                     "chunk_count": body.get("chunk_count").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -128,9 +135,16 @@ async fn start_mock(mock: Mock) -> String {
         )
         .route(
             "/api/v1/uploads/:session/complete",
-            post(|State(m): State<Mock>| async move {
+            post(|State(m): State<Mock>, UrlPath(sid): UrlPath<String>| async move {
                 *m.completes.lock().unwrap() += 1;
-                Json(json!({ "id": uuid::Uuid::new_v4().to_string(), "size_bytes": 0, "chunk_count": 1 }))
+                let id = m
+                    .sessions
+                    .lock()
+                    .unwrap()
+                    .get(&sid)
+                    .cloned()
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                Json(json!({ "id": id, "size_bytes": 0, "chunk_count": 1 }))
             }),
         )
         .fallback(|| async {

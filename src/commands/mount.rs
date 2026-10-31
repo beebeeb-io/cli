@@ -49,11 +49,11 @@
 //! Per-file AES-256-GCM keys are derived from a UUID:
 //! `file_key = HKDF(master_key, uuid.as_bytes())`.
 //!
-//! For files pulled from the server the UUID = server-assigned file_id. For
-//! files we create via FUSE, we generate a random UUID (`key_uuid`) for key
-//! derivation before uploading; the server may assign a *different* ID. We
-//! store `key_uuid` alongside `file_id` in the inode so `read` can always
-//! derive the right key regardless of what the server assigned.
+//! For files pulled from the server the UUID = the file's id. For files we
+//! create via FUSE, we mint a random UUID (`key_uuid`) before uploading and
+//! propose it as the file's id; L13 (SF-0001): every answer must echo that id
+//! exactly, or the upload is abandoned and the inode records no server id. So
+//! `key_uuid` and `file_id` are the same id for every file the mount writes.
 
 #[cfg(not(feature = "fuse"))]
 use std::path::PathBuf;
@@ -611,32 +611,6 @@ mod fuse_impl {
         // ── File upload (called from release()) ───────────────────────────────
 
         fn upload_file(&mut self, ino: u64, name: &str, plaintext: Vec<u8>, parent_ino: u64) -> Result<(), String> {
-            // Generate a stable UUID for this file. Key derivation uses this UUID.
-            let key_uuid = uuid::Uuid::new_v4();
-            let file_key = beebeeb_core::kdf::derive_file_key(&self.master_key, key_uuid.to_string().as_bytes());
-
-            // Encrypt the filename (MIME type is now part of the encrypted envelope).
-            let mime = beebeeb_core::media::guess_mime_type(name);
-            let name_enc = beebeeb_core::encrypt::encrypt_name(&self.master_key, &key_uuid.to_string(), name, mime)
-                .map_err(|e| format!("encrypt name: {e}"))?;
-
-            // Encrypt content using the adaptive chunk-size ladder.
-            let plan = beebeeb_types::plan_chunks(plaintext.len() as u64, beebeeb_types::ChunkProfile::Cli);
-            let chunk_size = plan.chunk_size_bytes as usize;
-
-            let mut encrypted_chunks: Vec<(u32, Vec<u8>)> = Vec::new();
-            let chunks: Vec<&[u8]> = if plaintext.is_empty() {
-                vec![&[]] // at least one (empty) chunk
-            } else {
-                plaintext.chunks(chunk_size).collect()
-            };
-
-            for (i, chunk) in chunks.iter().enumerate() {
-                let bytes = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, chunk)
-                    .map_err(|e| format!("encrypt chunk {i}: {e}"))?;
-                encrypted_chunks.push((i as u32, bytes));
-            }
-
             // Resolve parent_id (None = root).
             let parent_file_id: Option<uuid::Uuid> = self
                 .inodes
@@ -644,49 +618,31 @@ mod fuse_impl {
                 .and_then(|e| e.file_id.as_deref())
                 .and_then(|s| s.parse().ok());
 
-            let is_media = beebeeb_core::media::is_media(mime);
-            let chunk_count = encrypted_chunks.len() as i32;
-
-            // V2 upload: init (open session) → chunks (by session) → complete.
-            // Mount always mints a fresh `key_uuid` per flush (new file each
-            // write), so there's no version replace → `base_version_number` None.
-            // The v2 init takes the PLAINTEXT size; the server recomputes the
-            // stored encrypted total from the summed chunks.
-            let init = self.rt.block_on(self.api.upload_init(
-                Some(key_uuid),
-                &name_enc,
+            // L13 (SF-0001): a new file under an id minted here, every echo
+            // checked; an error leaves the inode exactly as it was.
+            let uploaded = self.rt.block_on(super::upload_new_file(
+                &self.api,
+                &self.master_key,
+                name,
+                &plaintext,
                 parent_file_id,
-                plaintext.len() as i64,
-                chunk_size as i64,
-                chunk_count,
-                is_media,
-                None,
             ))?;
-
-            let server_id = init.file_id.clone();
-            let session_id = init.upload_session_id.clone();
-
-            for (idx, data) in encrypted_chunks {
-                self.rt
-                    .block_on(self.api.upload_chunk(&session_id, idx, bytes::Bytes::from(data)))?;
-            }
-
-            self.rt.block_on(self.api.upload_complete(&session_id))?;
 
             // The server now has this content: a cache entry from before the
             // write describes the previous version and must not survive.
             self.file_cache.remove(&ino);
 
-            // Update inode: server_id for API calls, key_uuid for decryption.
+            // Update inode: the minted id names the file AND derives its key.
+            let file_id = uploaded.id.to_string();
             if let Some(entry) = self.inodes.get_mut(&ino) {
                 self.id_to_ino.remove(entry.file_id.as_deref().unwrap_or(""));
-                entry.file_id = Some(server_id.clone());
-                entry.key_uuid = Some(key_uuid);
+                entry.file_id = Some(file_id.clone());
+                entry.key_uuid = Some(uploaded.id);
                 entry.size = plaintext.len() as u64;
-                entry.chunk_count = chunk_count as u32;
+                entry.chunk_count = uploaded.chunk_count;
                 entry.modified = SystemTime::now();
             }
-            self.id_to_ino.insert(server_id, ino);
+            self.id_to_ino.insert(file_id, ino);
 
             // Invalidate parent dir cache so readdir shows the new file.
             self.dir_cache.remove(&parent_ino);
@@ -1145,36 +1101,35 @@ mod fuse_impl {
                 }
 
                 // ── Case 2: existing file re-written (e.g. O_TRUNC overwrite) ──
-                ReleaseUpload::Overwrite => {
-                    let (name, parent_ino, old_file_id) = match self.inodes.get(&ino) {
-                        Some(e) => (e.name.clone(), e.parent_ino, e.file_id.clone()),
-                        None => {
-                            reply.error(Errno::ENOENT);
-                            return;
-                        }
-                    };
+                ReleaseUpload::Overwrite => match self.commit_overwrite(ino, buf) {
+                    Ok(()) => reply.ok(),
+                    Err(errno) => reply.error(errno),
+                },
+            }
+        }
 
-                    // Trash the old server-side file before uploading the new one.
-                    if let Some(old_id) = old_file_id {
-                        if let Err(e) = self.rt.block_on(self.api.trash_file(&old_id)) {
-                            eprintln!("[mount] release: trash old file {old_id}: {e}");
-                            // Non-fatal — continue with upload.
-                        }
-                        self.id_to_ino.remove(&old_id);
-                        if let Some(e) = self.inodes.get_mut(&ino) {
-                            e.file_id = None;
-                        }
-                    }
-
-                    match self.upload_file(ino, &name, buf, parent_ino) {
-                        Ok(_) => reply.ok(),
-                        Err(e) => {
-                            eprintln!("[mount] release upload (overwrite): {e}");
-                            reply.error(Errno::EIO);
-                        }
-                    }
+        /// `release()` case 2: upload `buf` as the new copy of the stored file at
+        /// `ino`, then trash the old one. The old file is trashed only AFTER the
+        /// new one exists under the id this client minted (L13, SF-0001): an
+        /// aborted upload (a changed echo, a network error) leaves the old file
+        /// untouched and the inode still on it, never the old one in the trash
+        /// with nothing in its place.
+        fn commit_overwrite(&mut self, ino: u64, buf: Vec<u8>) -> Result<(), Errno> {
+            let (name, parent_ino, old_file_id) = match self.inodes.get(&ino) {
+                Some(e) => (e.name.clone(), e.parent_ino, e.file_id.clone()),
+                None => return Err(Errno::ENOENT),
+            };
+            if let Err(e) = self.upload_file(ino, &name, buf, parent_ino) {
+                eprintln!("[mount] release upload (overwrite): {e}");
+                return Err(Errno::EIO);
+            }
+            if let Some(old_id) = old_file_id {
+                if let Err(e) = self.rt.block_on(self.api.trash_file(&old_id)) {
+                    // Non-fatal: the new copy exists; the old one stays listed.
+                    eprintln!("[mount] release: trash old file {old_id}: {e}");
                 }
             }
+            Ok(())
         }
 
         /// Take the buffer off `ino` and decide what `release()` does with it.
@@ -1242,11 +1197,16 @@ mod fuse_impl {
                 }
             };
 
-            let server_id = resp
-                .get("id")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-                .unwrap_or_else(|| folder_uuid.to_string());
+            // L13 (SF-0001): only the id this client minted; a different echo
+            // aborts before the folder is listed or used as a parent.
+            let server_id = match super::folder_create_reply(&resp, folder_uuid) {
+                Ok(id) => id,
+                Err(e) => {
+                    eprintln!("[mount] mkdir: {e}");
+                    reply.error(Errno::EIO);
+                    return;
+                }
+            };
 
             let ino = self.alloc_ino();
             let now = SystemTime::now();
@@ -1962,115 +1922,26 @@ mod fuse_impl {
             chunk.data
         }
 
-        /// A mock `GET /api/v1/files/:id/download` that answers `body`. Runs on
-        /// its own thread with its own runtime: `fetch_file` drives the client
-        /// runtime with `block_on`, so the server cannot share it.
+        /// The shared mock (`crate::test_server`) answering `GET
+        /// /api/v1/files/FILE_ID/download` with `body`. Runs on its own thread
+        /// with its own runtime: `fetch_file` drives the client runtime with
+        /// `block_on`, so the server cannot share it.
         fn spawn_download_server(body: Vec<u8>) -> String {
-            use std::sync::mpsc;
-
-            let (tx, rx) = mpsc::channel();
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("mock server runtime");
-                rt.block_on(async move {
-                    let app = axum::Router::new().route(
-                        "/api/v1/files/:file_id/download",
-                        axum::routing::get(move || {
-                            let body = body.clone();
-                            async move { axum::body::Body::from(body) }
-                        }),
-                    );
-                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                        .await
-                        .expect("bind mock download server");
-                    tx.send(format!("http://{}", listener.local_addr().expect("mock addr")))
-                        .expect("hand back the mock address");
-                    axum::serve(listener, app).await.expect("serve mock download");
-                });
-            });
-            rx.recv().expect("mock download server address")
+            let mock = crate::test_server::shared(crate::test_server::Mock::default());
+            mock.lock().unwrap().downloads.insert(FILE_ID.to_string(), body);
+            crate::test_server::spawn_on_own_thread(mock)
         }
 
-        /// A mock of the V2 upload routes that records every chunk body, so a
-        /// test can decrypt what the client actually sent.
-        fn spawn_upload_server() -> (String, std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>) {
-            use std::sync::{Arc, Mutex, mpsc};
+        /// The shared mock of the V2 upload routes, which records every chunk
+        /// body (so a test can decrypt what the client actually sent) and, like
+        /// an honest server, echoes the id each init was sent.
+        fn spawn_upload_server() -> (String, crate::test_server::Shared) {
+            spawn_upload_server_with(crate::test_server::Mock::default())
+        }
 
-            let chunks: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
-            let server_chunks = Arc::clone(&chunks);
-            let (tx, rx) = mpsc::channel();
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("mock server runtime");
-                rt.block_on(async move {
-                    let app = axum::Router::new()
-                        .route(
-                            "/api/v1/uploads/init",
-                            axum::routing::post(|axum::Json(body): axum::Json<serde_json::Value>| async move {
-                                let file_id = body
-                                    .get("file_id")
-                                    .and_then(|v| v.as_str())
-                                    .map(String::from)
-                                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-                                axum::Json(serde_json::json!({
-                                    "upload_session_id": uuid::Uuid::new_v4().to_string(),
-                                    "file_id": file_id,
-                                    "chunk_size_bytes": body
-                                        .get("chunk_size_bytes")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0),
-                                    "chunk_count": body
-                                        .get("chunk_count")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0),
-                                }))
-                            }),
-                        )
-                        .route(
-                            "/api/v1/uploads/:session/chunks/:idx",
-                            axum::routing::put({
-                                let server_chunks = Arc::clone(&server_chunks);
-                                move |axum::extract::Path((_session, idx)): axum::extract::Path<(String, u32)>,
-                                      body: axum::body::Body| {
-                                    let server_chunks = Arc::clone(&server_chunks);
-                                    async move {
-                                        let bytes =
-                                            axum::body::to_bytes(body, 64 * 1024 * 1024).await.unwrap_or_default();
-                                        let mut stored = server_chunks.lock().expect("chunk store");
-                                        if stored.len() <= idx as usize {
-                                            stored.resize(idx as usize + 1, Vec::new());
-                                        }
-                                        stored[idx as usize] = bytes.to_vec();
-                                        axum::Json(serde_json::json!({
-                                            "index": idx,
-                                            "size": bytes.len(),
-                                            "skipped": false,
-                                        }))
-                                    }
-                                }
-                            }),
-                        )
-                        .route(
-                            "/api/v1/uploads/:session/complete",
-                            axum::routing::post(|axum::extract::Path(_session): axum::extract::Path<String>| async {
-                                axum::Json(serde_json::json!({
-                                    "id": uuid::Uuid::new_v4().to_string(),
-                                }))
-                            }),
-                        );
-                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                        .await
-                        .expect("bind mock upload server");
-                    tx.send(format!("http://{}", listener.local_addr().expect("mock addr")))
-                        .expect("hand back the mock address");
-                    axum::serve(listener, app).await.expect("serve mock upload");
-                });
-            });
-            (rx.recv().expect("mock upload server address"), chunks)
+        fn spawn_upload_server_with(mock: crate::test_server::Mock) -> (String, crate::test_server::Shared) {
+            let mock = crate::test_server::shared(mock);
+            (crate::test_server::spawn_on_own_thread(mock.clone()), mock)
         }
 
         #[test]
@@ -2169,13 +2040,14 @@ mod fuse_impl {
             fs.upload_file(INO, "empty.txt", buf, ROOT_INO).expect("upload");
 
             let key_uuid = fs.inodes[&INO].key_uuid.expect("the upload assigns a key UUID");
-            let stored = chunks.lock().expect("chunk store");
-            assert_eq!(stored.len(), 1);
+            let m = chunks.lock().expect("mock state");
+            assert_eq!(m.chunk_bodies.len(), 1);
+            let stored = m.chunk_bodies.values().next().expect("one chunk");
             let plain = crate::crypto::decrypt_file_chunks(
                 &master_key(),
                 &key_uuid.to_string(),
                 beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
-                &stored[0],
+                stored,
                 1,
             )
             .expect("the server's chunk decrypts");
@@ -2386,7 +2258,199 @@ mod fuse_impl {
                 "a cache from before the write must not survive the upload"
             );
         }
+
+        /// L1 (SF-0001 L13, mount new file): the init echoes another id. The
+        /// release fails (EIO), no chunk is PUT, nothing completes, the session
+        /// is ended once by the minted id, and the inode records no server id —
+        /// neither the echoed one nor any other.
+        #[test]
+        fn a_new_file_whose_init_echoes_another_id_records_no_server_id() {
+            const NEW: u64 = 8;
+            let echoed = uuid::Uuid::new_v4().to_string();
+            let (url, mock) = spawn_upload_server_with(crate::test_server::Mock {
+                init_echo: Some(echoed.clone()),
+                ..Default::default()
+            });
+            let mut fs = BeebeebFsState::new(ApiClient::new_for_test(url), master_key(), Duration::from_secs(5));
+            fs.inodes.insert(
+                NEW,
+                InodeEntry {
+                    file_id: None,
+                    key_uuid: None,
+                    name: "new.txt".to_string(),
+                    is_dir: false,
+                    size: 0,
+                    chunk_count: 0,
+                    modified: SystemTime::UNIX_EPOCH,
+                    parent_ino: ROOT_INO,
+                    pin: Ok(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded),
+                },
+            );
+
+            let err = fs
+                .upload_file(NEW, "new.txt", b"hello".to_vec(), ROOT_INO)
+                .expect_err("a changed echo aborts the upload");
+            assert_eq!(err, crate::item_id::CHANGED_ID_MESSAGE);
+            assert_eq!(fs.inodes[&NEW].file_id, None, "the inode keeps no server id");
+            assert!(!fs.id_to_ino.contains_key(&echoed), "the echoed id is never recorded");
+            let m = mock.lock().unwrap();
+            assert!(m.chunk_puts.is_empty(), "zero chunk PUTs: {:?}", m.chunk_puts);
+            assert!(m.completed.is_empty(), "no completion");
+            assert_eq!(m.abandons, m.inits, "ended once, by the minted id");
+        }
+
+        /// L1 (mount overwrite): the new copy's upload is refused (a changed
+        /// echo). The old file is NOT trashed and the inode stays on it: the
+        /// trash runs only after the new copy exists.
+        #[test]
+        fn an_overwrite_whose_upload_aborts_keeps_the_old_file() {
+            let (url, mock) = spawn_upload_server_with(crate::test_server::Mock {
+                init_echo: Some(uuid::Uuid::new_v4().to_string()),
+                ..Default::default()
+            });
+            let mut fs = state_with_stored_file(url, 0, beebeeb_core::chunk_stream::ExpectedChunkFormat::V2);
+            fs.id_to_ino.insert(FILE_ID.to_string(), INO);
+
+            assert_eq!(fs.commit_overwrite(INO, b"new".to_vec()), Err(Errno::EIO));
+            assert_eq!(
+                fs.inodes[&INO].file_id.as_deref(),
+                Some(FILE_ID),
+                "still on the old file"
+            );
+            assert_eq!(fs.id_to_ino.get(FILE_ID), Some(&INO));
+            let m = mock.lock().unwrap();
+            assert!(m.trashed.is_empty(), "the old file is not trashed: {:?}", m.trashed);
+            assert!(m.chunk_puts.is_empty());
+        }
+
+        /// The overwrite that succeeds trashes the old file, after the new
+        /// copy completed under the minted id.
+        #[test]
+        fn an_overwrite_trashes_the_old_file_after_the_new_one_completes() {
+            let (url, mock) = spawn_upload_server();
+            let mut fs = state_with_stored_file(url, 0, beebeeb_core::chunk_stream::ExpectedChunkFormat::V2);
+            fs.id_to_ino.insert(FILE_ID.to_string(), INO);
+
+            fs.commit_overwrite(INO, b"new".to_vec()).expect("overwrite");
+            let new_id = fs.inodes[&INO].file_id.clone().expect("the new copy's id");
+            assert_ne!(new_id, FILE_ID);
+            assert_eq!(fs.inodes[&INO].key_uuid.map(|u| u.to_string()), Some(new_id.clone()));
+            assert!(!fs.id_to_ino.contains_key(FILE_ID));
+            let m = mock.lock().unwrap();
+            let complete = m
+                .events
+                .iter()
+                .position(|e| e.starts_with("complete:"))
+                .expect("completed");
+            let trash = m
+                .events
+                .iter()
+                .position(|e| *e == format!("trash:{FILE_ID}"))
+                .expect("the old file is trashed");
+            assert!(
+                complete < trash,
+                "trashed only after the new copy completed: {:?}",
+                m.events
+            );
+        }
     }
+}
+
+/// L13 (SF-0001): the folder id to record after a create — the one this client
+/// minted, confirmed against the answer's echo. Kept outside the FUSE module so
+/// the decision is unit-tested without a FUSE mount.
+#[cfg_attr(not(feature = "fuse"), allow(dead_code))]
+fn folder_create_reply(resp: &serde_json::Value, folder_uuid: uuid::Uuid) -> Result<String, String> {
+    crate::item_id::verify_minted_echo(folder_uuid, crate::item_id::echoed_id(resp))
+        .map(|id| id.to_string())
+        .map_err(|e| e.to_string())
+}
+
+/// What a FUSE release uploaded: the id this client minted (it derives the
+/// content key AND names the file on the server: one id) and the chunk count.
+#[cfg(any(feature = "fuse", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UploadedFile {
+    id: uuid::Uuid,
+    chunk_count: u32,
+}
+
+/// Encrypt and upload `plaintext` as a NEW file under an id minted here (the
+/// FUSE `release` path). L13 (SF-0001): the init must echo that id exactly
+/// before any chunk is PUT, and the completion must echo it too. On either
+/// mismatch the session just opened is abandoned, by the minted id (never the
+/// echoed one), and the error is the plain changed-id message; the caller then
+/// records no server id. Kept outside the FUSE module so it is tested without a
+/// mount.
+#[cfg(any(feature = "fuse", test))]
+async fn upload_new_file(
+    api: &crate::api::ApiClient,
+    master_key: &beebeeb_core::kdf::MasterKey,
+    name: &str,
+    plaintext: &[u8],
+    parent_id: Option<uuid::Uuid>,
+) -> Result<UploadedFile, String> {
+    let minted = crate::item_id::Proposed::Minted(crate::item_id::mint());
+    let key_uuid = minted.id();
+    let file_key = beebeeb_core::kdf::derive_file_key(master_key, key_uuid.to_string().as_bytes());
+
+    // Encrypt the filename (MIME type is part of the encrypted envelope).
+    let mime = beebeeb_core::media::guess_mime_type(name);
+    let name_enc = beebeeb_core::encrypt::encrypt_name(master_key, &key_uuid.to_string(), name, mime)
+        .map_err(|e| format!("encrypt name: {e}"))?;
+
+    // Encrypt content using the adaptive chunk-size ladder.
+    let plan = beebeeb_types::plan_chunks(plaintext.len() as u64, beebeeb_types::ChunkProfile::Cli);
+    let chunk_size = plan.chunk_size_bytes as usize;
+    let chunks: Vec<&[u8]> = if plaintext.is_empty() {
+        vec![&[]] // at least one (empty) chunk
+    } else {
+        plaintext.chunks(chunk_size).collect()
+    };
+    let mut encrypted_chunks: Vec<Vec<u8>> = Vec::with_capacity(chunks.len());
+    for (i, chunk) in chunks.iter().enumerate() {
+        let bytes = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, chunk)
+            .map_err(|e| format!("encrypt chunk {i}: {e}"))?;
+        encrypted_chunks.push(bytes);
+    }
+    let chunk_count = encrypted_chunks.len() as i32;
+    let is_media = beebeeb_core::media::is_media(mime);
+
+    // V2 upload: init (open session) → chunks (by session) → complete. A new
+    // file, so no version replace (`base_version_number` None). The v2 init
+    // takes the PLAINTEXT size; the server recomputes the stored total.
+    let init = api
+        .upload_init(
+            Some(key_uuid),
+            &name_enc,
+            parent_id,
+            plaintext.len() as i64,
+            chunk_size as i64,
+            chunk_count,
+            is_media,
+            None,
+        )
+        .await?;
+    if let Err(e) = minted.verify(Some(&init.file_id)) {
+        let _ = api.upload_abandon(&key_uuid.to_string()).await;
+        return Err(e.to_string());
+    }
+
+    for (idx, data) in encrypted_chunks.into_iter().enumerate() {
+        api.upload_chunk(&init.upload_session_id, idx as u32, bytes::Bytes::from(data))
+            .await?;
+    }
+
+    let completed = api.upload_complete(&init.upload_session_id).await?;
+    if let Err(e) = minted.verify(crate::item_id::echoed_id(&completed)) {
+        let _ = api.upload_abandon(&key_uuid.to_string()).await;
+        return Err(e.to_string());
+    }
+
+    Ok(UploadedFile {
+        id: key_uuid,
+        chunk_count: chunk_count as u32,
+    })
 }
 
 #[cfg(feature = "fuse")]
@@ -2434,6 +2498,100 @@ mod parent_target_tests {
         assert_eq!(
             rename_parent_target(ROOT_INO, 9, Some((false, Some("invalid")))),
             Err(ParentError::NotFolder)
+        );
+    }
+}
+
+#[cfg(test)]
+mod item_id_echo_tests {
+    use super::{UploadedFile, folder_create_reply, upload_new_file};
+    use crate::test_server::{Mock, Shared, shared, spawn};
+    use serde_json::json;
+
+    fn master() -> beebeeb_core::kdf::MasterKey {
+        beebeeb_core::kdf::MasterKey::from_bytes([4u8; 32])
+    }
+
+    async fn upload(mock: Mock) -> (Result<UploadedFile, String>, Shared) {
+        let mock = shared(mock);
+        let api = crate::api::ApiClient::new_for_test(spawn(mock.clone()).await);
+        (upload_new_file(&api, &master(), "new.txt", b"hello", None).await, mock)
+    }
+
+    /// L1 (mount, new file): the init echoes another id. Zero chunk PUTs, no
+    /// completion, the session it opened ended once by the minted id, and the
+    /// plain message (the FUSE release turns it into EIO; the inode records
+    /// nothing, see `fuse_impl::truncate_tests`).
+    #[tokio::test]
+    async fn new_file_whose_init_echoes_another_id_puts_nothing() {
+        let (result, mock) = upload(Mock {
+            init_echo: Some(uuid::Uuid::new_v4().to_string()),
+            ..Default::default()
+        })
+        .await;
+        assert_eq!(result, Err(crate::item_id::CHANGED_ID_MESSAGE.to_string()));
+        let m = mock.lock().unwrap();
+        assert_eq!(m.inits.len(), 1);
+        assert!(
+            m.chunk_puts.is_empty(),
+            "no chunk under the echoed id: {:?}",
+            m.chunk_puts
+        );
+        assert!(m.completed.is_empty(), "never completed");
+        assert_eq!(m.abandons, m.inits, "ended once, by the minted id");
+    }
+
+    /// L1 (mount, new file): the completion answer names another item. The
+    /// upload fails with the plain message and the session is ended once.
+    #[tokio::test]
+    async fn new_file_whose_completion_echoes_another_id_fails() {
+        let (result, mock) = upload(Mock {
+            complete_echo: Some(uuid::Uuid::new_v4().to_string()),
+            ..Default::default()
+        })
+        .await;
+        assert_eq!(result, Err(crate::item_id::CHANGED_ID_MESSAGE.to_string()));
+        let m = mock.lock().unwrap();
+        assert_eq!(m.completed.len(), 1, "the check runs on the completion answer");
+        assert_eq!(m.abandons, m.inits, "ended once, by the minted id");
+    }
+
+    /// Normal flow: the minted v4 id is proposed, echoed, and returned.
+    #[tokio::test]
+    async fn new_file_echoing_the_minted_id_is_uploaded_under_it() {
+        let (result, mock) = upload(Mock::default()).await;
+        let uploaded = result.expect("uploads");
+        let m = mock.lock().unwrap();
+        assert_eq!(m.inits, vec![uploaded.id.to_string()]);
+        assert_eq!(uploaded.id.get_version(), Some(uuid::Version::Random));
+        assert_eq!(uploaded.chunk_count, 1);
+        assert_eq!(m.chunk_puts.len(), 1);
+        assert!(m.abandons.is_empty());
+    }
+
+    /// A8 (mount): the folder id recorded after a create is the client's own,
+    /// confirmed against the answer. A different echo aborts (the FUSE mkdir
+    /// turns this error into EIO); no id from the answer is ever used.
+    #[test]
+    fn folder_create_echoing_a_different_id_aborts() {
+        let mine = uuid::Uuid::new_v4();
+        let other = uuid::Uuid::new_v4();
+        let err = folder_create_reply(&json!({"id": other}), mine).expect_err("must abort");
+        assert_eq!(err, crate::item_id::CHANGED_ID_MESSAGE);
+    }
+
+    #[test]
+    fn folder_create_echoing_the_clients_id_is_recorded() {
+        let mine = uuid::Uuid::new_v4();
+        assert_eq!(folder_create_reply(&json!({"id": mine}), mine), Ok(mine.to_string()));
+    }
+
+    #[test]
+    fn folder_create_without_an_echo_aborts() {
+        let mine = uuid::Uuid::new_v4();
+        assert_eq!(
+            folder_create_reply(&json!({}), mine),
+            Err(crate::item_id::CHANGED_ID_MESSAGE.to_string())
         );
     }
 }

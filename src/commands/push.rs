@@ -285,15 +285,8 @@ async fn resolve_upload_folder(api: &ApiClient, folder: &str) -> Result<String, 
         }
     }
 
-    let folder_id = uuid::Uuid::new_v4();
-    let name_encrypted = beebeeb_core::encrypt::encrypt_name(&master_key, &folder_id.to_string(), folder, None)
-        .map_err(|e| format!("failed to encrypt folder name: {e}"))?;
-
-    let created = api.create_folder(&name_encrypted, None, Some(folder_id)).await?;
-    let created_id = created
-        .get("id")
-        .and_then(|v| v.as_str())
-        .ok_or("server response missing folder id")?;
+    // L13 (SF-0001): the client's own id, echoed unchanged by the answer.
+    let created_id = crate::item_id::create_owned_folder(api, &master_key, folder, None).await?;
     Ok(created_id.to_string())
 }
 
@@ -584,23 +577,14 @@ async fn push_directory(
         );
     }
 
-    let folder_id = uuid::Uuid::new_v4();
-    let name_encrypted = beebeeb_core::encrypt::encrypt_name(&master_key, &folder_id.to_string(), &dir_name, None)
-        .map_err(|e| format!("failed to encrypt folder name: {e}"))?;
-
     let parent_uuid = parent_id
         .as_deref()
         .map(|p| p.parse::<uuid::Uuid>())
         .transpose()
         .map_err(|e| format!("invalid parent ID: {e}"))?;
 
-    let root_folder = api.create_folder(&name_encrypted, parent_uuid, Some(folder_id)).await?;
-    let root_id: uuid::Uuid = root_folder
-        .get("id")
-        .and_then(|v| v.as_str())
-        .ok_or("missing folder id")?
-        .parse()
-        .map_err(|e| format!("invalid folder id: {e}"))?;
+    // L13 (SF-0001): the client's own id, echoed unchanged by the answer.
+    let root_id = crate::item_id::create_owned_folder(api, &master_key, &dir_name, parent_uuid).await?;
 
     let mut folder_map: std::collections::HashMap<PathBuf, uuid::Uuid> = std::collections::HashMap::new();
     folder_map.insert(dir_path.to_path_buf(), root_id);
@@ -617,17 +601,8 @@ async fn push_directory(
         if *is_dir {
             let name = entry_path.file_name().and_then(|n| n.to_str()).unwrap_or("folder");
 
-            let sub_id = uuid::Uuid::new_v4();
-            let sub_enc = beebeeb_core::encrypt::encrypt_name(&master_key, &sub_id.to_string(), name, None)
-                .map_err(|e| format!("failed to encrypt subfolder name: {e}"))?;
-
-            let result = api.create_folder(&sub_enc, Some(entry_parent_id), Some(sub_id)).await?;
-            let created_id: uuid::Uuid = result
-                .get("id")
-                .and_then(|v| v.as_str())
-                .ok_or("missing folder id")?
-                .parse()
-                .map_err(|e| format!("invalid id: {e}"))?;
+            // L13 (SF-0001): the client's own id, echoed unchanged by the answer.
+            let created_id = crate::item_id::create_owned_folder(api, &master_key, name, Some(entry_parent_id)).await?;
 
             folder_map.insert(entry_path.clone(), created_id);
         } else {
