@@ -572,28 +572,41 @@ pub async fn stream_encrypt_upload(
     // abandoned on the server and restarted under this run's own id — never
     // resumed. Runs once per file per run: the record is cleared either way.
     if let Some(stale) = crate::resume::unminted_upload(&spec.path, size, mtime_ns) {
-        crate::resume::clear(&spec.path);
         pending = None;
-        // An explicit replacement targets a row it listed: a record left under
-        // another identity is only discarded (never used, and never worth an
-        // abandon — it is not this write's session).
-        let abandon = spec.replace_file_key.is_none();
-        if abandon
-            && let Err(e) = api.upload_abandon(&stale.file_id.to_string()).await
-            && e.status != 404
-            && !crate::ui::is_quiet()
-        {
-            eprintln!(
-                "  {}: could not abandon the interrupted upload ({})",
-                display_name(&spec.file_name),
-                e.message
-            );
-        }
-        if abandon && !crate::ui::is_quiet() {
-            eprintln!(
-                "  {}: the interrupted upload was not started by this version; starting it again under a new id",
-                display_name(&spec.file_name)
-            );
+        // An explicit replacement targets a row it listed. A record left under
+        // THAT row's id is that row's session: end it, or its live lease 409s
+        // every retry of this replacement. A record left under another identity
+        // is not this write's session and is only discarded (never used, and not
+        // worth an abandon).
+        let abandon = spec.replace_file_key.is_none() || stale.file_id == spec.file_id;
+        if abandon {
+            // Abandon BEFORE the record goes: cleared first, a transient
+            // failure would leave a live session nothing ever ends again.
+            let ended = match api.upload_abandon(&stale.file_id.to_string()).await {
+                Ok(_) => true,
+                Err(e) if e.status == 404 => true,
+                Err(e) => {
+                    if !crate::ui::is_quiet() {
+                        eprintln!(
+                            "  {}: could not abandon the interrupted upload ({}); it will be tried again next run",
+                            display_name(&spec.file_name),
+                            e.message
+                        );
+                    }
+                    false
+                }
+            };
+            if ended {
+                crate::resume::clear(&spec.path);
+                if !crate::ui::is_quiet() {
+                    eprintln!(
+                        "  {}: the interrupted upload was not started by this version; starting it again under a new id",
+                        display_name(&spec.file_name)
+                    );
+                }
+            }
+        } else {
+            crate::resume::clear(&spec.path);
         }
     }
     let mut plan = match pending {
@@ -1512,6 +1525,9 @@ mod swept_session_reinit {
         init_echo: Option<String>,
         /// L13 (SF-0001): complete answers THIS id instead of the session's file.
         complete_echo: Option<String>,
+        /// L13 (SF-0001 L7): abandon answers this status instead of ending the
+        /// session (a transient failure).
+        abandon_status: Option<u16>,
     }
 
     type Shared = Arc<Mutex<Mock>>;
@@ -1604,6 +1620,11 @@ mod swept_session_reinit {
                 post(|State(st): State<Shared>, Path(fid): Path<String>| async move {
                     let mut m = st.lock().unwrap();
                     m.abandons.push(fid.clone());
+                    if let Some(code) = m.abandon_status {
+                        // A transient failure: the session stays alive.
+                        let status = StatusCode::from_u16(code).unwrap();
+                        return (status, Json(json!({ "error": "abandon failed by mock" }))).into_response();
+                    }
                     let ended: Vec<String> = m
                         .session_file
                         .iter()
@@ -2604,6 +2625,86 @@ mod swept_session_reinit {
         let m = state.lock().unwrap();
         assert_eq!(m.abandons, vec![stored_fid.to_string()]);
         assert_eq!(m.inits, vec![fresh.to_string()]);
+    }
+
+    /// L7a: an explicit replacement whose pre-update record names the SAME row
+    /// ends that session before the record is dropped — the record is not this
+    /// write's session and would otherwise 409 every retry.
+    #[tokio::test]
+    async fn a_replace_whose_record_names_the_listed_row_abandons_it_first() {
+        let s = Scratch::new("l7a-replace-record");
+        let (path, size, mtime) = s.file(64 * 1024);
+        let listed = Uuid::new_v4();
+        let stale_sid = Uuid::new_v4();
+        write_raw_record(&s, &path, listed, stale_sid, size, mtime, None);
+        let mut mock = Mock::default();
+        mock.live.insert(stale_sid.to_string());
+        mock.session_file.insert(stale_sid.to_string(), listed.to_string());
+        let state: Shared = Arc::new(Mutex::new(mock));
+
+        let mut replace_spec = spec(&path, listed);
+        replace_spec.base_version_number = Some(2);
+        replace_spec.replace_pin = Some(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded);
+        replace_spec.replace_file_key = Some(Arc::new(beebeeb_core::kdf::FileKey::from_bytes([3u8; 32])));
+        run(&state, replace_spec).await.expect("the replacement uploads");
+
+        let m = state.lock().unwrap();
+        assert_eq!(
+            m.abandons,
+            vec![listed.to_string()],
+            "the listed row's stale session is ended, once, before the record is dropped"
+        );
+        assert!(
+            m.chunk_puts.iter().all(|(sid, _)| *sid != stale_sid.to_string()),
+            "the stale session is never PUT to: {:?}",
+            m.chunk_puts
+        );
+        assert_eq!(m.completed.len(), 1);
+    }
+
+    /// L7b: abandon runs BEFORE the record is cleared, and the record is kept
+    /// when the abandon fails transiently — the next run retries it instead of
+    /// leaving a live lease behind.
+    #[tokio::test]
+    async fn a_transient_abandon_failure_keeps_the_record_for_the_next_run() {
+        let s = Scratch::new("l7b-abandon-503");
+        let (path, size, mtime) = s.file(64 * 1024);
+        let legacy_fid = Uuid::new_v4();
+        let legacy_sid = Uuid::new_v4();
+        write_raw_record(&s, &path, legacy_fid, legacy_sid, size, mtime, None);
+        let mut mock = Mock::default();
+        mock.live.insert(legacy_sid.to_string());
+        mock.session_file.insert(legacy_sid.to_string(), legacy_fid.to_string());
+        mock.abandon_status = Some(503);
+        // The live lease refuses a re-init of the same id, as the server does.
+        mock.init_refuse.insert(legacy_fid.to_string(), 409);
+        let state: Shared = Arc::new(Mutex::new(mock));
+
+        run(&state, spec(&path, legacy_fid))
+            .await
+            .expect_err("the lease is still there, so the re-init is refused");
+        assert!(
+            crate::resume::unminted_upload(&path, size, mtime).is_some(),
+            "the record is kept so the next run retries the abandon"
+        );
+
+        {
+            let mut m = state.lock().unwrap();
+            m.abandon_status = None;
+            m.init_refuse.clear();
+        }
+        run(&state, spec(&path, legacy_fid)).await.expect("retried and completed");
+        assert!(
+            crate::resume::unminted_upload(&path, size, mtime).is_none(),
+            "cleared only once the abandon succeeded"
+        );
+        let m = state.lock().unwrap();
+        assert_eq!(
+            m.abandons,
+            vec![legacy_fid.to_string(), legacy_fid.to_string()],
+            "one abandon attempt per run"
+        );
+        assert_eq!(m.completed.len(), 1);
     }
 
     /// Write exactly what a pre-update CLI left behind (or a record whose marker
