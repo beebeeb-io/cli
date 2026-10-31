@@ -91,9 +91,12 @@ pub struct Mock {
     pub files: HashMap<String, serde_json::Value>,
     /// `GET /files/{id}/download` answers: id -> body. Absent = 404.
     pub downloads: HashMap<String, Vec<u8>>,
+    /// SF-0002 r3: a move/rename (`PATCH /files/{id}`) answers this status
+    /// instead of succeeding.
+    pub move_status: Option<u16>,
     /// Every request that changes state, in order: `init:<id>`,
     /// `chunk:<session>:<index>`, `complete:<session>`, `abandon:<id>`,
-    /// `trash:<id>`, `folder:<id>`.
+    /// `trash:<id>`, `folder:<id>`, `move:<id>` (a successful PATCH).
     pub events: Vec<String>,
 }
 
@@ -267,6 +270,14 @@ fn router(state: Shared) -> Router {
                 m.trashed.push(fid.clone());
                 m.events.push(format!("trash:{fid}"));
                 Json(json!({ "id": fid, "is_trashed": true })).into_response()
+            })
+            .patch(|State(st): State<Shared>, Path(fid): Path<String>| async move {
+                let mut m = st.lock().unwrap();
+                if let Some(status) = m.move_status {
+                    return StatusCode::from_u16(status).unwrap().into_response();
+                }
+                m.events.push(format!("move:{fid}"));
+                Json(json!({ "id": fid })).into_response()
             }),
         )
         .route(

@@ -364,6 +364,10 @@ mod fuse_impl {
     struct PendingCreate {
         parent_ino: u64,
         name: String,
+        /// SF-0002 r3 (K3): the stored row this create replaces (a `create()`
+        /// over an existing name). Trashed only after the new file's upload
+        /// completed; a failed upload leaves it untouched.
+        replaces: Option<String>,
     }
 
     /// What `release()` does with the buffer it takes off an inode. One pure
@@ -426,6 +430,10 @@ mod fuse_impl {
         /// Inodes that have been written to and need re-upload (existing files
         /// opened with O_TRUNC / O_WRONLY). Distinct from pending_creates.
         dirty_inodes: HashSet<u64>,
+        /// SF-0002 r3 (K5): ids this mount uploaded, each under a key it minted
+        /// (the canonical string-id key). Their write check is decided here,
+        /// without a probe: an editor's atomic save never waits on a download.
+        minted: HashSet<String>,
         cache_ttl: Duration,
     }
 
@@ -457,6 +465,7 @@ mod fuse_impl {
                 write_buffers: HashMap::new(),
                 pending_creates: HashMap::new(),
                 dirty_inodes: HashSet::new(),
+                minted: HashSet::new(),
                 cache_ttl,
             };
             fs.inodes.insert(
@@ -651,7 +660,13 @@ mod fuse_impl {
                 entry.size = plaintext.len() as u64;
                 entry.chunk_count = uploaded.chunk_count;
                 entry.modified = SystemTime::now();
+                // SF-0002 r3 (K4): this is a NEW file, written here under the
+                // canonical key: it is not read-only, and its frames are the
+                // new-file writer's (Unrecorded pin, task 1943), not the old row's.
+                entry.read_only = false;
+                entry.pin = Ok(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded);
             }
+            self.minted.insert(file_id.clone());
             self.id_to_ino.insert(file_id, ino);
 
             // Invalidate parent dir cache so readdir shows the new file.
@@ -821,18 +836,16 @@ mod fuse_impl {
                 }
             };
 
-            // If a file with this name already exists in parent, trash it first
-            // so the copy-to-existing-name case works cleanly.
-            if let Some(old_ino) = self.find_child(parent, &name_str) {
-                if let Some(file_id) = self.inodes.get(&old_ino).and_then(|e| e.file_id.clone()) {
-                    let _ = self.rt.block_on(self.api.trash_file(&file_id));
-                    self.id_to_ino.remove(&file_id);
+            // A file with this name already exists in parent: the new file
+            // replaces it. SF-0002 r3 (K3): ask the write check now, and trash
+            // the old row only once the new one is uploaded (release).
+            let replaces = match self.take_replaced_child(parent, &name_str) {
+                Ok(replaces) => replaces,
+                Err(errno) => {
+                    reply.error(errno);
+                    return;
                 }
-                self.inodes.remove(&old_ino);
-                self.write_buffers.remove(&old_ino);
-                self.file_cache.remove(&old_ino);
-                self.dir_cache.remove(&parent);
-            }
+            };
 
             let ino = self.alloc_ino();
             let now = SystemTime::now();
@@ -858,6 +871,7 @@ mod fuse_impl {
                 PendingCreate {
                     parent_ino: parent,
                     name: name_str,
+                    replaces,
                 },
             );
             self.write_buffers.insert(ino, Vec::new());
@@ -1102,12 +1116,9 @@ mod fuse_impl {
                 // ── Case 1: brand-new file ────────────────────────────────────
                 ReleaseUpload::NewFile => {
                     let pending = pending.expect("a pending create carries its metadata");
-                    match self.upload_file(ino, &pending.name, buf, pending.parent_ino) {
-                        Ok(_) => reply.ok(),
-                        Err(e) => {
-                            eprintln!("[mount] release upload (new file): {e}");
-                            reply.error(Errno::EIO);
-                        }
+                    match self.commit_new_file(ino, buf, pending) {
+                        Ok(()) => reply.ok(),
+                        Err(errno) => reply.error(errno),
                     }
                 }
 
@@ -1125,11 +1136,16 @@ mod fuse_impl {
         /// aborted upload (a changed echo, a network error) leaves the old file
         /// untouched and the inode still on it, never the old one in the trash
         /// with nothing in its place.
+        ///
+        /// SF-0002 r3 (K3): the old row is asked the write check first. A
+        /// read-only row is never replaced (EPERM) and one the check could not
+        /// read is left alone (EAGAIN): nothing is uploaded or trashed.
         fn commit_overwrite(&mut self, ino: u64, buf: Vec<u8>) -> Result<(), Errno> {
             let (name, parent_ino, old_file_id) = match self.inodes.get(&ino) {
                 Some(e) => (e.name.clone(), e.parent_ino, e.file_id.clone()),
                 None => return Err(Errno::ENOENT),
             };
+            self.check_stored_row(ino, "overwrite")?;
             if let Err(e) = self.upload_file(ino, &name, buf, parent_ino) {
                 eprintln!("[mount] release upload (overwrite): {e}");
                 return Err(Errno::EIO);
@@ -1141,6 +1157,46 @@ mod fuse_impl {
                 }
             }
             Ok(())
+        }
+
+        /// `release()` case 1: upload a pending create, then trash the row it
+        /// replaces (if any), only once the new file exists under the id this
+        /// client minted (SF-0002 r3 K3, the L5 order).
+        fn commit_new_file(&mut self, ino: u64, buf: Vec<u8>, pending: PendingCreate) -> Result<(), Errno> {
+            if let Err(e) = self.upload_file(ino, &pending.name, buf, pending.parent_ino) {
+                eprintln!("[mount] release upload (new file): {e}");
+                return Err(Errno::EIO);
+            }
+            if let Some(old_id) = pending.replaces {
+                if let Err(e) = self.rt.block_on(self.api.trash_file(&old_id)) {
+                    // Non-fatal: the new copy exists; the old one stays listed.
+                    eprintln!("[mount] release: trash replaced file {old_id}: {e}");
+                }
+            }
+            Ok(())
+        }
+
+        /// `create()` over a name that already exists in `parent`: the stored
+        /// row there is about to be replaced. Ask the write check (EPERM for a
+        /// read-only row, EAGAIN when it cannot be read; the row and its inode
+        /// stay as they are), then drop its inode and return its id, for
+        /// `release()` to trash after the new upload completed (SF-0002 r3 K3).
+        fn take_replaced_child(&mut self, parent: u64, name: &str) -> Result<Option<String>, Errno> {
+            let Some(old_ino) = self.find_child(parent, name) else {
+                return Ok(None);
+            };
+            self.check_stored_row(old_ino, "replace")?;
+            let replaced = self.inodes.get(&old_ino).and_then(|e| e.file_id.clone());
+            if let Some(id) = &replaced {
+                self.id_to_ino.remove(id);
+            }
+            self.inodes.remove(&old_ino);
+            self.write_buffers.remove(&old_ino);
+            self.pending_creates.remove(&old_ino);
+            self.dirty_inodes.remove(&old_ino);
+            self.file_cache.remove(&old_ino);
+            self.dir_cache.remove(&parent);
+            Ok(replaced)
         }
 
         /// Take the buffer off `ino` and decide what `release()` does with it.
@@ -1338,16 +1394,22 @@ mod fuse_impl {
             reply.ok();
         }
 
-        /// SF-0002: may the stored row behind `ino` be renamed? The one write
-        /// check: `EPERM` for a read-only row, `EAGAIN` when the check could not
-        /// decide (retryable; the row is not marked read-only).
-        fn rename_check(&self, ino: u64) -> Result<(), Errno> {
+        /// SF-0002: may the stored row behind `ino` be renamed, overwritten or
+        /// replaced (`what`, for the log)? The one write check: `EPERM` for a
+        /// read-only row, `EAGAIN` when the check could not decide (retryable;
+        /// the row is not marked read-only).
+        fn check_stored_row(&self, ino: u64, what: &str) -> Result<(), Errno> {
             let Some(entry) = self.inodes.get(&ino) else {
                 return Err(Errno::ENOENT);
             };
             let Some(file_id) = entry.file_id.as_deref() else {
-                return Ok(()); // not uploaded yet: the rename is local
+                return Ok(()); // not uploaded yet: the change is local
             };
+            // Round 3 (K5): a file this mount uploaded under a key it minted is
+            // writable by construction; no probe.
+            if self.minted.contains(file_id) {
+                return Ok(());
+            }
             let target = crate::owned_keys::WriteTarget {
                 file_id,
                 is_folder: entry.is_dir,
@@ -1363,11 +1425,17 @@ mod fuse_impl {
             {
                 crate::owned_keys::WriteCheck::Writable => Ok(()),
                 crate::owned_keys::WriteCheck::UpperRepair => {
-                    eprintln!("[mount] rename refused: {file_id} is read-only (SF-0002)");
+                    eprintln!(
+                        "[mount] {what} refused for {file_id}: {}",
+                        crate::crypto::OWNER_REPAIR_READ_ONLY
+                    );
                     Err(Errno::EPERM)
                 }
                 crate::owned_keys::WriteCheck::Unknown => {
-                    eprintln!("[mount] rename refused: {file_id} could not be checked (SF-0002), try again");
+                    eprintln!(
+                        "[mount] {what} refused for {file_id}: {}",
+                        crate::owned_keys::WRITE_CHECK_UNKNOWN
+                    );
                     Err(Errno::EAGAIN)
                 }
             }
@@ -1454,19 +1522,45 @@ mod fuse_impl {
                 }
             };
 
-            // Determine what changed.
-            let name_changed = old_name != newname_str;
-            let parent_changed = parent != newparent;
+            match self.rename_stored(
+                ino,
+                &file_id,
+                key_uuid,
+                &old_name,
+                parent,
+                newparent,
+                &newname_str,
+                new_parent_file_id,
+            ) {
+                Ok(()) => reply.ok(),
+                Err(errno) => reply.error(errno),
+            }
+        }
 
-            // SF-0002: a rename rewrites the name envelope under the id's
-            // convention, so a read-only row (name or CURRENT version) is
-            // refused, and so is one the check could not read. Reparenting
-            // stays a pure move.
+        /// The stored half of `rename()`: the source row is on the server.
+        ///
+        /// SF-0002: a rename rewrites the name envelope under the id's
+        /// convention, so a read-only source (name or CURRENT version) is
+        /// refused, and so is one the check could not read; reparenting stays a
+        /// pure move. Round 3 (K3): a rename onto an existing name replaces the
+        /// row there: it is asked the write check too, and trashed only AFTER the
+        /// move succeeded, so a refused or failed move leaves it untouched.
+        #[allow(clippy::too_many_arguments)]
+        fn rename_stored(
+            &mut self,
+            ino: u64,
+            file_id: &str,
+            key_uuid: Option<uuid::Uuid>,
+            old_name: &str,
+            parent: u64,
+            newparent: u64,
+            newname: &str,
+            new_parent_file_id: Option<Option<uuid::Uuid>>,
+        ) -> Result<(), Errno> {
+            let name_changed = old_name != newname;
+            let parent_changed = parent != newparent;
             if name_changed {
-                if let Err(errno) = self.rename_check(ino) {
-                    reply.error(errno);
-                    return;
-                }
+                self.check_stored_row(ino, "rename")?;
             }
 
             // Re-encrypt the name if it changed, using the file's existing key.
@@ -1475,50 +1569,51 @@ mod fuse_impl {
                     .or_else(|| file_id.parse().ok())
                     .unwrap_or_else(uuid::Uuid::new_v4);
                 let fk = beebeeb_core::kdf::derive_file_key(&self.master_key, ku.to_string().as_bytes());
-                match beebeeb_core::encrypt::encrypt_metadata(&fk, &newname_str) {
-                    Ok(blob) => match serde_json::to_string(&blob) {
-                        Ok(s) => Some(s),
-                        Err(e) => {
-                            eprintln!("[mount] rename serialize: {e}");
-                            reply.error(Errno::EIO);
-                            return;
-                        }
-                    },
-                    Err(e) => {
-                        eprintln!("[mount] rename encrypt: {e}");
-                        reply.error(Errno::EIO);
-                        return;
-                    }
-                }
+                let blob = beebeeb_core::encrypt::encrypt_metadata(&fk, newname).map_err(|e| {
+                    eprintln!("[mount] rename encrypt: {e}");
+                    Errno::EIO
+                })?;
+                Some(serde_json::to_string(&blob).map_err(|e| {
+                    eprintln!("[mount] rename serialize: {e}");
+                    Errno::EIO
+                })?)
             } else {
                 None
             };
 
-            // If a file with the target name already exists in newparent, trash it.
-            if let Some(conflict_ino) = self.find_child(newparent, &newname_str) {
-                if conflict_ino != ino {
-                    if let Some(cid) = self.inodes.get(&conflict_ino).and_then(|e| e.file_id.clone()) {
-                        let _ = self.rt.block_on(self.api.trash_file(&cid));
-                        self.id_to_ino.remove(&cid);
-                    }
-                    self.inodes.remove(&conflict_ino);
-                    self.file_cache.remove(&conflict_ino);
+            // The row a rename onto an existing name replaces.
+            let replaced = match self.find_child(newparent, newname) {
+                Some(conflict_ino) if conflict_ino != ino => {
+                    self.check_stored_row(conflict_ino, "replace")?;
+                    Some(conflict_ino)
                 }
-            }
+                _ => None,
+            };
 
             if let Err(e) = self.rt.block_on(
                 self.api
-                    .move_file(&file_id, new_name_enc.as_deref(), new_parent_file_id),
+                    .move_file(file_id, new_name_enc.as_deref(), new_parent_file_id),
             ) {
                 eprintln!("[mount] rename move_file: {e}");
-                reply.error(Errno::EIO);
-                return;
+                return Err(Errno::EIO);
+            }
+
+            if let Some(conflict_ino) = replaced {
+                if let Some(cid) = self.inodes.get(&conflict_ino).and_then(|e| e.file_id.clone()) {
+                    if let Err(e) = self.rt.block_on(self.api.trash_file(&cid)) {
+                        // Non-fatal: the move happened; the replaced row stays listed.
+                        eprintln!("[mount] rename: trash replaced file {cid}: {e}");
+                    }
+                    self.id_to_ino.remove(&cid);
+                }
+                self.inodes.remove(&conflict_ino);
+                self.file_cache.remove(&conflict_ino);
             }
 
             // Update local inode.
             if let Some(entry) = self.inodes.get_mut(&ino) {
                 if name_changed {
-                    entry.name = newname_str;
+                    entry.name = newname.to_string();
                 }
                 if parent_changed {
                     entry.parent_ino = newparent;
@@ -1528,7 +1623,7 @@ mod fuse_impl {
             if parent_changed {
                 self.dir_cache.remove(&newparent);
             }
-            reply.ok();
+            Ok(())
         }
     }
 
@@ -1999,6 +2094,16 @@ mod fuse_impl {
             spawn_upload_server_with(crate::test_server::Mock::default())
         }
 
+        /// The stored FILE_ID's empty version (size 0, one frame, the canonical
+        /// key), so its SF-0002 write check proves it writable.
+        fn stored_empty_version() -> HashMap<String, Vec<u8>> {
+            let key = beebeeb_core::kdf::derive_file_key(&master_key(), FILE_ID.as_bytes());
+            HashMap::from([(
+                FILE_ID.to_string(),
+                beebeeb_core::encrypt::encrypt_chunk_raw(&key, b"").unwrap(),
+            )])
+        }
+
         fn spawn_upload_server_with(mock: crate::test_server::Mock) -> (String, crate::test_server::Shared) {
             let mock = crate::test_server::shared(mock);
             (crate::test_server::spawn_on_own_thread(mock.clone()), mock)
@@ -2150,6 +2255,7 @@ mod fuse_impl {
                 PendingCreate {
                     parent_ino: ROOT_INO,
                     name: "new.bin".to_string(),
+                    replaces: None,
                 },
             );
             fs.inodes.get_mut(&INO).expect("inode").file_id = None;
@@ -2167,6 +2273,7 @@ mod fuse_impl {
                 PendingCreate {
                     parent_ino: ROOT_INO,
                     name: "new.bin".to_string(),
+                    replaces: None,
                 },
             );
 
@@ -2367,6 +2474,8 @@ mod fuse_impl {
         fn an_overwrite_whose_upload_aborts_keeps_the_old_file() {
             let (url, mock) = spawn_upload_server_with(crate::test_server::Mock {
                 init_echo: Some(uuid::Uuid::new_v4().to_string()),
+                // SF-0002 r3: the old row's write check reads its version.
+                downloads: stored_empty_version(),
                 ..Default::default()
             });
             let mut fs = state_with_stored_file(url, 0, beebeeb_core::chunk_stream::ExpectedChunkFormat::V2);
@@ -2388,7 +2497,11 @@ mod fuse_impl {
         /// copy completed under the minted id.
         #[test]
         fn an_overwrite_trashes_the_old_file_after_the_new_one_completes() {
-            let (url, mock) = spawn_upload_server();
+            // SF-0002 r3: the old row's write check reads its version.
+            let (url, mock) = spawn_upload_server_with(crate::test_server::Mock {
+                downloads: stored_empty_version(),
+                ..Default::default()
+            });
             let mut fs = state_with_stored_file(url, 0, beebeeb_core::chunk_stream::ExpectedChunkFormat::V2);
             fs.id_to_ino.insert(FILE_ID.to_string(), INO);
 
@@ -2418,7 +2531,7 @@ mod fuse_impl {
 
     // ── SF-0002 rename check ──────────────────────────────────────────────────
     //
-    // `rename()` asks `rename_check` before it re-encrypts a name. The API here
+    // `rename()` asks `check_stored_row` before it re-encrypts a name. The API here
     // is a closed local port: any probe fails, so an answer that needed one is
     // EAGAIN (Unknown), and an `Ok` proves nothing was downloaded.
 
@@ -2465,20 +2578,226 @@ mod fuse_impl {
         /// C4: renaming a folder downloads nothing and is allowed.
         #[test]
         fn a_folder_rename_is_never_probed() {
-            assert_eq!(state().rename_check(DIR_INO), Ok(()));
+            assert_eq!(state().check_stored_row(DIR_INO, "rename"), Ok(()));
         }
 
         /// C1 on the mount: a file whose version the check cannot read is
         /// refused with EAGAIN (retryable), not allowed and not EPERM.
         #[test]
         fn an_unreadable_check_refuses_with_eagain() {
-            assert_eq!(state().rename_check(FILE_INO), Err(Errno::EAGAIN));
+            assert_eq!(state().check_stored_row(FILE_INO, "rename"), Err(Errno::EAGAIN));
         }
 
         /// A name sealed read-only is EPERM without asking the server.
         #[test]
         fn a_read_only_name_is_eperm() {
-            assert_eq!(state().rename_check(RO_INO), Err(Errno::EPERM));
+            assert_eq!(state().check_stored_row(RO_INO, "rename"), Err(Errno::EPERM));
+        }
+    }
+
+    // ── SF-0002 round 3: replacing a stored row (K3, K4, K5) ──────────────────
+    //
+    // An overwrite on release, a create over an existing name and a rename onto
+    // one each replace a stored row. These drive the state methods the FUSE
+    // handlers call against the shared mock (its own thread: the state drives
+    // its runtime with `block_on`). Rows: OK (version served, writable), RO
+    // (name read-only), UNK (version not served: the check is Unknown), SRC (a
+    // rename's writable source).
+
+    #[cfg(test)]
+    mod replace_tests {
+        use super::*;
+        use crate::test_server::{Mock, Shared, shared, spawn_on_own_thread};
+        use beebeeb_core::chunk_stream::ExpectedChunkFormat;
+
+        const OK_ID: &str = "11111111-1111-4111-8111-111111111111";
+        const RO_ID: &str = "5f0c2a9e-3b1d-4c7e-9a2f-6d8e1b4c7a30";
+        const UNK_ID: &str = "33333333-3333-4333-8333-333333333333";
+        const SRC_ID: &str = "44444444-4444-4444-8444-444444444444";
+        const OK_INO: u64 = 10;
+        const RO_INO: u64 = 11;
+        const UNK_INO: u64 = 12;
+        const SRC_INO: u64 = 13;
+        const NEW_INO: u64 = 20;
+
+        fn master() -> beebeeb_core::kdf::MasterKey {
+            beebeeb_core::kdf::MasterKey::from_bytes([7u8; 32])
+        }
+
+        fn entry(file_id: Option<&str>, name: &str, read_only: bool) -> InodeEntry {
+            InodeEntry {
+                file_id: file_id.map(str::to_string),
+                key_uuid: file_id.and_then(|id| id.parse().ok()),
+                name: name.to_string(),
+                is_dir: false,
+                size: 0,
+                chunk_count: if file_id.is_some() { 1 } else { 0 },
+                modified: SystemTime::UNIX_EPOCH,
+                parent_ino: ROOT_INO,
+                pin: Ok(ExpectedChunkFormat::Unrecorded),
+                read_only,
+            }
+        }
+
+        fn setup(mut mock: Mock) -> (BeebeebFsState, Shared) {
+            for id in [OK_ID, SRC_ID] {
+                let key = beebeeb_core::kdf::derive_file_key(&master(), id.as_bytes());
+                mock.downloads
+                    .insert(id.to_string(), beebeeb_core::encrypt::encrypt_chunk_raw(&key, b"").unwrap());
+            }
+            let mock = shared(mock);
+            let url = spawn_on_own_thread(mock.clone());
+            let mut fs = BeebeebFsState::new(ApiClient::new_for_test(url), master(), Duration::from_secs(60));
+            for (ino, id, name, read_only) in [
+                (OK_INO, OK_ID, "ok.txt", false),
+                (RO_INO, RO_ID, "ro.pdf", true),
+                (UNK_INO, UNK_ID, "unk.txt", false),
+                (SRC_INO, SRC_ID, "src.txt", false),
+            ] {
+                fs.inodes.insert(ino, entry(Some(id), name, read_only));
+                fs.id_to_ino.insert(id.to_string(), ino);
+            }
+            // The root listing as the mount last read it (no listing route here).
+            fs.dir_cache.insert(
+                ROOT_INO,
+                CachedDir {
+                    children: vec![OK_INO, RO_INO, UNK_INO, SRC_INO],
+                    expires_at: std::time::Instant::now() + Duration::from_secs(60),
+                },
+            );
+            (fs, mock)
+        }
+
+        fn position(events: &[String], event: &str) -> usize {
+            events
+                .iter()
+                .position(|e| e.starts_with(event))
+                .unwrap_or_else(|| panic!("no {event} in {events:?}"))
+        }
+
+        /// K3 (overwrite on release): a read-only row is never replaced (EPERM)
+        /// and one the check cannot read is left alone (EAGAIN). Nothing is
+        /// uploaded, nothing is trashed, and the inodes stay on their rows.
+        #[test]
+        fn an_overwrite_of_a_read_only_or_unchecked_row_changes_nothing() {
+            let (mut fs, mock) = setup(Mock::default());
+            assert_eq!(fs.commit_overwrite(RO_INO, b"new".to_vec()), Err(Errno::EPERM));
+            assert_eq!(fs.commit_overwrite(UNK_INO, b"new".to_vec()), Err(Errno::EAGAIN));
+            assert_eq!(fs.inodes[&RO_INO].file_id.as_deref(), Some(RO_ID));
+            assert_eq!(fs.inodes[&UNK_INO].file_id.as_deref(), Some(UNK_ID));
+            let m = mock.lock().unwrap();
+            assert!(m.inits.is_empty(), "nothing uploaded: {:?}", m.events);
+            assert!(m.trashed.is_empty(), "nothing trashed: {:?}", m.events);
+        }
+
+        /// K4: after an overwrite the inode describes the NEW file: the
+        /// new-file writer's pin (Unrecorded), not the old row's V2, and not
+        /// read-only (upload_file clears a flag left on the inode).
+        #[test]
+        fn an_overwrite_resets_the_pin_and_the_read_only_flag() {
+            let (mut fs, _mock) = setup(Mock::default());
+            fs.inodes.get_mut(&OK_INO).unwrap().pin = Ok(ExpectedChunkFormat::V2);
+            fs.commit_overwrite(OK_INO, b"new".to_vec()).expect("overwrite");
+            assert_eq!(fs.inodes[&OK_INO].pin, Ok(ExpectedChunkFormat::Unrecorded));
+
+            fs.inodes.get_mut(&OK_INO).unwrap().read_only = true;
+            fs.upload_file(OK_INO, "ok.txt", b"again".to_vec(), ROOT_INO)
+                .expect("upload");
+            assert!(!fs.inodes[&OK_INO].read_only);
+        }
+
+        /// K3 (create over an existing name): the row there is asked the write
+        /// check (EPERM / EAGAIN, and it stays), and a writable one is trashed
+        /// only after the new file's upload completed.
+        #[test]
+        fn a_create_over_an_existing_name_trashes_only_after_the_upload() {
+            let (mut fs, mock) = setup(Mock::default());
+            assert_eq!(fs.take_replaced_child(ROOT_INO, "ro.pdf"), Err(Errno::EPERM));
+            assert_eq!(fs.take_replaced_child(ROOT_INO, "unk.txt"), Err(Errno::EAGAIN));
+            assert!(fs.inodes.contains_key(&RO_INO) && fs.inodes.contains_key(&UNK_INO));
+
+            let replaces = fs.take_replaced_child(ROOT_INO, "ok.txt").expect("a writable row");
+            assert_eq!(replaces.as_deref(), Some(OK_ID));
+            assert!(mock.lock().unwrap().trashed.is_empty(), "nothing trashed at create");
+            fs.inodes.insert(NEW_INO, entry(None, "ok.txt", false));
+            let pending = PendingCreate {
+                parent_ino: ROOT_INO,
+                name: "ok.txt".to_string(),
+                replaces,
+            };
+            fs.commit_new_file(NEW_INO, b"new".to_vec(), pending).expect("upload");
+            let m = mock.lock().unwrap();
+            assert!(
+                position(&m.events, "complete:") < position(&m.events, &format!("trash:{OK_ID}")),
+                "trashed only after the new file completed: {:?}",
+                m.events
+            );
+        }
+
+        /// K3: a create whose upload is refused (a changed echo) leaves the row
+        /// it would have replaced untouched.
+        #[test]
+        fn a_create_whose_upload_aborts_keeps_the_replaced_row() {
+            let (mut fs, mock) = setup(Mock {
+                init_echo: Some(uuid::Uuid::new_v4().to_string()),
+                ..Default::default()
+            });
+            let replaces = fs.take_replaced_child(ROOT_INO, "ok.txt").expect("a writable row");
+            fs.inodes.insert(NEW_INO, entry(None, "ok.txt", false));
+            let pending = PendingCreate {
+                parent_ino: ROOT_INO,
+                name: "ok.txt".to_string(),
+                replaces,
+            };
+            assert_eq!(fs.commit_new_file(NEW_INO, b"new".to_vec(), pending), Err(Errno::EIO));
+            assert!(mock.lock().unwrap().trashed.is_empty(), "the replaced row was trashed");
+        }
+
+        /// K3 (rename onto an existing name): the row there is asked the write
+        /// check (EPERM / EAGAIN: no move, nothing trashed); a writable one is
+        /// trashed only after the move succeeded, and a failed move trashes
+        /// nothing.
+        #[test]
+        fn a_rename_onto_an_existing_name_trashes_only_after_the_move() {
+            let (mut fs, mock) = setup(Mock::default());
+            let rename = |fs: &mut BeebeebFsState, onto: &str| {
+                fs.rename_stored(
+                    SRC_INO,
+                    SRC_ID,
+                    SRC_ID.parse().ok(),
+                    "src.txt",
+                    ROOT_INO,
+                    ROOT_INO,
+                    onto,
+                    None,
+                )
+            };
+            assert_eq!(rename(&mut fs, "ro.pdf"), Err(Errno::EPERM));
+            assert_eq!(rename(&mut fs, "unk.txt"), Err(Errno::EAGAIN));
+            assert!(mock.lock().unwrap().events.is_empty(), "a refused rename sent nothing");
+
+            mock.lock().unwrap().move_status = Some(500);
+            assert_eq!(rename(&mut fs, "ok.txt"), Err(Errno::EIO));
+            assert!(mock.lock().unwrap().trashed.is_empty(), "a failed move trashed the target");
+
+            mock.lock().unwrap().move_status = None;
+            rename(&mut fs, "ok.txt").expect("a rename onto a writable row");
+            assert_eq!(
+                mock.lock().unwrap().events,
+                vec![format!("move:{SRC_ID}"), format!("trash:{OK_ID}")]
+            );
+        }
+
+        /// K5: a file this mount uploaded (under a key it minted) is decided
+        /// without a probe. Its version is not served here, so a probe would
+        /// answer EAGAIN.
+        #[test]
+        fn a_file_this_mount_uploaded_is_renamed_without_a_probe() {
+            let (mut fs, _mock) = setup(Mock::default());
+            fs.inodes.insert(NEW_INO, entry(None, "draft.txt", false));
+            fs.upload_file(NEW_INO, "draft.txt", b"draft".to_vec(), ROOT_INO)
+                .expect("upload");
+            assert_eq!(fs.check_stored_row(NEW_INO, "rename"), Ok(()));
         }
     }
 }
