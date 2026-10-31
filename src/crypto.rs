@@ -130,9 +130,9 @@ pub fn decrypt_name_with_convention(
 }
 
 /// SF-0002: does this row's NAME authenticate only under the read-only
-/// uppercase repair convention? The flag a mount entry carries; a caller that
-/// can also read content must check chunk 0 as well before a write.
-#[cfg_attr(not(feature = "fuse"), allow(dead_code))] // only the mount path asks
+/// uppercase repair convention? The one name verdict for every surface (the
+/// resolver, `bb mv`/`push` paths, WebDAV, the mount), whichever key the row
+/// was reached by; `owned_keys::write_check` then checks the content as well.
 pub fn name_is_upper_repair(
     master_key: &beebeeb_core::kdf::MasterKey,
     file_id_str: &str,

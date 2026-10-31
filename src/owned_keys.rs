@@ -175,6 +175,10 @@ impl OwnedKeyResolver {
             if let Ok(key) = owned_keys::unwrap_owner_file_key(master, &id, frame) {
                 if let Ok(name) = authenticated_name(&key, &canonical) {
                     self.pending.remove(&id);
+                    // SF-0002 r2 (C5): the same name verdict as every other
+                    // surface. An owner wrap of the uppercase-id key is read-only
+                    // here too, not writable because it was reached by the wrap.
+                    let read_only = name_read_only(master, &id, &canonical);
                     return Ok(ResolvedCliKey {
                         key: Arc::new(key),
                         origin: KeyOrigin::OwnerWrap,
@@ -182,7 +186,7 @@ impl OwnedKeyResolver {
                         pending_owner_wrap: None,
                         shared_root_id: None,
                         name,
-                        read_only: false,
+                        read_only,
                     });
                 }
             }
@@ -192,6 +196,7 @@ impl OwnedKeyResolver {
         if let Some(frame) = self.pending.get(&id) {
             if let Ok(key) = owned_keys::unwrap_owner_file_key(master, &id, frame) {
                 if let Ok(name) = authenticated_name(&key, &canonical) {
+                    let read_only = name_read_only(master, &id, &canonical);
                     return Ok(ResolvedCliKey {
                         key: Arc::new(key),
                         origin: KeyOrigin::OwnerWrap,
@@ -199,7 +204,7 @@ impl OwnedKeyResolver {
                         pending_owner_wrap: Some(frame.clone()),
                         shared_root_id: None,
                         name,
-                        read_only: false,
+                        read_only,
                     });
                 }
             }
@@ -656,6 +661,14 @@ fn chunk0_lengths(
         push(have as u64);
     }
     out
+}
+
+/// The resolver's name verdict for a row it opened through an owner wrap:
+/// [`crate::crypto::name_is_upper_repair`], the one every listing uses.
+fn name_read_only(master: &MasterKey, id: &str, row: &Value) -> bool {
+    row["name_encrypted"]
+        .as_str()
+        .is_some_and(|enc| crate::crypto::name_is_upper_repair(master, id, enc))
 }
 
 fn text<'a>(row: &'a Value, key: &str) -> Result<&'a str, String> {

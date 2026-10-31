@@ -319,3 +319,40 @@ async fn a_folder_rename_downloads_nothing() {
     assert_eq!(downloads(&h), 0, "a folder rename probed content");
     h.close().await;
 }
+
+/// SF-0002 round 2 (C5): an owner wrap of the uppercase-id key is the same
+/// read-only row for `bb mv` and `push --replace` (the resolver path) as it is
+/// for WebDAV and the mount: refused by its NAME, before any content probe.
+/// The probe is made to fail, so a verdict that waited for the content would
+/// say "couldn't check" instead (WebDAV's half is
+/// `webdav::sf_0002_write_check_tests::an_owner_wrap_of_the_uppercase_key_is_read_only`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_owner_wrap_of_the_uppercase_key_is_read_only() {
+    let h = Harness::new(Fixture::upper_repair_owner_wrap()).await;
+    h.state.lock().unwrap().download_status = Some(503);
+    let out = h
+        .run(&["mv", "Shared/uppercase-repair.pdf", "Shared/renamed.pdf"])
+        .await;
+    assert!(!out.status.success(), "a read-only owner-wrap row was renamed");
+    assert!(
+        stderr(&out).contains("This file was saved by an older version of the iOS app"),
+        "stderr={}",
+        stderr(&out)
+    );
+    assert_eq!(h.count("PATCH", &format!("/api/v1/files/{UPPER_FILE}")), 0);
+
+    let local = h.home.join("uppercase-repair.pdf");
+    std::fs::write(&local, b"replacement bytes").unwrap();
+    let out = h
+        .run(&["push", local.to_str().unwrap(), "--folder", "Shared", "--replace"])
+        .await;
+    assert!(!out.status.success(), "a read-only owner-wrap row was replaced");
+    assert!(
+        stderr(&out).contains("This file was saved by an older version of the iOS app"),
+        "stderr={}",
+        stderr(&out)
+    );
+    assert_eq!(h.count("POST", "/api/v1/uploads/init"), 0);
+    assert_eq!(downloads(&h), 0, "the name decides; no content probe is needed");
+    h.close().await;
+}

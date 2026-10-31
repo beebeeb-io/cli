@@ -1652,6 +1652,7 @@ mod windows_hint_tests {
 mod sf_0002_write_check_tests {
     use super::*;
     use axum::{Json, routing::get};
+    use base64::Engine as _;
     use serde_json::json;
     use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 
@@ -1772,6 +1773,31 @@ mod sf_0002_write_check_tests {
             m.writes.load(Ordering::SeqCst) >= 1,
             "a readable ordinary row must get past the check to the upload"
         );
+        m.server.abort();
+    }
+
+    /// C5: the owner-wrap-of-uppercase row `bb mv` refuses
+    /// (`owner_read_repair::an_owner_wrap_of_the_uppercase_key_is_read_only`) is
+    /// refused here as well: 403 by its name, no probe, no write.
+    #[tokio::test]
+    async fn an_owner_wrap_of_the_uppercase_key_is_read_only() {
+        const UPPER: &str = "5f0c2a9e-3b1d-4c7e-9a2f-6d8e1b4c7a30";
+        let upper = beebeeb_core::kdf::derive_file_key(&master(), UPPER.to_ascii_uppercase().as_bytes());
+        let plaintext = b"SF-0002 read-only repair content";
+        let mut row = file_row(UPPER, "uppercase-repair.pdf", &upper, plaintext);
+        let wrap = beebeeb_core::owned_keys::wrap_owner_file_key(&master(), UPPER, &upper).unwrap();
+        row["owner_wrapped_file_key"] = json!(base64::engine::general_purpose::STANDARD.encode(wrap));
+        let frame = beebeeb_core::encrypt::encrypt_chunk_raw(&upper, plaintext).unwrap();
+        let m = mock(vec![row], frame).await;
+        m.download_status.store(503, Ordering::SeqCst);
+
+        let put = put_response(&m.state, "/uppercase-repair.pdf", b"edited".to_vec(), None).await;
+        assert_eq!(put.status(), StatusCode::FORBIDDEN);
+        assert_eq!(body_text(put).await, crate::crypto::OWNER_REPAIR_READ_ONLY);
+        let rename = move_response(&m.state, "/uppercase-repair.pdf", "/renamed.pdf").await;
+        assert_eq!(rename.status(), StatusCode::FORBIDDEN);
+        assert_eq!(m.writes.load(Ordering::SeqCst), 0, "a refused write sent a request");
+        assert_eq!(m.downloads.load(Ordering::SeqCst), 0, "the name decides; no probe");
         m.server.abort();
     }
 }

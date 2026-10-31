@@ -186,6 +186,16 @@ impl Fixture {
         f.rows[1] = r;
         f
     }
+    /// SF-0002 round 2 (C5): [`Fixture::upper_repair`] whose row also carries an
+    /// owner wrap of the uppercase-id key, so the resolver opens it through the
+    /// wrap (`KeyOrigin::OwnerWrap`) rather than by derivation.
+    pub fn upper_repair_owner_wrap() -> Self {
+        let mut f = Self::upper_repair();
+        let upper = beebeeb_core::kdf::derive_file_key(&master(), UPPER_FILE.to_uppercase().as_bytes());
+        let wrap = owned_keys::wrap_owner_file_key(&master(), UPPER_FILE, &upper).unwrap();
+        f.rows[1]["owner_wrapped_file_key"] = json!(B64.encode(wrap));
+        f
+    }
     /// SF-0002 round 2: an ordinary owner row (id `FILE`, under ROOT): its name
     /// and its single legacy content frame use the canonical string key, so it
     /// is writable once the check can read it.
