@@ -2487,8 +2487,10 @@ mod fuse_impl {
             let mut dir = inode("22222222-2222-4222-8222-222222222222", true, false);
             dir.chunk_count = 1;
             fs.inodes.insert(DIR_INO, dir);
-            fs.inodes.insert(FILE_INO, inode("11111111-1111-4111-8111-111111111111", false, false));
-            fs.inodes.insert(RO_INO, inode("5f0c2a9e-3b1d-4c7e-9a2f-6d8e1b4c7a30", false, true));
+            fs.inodes
+                .insert(FILE_INO, inode("11111111-1111-4111-8111-111111111111", false, false));
+            fs.inodes
+                .insert(RO_INO, inode("5f0c2a9e-3b1d-4c7e-9a2f-6d8e1b4c7a30", false, true));
             fs
         }
 

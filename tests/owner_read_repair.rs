@@ -109,13 +109,22 @@ async fn sync_keeps_a_read_only_row_and_the_local_edit() {
     let out = h
         .run(&["sync", dir.to_str().unwrap(), "/Shared", "--once", "--rehash"])
         .await;
-    assert_eq!(out.status.code(), Some(3), "a pass that left the edit unsynced must say so: {}", stderr(&out));
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "a pass that left the edit unsynced must say so: {}",
+        stderr(&out)
+    );
     assert!(
         stderr(&out).contains("This file was saved by an older version of the iOS app"),
         "stderr={}",
         stderr(&out)
     );
-    assert_eq!(h.count("DELETE", &format!("/api/v1/files/{UPPER_FILE}")), 0, "the original was trashed");
+    assert_eq!(
+        h.count("DELETE", &format!("/api/v1/files/{UPPER_FILE}")),
+        0,
+        "the original was trashed"
+    );
     assert_eq!(h.count("POST", "/api/v1/uploads/init"), 0, "the edit was uploaded");
     assert_eq!(std::fs::read(dir.join("uppercase-repair.pdf")).unwrap(), edited);
     h.close().await;
@@ -263,19 +272,37 @@ async fn replace_refuses_when_the_check_cannot_read_the_version() {
     let out = h
         .run(&["push", local.to_str().unwrap(), "--folder", "Shared", "--replace"])
         .await;
-    assert!(!out.status.success(), "a replace went ahead without a check: {}", stderr(&out));
+    assert!(
+        !out.status.success(),
+        "a replace went ahead without a check: {}",
+        stderr(&out)
+    );
     assert!(stderr(&out).contains(COULD_NOT_CHECK), "stderr={}", stderr(&out));
-    assert_eq!(h.count("POST", "/api/v1/uploads/init"), 0, "an upload session was started");
-    assert!(h.count("GET", &format!("/api/v1/files/{FILE}/download")) >= 1, "the check never asked");
+    assert_eq!(
+        h.count("POST", "/api/v1/uploads/init"),
+        0,
+        "an upload session was started"
+    );
+    assert!(
+        h.count("GET", &format!("/api/v1/files/{FILE}/download")) >= 1,
+        "the check never asked"
+    );
 
     h.state.lock().unwrap().download_status = None;
     let out = h
         .run(&["push", local.to_str().unwrap(), "--folder", "Shared", "--replace"])
         .await;
-    assert!(out.status.success(), "a readable ordinary row must stay replaceable: {}", stderr(&out));
+    assert!(
+        out.status.success(),
+        "a readable ordinary row must stay replaceable: {}",
+        stderr(&out)
+    );
     {
         let f = h.state.lock().unwrap();
-        assert_eq!(f.upload_request["file_id"], FILE, "the replace must version the same id");
+        assert_eq!(
+            f.upload_request["file_id"], FILE,
+            "the replace must version the same id"
+        );
         assert_eq!(f.upload_request["base_version_number"], 1);
     }
     h.close().await;
@@ -288,13 +315,25 @@ async fn rename_refuses_when_the_check_cannot_read_the_version() {
     let h = Harness::new(Fixture::owner_file()).await;
     h.state.lock().unwrap().download_status = Some(503);
     let out = h.run(&["mv", "Shared/owned.txt", "Shared/renamed.txt"]).await;
-    assert!(!out.status.success(), "a rename went ahead without a check: {}", stderr(&out));
+    assert!(
+        !out.status.success(),
+        "a rename went ahead without a check: {}",
+        stderr(&out)
+    );
     assert!(stderr(&out).contains(COULD_NOT_CHECK), "stderr={}", stderr(&out));
-    assert_eq!(h.count("PATCH", &format!("/api/v1/files/{FILE}")), 0, "a rename was sent");
+    assert_eq!(
+        h.count("PATCH", &format!("/api/v1/files/{FILE}")),
+        0,
+        "a rename was sent"
+    );
 
     h.state.lock().unwrap().download_status = None;
     let out = h.run(&["mv", "Shared/owned.txt", "Shared/renamed.txt"]).await;
-    assert!(out.status.success(), "a readable ordinary row must stay renamable: {}", stderr(&out));
+    assert!(
+        out.status.success(),
+        "a readable ordinary row must stay renamable: {}",
+        stderr(&out)
+    );
     assert_eq!(h.count("PATCH", &format!("/api/v1/files/{FILE}")), 1);
     h.close().await;
 }
@@ -317,7 +356,11 @@ fn downloads(h: &Harness) -> usize {
 async fn a_folder_rename_downloads_nothing() {
     let h = Harness::new(Fixture::basic()).await;
     let out = h.run(&["mv", "Shared", "Renamed"]).await;
-    assert!(out.status.success(), "a folder rename must go through: {}", stderr(&out));
+    assert!(
+        out.status.success(),
+        "a folder rename must go through: {}",
+        stderr(&out)
+    );
     assert_eq!(h.count("PATCH", &format!("/api/v1/files/{ROOT}")), 1);
     assert_eq!(downloads(&h), 0, "a folder rename probed content");
     h.close().await;
@@ -380,10 +423,23 @@ async fn sync_skips_a_row_it_cannot_check_and_replaces_it_in_place_next_pass() {
     let out = h
         .run(&["sync", dir.to_str().unwrap(), "/Shared", "--once", "--rehash"])
         .await;
-    assert_eq!(out.status.code(), Some(3), "a skipped upload must not report synced: {}", stderr(&out));
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "a skipped upload must not report synced: {}",
+        stderr(&out)
+    );
     assert!(stderr(&out).contains(COULD_NOT_CHECK), "stderr={}", stderr(&out));
-    assert_eq!(h.count("DELETE", &format!("/api/v1/files/{FILE}")), 0, "an unchecked row was trashed");
-    assert_eq!(h.count("POST", "/api/v1/uploads/init"), 0, "an unchecked row was re-uploaded");
+    assert_eq!(
+        h.count("DELETE", &format!("/api/v1/files/{FILE}")),
+        0,
+        "an unchecked row was trashed"
+    );
+    assert_eq!(
+        h.count("POST", "/api/v1/uploads/init"),
+        0,
+        "an unchecked row was re-uploaded"
+    );
     assert_eq!(std::fs::read(dir.join("guest.txt")).unwrap(), edited);
 
     h.state.lock().unwrap().download_status = None;
@@ -423,7 +479,11 @@ async fn sync_keeps_a_row_whose_content_is_uppercase() {
         "stderr={}",
         stderr(&out)
     );
-    assert_eq!(h.count("DELETE", &format!("/api/v1/files/{UPPER_FILE}")), 0, "the original was trashed");
+    assert_eq!(
+        h.count("DELETE", &format!("/api/v1/files/{UPPER_FILE}")),
+        0,
+        "the original was trashed"
+    );
     assert_eq!(h.count("POST", "/api/v1/uploads/init"), 0);
     h.close().await;
 }

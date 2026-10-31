@@ -1652,7 +1652,6 @@ mod windows_hint_tests {
 mod sf_0002_write_check_tests {
     use super::*;
     use axum::{Json, routing::get};
-    use base64::Engine as _;
     use serde_json::json;
     use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 

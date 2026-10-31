@@ -799,7 +799,10 @@ mod write_check_tests {
         let stranger = FileKey::from_bytes([3u8; 32]);
         let wire = frame(&stranger, b"sealed under a key the owner does not hold");
         let size = Some(wire.len() as u64 - 28);
-        assert_eq!(first_chunk_check(&m, ID, None, &wire, size, 1, None, true), WriteCheck::Unknown);
+        assert_eq!(
+            first_chunk_check(&m, ID, None, &wire, size, 1, None, true),
+            WriteCheck::Unknown
+        );
         let other = FileKey::from_bytes([4u8; 32]);
         assert_eq!(
             first_chunk_check(&m, ID, Some(&other), &wire, size, 1, None, true),
@@ -826,7 +829,10 @@ mod write_check_tests {
             chunk_count: 1,
         };
         assert_eq!(write_check(&api, &m, &target(true, false)).await, WriteCheck::Writable);
-        assert_eq!(write_check(&api, &m, &target(true, true)).await, WriteCheck::UpperRepair);
+        assert_eq!(
+            write_check(&api, &m, &target(true, true)).await,
+            WriteCheck::UpperRepair
+        );
         assert_eq!(write_check(&api, &m, &target(false, false)).await, WriteCheck::Unknown);
     }
 
@@ -839,13 +845,22 @@ mod write_check_tests {
         let pt = b"single chunk";
         let size = Some(pt.len() as u64);
         let ordinary = frame(&derive_file_key(&m, ID.as_bytes()), pt);
-        assert_eq!(first_chunk_check(&m, ID, None, &ordinary, size, 1, None, false), WriteCheck::Writable);
+        assert_eq!(
+            first_chunk_check(&m, ID, None, &ordinary, size, 1, None, false),
+            WriteCheck::Writable
+        );
         let item = FileKey::from_bytes([5u8; 32]);
         let shared = frame(&item, pt);
-        assert_eq!(first_chunk_check(&m, ID, Some(&item), &shared, size, 1, None, false), WriteCheck::Writable);
+        assert_eq!(
+            first_chunk_check(&m, ID, Some(&item), &shared, size, 1, None, false),
+            WriteCheck::Writable
+        );
         let upper = derive_file_key(&m, ID.to_ascii_uppercase().as_bytes());
         let sealed = frame(&upper, pt);
-        assert_eq!(first_chunk_check(&m, ID, None, &sealed, size, 1, None, false), WriteCheck::UpperRepair);
+        assert_eq!(
+            first_chunk_check(&m, ID, None, &sealed, size, 1, None, false),
+            WriteCheck::UpperRepair
+        );
         assert_eq!(
             first_chunk_check(&m, ID, Some(&upper), &sealed, size, 1, None, false),
             WriteCheck::UpperRepair

@@ -208,8 +208,13 @@ impl Fixture {
         f.frames = vec![beebeeb_core::encrypt::encrypt_chunk_raw(&key, &f.plaintext).unwrap()];
         let mut r = row(FILE, Some(ROOT), "owned.txt", false, false);
         r["name_encrypted"] = json!(
-            beebeeb_core::encrypt::encrypt_name_for(&key, "owned.txt", Some("text/plain"), ExpectedChunkFormat::Unrecorded)
-                .unwrap()
+            beebeeb_core::encrypt::encrypt_name_for(
+                &key,
+                "owned.txt",
+                Some("text/plain"),
+                ExpectedChunkFormat::Unrecorded
+            )
+            .unwrap()
         );
         r["size_bytes"] = json!(f.plaintext.len());
         r["chunk_count"] = json!(1);
