@@ -2399,7 +2399,7 @@ mod fuse_impl {
 /// the decision is unit-tested without a FUSE mount.
 #[cfg_attr(not(feature = "fuse"), allow(dead_code))]
 fn folder_create_reply(resp: &serde_json::Value, folder_uuid: uuid::Uuid) -> Result<String, String> {
-    crate::item_id::verify_echoed_id(folder_uuid, crate::item_id::echoed_id(resp))
+    crate::item_id::verify_minted_echo(folder_uuid, crate::item_id::echoed_id(resp))
         .map(|id| id.to_string())
         .map_err(|e| e.to_string())
 }

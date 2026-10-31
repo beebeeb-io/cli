@@ -121,6 +121,22 @@ fn writer_pin(spec: &UploadSpec) -> ExpectedChunkFormat {
     }
 }
 
+/// L13 (SF-0001): the listed row a replace versions (`base_version_number` is
+/// `Some`), `None` for a create. A replace proposes that row's id; a create, an
+/// id its caller minted.
+fn replacing(spec: &UploadSpec) -> Option<Uuid> {
+    spec.base_version_number.map(|_| spec.file_id)
+}
+
+/// L13 (SF-0001): what an attempt under `file_id` proposes, which decides how
+/// every echo is checked ([`crate::item_id::Proposed`]).
+fn proposed(spec: &UploadSpec, file_id: Uuid) -> crate::item_id::Proposed {
+    match replacing(spec) {
+        Some(_) => crate::item_id::Proposed::Listed(file_id),
+        None => crate::item_id::Proposed::Minted(file_id),
+    }
+}
+
 /// Result of a completed upload.
 #[derive(Debug)]
 pub struct UploadOutcome {
@@ -944,10 +960,11 @@ async fn upload_attempt(
         // different id means the server would store the content under another
         // item, whose derived key someone else may hold — abort before any
         // chunk goes out, any name is sealed under it or it is used as a parent.
-        if let Err(e) = crate::item_id::verify_echoed_id(file_id, Some(&init.file_id)) {
+        if let Err(e) = proposed(spec, file_id).verify(Some(&init.file_id)) {
             // The session this attempt just opened is not a session for our
             // item: end it (best effort, by the id WE sent — never the echoed
-            // one) so it cannot hold a lease over our id.
+            // one, which may name another item) so it cannot hold a lease over
+            // our id. Nothing is recorded: the record is written below.
             let _ = api.upload_abandon(&file_id_str).await;
             return Err(AttemptErr::Other(e.to_string()));
         }

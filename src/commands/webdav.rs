@@ -695,8 +695,13 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
     let parent_cache_key = normalise_cache_key(parent_path);
     invalidate_cache(state, &parent_cache_key).await;
 
-    // Use existing UUID for versioning; generate fresh UUID for new files.
-    let file_uuid = existing_file_id.unwrap_or_else(uuid::Uuid::new_v4);
+    // Use existing UUID for versioning; mint a fresh one for new files. L13
+    // (SF-0001): every answer below must echo exactly this id.
+    let proposed = match existing_file_id {
+        Some(listed) => crate::item_id::Proposed::Listed(listed),
+        None => crate::item_id::Proposed::Minted(crate::item_id::mint()),
+    };
+    let file_uuid = proposed.id();
     let file_key = beebeeb_core::kdf::derive_file_key(&state.master_key, file_uuid.to_string().as_bytes());
 
     // Encrypt filename (MIME type is now part of the encrypted envelope)
@@ -735,7 +740,7 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
 
     let parent_uuid = parent_id.as_deref().and_then(|s| s.parse::<uuid::Uuid>().ok());
     let is_media = beebeeb_core::media::is_media(mime);
-    let effective_file_id = existing_file_id.or(Some(file_uuid));
+    let effective_file_id = Some(file_uuid);
     let _ = total_encrypted_size; // v2 init takes plaintext size; server recomputes encrypted total
 
     // On a replace (the path already had a file), pass the existing file's
@@ -773,7 +778,7 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
     // L13 (SF-0001): the init must echo the id this client chose (a fresh one
     // for a new file, the listed row's for a replace). A different id aborts
     // before a single chunk is PUT under it.
-    if let Err(e) = crate::item_id::verify_echoed_id(file_uuid, Some(&init.file_id)) {
+    if let Err(e) = proposed.verify(Some(&init.file_id)) {
         // The session it just opened is not a session for our item: end it
         // (best effort, by the id WE chose) so it cannot hold a lease over it.
         let _ = state.api.upload_abandon(&file_uuid.to_string()).await;
@@ -791,7 +796,7 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
     match state.api.upload_complete(&session_id).await {
         Ok(answer) => {
             // L13 (SF-0001): the completion answer must name the same item.
-            if let Err(e) = crate::item_id::verify_echoed_id(file_uuid, crate::item_id::echoed_id(&answer)) {
+            if let Err(e) = proposed.verify(crate::item_id::echoed_id(&answer)) {
                 // End the mislabelled session once, by the id this client chose.
                 let _ = state.api.upload_abandon(&file_uuid.to_string()).await;
                 return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
