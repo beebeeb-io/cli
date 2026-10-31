@@ -295,3 +295,27 @@ async fn rename_refuses_when_the_check_cannot_read_the_version() {
     assert_eq!(h.count("PATCH", &format!("/api/v1/files/{FILE}")), 1);
     h.close().await;
 }
+
+/// Every GET of a version's content the fixture server answered.
+fn downloads(h: &Harness) -> usize {
+    h.state
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .filter(|(m, p, _)| m == "GET" && p.ends_with("/download"))
+        .count()
+}
+
+/// SF-0002 round 2 (C4): renaming a folder with `bb mv` asks nothing about
+/// content (a folder has no version): no download is made and the rename goes
+/// through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_folder_rename_downloads_nothing() {
+    let h = Harness::new(Fixture::basic()).await;
+    let out = h.run(&["mv", "Shared", "Renamed"]).await;
+    assert!(out.status.success(), "a folder rename must go through: {}", stderr(&out));
+    assert_eq!(h.count("PATCH", &format!("/api/v1/files/{ROOT}")), 1);
+    assert_eq!(downloads(&h), 0, "a folder rename probed content");
+    h.close().await;
+}

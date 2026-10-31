@@ -1279,6 +1279,7 @@ pub async fn run(
                         Some(r) => {
                             let target = crate::owned_keys::WriteTarget {
                                 file_id: r.canonical["id"].as_str().unwrap_or_default(),
+                                is_folder: false,
                                 name_read_only: r.read_only,
                                 row_key: Some(r.key.as_ref()),
                                 size_bytes: r.canonical["size_bytes"].as_u64(),
@@ -3365,6 +3366,7 @@ async fn do_upload(
         Some(r) => {
             let target = crate::owned_keys::WriteTarget {
                 file_id: r.canonical["id"].as_str().unwrap_or_default(),
+                is_folder: false,
                 name_read_only: r.read_only,
                 row_key: Some(r.key.as_ref()),
                 size_bytes: r.canonical["size_bytes"].as_u64(),

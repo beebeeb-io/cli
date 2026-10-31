@@ -1255,14 +1255,12 @@ fn make_etag(file_id: &str, modified: Option<&str>) -> String {
 /// `Err` is the response: 403 for a read-only row, 503 when the check could not
 /// decide (retryable; the row is not marked read-only).
 async fn write_refusal(state: &Arc<DavState>, entry: &ResolvedEntry) -> Result<(), Response> {
-    if entry.is_collection && !entry.read_only {
-        return Ok(());
-    }
     let Some(file_id) = entry.file_id.as_deref() else {
         return Ok(());
     };
     let target = crate::owned_keys::WriteTarget {
         file_id,
+        is_folder: entry.is_collection,
         name_read_only: entry.read_only,
         // Rows here open under the owner's own conventions (the master key).
         row_key: None,

@@ -1390,6 +1390,7 @@ mod fuse_impl {
             };
             let target = crate::owned_keys::WriteTarget {
                 file_id,
+                is_folder: entry.is_dir,
                 name_read_only: entry.read_only,
                 // Rows here open under the owner's own conventions (the master key).
                 row_key: None,
@@ -2444,6 +2445,70 @@ mod fuse_impl {
                 !fs.file_cache.contains_key(&INO),
                 "a cache from before the write must not survive the upload"
             );
+        }
+    }
+
+    // ── SF-0002 rename check ──────────────────────────────────────────────────
+    //
+    // `rename()` asks `rename_check` before it re-encrypts a name. The API here
+    // is a closed local port: any probe fails, so an answer that needed one is
+    // EAGAIN (Unknown), and an `Ok` proves nothing was downloaded.
+
+    #[cfg(test)]
+    mod rename_check_tests {
+        use super::*;
+
+        const DIR_INO: u64 = 5;
+        const FILE_INO: u64 = 6;
+        const RO_INO: u64 = 7;
+
+        fn inode(file_id: &str, is_dir: bool, read_only: bool) -> InodeEntry {
+            InodeEntry {
+                file_id: Some(file_id.to_string()),
+                key_uuid: file_id.parse().ok(),
+                name: "item".to_string(),
+                is_dir,
+                size: if is_dir { 0 } else { 11 },
+                chunk_count: if is_dir { 0 } else { 1 },
+                modified: SystemTime::UNIX_EPOCH,
+                parent_ino: ROOT_INO,
+                pin: no_content(),
+                read_only,
+            }
+        }
+
+        fn state() -> BeebeebFsState {
+            let mut fs = BeebeebFsState::new(
+                ApiClient::new_for_test("http://127.0.0.1:9".to_string()),
+                beebeeb_core::kdf::MasterKey::from_bytes([7u8; 32]),
+                Duration::from_secs(5),
+            );
+            // A folder whose listing even claims a chunk: it must still not be probed.
+            let mut dir = inode("22222222-2222-4222-8222-222222222222", true, false);
+            dir.chunk_count = 1;
+            fs.inodes.insert(DIR_INO, dir);
+            fs.inodes.insert(FILE_INO, inode("11111111-1111-4111-8111-111111111111", false, false));
+            fs.inodes.insert(RO_INO, inode("5f0c2a9e-3b1d-4c7e-9a2f-6d8e1b4c7a30", false, true));
+            fs
+        }
+
+        /// C4: renaming a folder downloads nothing and is allowed.
+        #[test]
+        fn a_folder_rename_is_never_probed() {
+            assert_eq!(state().rename_check(DIR_INO), Ok(()));
+        }
+
+        /// C1 on the mount: a file whose version the check cannot read is
+        /// refused with EAGAIN (retryable), not allowed and not EPERM.
+        #[test]
+        fn an_unreadable_check_refuses_with_eagain() {
+            assert_eq!(state().rename_check(FILE_INO), Err(Errno::EAGAIN));
+        }
+
+        /// A name sealed read-only is EPERM without asking the server.
+        #[test]
+        fn a_read_only_name_is_eperm() {
+            assert_eq!(state().rename_check(RO_INO), Err(Errno::EPERM));
         }
     }
 }

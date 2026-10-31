@@ -537,6 +537,8 @@ impl WriteCheck {
 /// listing or metadata that resolved the row, so no second GET is made.
 pub struct WriteTarget<'a> {
     pub file_id: &'a str,
+    /// A folder has no content: only its name decides, nothing is downloaded.
+    pub is_folder: bool,
     /// The name verdict: [`crate::crypto::name_is_upper_repair`], which is what
     /// the resolver's `read_only` and every listing's flag carry.
     pub name_read_only: bool,
@@ -562,7 +564,8 @@ pub async fn write_check(api: &ApiClient, master: &MasterKey, target: &WriteTarg
     if target.name_read_only {
         return WriteCheck::UpperRepair;
     }
-    if target.chunk_count == 0 {
+    // A folder is never probed: it has no version to read (C4).
+    if target.is_folder || target.chunk_count == 0 {
         return WriteCheck::Writable;
     }
     let Ok((body, chunk_size, complete)) =
@@ -784,6 +787,28 @@ mod write_check_tests {
             WriteCheck::Unknown,
             "a row key that does not open the frame proves nothing"
         );
+    }
+
+    /// SF-0002 round 2 (C4): a folder is never probed. The API here is a
+    /// closed port, so any request would make the answer Unknown: Writable
+    /// proves nothing was asked. Its name still decides (a read-only name is
+    /// UpperRepair), and the same target as a file is Unknown (the control that
+    /// shows the closed port answers).
+    #[tokio::test]
+    async fn a_folder_is_decided_by_its_name_alone() {
+        let api = ApiClient::new_for_test("http://127.0.0.1:9".to_string());
+        let m = master();
+        let target = |is_folder, name_read_only| WriteTarget {
+            file_id: ID,
+            is_folder,
+            name_read_only,
+            row_key: None,
+            size_bytes: None,
+            chunk_count: 1,
+        };
+        assert_eq!(write_check(&api, &m, &target(true, false)).await, WriteCheck::Writable);
+        assert_eq!(write_check(&api, &m, &target(true, true)).await, WriteCheck::UpperRepair);
+        assert_eq!(write_check(&api, &m, &target(false, false)).await, WriteCheck::Unknown);
     }
 
     /// The controls: the canonical owner key and a row's own key prove a

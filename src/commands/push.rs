@@ -481,6 +481,7 @@ async fn push_single_file(
                 &master_key,
                 &crate::owned_keys::WriteTarget {
                     file_id: &existing,
+                    is_folder: false,
                     name_read_only: resolved.read_only,
                     row_key: Some(resolved.key.as_ref()),
                     size_bytes: meta.get("size_bytes").and_then(|v| v.as_u64()),

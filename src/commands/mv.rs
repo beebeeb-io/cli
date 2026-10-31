@@ -176,6 +176,7 @@ async fn move_single(
             master_key,
             &crate::owned_keys::WriteTarget {
                 file_id: &src_id,
+                is_folder: src.is_folder,
                 name_read_only: src.read_only,
                 row_key: row_key.as_deref(),
                 size_bytes: src.size_bytes,
