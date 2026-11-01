@@ -183,6 +183,80 @@ pub async fn download_buffered(api: &ApiClient, file_id: &str) -> Result<(Vec<u8
     Ok((bytes.to_vec(), chunk_size))
 }
 
+/// Read only as much of a file's current version as the first wire frame needs
+/// (never the whole file), for the SF-0002 read-only content check. Returns the
+/// prefix, the server's `X-Chunk-Size` when present, and whether the body ended
+/// before the requested length.
+///
+/// `wide` (round 3, K2): a legacy multi-chunk raw file served without
+/// `X-Chunk-Size` whose first frame was not in the ordinary prefix. Its frame
+/// size is found by probing, and every feasible size is at most
+/// `(total - 28) / (count - 1)` (the read path's bound), so that much is read.
+pub async fn download_frame_prefix(
+    api: &ApiClient,
+    file_id: &str,
+    size_bytes: Option<u64>,
+    chunk_count: u32,
+    wide: bool,
+) -> Result<(Vec<u8>, Option<u64>, bool), String> {
+    let mut resp = api.download_stream(file_id).await?;
+    let chunk_size = header_u64(&resp, "X-Chunk-Size").filter(|&v| v > 0 && v <= MAX_CHUNK_SIZE);
+    let count = chunk_count.max(1);
+    let mut want = frame_probe_len(size_bytes, count, chunk_size, wide);
+    let mut buf = Vec::new();
+    fill_to(&mut resp, &mut buf, want).await?;
+    // Round 3 (K1): a legacy JSON-blob chunk 0 is about 4x its plaintext. Read
+    // until a whole blob 0 can be in hand (a raw frame whose nonce happens to
+    // start with '{' reads a little more and is decided the same way).
+    if buf.first() == Some(&b'{') {
+        let json_want = json_chunk0_probe_len(size_bytes, count);
+        if buf.len() < json_want {
+            fill_to(&mut resp, &mut buf, json_want).await?;
+        }
+        want = want.max(json_want);
+    }
+    let complete = buf.len() < want;
+    Ok((buf, chunk_size, complete))
+}
+
+/// The longest legacy JSON-blob chunk 0 a version of this geometry can have:
+/// [`json_wire_bound`] of chunk 0's largest possible plaintext. With `n > 1`
+/// uniform chunks `(n-1)·cs < size`, so chunk 0 holds at most
+/// `ceil(size / (n-1))` bytes (and never more than the file).
+fn json_chunk0_probe_len(size_bytes: Option<u64>, chunk_count: u32) -> usize {
+    const FILE_PROVIDER_CHUNK: u64 = 1024 * 1024;
+    let plain = match size_bytes {
+        Some(size) if chunk_count <= 1 => size,
+        Some(size) => size.div_ceil(u64::from(chunk_count - 1)).min(size),
+        None => FILE_PROVIDER_CHUNK,
+    }
+    .min(MAX_CHUNK_SIZE);
+    usize::try_from(json_wire_bound(plain, 1)).unwrap_or(usize::MAX)
+}
+
+/// The longest plausible first-frame length for a version of `count` chunks,
+/// bounded by core's maximum chunk size. Only a prefix of this length is read.
+/// `wide`: see [`download_frame_prefix`].
+fn frame_probe_len(size_bytes: Option<u64>, chunk_count: u32, chunk_size: Option<u64>, wide: bool) -> usize {
+    const NONCE_AND_TAG: u64 = 28;
+    const FILE_PROVIDER_CHUNK: u64 = 1024 * 1024;
+    let total = size_bytes
+        .unwrap_or(0)
+        .saturating_add(NONCE_AND_TAG.saturating_mul(chunk_count as u64));
+    let want = if chunk_count <= 1 {
+        total
+    } else {
+        let mut m = (FILE_PROVIDER_CHUNK + NONCE_AND_TAG).max(total / chunk_count as u64);
+        match (chunk_size, size_bytes) {
+            (Some(cs), _) => m = m.max(cs.saturating_add(NONCE_AND_TAG)),
+            (None, Some(_)) if wide => m = m.max(total.saturating_sub(NONCE_AND_TAG) / (chunk_count as u64 - 1)),
+            _ => {}
+        }
+        m
+    };
+    usize::try_from(want.min(MAX_CHUNK_SIZE.saturating_add(NONCE_AND_TAG))).unwrap_or(usize::MAX)
+}
+
 /// Stream-download `file_id`, decrypt to `out_path` with constant memory, and
 /// report progress. Falls back to the buffered legacy decrypt for JSON-blob /
 /// binary-UUID / unknown-frame-size files (see module docs).
@@ -248,11 +322,14 @@ impl DownloadKey<'_> {
     fn decryptor(&self, id: &str, pin: ExpectedChunkFormat) -> ChunkDecryptor {
         match self {
             Self::Legacy(master) => ChunkDecryptor::for_push(master, id, pin),
-            Self::Explicit(key) => {
-                ChunkDecryptor::for_push_with_file_key(beebeeb_core::kdf::FileKey::from_bytes(*key.as_bytes()), id, pin)
-            }
+            // The decryptor owns its copy; `key_copy` wipes the by-value bytes it passes through.
+            Self::Explicit(key) => ChunkDecryptor::for_push_with_file_key(crate::crypto::key_copy(key), id, pin),
         }
     }
+    /// The owner path's master key, for the buffered fallback. An explicit key
+    /// (shared folder, owner wrap, file request) has no fallback: its content
+    /// opens under that key or not at all, so a frame-0 failure ends the download
+    /// at once, before the rest of the body is read (SF-0002 round 2, C6).
     fn legacy(&self) -> Result<&MasterKey, DownloadError> {
         match self {
             Self::Legacy(m) => Ok(m),
@@ -1324,5 +1401,92 @@ mod tests {
         }
         eprintln!("measured JSON envelope overhead = {envelope} bytes; max wire/plaintext ratio = {max_ratio:.2}");
         assert!(envelope as u64 <= JSON_CHUNK_ENVELOPE);
+    }
+
+    /// SF-0002 round 3 (K1): the probe reads at least a whole legacy JSON blob 0
+    /// for the geometry the listing gives (single chunk, uniform chunks with a
+    /// shorter last one, a last chunk of one byte).
+    #[test]
+    fn json_chunk0_probe_len_covers_blob_zero() {
+        let fk = derive_file_key(&mk(), FID.as_bytes());
+        for (size, count, chunk0) in [
+            (0u64, 1u32, 0usize),
+            (500, 1, 500),
+            (605, 3, 300),
+            (3 * 4096 + 77, 4, 4096),
+            (10, 2, 9),
+        ] {
+            let blob0 = serde_json::to_vec(&encrypt_chunk(&fk, &payload(chunk0)).unwrap()).unwrap();
+            let want = json_chunk0_probe_len(Some(size), count);
+            assert!(
+                blob0.len() <= want,
+                "size={size} count={count}: blob 0 is {} bytes, the probe reads {want}",
+                blob0.len()
+            );
+        }
+    }
+
+    /// SF-0002 round 2 (C6): a download opened with an explicit key (shared
+    /// folder, owner wrap, file request) whose frame 0 does not authenticate
+    /// fails at once. The body after frame 0 never ends here, so a download that
+    /// buffers the rest before failing hangs, and the timeout turns that into a
+    /// failure of this test.
+    #[tokio::test]
+    async fn an_explicit_key_frame0_failure_fails_before_reading_the_rest() {
+        use futures_util::StreamExt as _;
+        let sealed_under = derive_file_key(&mk(), FID.as_bytes());
+        let pt = payload(3 * 4096 + 77);
+        let wire: Vec<u8> = pt
+            .chunks(4096)
+            .flat_map(|c| encrypt_chunk_raw(&sealed_under, c).unwrap())
+            .collect();
+        // Frame 0 and a little of frame 1, then a body that never ends.
+        let head = bytes::Bytes::from(wire[..4096 + 28 + 100].to_vec());
+        let app = Router::new().route(
+            "/api/v1/files/:id/download",
+            get(move || {
+                let head = head.clone();
+                async move {
+                    let mut h = axum::http::HeaderMap::new();
+                    h.insert("x-chunk-size", "4096".parse().unwrap());
+                    h.insert("x-chunk-count", "4".parse().unwrap());
+                    let body = futures_util::stream::once(async move { Ok::<_, std::convert::Infallible>(head) })
+                        .chain(futures_util::stream::pending());
+                    (h, axum::body::Body::from_stream(body))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let api = ApiClient::new_for_test(format!("http://{addr}"));
+        let dir = std::env::temp_dir().join(format!("bb-dl-c6-{}-{}", std::process::id(), rand::random::<u32>()));
+        let out = dir.join("out.bin");
+        let not_this_rows_key = Arc::new(beebeeb_core::kdf::FileKey::from_bytes([9u8; 32]));
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            stream_download_decrypt_with_file_key(
+                &api,
+                not_this_rows_key,
+                FID,
+                ExpectedChunkFormat::Unrecorded,
+                4,
+                &out,
+                &Counting(Arc::new(AtomicUsize::new(0))),
+                "out.bin",
+            ),
+        )
+        .await;
+        let exists = out.exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        let result = result.expect("an explicit-key frame-0 failure must not wait for the rest of the body");
+        match result {
+            Err(DownloadError::Unreadable(_)) => {}
+            Err(other) => panic!("an explicit key that does not open frame 0 is unreadable, got {other:?}"),
+            Ok(_) => panic!("a key that does not open frame 0 downloaded the file"),
+        }
+        assert!(!exists, "nothing is published for a failed download");
     }
 }

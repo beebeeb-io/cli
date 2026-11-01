@@ -13,6 +13,10 @@ const SOURCE: &str = "11111111-1111-4111-8111-111111111111";
 const TARGET: &str = "22222222-2222-4222-8222-222222222222";
 const FILE: &str = "33333333-3333-4333-8333-333333333333";
 const FOLDER: &str = "44444444-4444-4444-8444-444444444444";
+/// FILE's content. A rename asks the SF-0002 write check first, which reads the
+/// version's chunk 0 (`owned_keys::write_check`), so the mock serves a real
+/// frame and the listing carries its size, as the server does.
+const FILE_BYTES: &[u8] = b"file content";
 type Calls = Arc<Mutex<Vec<(String, Value)>>>;
 
 async fn run(args: &[&str]) -> Vec<(String, Value)> {
@@ -33,12 +37,22 @@ async fn run_with_target(args: &[&str], target_id: Value, success: bool) -> Vec<
                             {"id": target_id, "name_encrypted": "Target", "is_folder": true}
                         ]),
                         Some(SOURCE) => json!([
-                            {"id": FILE, "name_encrypted": "file.txt", "is_folder": false, "parent_id": SOURCE},
+                            {"id": FILE, "name_encrypted": "file.txt", "is_folder": false, "parent_id": SOURCE,
+                             "size_bytes": FILE_BYTES.len(), "chunk_count": 1},
                             {"id": FOLDER, "name_encrypted": "Child", "is_folder": true, "parent_id": SOURCE}
                         ]),
                         _ => json!([])
                     }}))
                 }
+            }),
+        )
+        .route(
+            "/api/v1/files/:id/download",
+            get(|Path(id): Path<String>| async move {
+                // The config's master key is 32 zero bytes; FILE is sealed under its canonical key.
+                let master = beebeeb_core::kdf::MasterKey::from_bytes([0; 32]);
+                let key = beebeeb_core::kdf::derive_file_key(&master, id.as_bytes());
+                beebeeb_core::encrypt::encrypt_chunk_raw(&key, FILE_BYTES).unwrap()
             }),
         )
         .route(

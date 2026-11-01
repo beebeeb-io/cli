@@ -1,0 +1,40 @@
+{
+  "_provenance": "Copied verbatim from beebeeb-core test-vectors/vectors.json at 064c622790963c0027a3fefeb1ea719f8a3c513c (vectors upper_repair_v1 and upper_repair_split_v1).",
+  "upper_repair_v1": {
+    "content_frame_hex": "6e6e6e6e6e6e6e6e6e6e6e6e2319d4407f9b92649c9c21853858e152c528b82cd9e5e3680af99f5a29b90aab329d5b6dfb4133b65b3ce7774970a7ce",
+    "content_nonce_hex": "6e6e6e6e6e6e6e6e6e6e6e6e",
+    "content_plaintext_hex": "53462d3030303220726561642d6f6e6c792072657061697220636f6e74656e74",
+    "expected_convention": "upper_repair",
+    "expected_key_hex": "0942d10929d2dd5fc1b1a45a0be064b73d040137d66928b9111398c79632d10d",
+    "expected_mime_type": "application/pdf",
+    "expected_name": "uppercase-repair.pdf",
+    "file_id": "5f0c2a9e-3b1d-4c7e-9a2f-6d8e1b4c7a30",
+    "file_id_upper": "5F0C2A9E-3B1D-4C7E-9A2F-6D8E1B4C7A30",
+    "master_key_hex": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+    "name": "upper_repair_v1",
+    "name_encrypted": "{\"cipher_suite\":\"V1Aes256Gcm\",\"nonce\":[94,94,94,94,94,94,94,94,94,94,94,94],\"ciphertext\":[92,204,65,69,136,159,200,122,13,221,135,58,76,72,36,180,173,104,246,76,151,109,78,232,118,180,46,165,27,142,119,171,10,32,39,104,122,27,141,210,139,238,127,174,197,158,249,127,189,242,11,85,3,105,169,54,189,62,1,11,215,16,226,215,22,165,38,201,173,69,173,236,147,36,216,254,205]}",
+    "note": "SF-0002: name and content were sealed under derive_file_key(master, UPPERCASE(file_id)), the iOS File Provider convention. Read-only: derive the same key through owner_file_key_for_name, which reports upper_repair. Never rename or write a new version under this id; save an edit as a new file. Fixed nonces, published KAT only."
+  },
+  "upper_repair_split_v1": {
+    "content_v1_frame_hex": "6f6f6f6f6f6f6f6f6f6f6f6f037dfe50d6ac583ca7c51ae349f84e2ae48b1afef8f8ea9be953ad4ec8acf83d942cecb104cff72684805a01b4ee6c",
+    "content_v1_nonce_hex": "6f6f6f6f6f6f6f6f6f6f6f6f",
+    "content_v1_plaintext_hex": "53462d303030322073706c697420636f6e74656e742076657273696f6e2031",
+    "content_v2_frame_hex": "7f7f7f7f7f7f7f7f7f7f7f7fea371af4f9c8009ed8d89a355128736869cd634dcc982c5bab466a15a8f1c5816410dd6e53c651302d969c86392878",
+    "content_v2_nonce_hex": "7f7f7f7f7f7f7f7f7f7f7f7f",
+    "content_v2_plaintext_hex": "53462d303030322073706c697420636f6e74656e742076657273696f6e2032",
+    "expected_content_v1_convention": "upper_repair",
+    "expected_content_v1_key_hex": "0942d10929d2dd5fc1b1a45a0be064b73d040137d66928b9111398c79632d10d",
+    "expected_content_v2_convention": "string",
+    "expected_content_v2_key_hex": "26451b1e6a690f98fe26dd5ed37c345008353f350ab9d3a4ea22e03fc5e1ea43",
+    "expected_mime_type": "application/pdf",
+    "expected_name": "split-repair.pdf",
+    "expected_name_convention": "upper_repair",
+    "expected_name_key_hex": "0942d10929d2dd5fc1b1a45a0be064b73d040137d66928b9111398c79632d10d",
+    "file_id": "5f0c2a9e-3b1d-4c7e-9a2f-6d8e1b4c7a30",
+    "file_id_upper": "5F0C2A9E-3B1D-4C7E-9A2F-6D8E1B4C7A30",
+    "master_key_hex": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+    "name": "upper_repair_split_v1",
+    "name_encrypted": "{\"cipher_suite\":\"V1Aes256Gcm\",\"nonce\":[95,95,95,95,95,95,95,95,95,95,95,95],\"ciphertext\":[4,67,151,86,160,40,102,140,245,4,159,253,136,107,33,50,75,233,75,180,203,191,86,231,56,241,181,49,184,35,247,110,152,88,130,247,171,70,58,168,101,169,150,238,26,143,90,149,134,87,10,146,226,22,53,225,189,246,35,250,80,49,122,252,151,180,125,228,40,130,105,146,40]}",
+    "note": "SF-0002 split keys: name and content version 1 are v1 frames sealed under derive_file_key(master, UPPERCASE(file_id)); content version 2 is sealed under derive_file_key(master, file_id). Resolve each content version independently with owner_file_key_for_content. The file is READ-ONLY if the name OR any version reports upper_repair. Fixed nonces, published KAT only."
+  }
+}

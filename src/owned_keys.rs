@@ -22,6 +22,9 @@ pub struct ResolvedCliKey {
     #[allow(dead_code)] // Consumed by Task 9 sync/index integration.
     pub shared_root_id: Option<String>,
     pub name: String,
+    /// SF-0002: the name resolved under the read-only uppercase repair
+    /// convention. No rename, no new version; an edit becomes a new file.
+    pub read_only: bool,
 }
 struct SharedRoot {
     key: Arc<FileKey>,
@@ -74,6 +77,10 @@ impl OwnedKeyResolver {
     }
     pub fn resolved(&self) -> Vec<ResolvedCliKey> {
         self.resolved.values().cloned().collect()
+    }
+    /// The key `id` resolved to in this resolver, if it was resolved here.
+    pub fn key_for(&self, id: &str) -> Option<Arc<FileKey>> {
+        self.resolved.get(id).map(|r| r.key.clone())
     }
     pub fn pending(&self, id: &str) -> Option<Vec<u8>> {
         self.pending.get(id).cloned()
@@ -168,6 +175,10 @@ impl OwnedKeyResolver {
             if let Ok(key) = owned_keys::unwrap_owner_file_key(master, &id, frame) {
                 if let Ok(name) = authenticated_name(&key, &canonical) {
                     self.pending.remove(&id);
+                    // SF-0002 r2 (C5): the same name verdict as every other
+                    // surface. An owner wrap of the uppercase-id key is read-only
+                    // here too, not writable because it was reached by the wrap.
+                    let read_only = name_read_only(master, &id, &canonical);
                     return Ok(ResolvedCliKey {
                         key: Arc::new(key),
                         origin: KeyOrigin::OwnerWrap,
@@ -175,6 +186,7 @@ impl OwnedKeyResolver {
                         pending_owner_wrap: None,
                         shared_root_id: None,
                         name,
+                        read_only,
                     });
                 }
             }
@@ -184,6 +196,7 @@ impl OwnedKeyResolver {
         if let Some(frame) = self.pending.get(&id) {
             if let Ok(key) = owned_keys::unwrap_owner_file_key(master, &id, frame) {
                 if let Ok(name) = authenticated_name(&key, &canonical) {
+                    let read_only = name_read_only(master, &id, &canonical);
                     return Ok(ResolvedCliKey {
                         key: Arc::new(key),
                         origin: KeyOrigin::OwnerWrap,
@@ -191,6 +204,7 @@ impl OwnedKeyResolver {
                         pending_owner_wrap: Some(frame.clone()),
                         shared_root_id: None,
                         name,
+                        read_only,
                     });
                 }
             }
@@ -212,16 +226,35 @@ impl OwnedKeyResolver {
                 pending_owner_wrap: None,
                 shared_root_id: None,
                 name,
+                read_only: false,
             });
         }
         if !foreign && !has_owner {
-            let name = crate::crypto::decrypt_name(master, &id, text(&canonical, "name_encrypted")?)
-                .ok_or("can't decrypt item name")?;
+            let enc = text(&canonical, "name_encrypted")?;
+            let (name, read_only) = match crate::crypto::decrypt_name_with_convention(master, &id, enc) {
+                Some((name, convention)) => (name, convention == beebeeb_core::kdf::OwnerKeyConvention::UpperRepair),
+                None => return Err("can't decrypt item name".into()),
+            };
+            // SF-0002: the iOS File Provider sealed this row under the
+            // uppercase id. Only the owner can derive that key; hand it back
+            // read-only so every write path refuses.
+            if read_only {
+                let (key, _) = beebeeb_core::kdf::owner_file_key_for_name(master, &id, enc)
+                    .map_err(|_| "can't resolve item key")?;
+                return Ok(ResolvedCliKey {
+                    key: Arc::new(key),
+                    origin: KeyOrigin::Derived,
+                    canonical,
+                    pending_owner_wrap: None,
+                    shared_root_id: None,
+                    name,
+                    read_only: true,
+                });
+            }
             let mut resolved =
                 owned_keys::resolve_owned_key(master, &id, None, None, false).map_err(|_| "can't resolve item key")?;
             // Preserve the pre-string-UUID key convention when that is the key
             // which authenticated this ordinary legacy item's encrypted name.
-            let enc = text(&canonical, "name_encrypted")?;
             if enc.starts_with('{') && authenticated_name(&resolved.key, &canonical).is_err() {
                 let binary = beebeeb_core::kdf::derive_file_key(master, uuid::Uuid::parse_str(&id).unwrap().as_bytes());
                 authenticated_name(&binary, &canonical)?;
@@ -234,6 +267,7 @@ impl OwnedKeyResolver {
                 pending_owner_wrap: None,
                 shared_root_id: None,
                 name,
+                read_only: false,
             });
         }
         let mut parent = canonical["parent_id"].as_str().map(str::to_string);
@@ -284,6 +318,7 @@ impl OwnedKeyResolver {
                     pending_owner_wrap: Some(pending),
                     shared_root_id: Some(root_id),
                     name,
+                    read_only: false,
                 });
             }
             let ancestor = self.ancestor_row(api, &root_id).await?;
@@ -468,6 +503,256 @@ impl OwnedKeyResolver {
         }
     }
 }
+/// SF-0002 round 2: the three answers of the read-only check a write asks
+/// before it renames a row or writes a version under its id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteCheck {
+    /// Neither the name nor the current version is sealed under the read-only
+    /// uppercase repair convention: the write may go ahead.
+    Writable,
+    /// The name or the current version resolves as core's `UpperRepair`: the
+    /// row is read-only. No rename, no new version, and an edit is not written
+    /// over it ([`crate::crypto::OWNER_REPAIR_READ_ONLY`]).
+    UpperRepair,
+    /// The check could not decide: a download error, a timeout, a 5xx, a short
+    /// body, missing geometry, or no key authenticated chunk 0. It never
+    /// proceeds and never marks the row read-only: an interactive
+    /// write is refused with [`WRITE_CHECK_UNKNOWN`], sync leaves the row alone
+    /// and asks again on its next pass.
+    Unknown,
+}
+
+/// What a write says when [`WriteCheck::Unknown`] refused it. Retryable: the
+/// row is not marked read-only.
+pub const WRITE_CHECK_UNKNOWN: &str = "Couldn't check this file before changing it. Try again.";
+
+/// Is `e` one of the two refusals a write check gives (the row was left
+/// untouched on purpose), rather than a failed request?
+pub fn is_write_refusal(e: &str) -> bool {
+    e == crate::crypto::OWNER_REPAIR_READ_ONLY || e == WRITE_CHECK_UNKNOWN
+}
+
+impl WriteCheck {
+    /// The guard form for an interactive write (`bb push --replace`, `bb mv`):
+    /// only [`WriteCheck::Writable`] proceeds; the error is the user-facing text.
+    pub fn ensure(self) -> Result<(), String> {
+        match self {
+            Self::Writable => Ok(()),
+            Self::UpperRepair => Err(crate::crypto::OWNER_REPAIR_READ_ONLY.to_string()),
+            Self::Unknown => Err(WRITE_CHECK_UNKNOWN.to_string()),
+        }
+    }
+}
+
+/// What one row's write check is decided from. Each surface fills it from the
+/// listing or metadata that resolved the row, so no second GET is made.
+pub struct WriteTarget<'a> {
+    pub file_id: &'a str,
+    /// A folder has no content: only its name decides, nothing is downloaded.
+    pub is_folder: bool,
+    /// The name verdict: [`crate::crypto::name_is_upper_repair`], which is what
+    /// the resolver's `read_only` and every listing's flag carry.
+    pub name_read_only: bool,
+    /// The key the row resolved to, when the surface resolved one (a shared
+    /// folder, owner-wrap or file-request key). Chunk 0 opening under it proves
+    /// the version is not uppercase-sealed: core's owner resolver is asked
+    /// first, so the owner's uppercase key is reported as `UpperRepair` before
+    /// this key is tried. Without it, only the owner conventions can prove a
+    /// version writable.
+    pub row_key: Option<&'a FileKey>,
+    /// The plaintext size the listing carried, if any.
+    pub size_bytes: Option<u64>,
+    /// The chunk count the listing carried (`1` when it did not say).
+    pub chunk_count: u32,
+}
+
+/// SF-0002: the ONE read-only decision every write surface asks first (`bb
+/// push --replace`, `bb mv`, WebDAV PUT and MOVE, the mount's rename, `bb
+/// sync`). The name decides first; otherwise the CURRENT version's chunk 0 is
+/// read (a bounded prefix, never the whole file) and core's per-version owner
+/// resolver decides.
+pub async fn write_check(api: &ApiClient, master: &MasterKey, target: &WriteTarget<'_>) -> WriteCheck {
+    if target.name_read_only {
+        return WriteCheck::UpperRepair;
+    }
+    // A folder is never probed: it has no version to read (C4).
+    if target.is_folder || target.chunk_count == 0 {
+        return WriteCheck::Writable;
+    }
+    let probe =
+        |wide| crate::download::download_frame_prefix(api, target.file_id, target.size_bytes, target.chunk_count, wide);
+    let Ok((body, chunk_size, complete)) = probe(false).await else {
+        return WriteCheck::Unknown;
+    };
+    let check = |body: &[u8], chunk_size: Option<u64>, complete: bool| {
+        first_chunk_check(
+            master,
+            target.file_id,
+            target.row_key,
+            body,
+            target.size_bytes,
+            target.chunk_count,
+            chunk_size,
+            complete,
+        )
+    };
+    let verdict = check(&body, chunk_size, complete);
+    // Round 3 (K2): a legacy multi-chunk raw file without X-Chunk-Size whose
+    // first frame is longer than the ordinary prefix. Read every feasible
+    // frame-0 length once (a second request, only in this case) and probe again.
+    if verdict == WriteCheck::Unknown
+        && target.chunk_count > 1
+        && target.size_bytes.is_some()
+        && chunk_size.is_none()
+        && !complete
+    {
+        let Ok((body, chunk_size, complete)) = probe(true).await else {
+            return WriteCheck::Unknown;
+        };
+        return check(&body, chunk_size, complete);
+    }
+    verdict
+}
+
+/// Decide from the prefix of the current version. Writable needs PROOF: chunk 0
+/// authenticated under a write-capable key. No candidate length (missing
+/// geometry: a single-chunk row whose size the listing did not carry, a body
+/// cut short) or no key that opens chunk 0 is [`WriteCheck::Unknown`], never
+/// writable and never read-only.
+#[allow(clippy::too_many_arguments)]
+fn first_chunk_check(
+    master: &MasterKey,
+    file_id: &str,
+    row_key: Option<&FileKey>,
+    body: &[u8],
+    size_bytes: Option<u64>,
+    chunk_count: u32,
+    chunk_size: Option<u64>,
+    complete: bool,
+) -> WriteCheck {
+    for len in chunk0_lengths(body.len(), size_bytes, chunk_count, chunk_size, complete) {
+        if let Some(verdict) = frame_check(master, file_id, row_key, &body[..len]) {
+            return verdict;
+        }
+    }
+    // Round 3 (K2): a legacy multi-chunk raw file served without X-Chunk-Size.
+    // The read path's AEAD-validated frame-size search (same order, bounds and
+    // budget), over the prefix in hand and bounded by the version's length from
+    // the listing.
+    if chunk_count > 1 {
+        if let Some(size) = size_bytes {
+            let total = size.saturating_add(28u64.saturating_mul(u64::from(chunk_count)));
+            let mut verdict = None;
+            let _ = crate::crypto::probe_first_frame_len(body, total, chunk_count as usize, chunk_size, &mut |frame| {
+                verdict = frame_check(master, file_id, row_key, frame);
+                verdict.is_some()
+            });
+            if let Some(verdict) = verdict {
+                return verdict;
+            }
+        }
+    }
+    // Round 3 (K1): a legacy CLI JSON-blob chunk 0. Only the old iOS File
+    // Provider sealed under the uppercase id, and it wrote raw frames, so a JSON
+    // blob is never UpperRepair: it is writable once blob 0 authenticates under
+    // the owner's string or binary key, or the row's own key.
+    if let Some(frame) = crate::crypto::first_json_blob_frame(body) {
+        if json_blob_opens(master, file_id, row_key, &frame) {
+            return WriteCheck::Writable;
+        }
+    }
+    WriteCheck::Unknown
+}
+
+/// One candidate frame 0: core's owner resolver first (`UpperRepair`, or a
+/// writable String/Binary convention), then the row's own key. `None`: no key
+/// opens it.
+fn frame_check(master: &MasterKey, file_id: &str, row_key: Option<&FileKey>, frame: &[u8]) -> Option<WriteCheck> {
+    if let Some((_, convention)) = crate::crypto::owner_content_key(master, file_id, frame) {
+        return Some(if convention == beebeeb_core::kdf::OwnerKeyConvention::UpperRepair {
+            WriteCheck::UpperRepair
+        } else {
+            WriteCheck::Writable
+        });
+    }
+    row_key
+        .is_some_and(|key| crate::crypto::first_frame_opens(key, file_id, frame))
+        .then_some(WriteCheck::Writable)
+}
+
+/// Does a JSON-blob chunk-0 frame open under a write-capable key: the owner's
+/// string-id key, its legacy binary-id key (the old CLI's), or the row's own?
+/// One key at a time, each dropped (zeroized) before the next is derived.
+fn json_blob_opens(master: &MasterKey, file_id: &str, row_key: Option<&FileKey>, frame: &[u8]) -> bool {
+    let Ok(uuid) = uuid::Uuid::parse_str(file_id) else {
+        return false;
+    };
+    if crate::crypto::first_frame_opens(
+        &beebeeb_core::kdf::derive_file_key(master, file_id.as_bytes()),
+        file_id,
+        frame,
+    ) {
+        return true;
+    }
+    if crate::crypto::first_frame_opens(
+        &beebeeb_core::kdf::derive_file_key(master, uuid.as_bytes()),
+        file_id,
+        frame,
+    ) {
+        return true;
+    }
+    row_key.is_some_and(|key| crate::crypto::first_frame_opens(key, file_id, frame))
+}
+
+/// Candidate lengths for wire frame 0, from the version's geometry in its
+/// metadata (the server's plaintext chunk size is authoritative when present).
+fn chunk0_lengths(
+    have: usize,
+    size_bytes: Option<u64>,
+    chunk_count: u32,
+    chunk_size: Option<u64>,
+    complete: bool,
+) -> Vec<usize> {
+    const NONCE_AND_TAG: u64 = 28;
+    const FILE_PROVIDER_CHUNK: u64 = 1024 * 1024;
+    let mut out: Vec<usize> = Vec::new();
+    let mut push = |v: u64| {
+        if let Ok(v) = usize::try_from(v) {
+            if v > 0 && v <= have && !out.contains(&v) {
+                out.push(v);
+            }
+        }
+    };
+    if chunk_count <= 1 {
+        if complete {
+            push(have as u64);
+        } else if let Some(size) = size_bytes {
+            push(size.saturating_add(NONCE_AND_TAG));
+        }
+        return out;
+    }
+    if let Some(cs) = chunk_size {
+        push(cs.saturating_add(NONCE_AND_TAG));
+    }
+    if let Some(size) = size_bytes {
+        let total = size.saturating_add(NONCE_AND_TAG.saturating_mul(chunk_count as u64));
+        push(total / chunk_count as u64);
+    }
+    push(FILE_PROVIDER_CHUNK + NONCE_AND_TAG);
+    if complete {
+        push(have as u64);
+    }
+    out
+}
+
+/// The resolver's name verdict for a row it opened through an owner wrap:
+/// [`crate::crypto::name_is_upper_repair`], the one every listing uses.
+fn name_read_only(master: &MasterKey, id: &str, row: &Value) -> bool {
+    row["name_encrypted"]
+        .as_str()
+        .is_some_and(|enc| crate::crypto::name_is_upper_repair(master, id, enc))
+}
+
 fn text<'a>(row: &'a Value, key: &str) -> Result<&'a str, String> {
     row[key].as_str().ok_or_else(|| format!("missing {key}"))
 }
@@ -538,4 +823,229 @@ fn open_invite_owner_copy(
         frame,
         rows.iter().map(|(id, wrap)| (id.as_bytes(), wrap.as_slice())),
     )
+}
+
+#[cfg(test)]
+mod write_check_tests {
+    use super::*;
+    use beebeeb_core::kdf::derive_file_key;
+
+    const ID: &str = "5f0c2a9e-3b1d-4c7e-9a2f-6d8e1b4c7a30";
+
+    fn master() -> MasterKey {
+        MasterKey::from_bytes([7u8; 32])
+    }
+
+    fn frame(key: &FileKey, plaintext: &[u8]) -> Vec<u8> {
+        beebeeb_core::encrypt::encrypt_chunk_raw(key, plaintext).unwrap()
+    }
+
+    /// SF-0002 round 2 (C3): geometry that gives no frame-0 candidate is
+    /// Unknown. A single-chunk row whose size the listing did not carry, read
+    /// as a prefix that is not the whole body, has no candidate length; the
+    /// mount's `size_bytes = 0` default gives a 28-byte candidate that cannot
+    /// authenticate a longer frame. Neither may pass as writable.
+    #[test]
+    fn missing_geometry_is_unknown_not_writable() {
+        let m = master();
+        let wire = frame(&derive_file_key(&m, ID.as_bytes()), b"an ordinary single-chunk version");
+        let prefix = &wire[..28];
+        assert_eq!(
+            first_chunk_check(&m, ID, None, prefix, None, 1, None, false),
+            WriteCheck::Unknown,
+            "no size, partial body"
+        );
+        assert_eq!(
+            first_chunk_check(&m, ID, None, prefix, Some(0), 1, None, false),
+            WriteCheck::Unknown,
+            "the mount's size 0 for a size the listing did not carry"
+        );
+        assert_eq!(
+            first_chunk_check(&m, ID, None, &[], Some(4), 1, None, true),
+            WriteCheck::Unknown,
+            "an empty body"
+        );
+    }
+
+    /// No key opens chunk 0: Unknown (a version this client cannot read is
+    /// neither proof of the repair convention nor of a writable row).
+    #[test]
+    fn a_frame_no_key_opens_is_unknown() {
+        let m = master();
+        let stranger = FileKey::from_bytes([3u8; 32]);
+        let wire = frame(&stranger, b"sealed under a key the owner does not hold");
+        let size = Some(wire.len() as u64 - 28);
+        assert_eq!(
+            first_chunk_check(&m, ID, None, &wire, size, 1, None, true),
+            WriteCheck::Unknown
+        );
+        let other = FileKey::from_bytes([4u8; 32]);
+        assert_eq!(
+            first_chunk_check(&m, ID, Some(&other), &wire, size, 1, None, true),
+            WriteCheck::Unknown,
+            "a row key that does not open the frame proves nothing"
+        );
+    }
+
+    /// SF-0002 round 2 (C4): a folder is never probed. The API here is a
+    /// closed port, so any request would make the answer Unknown: Writable
+    /// proves nothing was asked. Its name still decides (a read-only name is
+    /// UpperRepair), and the same target as a file is Unknown (the control that
+    /// shows the closed port answers).
+    #[tokio::test]
+    async fn a_folder_is_decided_by_its_name_alone() {
+        let api = ApiClient::new_for_test("http://127.0.0.1:9".to_string());
+        let m = master();
+        let target = |is_folder, name_read_only| WriteTarget {
+            file_id: ID,
+            is_folder,
+            name_read_only,
+            row_key: None,
+            size_bytes: None,
+            chunk_count: 1,
+        };
+        assert_eq!(write_check(&api, &m, &target(true, false)).await, WriteCheck::Writable);
+        assert_eq!(
+            write_check(&api, &m, &target(true, true)).await,
+            WriteCheck::UpperRepair
+        );
+        assert_eq!(write_check(&api, &m, &target(false, false)).await, WriteCheck::Unknown);
+    }
+
+    /// Round 3 (K1): a legacy CLI JSON-blob chunk 0 is writable once blob 0
+    /// authenticates under the owner's binary or string key or the row's own
+    /// key. A blob no write-capable key opens, or one cut short, is Unknown; a
+    /// JSON blob is never read as the repair convention.
+    #[test]
+    fn a_json_blob_chunk0_is_writable_once_it_authenticates() {
+        let m = master();
+        let uuid = uuid::Uuid::parse_str(ID).unwrap();
+        let json = |key: &FileKey, pt: &[u8]| {
+            serde_json::to_vec(&beebeeb_core::encrypt::encrypt_chunk(key, pt).unwrap()).unwrap()
+        };
+        let pt = b"a legacy CLI chunk";
+        let size = Some(pt.len() as u64);
+        let check = |row_key: Option<&FileKey>, body: &[u8], complete: bool| {
+            first_chunk_check(&m, ID, row_key, body, size, 1, None, complete)
+        };
+        for key in [derive_file_key(&m, uuid.as_bytes()), derive_file_key(&m, ID.as_bytes())] {
+            assert_eq!(check(None, &json(&key, pt), true), WriteCheck::Writable);
+        }
+        let item = FileKey::from_bytes([5u8; 32]);
+        let shared = json(&item, pt);
+        assert_eq!(
+            check(Some(&item), &shared, true),
+            WriteCheck::Writable,
+            "the row's own key"
+        );
+        assert_eq!(
+            check(None, &shared, true),
+            WriteCheck::Unknown,
+            "no write-capable key opens it"
+        );
+        let upper = json(&derive_file_key(&m, ID.to_ascii_uppercase().as_bytes()), pt);
+        assert_eq!(
+            check(None, &upper, true),
+            WriteCheck::Unknown,
+            "never the repair convention"
+        );
+        let binary = json(&derive_file_key(&m, uuid.as_bytes()), pt);
+        assert_eq!(
+            check(None, &binary[..binary.len() / 2], false),
+            WriteCheck::Unknown,
+            "cut short"
+        );
+
+        // Multi-chunk: blob 0 followed by the rest of the version.
+        let key = derive_file_key(&m, uuid.as_bytes());
+        let mut multi = json(&key, &[1u8; 300]);
+        multi.extend(json(&key, &[2u8; 300]));
+        multi.extend(json(&key, &[3u8; 5]));
+        assert_eq!(
+            first_chunk_check(&m, ID, None, &multi, Some(605), 3, None, true),
+            WriteCheck::Writable
+        );
+    }
+
+    /// Round 3 (K2): a legacy multi-chunk raw file served without X-Chunk-Size,
+    /// whose chunk size is not a power of two and whose last chunk is shorter,
+    /// is found by the read path's frame-size probe: writable under the owner's
+    /// key, read-only under the uppercase-id key.
+    #[test]
+    fn a_legacy_multi_chunk_file_without_a_chunk_size_is_probed() {
+        let m = master();
+        let pt: Vec<u8> = (0..3 * 3000 + 77).map(|i| (i % 251) as u8).collect();
+        let wire = |key: &FileKey| -> Vec<u8> { pt.chunks(3000).flat_map(|c| frame(key, c)).collect() };
+        let size = Some(pt.len() as u64);
+        let ordinary = wire(&derive_file_key(&m, ID.as_bytes()));
+        assert_eq!(
+            first_chunk_check(&m, ID, None, &ordinary, size, 4, None, true),
+            WriteCheck::Writable
+        );
+        let sealed = wire(&derive_file_key(&m, ID.to_ascii_uppercase().as_bytes()));
+        assert_eq!(
+            first_chunk_check(&m, ID, None, &sealed, size, 4, None, true),
+            WriteCheck::UpperRepair
+        );
+        let item = FileKey::from_bytes([5u8; 32]);
+        assert_eq!(
+            first_chunk_check(&m, ID, Some(&item), &wire(&item), size, 4, None, true),
+            WriteCheck::Writable,
+            "the row's own key, probed the same way"
+        );
+    }
+
+    /// Round 3 (K2), through the real probe: chunk 0 is 2 MiB (longer than the
+    /// ordinary prefix) and the server sends no X-Chunk-Size. The check reads
+    /// the feasible frame lengths in a second request and decides Writable.
+    #[tokio::test]
+    async fn a_frame_longer_than_the_first_prefix_is_found_by_a_second_read() {
+        let m = master();
+        let key = derive_file_key(&m, ID.as_bytes());
+        let pt: Vec<u8> = (0..2 * 1024 * 1024 + 100).map(|i| (i % 251) as u8).collect();
+        let wire: Vec<u8> = pt.chunks(2 * 1024 * 1024).flat_map(|c| frame(&key, c)).collect();
+        let mock = crate::test_server::shared(crate::test_server::Mock::default());
+        mock.lock().unwrap().downloads.insert(ID.to_string(), wire);
+        let api = ApiClient::new_for_test(crate::test_server::spawn(mock.clone()).await);
+        let target = WriteTarget {
+            file_id: ID,
+            is_folder: false,
+            name_read_only: false,
+            row_key: None,
+            size_bytes: Some(pt.len() as u64),
+            chunk_count: 2,
+        };
+        assert_eq!(write_check(&api, &m, &target).await, WriteCheck::Writable);
+    }
+
+    /// The controls: the canonical owner key and a row's own key prove a
+    /// version writable; the owner's uppercase-id key is read-only, also when it
+    /// is the row's own key (an owner wrap of the uppercase key).
+    #[test]
+    fn proven_answers_with_full_geometry() {
+        let m = master();
+        let pt = b"single chunk";
+        let size = Some(pt.len() as u64);
+        let ordinary = frame(&derive_file_key(&m, ID.as_bytes()), pt);
+        assert_eq!(
+            first_chunk_check(&m, ID, None, &ordinary, size, 1, None, false),
+            WriteCheck::Writable
+        );
+        let item = FileKey::from_bytes([5u8; 32]);
+        let shared = frame(&item, pt);
+        assert_eq!(
+            first_chunk_check(&m, ID, Some(&item), &shared, size, 1, None, false),
+            WriteCheck::Writable
+        );
+        let upper = derive_file_key(&m, ID.to_ascii_uppercase().as_bytes());
+        let sealed = frame(&upper, pt);
+        assert_eq!(
+            first_chunk_check(&m, ID, None, &sealed, size, 1, None, false),
+            WriteCheck::UpperRepair
+        );
+        assert_eq!(
+            first_chunk_check(&m, ID, Some(&upper), &sealed, size, 1, None, false),
+            WriteCheck::UpperRepair
+        );
+    }
 }

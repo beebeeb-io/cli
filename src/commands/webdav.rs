@@ -674,6 +674,11 @@ async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match
     // For versioning: reuse the existing file_id so the server creates a version
     // entry rather than a new file (keeps share links valid, builds history).
     let existing_file_id: Option<uuid::Uuid> = if let Ok(existing) = resolve_path(state, path).await {
+        // SF-0002: never version-replace a file sealed by the old iOS app (its
+        // name or its CURRENT version), and never one the check could not read.
+        if let Err(refusal) = write_refusal(state, &existing).await {
+            return refusal;
+        }
         if let Some(ref eid) = existing.file_id {
             // If-Match precondition: client must supply current ETag
             if let Some(im) = if_match {
@@ -942,6 +947,13 @@ async fn move_response(state: &Arc<DavState>, src_path: &str, destination: &str)
     };
 
     let same_parent = src_parent_path == dst_parent_path;
+
+    // SF-0002: reparenting is a move, but renaming rewrites the name envelope.
+    if new_name != src.display_name {
+        if let Err(refusal) = write_refusal(state, &src).await {
+            return refusal;
+        }
+    }
 
     // Compute new_name_encrypted if the name changed
     let new_name_encrypted = if new_name != src.display_name {
@@ -1248,6 +1260,33 @@ fn make_etag(file_id: &str, modified: Option<&str>) -> String {
     }
 }
 
+/// SF-0002: the one write check for a PUT-overwrite or a rename of `entry`.
+/// `Err` is the response: 403 for a read-only row, 503 when the check could not
+/// decide (retryable; the row is not marked read-only).
+async fn write_refusal(state: &Arc<DavState>, entry: &ResolvedEntry) -> Result<(), Response> {
+    let Some(file_id) = entry.file_id.as_deref() else {
+        return Ok(());
+    };
+    let target = crate::owned_keys::WriteTarget {
+        file_id,
+        is_folder: entry.is_collection,
+        name_read_only: entry.read_only,
+        // Rows here open under the owner's own conventions (the master key).
+        row_key: None,
+        size_bytes: entry.size_bytes,
+        chunk_count: entry.chunk_count,
+    };
+    match crate::owned_keys::write_check(&state.api, &state.master_key, &target).await {
+        crate::owned_keys::WriteCheck::Writable => Ok(()),
+        crate::owned_keys::WriteCheck::UpperRepair => {
+            Err((StatusCode::FORBIDDEN, crate::crypto::OWNER_REPAIR_READ_ONLY).into_response())
+        }
+        crate::owned_keys::WriteCheck::Unknown => {
+            Err((StatusCode::SERVICE_UNAVAILABLE, crate::owned_keys::WRITE_CHECK_UNKNOWN).into_response())
+        }
+    }
+}
+
 // ─── Path resolution ─────────────────────────────────────────────────────────
 
 /// A resolved vault entry (file or collection).
@@ -1263,6 +1302,9 @@ struct ResolvedEntry {
     /// (`crypto::content_pin`, task 1943). `Err` for a collection, or for a file
     /// whose metadata cannot be read (its content is then refused, never guessed).
     pin: Result<beebeeb_core::chunk_stream::ExpectedChunkFormat, String>,
+    /// SF-0002: the name resolved under the read-only uppercase repair
+    /// convention. PUT-overwrite and rename are refused; move-only is allowed.
+    read_only: bool,
 }
 
 /// What a collection carries in [`ResolvedEntry::pin`].
@@ -1284,8 +1326,11 @@ fn decode_file_entry(
 
     // Decrypt name
     let name_encrypted = file.get("name_encrypted").and_then(|v| v.as_str())?;
-    let display_name =
-        decrypt_name(master_key, &file_id, name_encrypted).unwrap_or_else(|| format!("[{}]", &file_id[..8]));
+    let (display_name, read_only) =
+        match crate::crypto::decrypt_name_with_convention(master_key, &file_id, name_encrypted) {
+            Some((name, convention)) => (name, convention == beebeeb_core::kdf::OwnerKeyConvention::UpperRepair),
+            None => (format!("[{}]", &file_id[..8]), false),
+        };
     let pin = if is_folder {
         no_content()
     } else {
@@ -1300,6 +1345,7 @@ fn decode_file_entry(
         chunk_count,
         modified,
         pin,
+        read_only,
     })
 }
 
@@ -1321,6 +1367,7 @@ async fn resolve_path(state: &Arc<DavState>, path: &str) -> Result<ResolvedEntry
             chunk_count: 0,
             modified: None,
             pin: no_content(),
+            read_only: false,
         });
     }
 
@@ -1371,10 +1418,6 @@ async fn resolve_path(state: &Arc<DavState>, path: &str) -> Result<ResolvedEntry
 }
 
 // ─── Decryption helpers ───────────────────────────────────────────────────────
-
-fn decrypt_name(master_key: &beebeeb_core::kdf::MasterKey, file_id: &str, name_encrypted: &str) -> Option<String> {
-    crate::crypto::decrypt_name(master_key, file_id, name_encrypted)
-}
 
 // ─── XML helpers ─────────────────────────────────────────────────────────────
 
@@ -1476,6 +1519,7 @@ mod parent_target_tests {
             chunk_count: 0,
             modified: None,
             pin: no_content(),
+            read_only: false,
         }
     }
 
@@ -1607,6 +1651,162 @@ mod windows_hint_tests {
             assert!(WINDOWS_EXPLORER_HINT.contains(needle), "hint lacks {needle:?}");
         }
         assert_eq!(windows_explorer_hint().is_some(), cfg!(windows));
+    }
+}
+
+/// SF-0002 round 2: WebDAV asks the one write check before a PUT-overwrite or a
+/// rename. These run the real handlers against an in-process API mock that
+/// counts every request that is not a GET (a write).
+#[cfg(test)]
+mod sf_0002_write_check_tests {
+    use super::*;
+    use axum::{Json, routing::get};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
+
+    const OWNED: &str = "11111111-1111-4111-8111-111111111111";
+
+    fn master() -> beebeeb_core::kdf::MasterKey {
+        beebeeb_core::kdf::MasterKey::from_bytes([7u8; 32])
+    }
+
+    /// A root-level file row: `name` and its single legacy frame sealed under `key`.
+    fn file_row(id: &str, name: &str, key: &beebeeb_core::kdf::FileKey, plaintext: &[u8]) -> serde_json::Value {
+        let sealed = beebeeb_core::encrypt::encrypt_name_for(
+            key,
+            name,
+            Some("text/plain"),
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+        )
+        .unwrap();
+        json!({"id": id, "parent_id": null, "name_encrypted": sealed, "is_folder": false,
+               "size_bytes": plaintext.len(), "chunk_count": 1, "updated_at": "2026-10-31T10:00:00Z"})
+    }
+
+    struct Mock {
+        state: Arc<DavState>,
+        download_status: Arc<AtomicU16>,
+        downloads: Arc<AtomicUsize>,
+        writes: Arc<AtomicUsize>,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    async fn mock(rows: Vec<serde_json::Value>, frame: Vec<u8>) -> Mock {
+        let download_status = Arc::new(AtomicU16::new(200));
+        let downloads = Arc::new(AtomicUsize::new(0));
+        let writes = Arc::new(AtomicUsize::new(0));
+        let (status, served, written) = (download_status.clone(), downloads.clone(), writes.clone());
+        let app = Router::new()
+            .route(
+                "/api/v1/files",
+                get(move || {
+                    let rows = rows.clone();
+                    async move { Json(json!({ "files": rows })) }
+                }),
+            )
+            .route(
+                "/api/v1/files/:id/download",
+                get(move || {
+                    let (frame, status, served) = (frame.clone(), status.clone(), served.clone());
+                    async move {
+                        served.fetch_add(1, Ordering::SeqCst);
+                        match status.load(Ordering::SeqCst) {
+                            200 => frame.into_response(),
+                            s => StatusCode::from_u16(s).unwrap().into_response(),
+                        }
+                    }
+                }),
+            )
+            .fallback(move |req: Request| {
+                let written = written.clone();
+                async move {
+                    if req.method() != Method::GET {
+                        written.fetch_add(1, Ordering::SeqCst);
+                    }
+                    (StatusCode::INTERNAL_SERVER_ERROR, "mock: unhandled")
+                }
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let state = Arc::new(DavState {
+            api: ApiClient::new_for_test(format!("http://{}", listener.local_addr().unwrap())),
+            master_key: master(),
+            read_only: false,
+            dir_cache: Mutex::new(HashMap::new()),
+            cache_ttl: Duration::ZERO,
+            locks: Mutex::new(HashMap::new()),
+            request_count: std::sync::atomic::AtomicU64::new(0),
+            error_count: std::sync::atomic::AtomicU64::new(0),
+            verbose: false,
+        });
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        Mock {
+            state,
+            download_status,
+            downloads,
+            writes,
+            server,
+        }
+    }
+
+    async fn body_text(r: Response) -> String {
+        String::from_utf8_lossy(&axum::body::to_bytes(r.into_body(), 4096).await.unwrap()).into_owned()
+    }
+
+    /// C1: a 5xx probe refuses a PUT-overwrite and a rename with 503 and the
+    /// retryable message, and no write is sent. With the version readable, the
+    /// same PUT gets past the check (it reaches the upload init).
+    #[tokio::test]
+    async fn put_and_rename_refuse_with_503_when_the_check_cannot_read_the_version() {
+        let key = beebeeb_core::kdf::derive_file_key(&master(), OWNED.as_bytes());
+        let plaintext = b"an ordinary owner file";
+        let frame = beebeeb_core::encrypt::encrypt_chunk_raw(&key, plaintext).unwrap();
+        let m = mock(vec![file_row(OWNED, "owned.txt", &key, plaintext)], frame).await;
+        m.download_status.store(503, Ordering::SeqCst);
+
+        let put = put_response(&m.state, "/owned.txt", b"edited".to_vec(), None).await;
+        assert_eq!(put.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body_text(put).await, crate::owned_keys::WRITE_CHECK_UNKNOWN);
+        let rename = move_response(&m.state, "/owned.txt", "/renamed.txt").await;
+        assert_eq!(rename.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(m.writes.load(Ordering::SeqCst), 0, "a refused write sent a request");
+        assert_eq!(m.downloads.load(Ordering::SeqCst), 2, "each write asked the check once");
+
+        m.download_status.store(200, Ordering::SeqCst);
+        let put = put_response(&m.state, "/owned.txt", b"edited".to_vec(), None).await;
+        assert_ne!(put.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_ne!(put.status(), StatusCode::FORBIDDEN);
+        assert!(
+            m.writes.load(Ordering::SeqCst) >= 1,
+            "a readable ordinary row must get past the check to the upload"
+        );
+        m.server.abort();
+    }
+
+    /// C5: the owner-wrap-of-uppercase row `bb mv` refuses
+    /// (`owner_read_repair::an_owner_wrap_of_the_uppercase_key_is_read_only`) is
+    /// refused here as well: 403 by its name, no probe, no write.
+    #[tokio::test]
+    async fn an_owner_wrap_of_the_uppercase_key_is_read_only() {
+        const UPPER: &str = "5f0c2a9e-3b1d-4c7e-9a2f-6d8e1b4c7a30";
+        let upper = beebeeb_core::kdf::derive_file_key(&master(), UPPER.to_ascii_uppercase().as_bytes());
+        let plaintext = b"SF-0002 read-only repair content";
+        let mut row = file_row(UPPER, "uppercase-repair.pdf", &upper, plaintext);
+        let wrap = beebeeb_core::owned_keys::wrap_owner_file_key(&master(), UPPER, &upper).unwrap();
+        row["owner_wrapped_file_key"] = json!(base64::engine::general_purpose::STANDARD.encode(wrap));
+        let frame = beebeeb_core::encrypt::encrypt_chunk_raw(&upper, plaintext).unwrap();
+        let m = mock(vec![row], frame).await;
+        m.download_status.store(503, Ordering::SeqCst);
+
+        let put = put_response(&m.state, "/uppercase-repair.pdf", b"edited".to_vec(), None).await;
+        assert_eq!(put.status(), StatusCode::FORBIDDEN);
+        assert_eq!(body_text(put).await, crate::crypto::OWNER_REPAIR_READ_ONLY);
+        let rename = move_response(&m.state, "/uppercase-repair.pdf", "/renamed.pdf").await;
+        assert_eq!(rename.status(), StatusCode::FORBIDDEN);
+        assert_eq!(m.writes.load(Ordering::SeqCst), 0, "a refused write sent a request");
+        assert_eq!(m.downloads.load(Ordering::SeqCst), 0, "the name decides; no probe");
+        m.server.abort();
     }
 }
 

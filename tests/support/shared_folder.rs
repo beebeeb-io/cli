@@ -20,6 +20,8 @@ use std::{
 pub const ROOT: &str = "22222222-2222-4222-8222-222222222222";
 pub const SUB: &str = "33333333-3333-4333-8333-333333333333";
 pub const FILE: &str = "11111111-1111-4111-8111-111111111111";
+/// SF-0002: an id whose uppercase spelling differs, as the iOS File Provider wrote.
+pub const UPPER_FILE: &str = "5f0c2a9e-3b1d-4c7e-9a2f-6d8e1b4c7a30";
 pub const BAD: &str = "44444444-4444-4444-8444-444444444444";
 pub const ACCOUNT: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 /// The approved legacy invite of SUB, used when `Fixture::nested_legacy` puts SUB inside ROOT.
@@ -98,6 +100,9 @@ pub struct Fixture {
     pub owner_index: HashMap<(u32, u32), (u64, Vec<u8>)>,
     pub upload_request: Value,
     pub uploaded_chunks: Vec<Vec<u8>>,
+    /// SF-0002 round 2: when set, `GET /files/{id}/download` answers this status
+    /// (the read-only check's probe cannot read the version).
+    pub download_status: Option<u16>,
 }
 impl Fixture {
     pub fn transfer(v2: bool) -> Self {
@@ -155,6 +160,118 @@ impl Fixture {
             self.stride = self.plaintext.len() as u64;
         }
         self.rows.push(r);
+    }
+    /// SF-0002: an owner row the old iOS File Provider sealed under the
+    /// uppercase id — name and its single legacy content frame both use the
+    /// uppercase owner key. Ordinary reads work; every write must refuse.
+    pub fn upper_repair() -> Self {
+        use beebeeb_core::chunk_stream::ExpectedChunkFormat;
+        let mut f = Self::basic();
+        let key = beebeeb_core::kdf::derive_file_key(&master(), UPPER_FILE.to_uppercase().as_bytes());
+        f.plaintext = b"SF-0002 read-only repair content".to_vec();
+        f.stride = f.plaintext.len() as u64;
+        f.frames = vec![beebeeb_core::encrypt::encrypt_chunk_raw(&key, &f.plaintext).unwrap()];
+        let mut r = row(UPPER_FILE, Some(ROOT), "uppercase-repair.pdf", false, false);
+        r["name_encrypted"] = json!(
+            beebeeb_core::encrypt::encrypt_name_for(
+                &key,
+                "uppercase-repair.pdf",
+                Some("application/pdf"),
+                ExpectedChunkFormat::Unrecorded
+            )
+            .unwrap()
+        );
+        r["size_bytes"] = json!(f.plaintext.len());
+        r["chunk_count"] = json!(1);
+        f.rows[1] = r;
+        f
+    }
+    /// SF-0002 round 2 (C5): [`Fixture::upper_repair`] whose row also carries an
+    /// owner wrap of the uppercase-id key, so the resolver opens it through the
+    /// wrap (`KeyOrigin::OwnerWrap`) rather than by derivation.
+    pub fn upper_repair_owner_wrap() -> Self {
+        let mut f = Self::upper_repair();
+        let upper = beebeeb_core::kdf::derive_file_key(&master(), UPPER_FILE.to_uppercase().as_bytes());
+        let wrap = owned_keys::wrap_owner_file_key(&master(), UPPER_FILE, &upper).unwrap();
+        f.rows[1]["owner_wrapped_file_key"] = json!(B64.encode(wrap));
+        f
+    }
+    /// SF-0002 round 2: an ordinary owner row (id `FILE`, under ROOT): its name
+    /// and its single legacy content frame use the canonical string key, so it
+    /// is writable once the check can read it.
+    pub fn owner_file() -> Self {
+        use beebeeb_core::chunk_stream::ExpectedChunkFormat;
+        let mut f = Self::basic();
+        let key = beebeeb_core::kdf::derive_file_key(&master(), FILE.as_bytes());
+        f.plaintext = b"an ordinary owner file".to_vec();
+        f.stride = f.plaintext.len() as u64;
+        f.frames = vec![beebeeb_core::encrypt::encrypt_chunk_raw(&key, &f.plaintext).unwrap()];
+        let mut r = row(FILE, Some(ROOT), "owned.txt", false, false);
+        r["name_encrypted"] = json!(
+            beebeeb_core::encrypt::encrypt_name_for(
+                &key,
+                "owned.txt",
+                Some("text/plain"),
+                ExpectedChunkFormat::Unrecorded
+            )
+            .unwrap()
+        );
+        r["size_bytes"] = json!(f.plaintext.len());
+        r["chunk_count"] = json!(1);
+        f.rows[1] = r;
+        f
+    }
+    /// SF-0002 round 3 (K1): an old-CLI owner row (id `FILE`): name and its single
+    /// content chunk sealed under the legacy binary-id key, the chunk stored as
+    /// a JSON `EncryptedBlob` (what the CLI wrote before raw frames).
+    pub fn owner_file_json_blob() -> Self {
+        use beebeeb_core::chunk_stream::ExpectedChunkFormat;
+        let mut f = Self::basic();
+        let uuid = uuid::Uuid::parse_str(FILE).unwrap();
+        let key = beebeeb_core::kdf::derive_file_key(&master(), uuid.as_bytes());
+        f.plaintext = b"an old CLI upload, stored as a JSON blob".to_vec();
+        f.stride = f.plaintext.len() as u64;
+        f.frames =
+            vec![serde_json::to_vec(&beebeeb_core::encrypt::encrypt_chunk(&key, &f.plaintext).unwrap()).unwrap()];
+        let mut r = row(FILE, Some(ROOT), "legacy.txt", false, false);
+        r["name_encrypted"] = json!(
+            beebeeb_core::encrypt::encrypt_name_for(
+                &key,
+                "legacy.txt",
+                Some("text/plain"),
+                ExpectedChunkFormat::Unrecorded
+            )
+            .unwrap()
+        );
+        r["size_bytes"] = json!(f.plaintext.len());
+        r["chunk_count"] = json!(1);
+        f.rows[1] = r;
+        f
+    }
+    /// SF-0002 review: the name was re-sealed under the normal convention but
+    /// the single content frame is still sealed under the uppercase id.
+    pub fn upper_repair_content_only() -> Self {
+        use beebeeb_core::chunk_stream::ExpectedChunkFormat;
+        let mut f = Self::basic();
+        let normal = beebeeb_core::kdf::derive_file_key(&master(), UPPER_FILE.as_bytes());
+        let upper = beebeeb_core::kdf::derive_file_key(&master(), UPPER_FILE.to_uppercase().as_bytes());
+        f.plaintext = b"SF-0002 content-only repair payload".to_vec();
+        f.stride = f.plaintext.len() as u64;
+        f.frames = vec![beebeeb_core::encrypt::encrypt_chunk_raw(&upper, &f.plaintext).unwrap()];
+        let mut r = row(UPPER_FILE, Some(ROOT), "uppercase-repair.pdf", false, false);
+        r["name_encrypted"] = json!(
+            beebeeb_core::encrypt::encrypt_name_for(
+                &normal,
+                "uppercase-repair.pdf",
+                Some("application/pdf"),
+                ExpectedChunkFormat::Unrecorded
+            )
+            .unwrap()
+        );
+        r["size_bytes"] = json!(f.plaintext.len());
+        r["chunk_count"] = json!(1);
+        f.rows[1] = r;
+        f
     }
     pub fn basic() -> Self {
         Self {
@@ -349,6 +466,9 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
         let i = path.rsplit('/').next().unwrap().parse::<usize>().unwrap();
         return f.frames[i].clone().into_response();
     } else if method == "GET" && path.ends_with("/download") {
+        if let Some(status) = f.download_status {
+            return StatusCode::from_u16(status).unwrap().into_response();
+        }
         return (
             [
                 ("X-Chunk-Size", f.stride.to_string()),
@@ -466,6 +586,10 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
         let second = query.contains_key("cursor");
         let cut = f.inventory.len().min(500);
         json!({"keys": if second {&f.inventory[cut..]} else {&f.inventory[..cut]},"next_cursor":if f.cycle || (!second && cut<f.inventory.len()) {Some("opaque+cursor/=")} else {None}})
+    } else if method == "PATCH" && path.starts_with("/api/v1/files/") {
+        // A rename/move: answered so a write the client is allowed to make succeeds.
+        let id = path.trim_start_matches("/api/v1/files/").to_string();
+        json!({ "id": id })
     } else if method == "GET" && path.starts_with("/api/v1/files/") {
         let id = path.trim_start_matches("/api/v1/files/");
         if let Some(row) = f.canonical.get(id).or_else(|| f.rows.iter().find(|r| r["id"] == id)) {

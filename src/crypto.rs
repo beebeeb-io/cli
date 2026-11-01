@@ -50,6 +50,12 @@ struct WebAppBlob {
     ciphertext: String,
 }
 
+/// Plain, user-facing explanation for a file that the SF-0002 read-only
+/// repair convention could open (iOS Files-app create sealed under an
+/// uppercase id). Shared by every CLI surface that refuses a write.
+pub const OWNER_REPAIR_READ_ONLY: &str =
+    "This file was saved by an older version of the iOS app. You can open and download it. To change it, save a copy.";
+
 /// Decrypt a `name_encrypted` value from the API, handling all three server
 /// formats (Rust EncryptedBlob, web-app base64 blob, plaintext fallback).
 ///
@@ -60,35 +66,121 @@ pub fn decrypt_name(
     file_id_str: &str,
     name_encrypted_str: &str,
 ) -> Option<String> {
+    decrypt_name_with_convention(master_key, file_id_str, name_encrypted_str).map(|(name, _)| name)
+}
+
+/// [`decrypt_name`] that also reports which id convention authenticated the
+/// name (SF-0002). A returned [`beebeeb_core::kdf::OwnerKeyConvention::UpperRepair`]
+/// means the row was sealed by the iOS File Provider under an uppercase id:
+/// it is READ-ONLY on this client (see [`OWNER_REPAIR_READ_ONLY`]).
+///
+/// The client's existing decrypt paths run first and are unchanged. Only when
+/// they all fail for an owner row is core's
+/// [`beebeeb_core::kdf::owner_file_key_for_name`] asked for the read-only
+/// repair key, so no ordinary row changes behaviour.
+pub fn decrypt_name_with_convention(
+    master_key: &beebeeb_core::kdf::MasterKey,
+    file_id_str: &str,
+    name_encrypted_str: &str,
+) -> Option<(String, beebeeb_core::kdf::OwnerKeyConvention)> {
+    use beebeeb_core::kdf::OwnerKeyConvention;
+
     // Format 3 (fast path): Plaintext — not JSON at all.
     if !name_encrypted_str.starts_with('{') {
-        return Some(name_encrypted_str.to_string());
+        return Some((name_encrypted_str.to_string(), OwnerKeyConvention::String));
     }
 
     // Core first (task 1943): it also opens envelopes sealed under the 1908
     // name subkey, which every v2 file's metadata is. The paths below stay for
     // the legacy blobs core does not parse.
     if let Ok(meta) = beebeeb_core::encrypt::decrypt_name_metadata(master_key, file_id_str, name_encrypted_str) {
-        return Some(meta.name);
+        return Some((meta.name, OwnerKeyConvention::String));
     }
 
-    let file_uuid: uuid::Uuid = file_id_str.parse().ok()?;
+    if let Ok(file_uuid) = file_id_str.parse::<uuid::Uuid>() {
+        // The web app derives file keys using the UUID *string* as UTF-8 bytes
+        // (TextEncoder.encode(fileId)), while the CLI/core uses the UUID's 16-byte
+        // binary form (uuid.as_bytes()). We must try both derivations since files
+        // can originate from either client.
+        let key_from_string = beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes());
+        let key_from_binary = beebeeb_core::kdf::derive_file_key(master_key, file_uuid.as_bytes());
 
-    // The web app derives file keys using the UUID *string* as UTF-8 bytes
-    // (TextEncoder.encode(fileId)), while the CLI/core uses the UUID's 16-byte
-    // binary form (uuid.as_bytes()). We must try both derivations since files
-    // can originate from either client.
-    let key_from_string = beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes());
-    let key_from_binary = beebeeb_core::kdf::derive_file_key(master_key, file_uuid.as_bytes());
+        // Try each key derivation against each blob format.
+        for (file_key, convention) in [
+            (&key_from_string, OwnerKeyConvention::String),
+            (&key_from_binary, OwnerKeyConvention::Binary),
+        ] {
+            if let Some(name) = decrypt_name_with_key(file_key, name_encrypted_str) {
+                return Some((name, convention));
+            }
+        }
+    }
 
-    // Try each key derivation against each blob format.
-    for file_key in [&key_from_string, &key_from_binary] {
-        if let Some(name) = decrypt_name_with_key(file_key, name_encrypted_str) {
-            return Some(name);
+    // SF-0002: read-only repair. Only the owner can derive this key, and only
+    // when the name still fails under both written conventions above.
+    if let Ok((file_key, convention)) =
+        beebeeb_core::kdf::owner_file_key_for_name(master_key, file_id_str, name_encrypted_str)
+    {
+        if let Some(name) = decrypt_name_with_key(&file_key, name_encrypted_str) {
+            return Some((name, convention));
         }
     }
 
     None
+}
+
+/// SF-0002: does this row's NAME authenticate only under the read-only
+/// uppercase repair convention? The one name verdict for every surface (the
+/// resolver, `bb mv`/`push` paths, WebDAV, the mount), whichever key the row
+/// was reached by; `owned_keys::write_check` then checks the content as well.
+pub fn name_is_upper_repair(
+    master_key: &beebeeb_core::kdf::MasterKey,
+    file_id_str: &str,
+    name_encrypted_str: &str,
+) -> bool {
+    decrypt_name_with_convention(master_key, file_id_str, name_encrypted_str)
+        .is_some_and(|(_, convention)| convention == beebeeb_core::kdf::OwnerKeyConvention::UpperRepair)
+}
+
+/// Resolve the owner's content key for ONE stored version from its first chunk
+/// frame (SF-0002). Only call this after the existing key failed to
+/// authenticate that version's first chunk: it is the read-only repair path,
+/// and a returned [`beebeeb_core::kdf::OwnerKeyConvention::UpperRepair`] means
+/// the version must not be rewritten (no new version under this id).
+pub fn owner_content_key(
+    master_key: &beebeeb_core::kdf::MasterKey,
+    file_id_str: &str,
+    first_chunk_frame: &[u8],
+) -> Option<(FileKey, beebeeb_core::kdf::OwnerKeyConvention)> {
+    beebeeb_core::kdf::owner_file_key_for_content(master_key, file_id_str, first_chunk_frame).ok()
+}
+
+/// SF-0002 write check: does `frame` open as chunk 0 of a version under `key`?
+/// The same reader core's per-version owner resolver uses (frame 0 decides
+/// the format: v1 legacy or v2, either `is_last`); only the verdict is kept and
+/// the opened bytes are wiped.
+pub fn first_frame_opens(key: &FileKey, file_id_str: &str, frame: &[u8]) -> bool {
+    ChunkDecryptor::for_push_with_file_key(key_copy(key), file_id_str, ExpectedChunkFormat::Unrecorded)
+        .push_frame(frame)
+        .map(|chunk| zeroize::Zeroizing::new(chunk.data))
+        .is_ok()
+}
+
+/// SF-0002 write check (round 3, K1): the frame (`nonce || ciphertext`) of a
+/// legacy CLI JSON-blob chunk 0 at the start of `prefix`, when one whole
+/// `EncryptedBlob` is there. The same parse the read path's JSON parser does
+/// (`decrypt_json_chunks`); nothing is authenticated here.
+pub fn first_json_blob_frame(prefix: &[u8]) -> Option<Vec<u8>> {
+    if prefix.first() != Some(&b'{') {
+        return None;
+    }
+    let blob = serde_json::Deserializer::from_slice(prefix)
+        .into_iter::<EncryptedBlob>()
+        .next()?
+        .ok()?;
+    let mut frame = blob.nonce;
+    frame.extend_from_slice(&blob.ciphertext);
+    Some(frame)
 }
 
 /// Batch [`decrypt_name`] — decrypt many `(file_id, name_encrypted)` pairs in
@@ -185,9 +277,23 @@ pub fn content_pin(
     file_id_str: &str,
     name_encrypted_str: &str,
 ) -> Result<ExpectedChunkFormat, String> {
-    beebeeb_core::encrypt::decrypt_file_metadata(master_key, file_id_str, name_encrypted_str)
-        .map(|m| m.chunk_format)
-        .map_err(|e| pin_error(file_id_str, e))
+    match beebeeb_core::encrypt::decrypt_file_metadata(master_key, file_id_str, name_encrypted_str) {
+        Ok(m) => Ok(m.chunk_format),
+        Err(e) => {
+            // SF-0002: the name may be sealed under the read-only uppercase
+            // convention. Resolve it through core's owner helper, then read the
+            // pin under that key. A row that still does not authenticate keeps
+            // the original error (never guessed).
+            if let Ok((key, _)) =
+                beebeeb_core::kdf::owner_file_key_for_name(master_key, file_id_str, name_encrypted_str)
+            {
+                if let Ok(m) = beebeeb_core::encrypt::decrypt_file_metadata_with_key(&key, name_encrypted_str) {
+                    return Ok(m.chunk_format);
+                }
+            }
+            Err(pin_error(file_id_str, e))
+        }
+    }
 }
 
 /// [`content_pin`] under a known file key (file-request content keys).
@@ -221,9 +327,12 @@ fn pin_error(file_id: &str, e: impl std::fmt::Display) -> String {
     )
 }
 
-/// A second owned handle on a file key, for the decryptor that takes one by value.
-fn key_copy(file_key: &FileKey) -> FileKey {
-    FileKey::from_bytes(*file_key.as_bytes())
+/// A second owned copy of `file_key` (core's `FileKey` is not `Clone`). The
+/// by-value bytes it passes through are wiped on drop (SF-0002 round 2, C6);
+/// `FileKey::from_bytes` wipes its own argument and the copy zeroizes on drop.
+pub(crate) fn key_copy(file_key: &FileKey) -> FileKey {
+    let bytes = zeroize::Zeroizing::new(*file_key.as_bytes());
+    FileKey::from_bytes(*bytes)
 }
 
 /// Decrypt all chunks of a downloaded file under its read `pin`
@@ -265,17 +374,57 @@ pub fn decrypt_file_chunks_with_chunk_size(
     chunk_count: u32,
     chunk_size: Option<u64>,
 ) -> Result<Vec<u8>, String> {
+    decrypt_file_chunks_owned(
+        master_key,
+        file_id_str,
+        pin,
+        None,
+        encrypted_bytes,
+        chunk_count,
+        chunk_size,
+    )
+    .map(|(plaintext, _)| plaintext)
+}
+
+/// [`decrypt_file_chunks_with_chunk_size`] with an explicit first candidate key
+/// (owner rows resolved through [`crate::owned_keys`]) and the id convention
+/// that finally opened the content, when one of core's owner helpers was used
+/// (SF-0002).
+///
+/// The existing keys are tried first, exactly as before. Only when the first
+/// chunk fails under all of them does core's
+/// [`beebeeb_core::kdf::owner_file_key_for_content`] pick the per-version
+/// read-only repair key, authenticated against that version's first frame.
+#[allow(clippy::too_many_arguments)]
+pub fn decrypt_file_chunks_owned(
+    master_key: &beebeeb_core::kdf::MasterKey,
+    file_id_str: &str,
+    pin: ExpectedChunkFormat,
+    explicit_key: Option<&FileKey>,
+    encrypted_bytes: &[u8],
+    chunk_count: u32,
+    chunk_size: Option<u64>,
+) -> Result<(Vec<u8>, Option<beebeeb_core::kdf::OwnerKeyConvention>), String> {
     let file_uuid: uuid::Uuid = file_id_str.parse().map_err(|e| format!("invalid file ID: {e}"))?;
 
     // A v2 file is written by core, which derives its key from the UUID STRING:
     // that key only. A legacy file may be under either derivation: binary-UUID
-    // first (CLI origin), then string-UUID (web origin).
-    let keys = match pin {
-        ExpectedChunkFormat::V2 => vec![beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes())],
-        ExpectedChunkFormat::Unrecorded => vec![
-            beebeeb_core::kdf::derive_file_key(master_key, file_uuid.as_bytes()),
-            beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes()),
-        ],
+    // first (CLI origin), then string-UUID (web origin). An explicit owner key
+    // (a shared-folder or owner-wrap key resolved from the row) authenticates
+    // the content on its own: try ONLY that key. Falling back to the owner's
+    // derived or repair keys would let a shared reader open content that is not
+    // sealed under the key the row handed it (SF-0002 review).
+    let keys: Vec<FileKey> = match explicit_key {
+        Some(key) => vec![key_copy(key)],
+        None => match pin {
+            ExpectedChunkFormat::V2 => {
+                vec![beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes())]
+            }
+            ExpectedChunkFormat::Unrecorded => vec![
+                beebeeb_core::kdf::derive_file_key(master_key, file_uuid.as_bytes()),
+                beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes()),
+            ],
+        },
     };
 
     // Attempt decryption with each key. The first successful full decryption wins.
@@ -283,7 +432,37 @@ pub fn decrypt_file_chunks_with_chunk_size(
         if let Ok(plaintext) =
             try_decrypt_all_chunks_with_chunk_size(file_key, file_id_str, pin, encrypted_bytes, chunk_count, chunk_size)
         {
-            return Ok(plaintext);
+            return Ok((plaintext, None));
+        }
+    }
+
+    // SF-0002: the first chunk failed under every written convention. Ask core
+    // which read-only owner convention authenticates THIS version, then retry
+    // that version under the returned key. A split file (name under the
+    // uppercase convention, this version under the string one, or the reverse)
+    // resolves per version. Only the owner's own (master-derived) path may take
+    // this fallback; a row opened with an explicit key must never switch to an
+    // owner key.
+    if explicit_key.is_some() {
+        return Err(match pin {
+            ExpectedChunkFormat::V2 => format!(
+                "failed to decrypt file {file_id_str}: its metadata records chunk format v2 and the content does not open under the key this row supplied"
+            ),
+            ExpectedChunkFormat::Unrecorded => {
+                format!(
+                    "failed to decrypt file {file_id_str}: the content does not authenticate under the key this row supplied"
+                )
+            }
+        });
+    }
+    for len in first_frame_candidates(encrypted_bytes, chunk_count, chunk_size) {
+        let Some((key, convention)) = owner_content_key(master_key, file_id_str, &encrypted_bytes[..len]) else {
+            continue;
+        };
+        if let Ok(plaintext) =
+            try_decrypt_all_chunks_with_chunk_size(&key, file_id_str, pin, encrypted_bytes, chunk_count, chunk_size)
+        {
+            return Ok((plaintext, Some(convention)));
         }
     }
 
@@ -291,10 +470,43 @@ pub fn decrypt_file_chunks_with_chunk_size(
         ExpectedChunkFormat::V2 => format!(
             "failed to decrypt file {file_id_str}: its metadata records chunk format v2 and the content does not open as v2"
         ),
-        ExpectedChunkFormat::Unrecorded => format!(
-            "failed to decrypt file {file_id_str}: neither binary-UUID nor string-UUID key derivation succeeded"
-        ),
+        ExpectedChunkFormat::Unrecorded => {
+            format!("failed to decrypt file {file_id_str}: no known owner key derivation authenticates its content")
+        }
     })
+}
+
+/// Candidate lengths for the first wire frame, used only to let core's
+/// per-version owner resolver authenticate chunk 0 (SF-0002). Ordered most
+/// likely first; duplicates are skipped. A single-frame file is the whole
+/// payload; otherwise `X-Chunk-Size` is authoritative, and the last resort is
+/// the average frame size for equal frames (the iOS File Provider wrote 1 MiB
+/// frames) and the total itself.
+fn first_frame_candidates(encrypted: &[u8], chunk_count: u32, chunk_size: Option<u64>) -> Vec<usize> {
+    const NONCE_AND_TAG: u64 = 28;
+    const FILE_PROVIDER_CHUNK: u64 = 1024 * 1024;
+    let total = encrypted.len();
+    let mut out: Vec<usize> = Vec::new();
+    let mut push = |v: u64| {
+        if let Ok(v) = usize::try_from(v) {
+            if v > 0 && v <= total && !out.contains(&v) {
+                out.push(v);
+            }
+        }
+    };
+    if chunk_count <= 1 {
+        push(total as u64);
+        return out;
+    }
+    if let Some(cs) = chunk_size {
+        push(cs.saturating_add(NONCE_AND_TAG));
+    }
+    if let Some(avg) = total.checked_div(chunk_count as usize) {
+        push(avg as u64);
+    }
+    push(FILE_PROVIDER_CHUNK.saturating_add(NONCE_AND_TAG));
+    push(total as u64);
+    out
 }
 
 /// Try to decrypt all chunks with a given file key under `pin`. For a legacy
@@ -453,7 +665,25 @@ fn raw_frame_size(
     count: usize,
     chunk_size: Option<u64>,
 ) -> Result<usize, String> {
-    let total = data.len() as u64;
+    probe_first_frame_len(data, data.len() as u64, count, chunk_size, &mut |frame| {
+        opens_as_first_frame(file_key, file_id_str, pin, frame)
+    })
+}
+
+/// The frame-size search of [`raw_frame_size`] (same order, same bounds, same
+/// budget), over `data` that may be only a PREFIX of the version: `total` is
+/// the whole encrypted length, which bounds the feasible sizes, and a size past
+/// the bytes in hand is skipped. `opens` is asked whether a candidate first
+/// frame authenticates; the first size it accepts is returned. Shared by the
+/// read path and the SF-0002 write check (round 3, K2), so both find the same
+/// frame for a legacy multi-chunk file served without `X-Chunk-Size`.
+pub(crate) fn probe_first_frame_len(
+    data: &[u8],
+    total: u64,
+    count: usize,
+    chunk_size: Option<u64>,
+    opens: &mut dyn FnMut(&[u8]) -> bool,
+) -> Result<usize, String> {
     let n = count as u64;
     // total = (n-1)*F + last, 28 <= last <= F  =>  F in [ceil(total/n), (total-28)/(n-1)].
     let lo = total.div_ceil(n);
@@ -465,9 +695,7 @@ fn raw_frame_size(
     }
 
     let mut probe = FrameProbe {
-        file_key,
-        file_id_str,
-        pin,
+        opens,
         data,
         lo,
         hi,
@@ -502,11 +730,9 @@ fn raw_frame_size(
     ))
 }
 
-/// Candidate-frame-size prober for [`raw_frame_size`].
+/// Candidate-frame-size prober for [`probe_first_frame_len`].
 struct FrameProbe<'a> {
-    file_key: &'a FileKey,
-    file_id_str: &'a str,
-    pin: ExpectedChunkFormat,
+    opens: &'a mut dyn FnMut(&[u8]) -> bool,
     data: &'a [u8],
     lo: u64,
     hi: u64,
@@ -516,15 +742,16 @@ struct FrameProbe<'a> {
 }
 
 impl FrameProbe<'_> {
-    /// True if `f` is a feasible frame size (the byte count allows it) whose
-    /// first frame authenticates. Each size is tried at most once.
+    /// True if `f` is a feasible frame size (the byte count allows it, and the
+    /// bytes are in hand) whose first frame authenticates. Each size is tried
+    /// at most once.
     fn accepts(&mut self, f: u64) -> bool {
-        if f < self.lo || f > self.hi || self.tried.contains(&f) {
+        if f < self.lo || f > self.hi || f > self.data.len() as u64 || self.tried.contains(&f) {
             return false;
         }
         self.tried.push(f);
         self.spent = self.spent.saturating_add(f);
-        opens_as_first_frame(self.file_key, self.file_id_str, self.pin, &self.data[..f as usize])
+        (self.opens)(&self.data[..f as usize])
     }
 }
 
@@ -606,7 +833,7 @@ mod tests {
     use super::*;
     use beebeeb_core::chunk_stream::ChunkDecryptor;
     use beebeeb_core::encrypt::{encrypt_chunk, encrypt_chunk_raw};
-    use beebeeb_core::kdf::{MasterKey, derive_file_key, derive_master_key};
+    use beebeeb_core::kdf::{MasterKey, OwnerKeyConvention, derive_file_key, derive_master_key};
 
     /// Task 1759: a raw-format file whose random nonce starts with 0x7b must
     /// still decrypt (was misrouted to the JSON parser: "key must be a string").
@@ -1276,5 +1503,103 @@ mod tests {
         // A key that does not open the envelope is no pin either.
         let other = MasterKey::from_bytes([0x24u8; 32]);
         assert!(content_pin(&other, &fid, &name_enc).is_err());
+    }
+    fn repair_vectors() -> serde_json::Value {
+        serde_json::from_str(include_str!("../tests/fixtures/sf_0002_owner_repair.json")).unwrap()
+    }
+
+    fn repair_master(v: &serde_json::Value) -> MasterKey {
+        let mut mk = [0u8; 32];
+        mk.copy_from_slice(&unhex(v["master_key_hex"].as_str().unwrap()));
+        MasterKey::from_bytes(mk)
+    }
+
+    /// SF-0002: a row the old iOS File Provider sealed under the uppercase id
+    /// opens through the ordinary readers (name, pin, content) and reports the
+    /// read-only convention.
+    #[test]
+    fn owner_repair_v1_opens_and_reports_read_only() {
+        let v = &repair_vectors()["upper_repair_v1"];
+        let m = repair_master(v);
+        let fid = v["file_id"].as_str().unwrap();
+        let name_enc = v["name_encrypted"].as_str().unwrap();
+        let frame = unhex(v["content_frame_hex"].as_str().unwrap());
+        let plaintext = unhex(v["content_plaintext_hex"].as_str().unwrap());
+
+        assert_eq!(
+            decrypt_name_with_convention(&m, fid, name_enc),
+            Some((
+                v["expected_name"].as_str().unwrap().to_string(),
+                OwnerKeyConvention::UpperRepair
+            ))
+        );
+        assert_eq!(
+            decrypt_name(&m, fid, name_enc).as_deref(),
+            Some(v["expected_name"].as_str().unwrap())
+        );
+        let pin = content_pin(&m, fid, name_enc).expect("the repair metadata authenticates");
+        assert_eq!(pin, ExpectedChunkFormat::Unrecorded);
+        assert_eq!(decrypt_file_chunks(&m, fid, pin, &frame, 1).unwrap(), plaintext);
+        assert_eq!(
+            decrypt_file_chunks_owned(&m, fid, pin, None, &frame, 1, None).unwrap(),
+            (plaintext, Some(OwnerKeyConvention::UpperRepair))
+        );
+    }
+
+    /// SF-0002 split row: the name is sealed uppercase while each version uses
+    /// its own convention. Both versions must open, per version.
+    #[test]
+    fn owner_repair_split_opens_every_version() {
+        let v = &repair_vectors()["upper_repair_split_v1"];
+        let m = repair_master(v);
+        let fid = v["file_id"].as_str().unwrap();
+        let name_enc = v["name_encrypted"].as_str().unwrap();
+        assert_eq!(
+            decrypt_name_with_convention(&m, fid, name_enc),
+            Some((
+                v["expected_name"].as_str().unwrap().to_string(),
+                OwnerKeyConvention::UpperRepair
+            ))
+        );
+        for (frame_key, pt_key) in [
+            ("content_v1_frame_hex", "content_v1_plaintext_hex"),
+            ("content_v2_frame_hex", "content_v2_plaintext_hex"),
+        ] {
+            let frame = unhex(v[frame_key].as_str().unwrap());
+            let plaintext = unhex(v[pt_key].as_str().unwrap());
+            let pin = content_pin(&m, fid, name_enc).expect("the repair metadata authenticates");
+            let (out, _) = decrypt_file_chunks_owned(&m, fid, pin, None, &frame, 1, None)
+                .unwrap_or_else(|e| panic!("{frame_key}: {e}"));
+            assert_eq!(out, plaintext, "{frame_key}");
+        }
+    }
+
+    /// The fallback is a fallback: an ordinary owner row still resolves under
+    /// the string convention and is not marked read-only.
+    #[test]
+    fn an_ordinary_owner_row_is_not_read_only() {
+        let m = mk();
+        let name_enc = beebeeb_core::encrypt::encrypt_name(&m, FID, "ordinary.txt", None).unwrap();
+        assert_eq!(
+            decrypt_name_with_convention(&m, FID, &name_enc),
+            Some(("ordinary.txt".to_string(), OwnerKeyConvention::String))
+        );
+    }
+
+    /// SF-0002 (mount): the flag a mounted entry carries comes from the name's
+    /// convention alone — true only for a name sealed under the uppercase id.
+    #[test]
+    fn the_mount_read_only_flag_follows_the_name_convention() {
+        use beebeeb_core::chunk_stream::ExpectedChunkFormat;
+        let m = mk();
+        let id = "5f0c2a9e-3b1d-4c7e-9a2f-6d8e1b4c7a30";
+        let upper = beebeeb_core::kdf::derive_file_key(&m, id.to_uppercase().as_bytes());
+        let normal = beebeeb_core::kdf::derive_file_key(&m, id.as_bytes());
+        let sealed =
+            beebeeb_core::encrypt::encrypt_name_for(&upper, "x.pdf", None, ExpectedChunkFormat::Unrecorded).unwrap();
+        let ordinary =
+            beebeeb_core::encrypt::encrypt_name_for(&normal, "x.pdf", None, ExpectedChunkFormat::Unrecorded).unwrap();
+        assert!(name_is_upper_repair(&m, id, &sealed));
+        assert!(!name_is_upper_repair(&m, id, &ordinary));
     }
 }

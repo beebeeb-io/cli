@@ -24,6 +24,9 @@ pub enum TuiEvent {
     SessionsRefresh(Vec<SessionInfo>),
     /// An error message from the sync task.
     SyncError(String),
+    /// A notice from the sync task: shown, but the sync is not in error (an
+    /// SF-0002 read-only row whose edit was kept locally).
+    SyncNotice(String),
 }
 
 /// Action returned from the TUI to the caller.

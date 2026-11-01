@@ -466,6 +466,23 @@ async fn push_single_file(
             let resolved = crate::owned_keys::OwnedKeyResolver::new()
                 .resolve(api, &master_key, &meta)
                 .await?;
+            // SF-0002: a row sealed by the old iOS app (its name or its CURRENT
+            // version) is read-only, and a check that could not decide refuses
+            // too: only a proven-writable row gets a new version.
+            crate::owned_keys::write_check(
+                api,
+                &master_key,
+                &crate::owned_keys::WriteTarget {
+                    file_id: &existing,
+                    is_folder: false,
+                    name_read_only: resolved.read_only,
+                    row_key: Some(resolved.key.as_ref()),
+                    size_bytes: meta.get("size_bytes").and_then(|v| v.as_u64()),
+                    chunk_count: meta.get("chunk_count").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
+                },
+            )
+            .await
+            .ensure()?;
             let pin = crate::crypto::content_pin_with_key(&resolved.key, &existing, name_encrypted)?;
             (Some(version), Some(pin), Some(resolved.key))
         }

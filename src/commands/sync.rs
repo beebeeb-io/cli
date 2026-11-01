@@ -949,6 +949,9 @@ pub async fn run(
     // Uploads that errored (not Ctrl-C). Together with `conflicts` this decides
     // whether a one-shot pass may report "synced" and exit 0.
     let mut failed = listing_health.unreadable + u32::from(listing_health.truncated);
+    // SF-0002 r3 (K6): local edits of read-only rows, kept here and reported as
+    // a notice (not a failure). They still leave the pass incomplete.
+    let mut read_only_kept = 0u32;
 
     // ── Phase 1: classify each file into an action ─────────────────────────
     enum SyncAction {
@@ -1267,7 +1270,19 @@ pub async fn run(
                         ));
                     }
 
-                    let replacement = resolved.filter(|r| r.origin != KeyOrigin::Derived);
+                    // SF-0002: ask the write check before touching the remote
+                    // row. A read-only row or one the check could not read is
+                    // left alone (never trashed) and this edit is not uploaded
+                    // this pass; the next pass asks again.
+                    let replacement =
+                        match replace_decision(api, &master_key, resolved.as_ref(), replace_id.is_some()).await {
+                            Replace::Skip(why) if why == crate::crypto::OWNER_REPAIR_READ_ONLY => {
+                                return Err(format!("{READ_ONLY_KEPT}{rel}"));
+                            }
+                            Replace::Skip(why) => return Err(format!("{rel}: {why}")),
+                            Replace::InPlace(r) => Some(r.clone()),
+                            Replace::NewFile => None,
+                        };
                     // Not a version of the old remote: it is uploaded as a new
                     // file and the old one trashed only AFTER that (L5).
                     let replaced = replace_id.filter(|_| replacement.is_none());
@@ -1353,6 +1368,10 @@ pub async fn run(
                 }
                 Err(e) if e == crate::upload::INTERRUPTED => {
                     interrupted_count += 1;
+                }
+                Err(e) if e.starts_with(READ_ONLY_KEPT) => {
+                    print_notice(&read_only_notice(&e[READ_ONLY_KEPT.len()..]));
+                    read_only_kept += 1;
                 }
                 Err(e) => {
                     eprintln!("  {} upload failed: {}", "!".custom_color(crate::colors::RED_ERR), e);
@@ -1509,13 +1528,13 @@ pub async fn run(
     // A one-shot run (`--once`, json/quiet, …) exits 3 so scripts and cron jobs
     // notice (flow-6: it used to print "✓ synced" and exit 0). A dry run only
     // previews, and the watch loop keeps retrying, so neither fails here.
-    let incomplete = failed > 0 || conflicts > 0 || held_back > 0 || delete_refused;
+    let incomplete = failed > 0 || conflicts > 0 || held_back > 0 || read_only_kept > 0 || delete_refused;
     let incomplete_err = || {
         crate::exit::with_code(
             crate::exit::INCOMPLETE,
             format!(
                 "sync incomplete: {} \u{2014} fix the cause and re-run{}",
-                match incomplete_summary(failed, conflicts, held_back) {
+                match incomplete_summary(failed, conflicts, held_back, read_only_kept) {
                     s if s.is_empty() && delete_refused => "--delete refused on a changed remote folder".to_string(),
                     s => s,
                 },
@@ -1525,6 +1544,8 @@ pub async fn run(
                     " (`--allow-mass-delete` confirms the held-back removals)"
                 } else if conflicts > 0 {
                     " (`--force` overwrites conflicts with the local copy)"
+                } else if read_only_kept > 0 {
+                    " (save each read-only file's edit under a new name; sync uploads it as a new file)"
                 } else {
                     ""
                 }
@@ -1542,6 +1563,7 @@ pub async fn run(
             "conflicts": conflicts,
             "deleted": deletes,
             "held_back": held_back,
+            "read_only_kept": read_only_kept,
             "skipped": skipped,
             "index_written": index_report.written,
             "index_deferred": index_report.deferred,
@@ -1610,6 +1632,12 @@ pub async fn run(
         parts.push(format!(
             "{}",
             format!("{held_back} held back").custom_color(crate::colors::AMBER)
+        ));
+    }
+    if read_only_kept > 0 {
+        parts.push(format!(
+            "{}",
+            format!("{read_only_kept} read-only").custom_color(crate::colors::AMBER)
         ));
     }
     if deletes > 0 {
@@ -1927,7 +1955,7 @@ async fn run_plain_watch(
                                 None => remote.is_none(),
                             };
                             if local_changed {
-                                do_upload(
+                                match do_upload(
                                     &resync_api,
                                     Arc::clone(&resync_master),
                                     local_dir,
@@ -1939,8 +1967,21 @@ async fn run_plain_watch(
                                     state,
                                     false,
                                 )
-                                .await?;
-                                resync_bytes += l.size;
+                                .await
+                                {
+                                    // SF-0002: a read-only or unchecked row is left as it is and
+                                    // asked again next pass; it does not end the watch.
+                                    Err(e) if e == crate::crypto::OWNER_REPAIR_READ_ONLY => {
+                                        print_notice(&read_only_notice(rel));
+                                    }
+                                    Err(e) if crate::owned_keys::is_write_refusal(&e) => {
+                                        eprintln!("  {} {rel}: {e}", "!".custom_color(crate::colors::AMBER));
+                                    }
+                                    other => {
+                                        other?;
+                                        resync_bytes += l.size;
+                                    }
+                                }
                             }
                         }
                     }
@@ -2300,6 +2341,16 @@ async fn run_tui_watch(
                                     size: l.size,
                                     timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
                                 }));
+                            }
+                            // SF-0002 r3 (K6): a read-only row's edit is kept, not failed.
+                            Err(e) if e == crate::crypto::OWNER_REPAIR_READ_ONLY => {
+                                let _ = sync_tx.send(TuiEvent::SyncUpdate(SyncFileEvent {
+                                    status: FileEventStatus::Skipped,
+                                    filename: file_name,
+                                    size: l.size,
+                                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                                }));
+                                let _ = sync_tx.send(TuiEvent::SyncNotice(read_only_notice(rel)));
                             }
                             Err(e) => {
                                 let _ = sync_tx.send(TuiEvent::SyncUpdate(SyncFileEvent {
@@ -3075,10 +3126,14 @@ fn parent_remote_id(rel: &str, folders: &HashMap<String, Uuid>, root_id: Uuid) -
 }
 
 /// "1 failed · 2 conflicts" — the counts a non-clean sync pass reports.
-fn incomplete_summary(failed: u32, conflicts: u32, held_back: u32) -> String {
+fn incomplete_summary(failed: u32, conflicts: u32, held_back: u32, read_only_kept: u32) -> String {
     let mut parts = Vec::new();
     if failed > 0 {
         parts.push(format!("{failed} failed"));
+    }
+    if read_only_kept > 0 {
+        let s = if read_only_kept == 1 { "" } else { "s" };
+        parts.push(format!("{read_only_kept} read-only edit{s} kept"));
     }
     if held_back > 0 {
         parts.push(format!(
@@ -3296,6 +3351,66 @@ async fn walk_remote(
     Ok(())
 }
 
+/// Marks a pass upload that left a read-only row's edit local (SF-0002 r3 K6):
+/// the upload result is `Err(READ_ONLY_KEPT + rel)`, reported as a notice.
+const READ_ONLY_KEPT: &str = "\u{0}sf-0002-read-only-kept\u{0}";
+
+/// What sync says when it keeps a local edit of a read-only (SF-0002) row: a
+/// notice, not a failure, with what the user can do. Every sync path (the pass,
+/// the plain watch loop, the TUI) says exactly this.
+fn read_only_notice(rel: &str) -> String {
+    format!(
+        "{rel}: {} Your edit stays on this computer: save it under a new name and sync uploads that as a new file.",
+        crate::crypto::OWNER_REPAIR_READ_ONLY
+    )
+}
+
+/// SF-0002 round 2 (C2): what a sync upload may do with the remote row it
+/// would replace. One decision for the pass's upload phase and the watch-mode
+/// resync, from the one write check ([`crate::owned_keys::write_check`]).
+enum Replace<'a> {
+    /// Version-replace the row in place under its own key (a shared-folder,
+    /// owner-wrap or file-request row).
+    InPlace(&'a ResolvedCliKey),
+    /// Trash the old row and upload the edit under a fresh id: an ordinary owner
+    /// row, as sync always did, or a path with no remote row at all.
+    NewFile,
+    /// Leave the remote row untouched (never trashed) and upload nothing this
+    /// pass: it is read-only, or the check could not read it. The text says
+    /// which; the next pass asks again.
+    Skip(&'static str),
+}
+
+async fn replace_decision<'a>(
+    api: &ApiClient,
+    master_key: &beebeeb_core::kdf::MasterKey,
+    resolved: Option<&'a ResolvedCliKey>,
+    has_remote: bool,
+) -> Replace<'a> {
+    use crate::owned_keys::{WRITE_CHECK_UNKNOWN, WriteCheck, WriteTarget};
+    if !has_remote {
+        return Replace::NewFile;
+    }
+    // A remote row this pass did not resolve cannot be checked.
+    let Some(r) = resolved else {
+        return Replace::Skip(WRITE_CHECK_UNKNOWN);
+    };
+    let target = WriteTarget {
+        file_id: r.canonical["id"].as_str().unwrap_or_default(),
+        is_folder: false,
+        name_read_only: r.read_only,
+        row_key: Some(r.key.as_ref()),
+        size_bytes: r.canonical["size_bytes"].as_u64(),
+        chunk_count: r.canonical["chunk_count"].as_u64().unwrap_or(1) as u32,
+    };
+    match crate::owned_keys::write_check(api, master_key, &target).await {
+        WriteCheck::Writable if r.origin != KeyOrigin::Derived => Replace::InPlace(r),
+        WriteCheck::Writable => Replace::NewFile,
+        WriteCheck::UpperRepair => Replace::Skip(crate::crypto::OWNER_REPAIR_READ_ONLY),
+        WriteCheck::Unknown => Replace::Skip(WRITE_CHECK_UNKNOWN),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn do_upload(
     api: &ApiClient,
@@ -3323,10 +3438,14 @@ async fn do_upload(
         return Ok(());
     }
 
-    let replacement = remote
-        .as_ref()
-        .and_then(|r| r.resolved.as_ref())
-        .filter(|r| r.origin != KeyOrigin::Derived);
+    // SF-0002: the same write check as the pass above (one helper). A skipped
+    // file is the bare refusal text, so the callers can tell it from a failure.
+    let candidate = remote.as_ref().and_then(|r| r.resolved.as_ref());
+    let replacement = match replace_decision(api, &master_key, candidate, remote.is_some()).await {
+        Replace::Skip(why) => return Err(why.to_string()),
+        Replace::InPlace(r) => Some(r),
+        Replace::NewFile => None,
+    };
     // Not a version of the old remote: uploaded as a new file, and the old one
     // trashed only AFTER that (L5).
     let replaced = remote.as_ref().filter(|_| replacement.is_none()).map(|r| r.id);
@@ -3740,6 +3859,24 @@ fn spawn_sync_daemon(local_dir: &Path, remote_path: Option<&str>) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SF-0002 r3 (K6): the notice every sync path prints for a kept edit of a
+    /// read-only row, word for word, and the pass summary counts it as kept,
+    /// not failed.
+    #[test]
+    fn a_read_only_edit_is_a_notice_with_guidance() {
+        assert_eq!(
+            read_only_notice("Scans/receipt.pdf"),
+            "Scans/receipt.pdf: This file was saved by an older version of the iOS app. You can open and \
+             download it. To change it, save a copy. Your edit stays on this computer: save it under a new name \
+             and sync uploads that as a new file."
+        );
+        assert_eq!(incomplete_summary(0, 0, 0, 1), "1 read-only edit kept");
+        assert_eq!(
+            incomplete_summary(1, 0, 0, 2),
+            "1 failed \u{00b7} 2 read-only edits kept"
+        );
+    }
 
     /// Make a unique scratch directory under the system temp dir (no extra
     /// test-only dependency). Caller removes it.
@@ -4493,8 +4630,9 @@ mod l13_trash_after_upload_tests {
 
     /// Upload the scratch file through `do_upload` as the NEW copy of the remote
     /// `old` (its key is derived, so it is not versioned: the old one is to be
-    /// trashed).
-    async fn upload_over(mock: Mock, s: &Scratch, old: Uuid) -> (Result<(), String>, SyncState, Shared) {
+    /// trashed). SF-0002 r3: `old` is resolved as the walk resolves it, and its
+    /// version is served, so the write check proves it writable first.
+    async fn upload_over(mut mock: Mock, s: &Scratch, old: Uuid) -> (Result<(), String>, SyncState, Shared) {
         let (path, size, _mtime) = s.file(4096);
         let mtime = std::fs::metadata(&path)
             .unwrap()
@@ -4508,16 +4646,34 @@ mod l13_trash_after_upload_tests {
             size,
             content_hash: compute_file_hash(&path).unwrap(),
         };
+        let master = Arc::new(beebeeb_core::kdf::MasterKey::from_bytes([5u8; 32]));
+        let old_version = b"the old remote's content";
+        let old_key = || beebeeb_core::kdf::derive_file_key(&master, old.to_string().as_bytes());
+        mock.downloads.insert(
+            old.to_string(),
+            beebeeb_core::encrypt::encrypt_chunk_raw(&old_key(), old_version).unwrap(),
+        );
         let remote = RemoteFile {
             id: old,
-            resolved: None,
+            resolved: Some(ResolvedCliKey {
+                key: Arc::new(old_key()),
+                origin: KeyOrigin::Derived,
+                canonical: serde_json::json!({
+                    "id": old.to_string(),
+                    "size_bytes": old_version.len(),
+                    "chunk_count": 1,
+                }),
+                pending_owner_wrap: None,
+                shared_root_id: None,
+                name: REL.to_string(),
+                read_only: false,
+            }),
             chunk_count: 1,
             updated_at: Utc::now(),
             pin: Ok(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded),
         };
         let mock = shared(mock);
         let api = ApiClient::new_for_test(spawn(mock.clone()).await);
-        let master = Arc::new(beebeeb_core::kdf::MasterKey::from_bytes([5u8; 32]));
         let mut state = SyncState::default();
         let result = do_upload(
             &api,

@@ -130,6 +130,9 @@ fn event_loop(
                         state.sync_status = SyncStatus::Error;
                         state.status_text = msg;
                     }
+                    TuiEvent::SyncNotice(msg) => {
+                        state.status_text = msg;
+                    }
                     TuiEvent::Key(_) | TuiEvent::Tick => {
                         // These are handled above via poll_key; ignore if they
                         // appear in the channel.
