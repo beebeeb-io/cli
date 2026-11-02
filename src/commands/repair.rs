@@ -139,8 +139,14 @@ fn encrypt_name_with_string_key(
     name: &str,
     mime_type: Option<&str>,
 ) -> Result<String, String> {
-    beebeeb_core::encrypt::encrypt_name(master_key, file_id_str, name, mime_type)
-        .map_err(|e| format!("failed to encrypt name: {e}"))
+    let file_key = beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes());
+    beebeeb_core::encrypt::encrypt_name_for(
+        &file_key,
+        name,
+        mime_type,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .map_err(|e| format!("failed to encrypt name: {e}"))
 }
 
 /// Counters for the summary line.

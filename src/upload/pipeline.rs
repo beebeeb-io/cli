@@ -316,13 +316,15 @@ pub(super) async fn upload_attempt(
             mime,
             ExpectedChunkFormat::recorded_for(format),
         ),
-        None => beebeeb_core::encrypt::encrypt_name_with_chunk_format(
-            master_key,
-            &file_id_str,
-            &spec.file_name,
-            mime,
-            ExpectedChunkFormat::recorded_for(format),
-        ),
+        None => {
+            let file_key = beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes());
+            beebeeb_core::encrypt::encrypt_name_for(
+                &file_key,
+                &spec.file_name,
+                mime,
+                ExpectedChunkFormat::recorded_for(format),
+            )
+        }
     }
     .map_err(|e| format!("encrypt name: {e}"))?;
 
@@ -790,15 +792,33 @@ pub(super) async fn maybe_upload_thumbnail(
     };
 
     if let Some(thumb) = crate::thumbnail::generate_from_file(&bytes, mime) {
-        // Same pin rule as the content and the name (core `encrypt_thumbnail_for`).
-        if let Ok(enc) = beebeeb_core::encrypt::encrypt_thumbnail_for(file_key, &thumb.data, pin) {
+        // Same pin rule as the content and the name.
+        if let Ok(enc) = seal_thumbnail(file_key, &thumb.data, pin) {
             let _ = api.upload_thumbnail(server_id, enc).await;
         }
     }
     if let Some(large) = crate::thumbnail::generate_large_from_file(&bytes, mime) {
-        if let Ok(enc) = beebeeb_core::encrypt::encrypt_thumbnail_for(file_key, &large.data, pin) {
+        if let Ok(enc) = seal_thumbnail(file_key, &large.data, pin) {
             let _ = api.upload_thumbnail_large(server_id, enc).await;
         }
+    }
+}
+
+/// Seal a thumbnail under the file's recorded pin. Core's non-deprecated
+/// thumbnail sealers take a `NewItemId` or a `WriteTarget`; the CLI's resolver
+/// cannot issue a `WriteTarget` for legacy rows, so the pinned case keeps the
+/// key-based writer (the deprecation note allows it for rows core has not
+/// resolved).
+#[allow(deprecated)]
+fn seal_thumbnail(
+    file_key: &beebeeb_core::kdf::FileKey,
+    data: &[u8],
+    pin: ExpectedChunkFormat,
+) -> Result<Vec<u8>, beebeeb_core::CoreError> {
+    if pin == ExpectedChunkFormat::Unrecorded {
+        beebeeb_core::encrypt::encrypt_thumbnail(file_key, data)
+    } else {
+        beebeeb_core::encrypt::encrypt_thumbnail_for(file_key, data, pin)
     }
 }
 

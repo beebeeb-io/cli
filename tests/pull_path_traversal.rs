@@ -225,7 +225,14 @@ impl Fixture {
     /// A file row the server lists but cannot serve (download answers 404).
     fn add_plain_row(&mut self, parent: &str, name: &str) -> String {
         let id = self.fresh_id();
-        let name_encrypted = beebeeb_core::encrypt::encrypt_name(&self.mk, &id, name, None).unwrap();
+        let name_key = beebeeb_core::kdf::derive_file_key(&self.mk, id.as_bytes());
+        let name_encrypted = beebeeb_core::encrypt::encrypt_name_for(
+            &name_key,
+            name,
+            None,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+        )
+        .unwrap();
         let row = json!({
             "id": id, "name_encrypted": name_encrypted, "is_folder": false, "chunk_count": 1, "size_bytes": 68,
         });
@@ -276,7 +283,15 @@ impl Fixture {
     /// 1908 read path takes the chunk-format pin from it, task 1943); the tests
     /// still choose any name they like to exercise the client's path guards.
     fn add_plain_file(&mut self, parent: &str, name: &str, body: &[u8]) -> String {
-        let name_encrypted = beebeeb_core::encrypt::encrypt_name(&self.mk, &self.next_id(), name, None).unwrap();
+        let id = self.next_id();
+        let name_key = beebeeb_core::kdf::derive_file_key(&self.mk, id.as_bytes());
+        let name_encrypted = beebeeb_core::encrypt::encrypt_name_for(
+            &name_key,
+            name,
+            None,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+        )
+        .unwrap();
         self.add_file_row(parent, name_encrypted, body)
     }
 
@@ -287,6 +302,7 @@ impl Fixture {
         self.add_file_row(parent, name.to_string(), body)
     }
 
+    #[allow(deprecated)] // fixture: a fixed id and chunk size, which the NewItemId/WriteTarget writers cannot express
     fn add_file_row(&mut self, parent: &str, name_encrypted: String, body: &[u8]) -> String {
         let id = self.fresh_id();
         let row = json!({

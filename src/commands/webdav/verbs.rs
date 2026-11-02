@@ -303,13 +303,17 @@ pub(super) async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8
 
     // Encrypt filename (MIME type is now part of the encrypted envelope)
     let mime = beebeeb_core::media::guess_mime_type(&filename);
-    let name_encrypted =
-        match beebeeb_core::encrypt::encrypt_name(&state.master_key, &file_uuid.to_string(), &filename, mime) {
-            Ok(s) => s,
-            Err(e) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-            }
-        };
+    let name_encrypted = match beebeeb_core::encrypt::encrypt_name_for(
+        &file_key,
+        &filename,
+        mime,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+    };
 
     // Encrypt body in chunks using adaptive chunk sizing
     let plan = beebeeb_types::plan_chunks(body.len() as u64, beebeeb_types::ChunkProfile::Cli);
@@ -548,7 +552,13 @@ pub(super) async fn move_response(state: &Arc<DavState>, src_path: &str, destina
         } else {
             beebeeb_core::media::guess_mime_type(&new_name)
         };
-        match beebeeb_core::encrypt::encrypt_name(&state.master_key, &file_id, &new_name, mime_for_rename) {
+        let file_key = beebeeb_core::kdf::derive_file_key(&state.master_key, file_id.as_bytes());
+        match beebeeb_core::encrypt::encrypt_name_for(
+            &file_key,
+            &new_name,
+            mime_for_rename,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+        ) {
             Ok(s) => Some(s),
             Err(e) => {
                 return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();

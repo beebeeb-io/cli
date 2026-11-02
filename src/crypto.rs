@@ -515,13 +515,19 @@ mod tests {
     /// preserving, across encrypted / plaintext / undecryptable items (task 0810).
     #[test]
     fn decrypt_names_batch_matches_single() {
-        use beebeeb_core::encrypt::encrypt_name;
         let m = mk();
         let id1 = "11111111-1111-2222-3333-444455556666";
         let id2 = "22222222-1111-2222-3333-444455556666";
         let id3 = "33333333-1111-2222-3333-444455556666";
-        // id1: Rust-format encrypted name (string-UUID key form, as encrypt_name uses).
-        let enc1 = encrypt_name(&m, id1, "report.pdf", Some("application/pdf")).unwrap();
+        // id1: Rust-format encrypted name (string-UUID key form).
+        let key1 = beebeeb_core::kdf::derive_file_key(&m, id1.as_bytes());
+        let enc1 = beebeeb_core::encrypt::encrypt_name_for(
+            &key1,
+            "report.pdf",
+            Some("application/pdf"),
+            ExpectedChunkFormat::Unrecorded,
+        )
+        .unwrap();
         // id2: plaintext name (fast path). id3: well-formed-but-undecryptable blob.
         let enc2 = "Documents".to_string();
         let enc3 = r#"{"cipher_suite":"V1Aes256Gcm","nonce":[1,2,3],"ciphertext":[9,9,9,9]}"#.to_string();
@@ -553,6 +559,7 @@ mod tests {
     /// yet (v4 has only the v1 `chunk_encrypt_decrypt`).
     #[test]
     #[ignore]
+    #[allow(deprecated)] // fixture regeneration: a fixed id and chunk size, which the NewItemId/WriteTarget writers cannot express
     fn regenerate_core_1908_v2_fixture() {
         use beebeeb_core::chunk_stream::{ChunkEncryptor, ExpectedChunkFormat};
         let master = [0x42u8; 32];
@@ -709,7 +716,14 @@ mod tests {
     fn content_pin_reads_authenticated_metadata_only() {
         let (m, fid, name_enc, ..) = v2_file();
         assert_eq!(content_pin(&m, &fid, &name_enc), Ok(ExpectedChunkFormat::V2));
-        let legacy = beebeeb_core::encrypt::encrypt_name(&m, &fid, "old.txt", None).unwrap();
+        let legacy_key = beebeeb_core::kdf::derive_file_key(&m, fid.as_bytes());
+        let legacy = beebeeb_core::encrypt::encrypt_name_for(
+            &legacy_key,
+            "old.txt",
+            None,
+            ExpectedChunkFormat::Unrecorded,
+        )
+        .unwrap();
         assert_eq!(content_pin(&m, &fid, &legacy), Ok(ExpectedChunkFormat::Unrecorded));
         let err = content_pin(&m, &fid, "plain-name.txt").unwrap_err();
         assert!(err.contains("refusing to guess"), "{err}");
@@ -792,7 +806,14 @@ mod tests {
     #[test]
     fn an_ordinary_owner_row_is_not_read_only() {
         let m = mk();
-        let name_enc = beebeeb_core::encrypt::encrypt_name(&m, FID, "ordinary.txt", None).unwrap();
+        let key = beebeeb_core::kdf::derive_file_key(&m, FID.as_bytes());
+        let name_enc = beebeeb_core::encrypt::encrypt_name_for(
+            &key,
+            "ordinary.txt",
+            None,
+            ExpectedChunkFormat::Unrecorded,
+        )
+        .unwrap();
         assert_eq!(
             decrypt_name_with_convention(&m, FID, &name_enc),
             Some(("ordinary.txt".to_string(), OwnerKeyConvention::String))

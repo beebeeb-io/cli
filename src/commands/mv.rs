@@ -194,9 +194,15 @@ async fn move_single(
     let new_name_encrypted = match new_name {
         Some(name) if name != src.name => {
             name_changed = true;
+            let file_key = beebeeb_core::kdf::derive_file_key(master_key, src_id.as_bytes());
             Some(
-                beebeeb_core::encrypt::encrypt_name(master_key, &src_id, &name, None)
-                    .map_err(|e| format!("failed to encrypt new name: {e}"))?,
+                beebeeb_core::encrypt::encrypt_name_for(
+                    &file_key,
+                    &name,
+                    None,
+                    beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+                )
+                .map_err(|e| format!("failed to encrypt new name: {e}"))?,
             )
         }
         _ => None,

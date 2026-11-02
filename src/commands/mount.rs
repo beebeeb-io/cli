@@ -191,8 +191,13 @@ async fn upload_new_file(
 
     // Encrypt the filename (MIME type is part of the encrypted envelope).
     let mime = beebeeb_core::media::guess_mime_type(name);
-    let name_enc = beebeeb_core::encrypt::encrypt_name(master_key, &key_uuid.to_string(), name, mime)
-        .map_err(|e| format!("encrypt name: {e}"))?;
+    let name_enc = beebeeb_core::encrypt::encrypt_name_for(
+        &file_key,
+        name,
+        mime,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .map_err(|e| format!("encrypt name: {e}"))?;
 
     // Encrypt content using the adaptive chunk-size ladder.
     let plan = beebeeb_types::plan_chunks(plaintext.len() as u64, beebeeb_types::ChunkProfile::Cli);

@@ -74,6 +74,7 @@ fn bb(home: &Path, cwd: &Path, args: &[&str]) -> Output {
 
 /// Ciphertext of `REMOTE` exactly as the server stores/returns it: one frame,
 /// `nonce || ct || tag`, keyed by the file id under the zero master key.
+#[allow(deprecated)] // fixture: a fixed id and chunk size, which the NewItemId/WriteTarget writers cannot express
 fn remote_ciphertext() -> Vec<u8> {
     let mk = beebeeb_core::kdf::MasterKey::from_bytes([0u8; 32]);
     let mut enc = beebeeb_core::chunk_stream::ChunkEncryptor::for_push_with_chunk_size(
@@ -93,7 +94,14 @@ fn remote_ciphertext() -> Vec<u8> {
 /// refuses a plaintext name (task 1943), as every real server row is encrypted.
 fn remote_name_encrypted() -> String {
     let mk = beebeeb_core::kdf::MasterKey::from_bytes([0u8; 32]);
-    beebeeb_core::encrypt::encrypt_name(&mk, FILE_ID, "note.txt", None).unwrap()
+    let name_key = beebeeb_core::kdf::derive_file_key(&mk, FILE_ID.as_bytes());
+    beebeeb_core::encrypt::encrypt_name_for(
+        &name_key,
+        "note.txt",
+        None,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap()
 }
 
 /// Mock API serving a single file `note.txt`.

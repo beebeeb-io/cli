@@ -50,8 +50,8 @@ struct Fixture {
     frames: Vec<Vec<u8>>,
     name_encrypted: String,
 }
-
 /// 21 chunks of v1 frames under the all-zero test key.
+#[allow(deprecated)] // fixture: a fixed id and chunk size, which the NewItemId/WriteTarget writers cannot express
 fn fixture() -> Fixture {
     let plaintext: Vec<u8> = (0..PLAIN_LEN).map(|i| (i.wrapping_mul(31) % 251) as u8).collect();
     let mk = MasterKey::from_bytes([0u8; 32]);

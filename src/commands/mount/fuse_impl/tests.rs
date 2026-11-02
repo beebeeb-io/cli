@@ -160,6 +160,7 @@ mod truncate_tests {
 
     /// A real v2 frame (`ChunkEncryptor` binds the file id as AAD) for a
     /// single-chunk file: what a v2 download body contains.
+    #[allow(deprecated)] // fixture: a fixed id, which the NewItemId writers cannot express
     fn v2_frame(plaintext: &[u8]) -> Vec<u8> {
         let mut encryptor = beebeeb_core::chunk_stream::ChunkEncryptor::for_push(
             &master_key(),
