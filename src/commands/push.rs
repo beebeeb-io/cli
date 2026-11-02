@@ -465,6 +465,10 @@ async fn push_single_file(
                 // L13: the edit is a NEW owner item, minted by core.
                 (None, None, None, Some(crate::item_id::mint_owner(&master_key)?))
             } else {
+                // P2-10: a plaintext name proves nothing; say so, not "older iOS app".
+                if resolved.read_only && crate::owned_keys::name_is_plaintext(&resolved.canonical) {
+                    return Err(crate::owned_keys::PLAINTEXT_NAME_READ_ONLY.to_string());
+                }
                 // SF-0002: a row sealed by the old iOS app (its name or its CURRENT
                 // version) is read-only, and a check that could not decide refuses
                 // too: only a proven-writable row gets a new version.

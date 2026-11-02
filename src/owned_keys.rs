@@ -24,6 +24,16 @@ pub const CUSTODY_UNAVAILABLE: &str = "This folder's keys are unavailable";
 /// A rename needs the key the row's name authenticates under. A row this
 /// device cannot resolve (a guest's folder, an unreadable row) has none, and a
 /// derived guess would seal the new name under a key that opens nothing.
+/// L12 (P2-10): an O row whose name is plaintext proves nothing about its key.
+/// It stays readable, but every surface refuses to change it with this sentence
+/// (not the SF-0002 iOS-repair one, which is about a different convention).
+pub const PLAINTEXT_NAME_READ_ONLY: &str = "This file's name isn't encrypted, so this device can't verify or change it. You can still open and download it; to change it, save a copy with the web or mobile app.";
+/// Is this row's stored name a plaintext value rather than an envelope?
+pub fn name_is_plaintext(canonical: &Value) -> bool {
+    canonical["name_encrypted"]
+        .as_str()
+        .is_some_and(|enc| !enc.starts_with('{'))
+}
 /// A request row whose name is not an encrypted envelope: nothing can
 /// authenticate it, so it is refused rather than guessed (2275 review P2-8).
 pub const REQUEST_NAME_NOT_ENCRYPTED: &str =
@@ -137,6 +147,10 @@ impl OwnedKeyResolver {
     /// The key `id` resolved to in this resolver, if it was resolved here.
     pub fn key_for(&self, id: &str) -> Option<Arc<FileKey>> {
         self.resolved.get(id).map(|r| r.key.clone())
+    }
+    /// P2-10: `id`'s stored name is plaintext, not an envelope.
+    pub fn name_is_plaintext_for(&self, id: &str) -> bool {
+        self.resolved.get(id).is_some_and(|r| name_is_plaintext(&r.canonical))
     }
     /// The key origin `id` resolved to in this resolver, if it was resolved here.
     pub fn origin_for(&self, id: &str) -> Option<KeyOrigin> {

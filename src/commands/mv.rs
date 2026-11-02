@@ -177,6 +177,10 @@ async fn move_single(
     // CURRENT version's content is still uppercase-sealed, so a rename asks the
     // one write check; a check that could not decide refuses as well.
     if new_name.as_deref().is_some_and(|n| n != src.name) {
+        // P2-10: a plaintext name is not the SF-0002 repair convention.
+        if src.read_only && src_keys.name_is_plaintext_for(&src_id) {
+            return Err(crate::owned_keys::PLAINTEXT_NAME_READ_ONLY.to_string());
+        }
         // The listing that resolved this path already carries the version's
         // geometry, so no second GET is made.
         let row_key = src_keys.key_for(&src_id);

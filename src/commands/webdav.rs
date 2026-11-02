@@ -99,6 +99,7 @@ mod parent_target_tests {
         ResolvedEntry {
             file_id: id.map(str::to_owned),
             parent_id: None,
+            plaintext_name: false,
             display_name: "Target".into(),
             is_collection: true,
             size_bytes: None,

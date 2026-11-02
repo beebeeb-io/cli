@@ -97,3 +97,36 @@ async fn a_request_row_edit_in_the_watch_loop_is_a_new_owner_item() {
         beebeeb_core::item_id::ItemClass::Owner
     );
 }
+
+/// P2-10: an O row whose name is plaintext is refused with its own sentence —
+/// not the SF-0002 iOS-repair message, which describes a different convention.
+#[tokio::test]
+async fn a_plaintext_name_is_skipped_with_its_own_reason() {
+    use crate::owned_keys::ResolvedCliKey;
+    use crate::commands::sync::transfer::{Replace, replace_decision};
+    use std::sync::Arc;
+
+    let master = beebeeb_core::kdf::MasterKey::from_bytes([7u8; 32]);
+    let id = "11111111-1111-4111-8111-111111111111";
+    let resolved = ResolvedCliKey {
+        key: Arc::new(beebeeb_core::kdf::derive_file_key(&master, id.as_bytes())),
+        name_key: None,
+        origin: beebeeb_core::owned_keys::KeyOrigin::Derived,
+        canonical: serde_json::json!({
+            "id": id, "name_encrypted": "plain.txt", "size_bytes": 5, "chunk_count": 1
+        }),
+        pending_owner_wrap: None,
+        shared_root_id: None,
+        name: "plain.txt".to_string(),
+        read_only: true,
+        write_target: None,
+    };
+    let api = ApiClient::new_for_test("http://127.0.0.1:9".to_string());
+    match replace_decision(&api, &master, Some(&resolved), true).await {
+        Replace::Skip(reason) => {
+            assert_eq!(reason, crate::owned_keys::PLAINTEXT_NAME_READ_ONLY);
+            assert_ne!(reason, crate::crypto::OWNER_REPAIR_READ_ONLY);
+        }
+        _ => panic!("a plaintext-named row must be skipped"),
+    }
+}

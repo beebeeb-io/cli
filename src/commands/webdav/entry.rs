@@ -9,6 +9,10 @@ pub(super) async fn write_refusal(state: &Arc<DavState>, entry: &ResolvedEntry) 
     let Some(file_id) = entry.file_id.as_deref() else {
         return Ok(());
     };
+    // P2-10: a plaintext name is read-only for its own reason.
+    if entry.read_only && entry.plaintext_name {
+        return Err((StatusCode::FORBIDDEN, crate::owned_keys::PLAINTEXT_NAME_READ_ONLY).into_response());
+    }
     let target = crate::owned_keys::WriteTarget {
         file_id,
         is_folder: entry.is_collection,
@@ -48,6 +52,9 @@ pub(super) struct ResolvedEntry {
     /// SF-0002: the name resolved under the read-only uppercase repair
     /// convention. PUT-overwrite and rename are refused; move-only is allowed.
     pub(super) read_only: bool,
+    /// P2-10: the stored name is plaintext, not an envelope. Refused with its
+    /// own sentence, never the SF-0002 iOS one.
+    pub(super) plaintext_name: bool,
     /// L12: the key core resolved for this row, when it authenticated. `None`
     /// means this client cannot open the row (or it is not a row), so a write
     /// must never guess one.
@@ -168,6 +175,7 @@ pub(super) fn decode_file_entry(
     Some(ResolvedEntry {
         file_id: Some(file_id),
         parent_id: file.get("parent_id").and_then(|v| v.as_str()).map(str::to_string),
+        plaintext_name: !name_encrypted.starts_with('{'),
         display_name,
         is_collection: is_folder,
         size_bytes,
@@ -194,6 +202,7 @@ pub(super) async fn resolve_path(state: &Arc<DavState>, path: &str) -> Result<Re
         return Ok(ResolvedEntry {
             file_id: None,
             parent_id: None,
+            plaintext_name: false,
             display_name: "vault".to_string(),
             is_collection: true,
             size_bytes: None,
