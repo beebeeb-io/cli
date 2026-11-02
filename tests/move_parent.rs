@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{Path, Query, State};
-use axum::routing::{get, patch};
+use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::{Value, json};
 

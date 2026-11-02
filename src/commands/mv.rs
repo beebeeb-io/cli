@@ -211,7 +211,7 @@ async fn move_single(
     // Preserve omitted/NULL/UUID: a changed parent at root is an explicit
     // Some(None), while a rename within the same directory omits parent_id.
     let new_parent_send = (src.parent_id != new_parent_id).then_some(new_parent_id);
-    let dest_parent = new_parent_send.clone().flatten();
+    let dest_parent = new_parent_send.flatten();
     let mut name_changed = false;
     let new_name_encrypted = match new_name {
         Some(name) if name != src.name => {

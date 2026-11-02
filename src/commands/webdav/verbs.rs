@@ -644,7 +644,7 @@ pub(super) async fn move_response(state: &Arc<DavState>, src_path: &str, destina
             // Invalidate both source and destination parent directories
             invalidate_cache(state, &normalise_cache_key(src_parent_path)).await;
             invalidate_cache(state, &normalise_cache_key(dst_parent_path)).await;
-            let moved_into = patch_parent.clone().flatten().map(|p| p.to_string());
+            let moved_into = patch_parent.flatten().map(|p| p.to_string());
             crate::owned_keys::announce_owner_only(&state.api, &state.master_key, moved_into.as_deref()).await;
             (StatusCode::CREATED, "").into_response()
         }
