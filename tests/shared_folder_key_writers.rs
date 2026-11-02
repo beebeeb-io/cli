@@ -39,9 +39,9 @@ const SANCTIONED: &[(&str, &str)] = &[
         "owned_keys.rs",
         r#".get_json(&format!("/api/v1/shares/invites/{invite_id}/folder-keys"))"#,
     ),
-    ("api.rs", r#".get(self.url(&format!("/api/v1/shared-folders/{id}")))"#),
+    ("tree.rs", r#".get(self.url(&format!("/api/v1/shared-folders/{id}")))"#),
     (
-        "api.rs",
+        "tree.rs",
         r#".get(self.url(&format!("/api/v1/shared-folders/{id}/keys")))"#,
     ),
 ];
@@ -156,13 +156,9 @@ fn a_write_to_a_key_route_is_not_sanctioned() {
     assert!(mentions_family(r#"json!({"folder_keys": keys})"#).is_some());
 }
 
-/// Match write helpers by their shape, not by a route string: an `ApiClient` method that takes the route as a
-/// parameter and sends a non-GET request can reach any key-writer route with a computed URL. There must be
-/// exactly one, and it must only be called from the search-index code.
-#[test]
-fn only_the_index_page_writer_takes_a_path() {
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let api = std::fs::read_to_string(src.join("api.rs")).unwrap();
+/// Write helpers of one api source: an `ApiClient` method that takes the route as a parameter and sends a non-GET
+/// request can reach any key-writer route with a computed URL.
+fn write_helpers(api: &str) -> Vec<String> {
     let mut writers = Vec::new();
     for item in api.split("pub async fn ").skip(1) {
         let (signature, rest) = item.split_once('{').unwrap();
@@ -177,6 +173,20 @@ fn only_the_index_page_writer_takes_a_path() {
             writers.push(signature.split('(').next().unwrap().trim().to_string());
         }
     }
+    writers
+}
+
+/// Match write helpers by their shape, not by a route string. There must be exactly one across the api module (the
+/// split moved it out of `api.rs`), and it must only be called from the search-index code.
+#[test]
+fn only_the_index_page_writer_takes_a_path() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut api_files = Vec::new();
+    sources(&src.join("api"), &mut api_files);
+    let writers: Vec<_> = api_files
+        .iter()
+        .flat_map(|f| write_helpers(&std::fs::read_to_string(f).unwrap()))
+        .collect();
     assert_eq!(
         writers,
         ["write_index_page"],
