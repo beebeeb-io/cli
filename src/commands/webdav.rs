@@ -98,6 +98,7 @@ mod parent_target_tests {
     fn folder(id: Option<&str>) -> ResolvedEntry {
         ResolvedEntry {
             file_id: id.map(str::to_owned),
+            parent_id: None,
             display_name: "Target".into(),
             is_collection: true,
             size_bytes: None,
@@ -539,3 +540,94 @@ use cache::*;
 
 mod entry;
 use entry::*;
+
+/// A19 (P2-5): WebDAV MOVE takes the same adopt-then-move path. When the
+/// source's shared ancestry cannot be read, the move is REFUSED (fail closed) and
+/// no PATCH is sent — an unreadable ancestor is never "not shared".
+#[cfg(test)]
+mod a19_move_tests {
+    use super::*;
+    use axum::{Json, routing::get};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const ROOT: &str = "22222222-2222-4222-8222-222222222222";
+    const SRC: &str = "33333333-3333-4333-8333-333333333333";
+
+    fn master() -> beebeeb_core::kdf::MasterKey {
+        beebeeb_core::kdf::MasterKey::from_bytes([7u8; 32])
+    }
+
+    async fn body_text(r: Response) -> String {
+        String::from_utf8_lossy(&axum::body::to_bytes(r.into_body(), 4096).await.unwrap()).into_owned()
+    }
+
+    #[tokio::test]
+    async fn a_move_refuses_when_shared_ancestry_cannot_be_read() {
+        let patches = Arc::new(AtomicUsize::new(0));
+        let patch_count = patches.clone();
+        let key = beebeeb_core::kdf::derive_file_key(&master(), SRC.as_bytes());
+        let name = beebeeb_core::encrypt::encrypt_name_for(
+            &key,
+            "file.txt",
+            None,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+        )
+        .unwrap();
+        let root_key = beebeeb_core::kdf::derive_file_key(&master(), ROOT.as_bytes());
+        let root_name = beebeeb_core::encrypt::encrypt_name_for(
+            &root_key,
+            "Shared",
+            None,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+        )
+        .unwrap();
+        let app = Router::new()
+            .route(
+                "/api/v1/files",
+                get(move || async move {
+                    Json(json!({"files": [
+                        {"id": SRC, "parent_id": ROOT, "name_encrypted": name, "is_folder": false},
+                        {"id": ROOT, "parent_id": null, "name_encrypted": root_name, "is_folder": true}
+                    ]}))
+                }),
+            )
+            // Custody is unreadable: doubt, never an owner folder.
+            .route(
+                "/api/v1/shared-folders/:id",
+                get(|| async { (StatusCode::INTERNAL_SERVER_ERROR, "custody store down") }),
+            )
+            .route(
+                "/api/v1/files/:id",
+                axum::routing::patch(move || {
+                    let patches = patch_count.clone();
+                    async move {
+                        patches.fetch_add(1, Ordering::SeqCst);
+                        Json(json!({"ok": true}))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let state = Arc::new(DavState {
+            api: ApiClient::new_for_test(format!("http://{}", listener.local_addr().unwrap())),
+            master_key: master(),
+            read_only: false,
+            dir_cache: Mutex::new(HashMap::new()),
+            cache_ttl: Duration::ZERO,
+            locks: Mutex::new(HashMap::new()),
+            request_count: std::sync::atomic::AtomicU64::new(0),
+            error_count: std::sync::atomic::AtomicU64::new(0),
+            verbose: false,
+        });
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let response = move_response(&state, "/Shared/file.txt", "/file.txt").await;
+        server.abort();
+        let status = response.status();
+        let body = body_text(response).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.starts_with("move refused:"), "the refusal says why: {body}");
+        assert_eq!(patches.load(Ordering::SeqCst), 0, "an unreadable ancestry sent a move");
+    }
+}

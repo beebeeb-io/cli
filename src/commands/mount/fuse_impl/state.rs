@@ -97,7 +97,8 @@ impl BeebeebFsState {
                 name_encrypted.is_some_and(|enc| crate::crypto::name_is_upper_repair(&self.master_key, &file_id, enc));
             let pin = match (is_folder, name_encrypted) {
                 (true, _) => no_content(),
-                (false, Some(enc)) => crate::crypto::content_pin(&self.master_key, &file_id, enc),
+                (false, Some(enc)) => crate::crypto::content_pin(&self.master_key, &file_id, enc)
+                    .map_err(|e| e.to_string()),
                 (false, None) => Err(format!("file {file_id} has no encrypted metadata")),
             };
 

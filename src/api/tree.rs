@@ -67,6 +67,31 @@ impl ApiClient {
             .await
     }
 
+    /// Read ONE batch of a folder's children: up to `batch` rows plus the cursor
+    /// that continues the walk (`None` on the last batch). §5 bounds adoption to
+    /// batches of 1,000 rows, so the caller counts what it reads instead of
+    /// holding a whole shared subtree in memory.
+    pub(crate) async fn list_files_batch(
+        &self,
+        parent_id: &str,
+        cursor: Option<&str>,
+        batch: usize,
+    ) -> Result<(Vec<Value>, Option<String>), ApiError> {
+        let mut all: Vec<Value> = Vec::new();
+        let mut current = cursor.map(str::to_string);
+        loop {
+            let (mut page, next) = self.list_files_page(Some(parent_id), false, current.as_deref()).await?;
+            all.append(&mut page);
+            let Some(next) = next else {
+                return Ok((all, None));
+            };
+            if all.len() >= batch.max(1) {
+                return Ok((all, Some(next)));
+            }
+            current = Some(next);
+        }
+    }
+
     async fn list_all_files_bounded(
         &self,
         parent_id: Option<&str>,

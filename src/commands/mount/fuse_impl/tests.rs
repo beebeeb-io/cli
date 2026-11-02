@@ -802,11 +802,29 @@ mod replace_tests {
     }
 
     fn setup(mut mock: Mock) -> (BeebeebFsState, Shared) {
-        for id in [OK_ID, SRC_ID] {
+        for (id, name) in [(OK_ID, "ok.txt"), (SRC_ID, "src.txt")] {
             let key = beebeeb_core::kdf::derive_file_key(&master(), id.as_bytes());
             mock.downloads.insert(
                 id.to_string(),
                 beebeeb_core::encrypt::encrypt_chunk_raw(&key, b"").unwrap(),
+            );
+            // The row a rename reads back: its name authenticates under the
+            // derived key, so core issues the seal target the new name uses.
+            let sealed = beebeeb_core::encrypt::encrypt_name_for(
+                &key,
+                name,
+                Some("text/plain"),
+                ExpectedChunkFormat::Unrecorded,
+            )
+            .expect("row name");
+            mock.files.insert(
+                id.to_string(),
+                serde_json::json!({
+                    "id": id,
+                    "parent_id": null,
+                    "name_encrypted": sealed,
+                    "is_folder": false,
+                }),
             );
         }
         let mock = shared(mock);
@@ -952,6 +970,47 @@ mod replace_tests {
         assert_eq!(
             mock.lock().unwrap().events,
             vec![format!("move:{SRC_ID}"), format!("trash:{OK_ID}")]
+        );
+    }
+
+    /// L13 (P2-5): the new name is sealed through core, under the key and chunk
+    /// format the row's own name authenticated — never encrypt_metadata under a
+    /// bare derive. A row whose stored name proves nothing is refused (EPERM), and
+    /// nothing is moved.
+    #[test]
+    fn a_rename_without_an_authenticated_name_is_refused() {
+        const PLAIN_ID: &str = "55555555-5555-4555-8555-555555555555";
+        const PLAIN_INO: u64 = 21;
+        let mut base = Mock::default();
+        base.files.insert(
+            PLAIN_ID.to_string(),
+            serde_json::json!({
+                "id": PLAIN_ID,
+                "parent_id": null,
+                "name_encrypted": "plain.txt",
+                "is_folder": false,
+            }),
+        );
+        let (mut fs, mock) = setup(base);
+        fs.inodes.insert(PLAIN_INO, entry(Some(PLAIN_ID), "plain.txt", false));
+        fs.id_to_ino.insert(PLAIN_ID.to_string(), PLAIN_INO);
+        // The write check is not what refuses here: the missing key is.
+        fs.minted.insert(PLAIN_ID.to_string());
+
+        let renamed = fs.rename_stored(
+            PLAIN_INO,
+            PLAIN_ID,
+            PLAIN_ID.parse().ok(),
+            "plain.txt",
+            ROOT_INO,
+            ROOT_INO,
+            "renamed.txt",
+            None,
+        );
+        assert_eq!(renamed, Err(Errno::EPERM));
+        assert!(
+            mock.lock().unwrap().events.is_empty(),
+            "a row with no authenticated name sent a move"
         );
     }
 

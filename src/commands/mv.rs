@@ -51,9 +51,10 @@ async fn move_bulk(
     let dst_id = destination_parent(&resolved_dst)?;
 
     // Resolve every source first so a typo doesn't half-finish the move.
-    let mut resolved_srcs: Vec<(String, String)> = Vec::with_capacity(srcs.len());
+    let mut src_keys = crate::owned_keys::OwnedKeyResolver::new();
+    let mut resolved_srcs: Vec<(String, String, Option<String>, bool)> = Vec::with_capacity(srcs.len());
     for s in srcs {
-        let r = path::resolve_path(api, master_key, s).await?;
+        let r = path::resolve_path_with_keys(api, master_key, s, &mut src_keys).await?;
         let Some(id) = r.file_id else {
             return Err(format!("cannot move the vault root ({s})"));
         };
@@ -63,12 +64,20 @@ async fn move_bulk(
         if r.is_folder && (d_norm == s_norm || d_norm.starts_with(&format!("{s_norm}/"))) {
             return Err(format!("cannot move {s} into {dst} (would create a cycle)"));
         }
-        resolved_srcs.push((s.clone(), id));
+        resolved_srcs.push((s.clone(), id, r.parent_id.map(|p| p.to_string()), r.is_folder));
     }
 
     let mut ok = 0u32;
     let mut failures: Vec<(String, String)> = Vec::new();
-    for (input, id) in resolved_srcs {
+    for (input, id, parent_id, is_folder) in resolved_srcs {
+        // A19: a source leaving a shared root adopts its foreign subtree first.
+        if let Err(e) = src_keys
+            .adopt_before_move(api, master_key, &id, parent_id.as_deref(), is_folder)
+            .await
+        {
+            failures.push((input, e));
+            continue;
+        }
         match api.move_file(&id, None, Some(dst_id)).await {
             Ok(_) => ok += 1,
             Err(e) => failures.push((input, e.to_string())),
@@ -222,20 +231,12 @@ async fn move_single(
     }
 
     // L12/A19: a move of a shared item (or a folder holding shared descendants)
-    // adopts every foreign item involved first, confirmed by a readback.
-    if let Some(parent) = src.parent_id {
-        if src_keys
-            .shared_root_of(api, master_key, &parent.to_string())
-            .await
-            .is_some()
-            && src_keys
-                .adopt_foreign_subtree(api, master_key, &src_id, src.is_folder)
-                .await
-                .is_err()
-        {
-            return Err("move refused: a shared item could not be adopted first".to_string());
-        }
-    }
+    // adopts every foreign item involved first, confirmed by a readback. The
+    // helper fails closed when the ancestry cannot be read.
+    let src_parent = src.parent_id.map(|p| p.to_string());
+    src_keys
+        .adopt_before_move(api, master_key, &src_id, src_parent.as_deref(), src.is_folder)
+        .await?;
 
     api.move_file(&src_id, new_name_encrypted.as_deref(), new_parent_send)
         .await?;

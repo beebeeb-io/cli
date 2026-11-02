@@ -11,6 +11,7 @@ use std::{
     sync::Arc,
 };
 
+mod adopt;
 mod l14;
 
 pub const UNREADABLE: &str = "can't open (added via shared folder)";
@@ -24,7 +25,10 @@ pub async fn announce_owner_only(api: &ApiClient, master: &MasterKey, folder_id:
     let Some(folder_id) = folder_id else {
         return;
     };
-    if OwnedKeyResolver::new().shared_root_of(api, master, folder_id).await.is_some() {
+    if matches!(
+        OwnedKeyResolver::new().shared_root_of(api, master, folder_id).await,
+        Ok(Some(_))
+    ) {
         println!("{OWNER_ONLY_NOTICE}");
     }
 }
@@ -139,20 +143,32 @@ impl OwnedKeyResolver {
     }
     /// L15: the shared root `id` sits in, if any. Walks up until a folder with
     /// owner custody is found.
-    pub async fn shared_root_of(&mut self, api: &ApiClient, master: &MasterKey, id: &str) -> Option<String> {
+    ///
+    /// Fails CLOSED: an ancestor the server will not answer for is an error, not
+    /// "not shared". A caller that would write must refuse rather than treat an
+    /// unreadable ancestry as an owner folder (2275 review P2-5).
+    pub async fn shared_root_of(
+        &mut self,
+        api: &ApiClient,
+        master: &MasterKey,
+        id: &str,
+    ) -> Result<Option<String>, String> {
         let mut current = Some(id.to_string());
         let mut visited = HashSet::new();
         while let Some(folder) = current {
             if !visited.insert(folder.clone()) || visited.len() > 256 {
-                return None;
+                return Err("shared-folder ancestry cycle".into());
             }
-            if self.load_root(api, master, &folder).await.is_ok() && self.roots.contains_key(&folder) {
-                return Some(folder);
+            match self.load_root(api, master, &folder).await {
+                Ok(()) if self.roots.contains_key(&folder) => return Ok(Some(folder)),
+                Ok(()) => {}
+                // Custody that cannot be read is doubt, never an owner folder.
+                Err(e) => return Err(e),
             }
-            let row = self.ancestor_row(api, &folder).await.ok()?;
+            let row = self.ancestor_row(api, &folder).await?;
             current = row["parent_id"].as_str().map(str::to_string);
         }
-        None
+        Ok(None)
     }
     pub fn pending(&self, id: &str) -> Option<Vec<u8>> {
         self.pending.get(id).cloned()
@@ -555,53 +571,6 @@ impl OwnedKeyResolver {
                 legacy_invite: false,
             },
         );
-        Ok(())
-    }
-    /// L12/A19: before an owner moves a shared item (or a folder holding shared
-    /// descendants) out of its root or to another root, every foreign item
-    /// involved is adopted and confirmed by reading it back. Any failure refuses
-    /// the move.
-    pub async fn adopt_foreign_subtree(
-        &mut self,
-        api: &ApiClient,
-        master: &MasterKey,
-        root_id: &str,
-        is_folder: bool,
-    ) -> Result<(), String> {
-        let mut queue = vec![(root_id.to_string(), is_folder)];
-        let mut seen = HashSet::new();
-        let mut count = 0;
-        while let Some((id, folder)) = queue.pop() {
-            if !seen.insert(id.clone()) {
-                continue;
-            }
-            let row = self.ancestor_row(api, &id).await?;
-            let class = beebeeb_core::item_id::item_class(&id).map_err(|_| "invalid item id")?;
-            if class == beebeeb_core::item_id::ItemClass::Foreign {
-                let resolved = self.resolve(api, master, &row).await?;
-                if !self.adopt(api, master, &resolved).await? {
-                    return Err("adoption not confirmed".into());
-                }
-            }
-            if !folder {
-                continue;
-            }
-            let listing = api.list_files_bounded(&id, 20_000 - count).await?;
-            if crate::sync_safety::listing_truncated(&listing) {
-                return Err("shared listing truncated".into());
-            }
-            let rows = listing["files"].as_array().ok_or("invalid shared listing")?;
-            self.seed(rows);
-            for row in rows {
-                count += 1;
-                if count > 20_000 {
-                    return Err("too many shared items".into());
-                }
-                if let Some(child) = row["id"].as_str() {
-                    queue.push((child.to_string(), row["is_folder"] == true));
-                }
-            }
-        }
         Ok(())
     }
     #[allow(dead_code)] // Task 9 is the only mutating caller.

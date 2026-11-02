@@ -604,6 +604,23 @@ pub(super) async fn move_response(state: &Arc<DavState>, src_path: &str, destina
         }
     };
 
+    // L12/A19: a MOVE that takes an item out of a shared root adopts its foreign
+    // subtree first, confirmed by a readback. An ancestry the server will not
+    // answer for refuses the move (fail closed).
+    let mut resolver = crate::owned_keys::OwnedKeyResolver::new();
+    if let Err(e) = resolver
+        .adopt_before_move(
+            &state.api,
+            &state.master_key,
+            &file_id,
+            src.parent_id.as_deref(),
+            src.is_collection,
+        )
+        .await
+    {
+        return (StatusCode::CONFLICT, e).into_response();
+    }
+
     match state
         .api
         .move_file(&file_id, new_name_encrypted.as_deref(), patch_parent)

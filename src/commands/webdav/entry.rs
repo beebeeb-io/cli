@@ -33,6 +33,9 @@ pub(super) async fn write_refusal(state: &Arc<DavState>, entry: &ResolvedEntry) 
 #[derive(Clone)]
 pub(super) struct ResolvedEntry {
     pub(super) file_id: Option<String>,
+    /// A19: the row's listed parent, so a MOVE can tell whether the source sits
+    /// in a shared root without a second read.
+    pub(super) parent_id: Option<String>,
     pub(super) display_name: String,
     pub(super) is_collection: bool,
     pub(super) size_bytes: Option<u64>,
@@ -143,6 +146,7 @@ pub(super) fn decode_file_entry(
 
     Some(ResolvedEntry {
         file_id: Some(file_id),
+        parent_id: file.get("parent_id").and_then(|v| v.as_str()).map(str::to_string),
         display_name,
         is_collection: is_folder,
         size_bytes,
@@ -168,6 +172,7 @@ pub(super) async fn resolve_path(state: &Arc<DavState>, path: &str) -> Result<Re
         // Root
         return Ok(ResolvedEntry {
             file_id: None,
+            parent_id: None,
             display_name: "vault".to_string(),
             is_collection: true,
             size_bytes: None,

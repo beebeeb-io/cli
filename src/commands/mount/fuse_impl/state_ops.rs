@@ -884,7 +884,7 @@ impl BeebeebFsState {
         &mut self,
         ino: u64,
         file_id: &str,
-        key_uuid: Option<uuid::Uuid>,
+        _key_uuid: Option<uuid::Uuid>,
         old_name: &str,
         parent: u64,
         newparent: u64,
@@ -897,20 +897,70 @@ impl BeebeebFsState {
             self.check_stored_row(ino, "rename")?;
         }
 
-        // Re-encrypt the name if it changed, using the file's existing key.
+        // L12/A19: a rename that takes the row out of a shared root adopts its
+        // foreign subtree first, confirmed by a readback. An ancestry the server
+        // will not answer for refuses the rename (fail closed).
+        let row = match self.rt.block_on(self.api.get_file(file_id)) {
+            Ok(row) => row,
+            Err(e) => {
+                eprintln!("[mount] rename: read row {file_id}: {e}");
+                return Err(Errno::EIO);
+            }
+        };
+        let mut resolver = crate::owned_keys::OwnedKeyResolver::new();
+        if let Err(e) = self.rt.block_on(resolver.adopt_before_move(
+            &self.api,
+            &self.master_key,
+            file_id,
+            row["parent_id"].as_str(),
+            self.inodes.get(&ino).is_some_and(|e| e.is_dir),
+        )) {
+            eprintln!("[mount] rename refused for {file_id}: {e}");
+            return Err(Errno::EIO);
+        }
+
+        // L13: the new name is sealed through core, under the key and chunk
+        // format the row itself authenticated — never a bare derive.
         let new_name_enc: Option<String> = if name_changed {
-            let ku = key_uuid
-                .or_else(|| file_id.parse().ok())
-                .unwrap_or_else(uuid::Uuid::new_v4);
-            let fk = beebeeb_core::kdf::derive_file_key(&self.master_key, ku.to_string().as_bytes());
-            let blob = beebeeb_core::encrypt::encrypt_metadata(&fk, newname).map_err(|e| {
-                eprintln!("[mount] rename encrypt: {e}");
-                Errno::EIO
+            let is_dir = self.inodes.get(&ino).is_some_and(|e| e.is_dir);
+            let kind = if is_dir {
+                beebeeb_core::owned_keys::ItemKind::Folder
+            } else {
+                beebeeb_core::owned_keys::ItemKind::File
+            };
+            let name_enc = row["name_encrypted"].as_str().ok_or_else(|| {
+                eprintln!("[mount] rename: {file_id} has no encrypted name");
+                Errno::EPERM
             })?;
-            Some(serde_json::to_string(&blob).map_err(|e| {
-                eprintln!("[mount] rename serialize: {e}");
-                Errno::EIO
-            })?)
+            let resolved = beebeeb_core::owned_keys::resolve_owned_key(
+                &self.master_key,
+                file_id,
+                kind,
+                None,
+                None,
+                name_enc,
+                None,
+            )
+            .map_err(|_| {
+                eprintln!("[mount] rename refused for {file_id}: its name does not authenticate");
+                Errno::EPERM
+            })?;
+            let target = resolved.write_target.ok_or_else(|| {
+                eprintln!("[mount] rename refused for {file_id}: the row is read-only");
+                Errno::EPERM
+            })?;
+            let mime = if is_dir {
+                None
+            } else {
+                beebeeb_core::media::guess_mime_type(newname)
+            };
+            let sealed = beebeeb_core::encrypt::encrypt_name_for(target.key(), newname, mime, target.pin()).map_err(
+                |e| {
+                    eprintln!("[mount] rename encrypt: {e}");
+                    Errno::EIO
+                },
+            )?;
+            Some(sealed)
         } else {
             None
         };

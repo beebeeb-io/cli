@@ -412,10 +412,12 @@ async fn a15_remote_move_into_shared_root_publishes_nothing() {
 /// and refuses the move when an adoption cannot be confirmed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a19_move_out_adopts_foreign_descendants_or_refuses() {
+    const NESTED_FILE: &str = "99999999-9999-8999-9999-999999999999";
     let mut f = Fixture::basic();
-    f.rows[1]["parent_id"] = json!(F_SUB);
     f.rows.push(row(F_SUB, Some(ROOT), "Nested", RowFacts { folder: true, foreign: true }));
+    f.rows.push(row(NESTED_FILE, Some(F_SUB), "inner.txt", RowFacts { foreign: true, ..Default::default() }));
     f.inventory.push(json!({"file_id":F_SUB,"encrypted_file_key":wrap(F_SUB,true)}));
+    f.inventory.push(json!({"file_id":NESTED_FILE,"encrypted_file_key":wrap(NESTED_FILE,false)}));
     let h = Harness::new(f).await;
     ok(h.run(&["mv", "Shared/Nested", "Shared/Nested2"]).await);
     assert_eq!(owner_key_posts(&h, F_SUB), 1);
@@ -531,5 +533,48 @@ async fn a27_share_refuses_a_request_row() {
     );
     assert!(text.contains("request upload"), "{text}");
     assert_eq!(h.count("POST", "/api/v1/shares"), 0, "nothing was published");
+    h.close().await;
+}
+
+/// A19 (P2-5): the OTHER move surfaces adopt too. Bulk `bb mv` is not the
+/// single-source path: every source leaving a shared root adopts its foreign
+/// subtree (confirmed by a readback) BEFORE the move, and the move then lands in
+/// the destination outside the root.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a19_bulk_move_out_of_a_shared_root_adopts_each_source_first() {
+    const DEST: &str = "66666666-6666-4666-8666-666666666666";
+    const NESTED_FILE: &str = "99999999-9999-8999-9999-999999999999";
+    let mut f = Fixture::basic();
+    f.rows.push(row(F_SUB, Some(ROOT), "Nested", RowFacts { folder: true, foreign: true }));
+    f.rows.push(row(NESTED_FILE, Some(F_SUB), "inner.txt", RowFacts { foreign: true, ..Default::default() }));
+    f.inventory.push(json!({"file_id":F_SUB,"encrypted_file_key":wrap(F_SUB,true)}));
+    f.inventory.push(json!({"file_id":NESTED_FILE,"encrypted_file_key":wrap(NESTED_FILE,false)}));
+    // A destination at the vault root, outside every shared folder.
+    f.rows.push(row(DEST, None, "Dest", RowFacts { folder: true, ..Default::default() }));
+    let h = Harness::new(f).await;
+    ok(h.run(&["mv", "Shared/Nested", "Shared/guest.txt", "Dest/"]).await);
+
+    assert_eq!(owner_key_posts(&h, F_SUB), 1, "the foreign folder is adopted first");
+    assert_eq!(owner_key_posts(&h, FILE), 1, "the foreign file is adopted first");
+    let requests = h.state.lock().unwrap().requests.clone();
+    let index = |m: &str, p: &str| {
+        requests
+            .iter()
+            .position(|(rm, rp, _)| rm == m && rp == p)
+            .unwrap_or_else(|| panic!("no {m} {p} in {requests:?}"))
+    };
+    for id in [F_SUB, FILE] {
+        assert!(
+            index("POST", &format!("/api/v1/files/{id}/owner-key"))
+                < index("PATCH", &format!("/api/v1/files/{id}")),
+            "each source is adopted before it moves"
+        );
+        let patch = requests
+            .iter()
+            .find(|(m, p, _)| m == "PATCH" && p == &format!("/api/v1/files/{id}"))
+            .expect("the source is moved");
+        let body: Value = serde_json::from_slice(&patch.2).unwrap();
+        assert_eq!(body["parent_id"], json!(DEST), "moved into the destination: {body}");
+    }
     h.close().await;
 }
