@@ -100,7 +100,7 @@ fn render_sessions(f: &mut Frame, area: Rect, state: &TuiState) {
             detail_parts.push(format!("{} files", session.files_synced));
         }
         if session.bytes_synced > 0 {
-            detail_parts.push(format_size_binary(session.bytes_synced));
+            detail_parts.push(crate::ui::human_size_binary(session.bytes_synced));
         }
         if let Some(ref hb) = session.last_heartbeat {
             detail_parts.push(format!("heartbeat {hb}"));
@@ -109,7 +109,7 @@ fn render_sessions(f: &mut Frame, area: Rect, state: &TuiState) {
         // Task 1922: the server no longer carries `current_file`; only the
         // heartbeat's numeric speed remains, so show just that.
         if let Some(speed) = session.speed_bps.filter(|s| *s > 0) {
-            detail_parts.push(format!("{}/s", format_size_binary(speed)));
+            detail_parts.push(format!("{}/s", crate::ui::human_size_binary(speed)));
         }
 
         let detail_str = if detail_parts.is_empty() {
@@ -148,21 +148,3 @@ fn render_hints(f: &mut Frame, area: Rect) {
     f.render_widget(Paragraph::new(line), area);
 }
 
-/// Format bytes using binary units (1024 base).
-fn format_size_binary(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * KB;
-    const GB: u64 = 1024 * MB;
-    if bytes == 0 {
-        return "\u{2014}".to_string();
-    }
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
-    }
-}

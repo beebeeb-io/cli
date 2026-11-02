@@ -74,7 +74,7 @@ fn render_file_log(f: &mut Frame, area: Rect, state: &TuiState) {
                 FileEventStatus::Error => ("\u{2717}", RED_ERR),    // X mark
                 FileEventStatus::Skipped => ("-", INK_DIM),
             };
-            let size_str = format_size_binary(evt.size);
+            let size_str = crate::ui::human_size_binary(evt.size);
             Line::from(vec![
                 Span::raw("  "),
                 Span::styled(evt.timestamp.as_str(), Style::default().fg(INK_DIM)),
@@ -108,7 +108,7 @@ fn render_status_bar(f: &mut Frame, area: Rect, state: &TuiState) {
     };
 
     let files_str = format!("{} files", state.local_file_count);
-    let bytes_str = format_size_binary(state.local_total_bytes);
+    let bytes_str = crate::ui::human_size_binary(state.local_total_bytes);
 
     let line = Line::from(vec![
         Span::raw("  "),
@@ -128,21 +128,3 @@ fn render_status_bar(f: &mut Frame, area: Rect, state: &TuiState) {
     f.render_widget(Paragraph::new(line), area);
 }
 
-/// Format bytes using binary units (1024 base) to match the plan.
-fn format_size_binary(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * KB;
-    const GB: u64 = 1024 * MB;
-    if bytes == 0 {
-        return "\u{2014}".to_string(); // em dash
-    }
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
-    }
-}

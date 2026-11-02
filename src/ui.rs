@@ -193,22 +193,26 @@ pub fn human_size(bytes: u64) -> String {
     if bytes == 0 {
         return "\u{2014}".to_string(); // —
     }
-    const KB: f64 = 1_000.0;
-    const MB: f64 = 1_000_000.0;
-    const GB: f64 = 1_000_000_000.0;
-    const TB: f64 = 1_000_000_000_000.0;
-    let b = bytes as f64;
-    if b < KB {
-        format!("{} B", bytes)
-    } else if b < MB {
-        format!("{:.0} kB", b / KB)
-    } else if b < GB {
-        format!("{:.1} MB", b / MB)
-    } else if b < TB {
-        format!("{:.2} GB", b / GB)
+    // Widths the tables have always used: kilobytes with no decimals, megabytes
+    // with one, gigabytes and up with two. The numbers come from core's one
+    // decimal formatter, which also carries a value that rounds up a unit.
+    let decimals = if bytes < 1_000_000 {
+        0
+    } else if bytes < 1_000_000_000 {
+        1
     } else {
-        format!("{:.2} TB", b / TB)
+        2
+    };
+    beebeeb_types::format_compact(bytes as i64, decimals)
+}
+
+/// Binary units (1 KiB = 1,024 B) for the dense TUI tables, where a KiB/MiB
+/// label reads better than a decimal one; 0 is an em dash, not an empty file.
+pub fn human_size_binary(bytes: u64) -> String {
+    if bytes == 0 {
+        return "\u{2014}".to_string(); // —
     }
+    beebeeb_types::format_binary(bytes as i64)
 }
 
 /// Format bytes-per-second as a human-readable throughput: "48.2 MB/s".
@@ -421,5 +425,32 @@ mod table_tests {
             strip_ansi(&colored_out),
             "ANSI-wrapped and plain cells of equal visible width must produce identical padding:\nplain:   {plain_out:?}\ncolored: {colored_out:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod size_vectors {
+    use super::{human_size, human_size_binary};
+
+    /// The one formatter contract: the canonical sizes every command and table
+    /// must print, including the em dash for an unknown size and the carry out
+    /// of a value that rounds up to the next unit.
+    #[test]
+    fn size_vectors_are_the_canonical_ones() {
+        let cases: [(u64, &str, &str); 9] = [
+            (0, "\u{2014}", "\u{2014}"),
+            (999, "999 B", "999 B"),
+            (1_000, "1 KB", "1000 B"),
+            (293_000, "293 KB", "286 KiB"),
+            (3_400_000, "3.4 MB", "3 MiB"),
+            (999_600_000, "999.6 MB", "953 MiB"),
+            (1_234_567_890, "1.23 GB", "1 GiB"),
+            (1_000_000_000_000, "1.00 TB", "931 GiB"),
+            (1_099_511_627_776, "1.10 TB", "1.0 TiB"),
+        ];
+        for (bytes, si, binary) in cases {
+            assert_eq!(human_size(bytes), si, "decimal size for {bytes}");
+            assert_eq!(human_size_binary(bytes), binary, "binary size for {bytes}");
+        }
     }
 }
