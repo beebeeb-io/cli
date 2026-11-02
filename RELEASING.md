@@ -28,10 +28,6 @@ vim Cargo.toml
 # 2. Update Cargo.lock
 cargo check
 
-# 2b. Task 2275 T4 gate: the `plan` job runs scripts/check-2275-owner-items.sh
-#     before anything is built and refuses the release while the CLI still
-#     resolves owner keys itself (no core `resolve_owned_key`, or local
-#     HKDF/AES back). The PR that lands 2275 T4 removes the script and the step.
 
 # 3. Author RELEASE_NOTES.md at the repo root for the exact version being cut
 #    (intro → What's New → Bug Fixes/Hardening → Verification → Install/Update →
