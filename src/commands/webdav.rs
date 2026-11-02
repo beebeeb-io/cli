@@ -160,23 +160,41 @@ mod parent_target_tests {
         };
         use serde_json::json;
         use std::sync::atomic::{AtomicUsize, Ordering};
+        // 2275 L12: only a canonical id resolves, so a destination row with an
+        // invalid id is an unresolvable parent - 409 "destination parent not
+        // found", never a 500 and never a PATCH.
         for (id, status) in [
-            (json!("not-a-uuid"), StatusCode::INTERNAL_SERVER_ERROR),
-            (json!(""), StatusCode::INTERNAL_SERVER_ERROR),
+            (json!("not-a-uuid"), StatusCode::CONFLICT),
+            (json!(""), StatusCode::CONFLICT),
             (serde_json::Value::Null, StatusCode::CONFLICT),
         ] {
             let patches = Arc::new(AtomicUsize::new(0));
             let reads = Arc::new(AtomicUsize::new(0));
             let get_reads = reads.clone();
             let patch_count = patches.clone();
+            // 2275 L12: an owner (v4) file's name is sealed under the key its id
+            // derives; a plaintext name would make the row unreadable.
+            let src = "33333333-3333-4333-8333-33333333333c";
+            let src_key = beebeeb_core::kdf::derive_file_key(
+                &beebeeb_core::kdf::MasterKey::from_bytes([0; 32]),
+                src.as_bytes(),
+            );
+            let src_name = beebeeb_core::encrypt::encrypt_name_for(
+                &src_key,
+                "file.txt",
+                None,
+                beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+            )
+            .unwrap();
             let app = Router::new()
                 .route("/api/v1/files", get(move || {
                     let id = id.clone();
                     let reads = get_reads.clone();
+                    let src_name = src_name.clone();
                     async move {
                         reads.fetch_add(1, Ordering::SeqCst);
                         Json(json!({"files": [
-                            {"id": "33333333-3333-4333-8333-333333333333", "name_encrypted": "file.txt", "is_folder": false},
+                            {"id": src, "name_encrypted": src_name, "is_folder": false},
                             {"id": id, "name_encrypted": "Target", "is_folder": true}
                         ]}))
                     }
@@ -375,14 +393,18 @@ mod sf_0002_write_check_tests {
     /// C5: the owner-wrap-of-uppercase row `bb mv` refuses
     /// (`owner_read_repair::an_owner_wrap_of_the_uppercase_key_is_read_only`) is
     /// refused here as well: 403 by its name, no probe, no write.
+    ///
+    /// 2275 L12: an owner item's key comes from its id, so a served L8 envelope
+    /// for an owner id is ignored (and core refuses to build one); the row is
+    /// read-only because its name is sealed under the uppercase repair
+    /// convention, not because of a wrap.
     #[tokio::test]
     async fn an_owner_wrap_of_the_uppercase_key_is_read_only() {
         const UPPER: &str = "5f0c2a9e-3b1d-4c7e-9a2f-6d8e1b4c7a30";
         let upper = beebeeb_core::kdf::derive_file_key(&master(), UPPER.to_ascii_uppercase().as_bytes());
         let plaintext = b"SF-0002 read-only repair content";
         let mut row = file_row(UPPER, "uppercase-repair.pdf", &upper, plaintext);
-        let wrap = beebeeb_core::owned_keys::wrap_owner_file_key(&master(), UPPER, &upper).unwrap();
-        row["owner_wrapped_file_key"] = json!(base64::engine::general_purpose::STANDARD.encode(wrap));
+        row["owner_wrapped_file_key"] = serde_json::Value::Null;
         let frame = beebeeb_core::encrypt::encrypt_chunk_raw(&upper, plaintext).unwrap();
         let m = mock(vec![row], frame).await;
         m.download_status.store(503, Ordering::SeqCst);

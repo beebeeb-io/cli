@@ -109,7 +109,9 @@ pub(super) fn decode_file_entry(
             )
         }
         None => (
-            format!("[{}]", &file_id[..8]),
+            // A row that does not resolve keeps its place in the listing without
+            // its name; an id too short to abbreviate shows whole.
+            format!("[{}]", file_id.get(..8).unwrap_or(&file_id)),
             false,
             None,
             None,
