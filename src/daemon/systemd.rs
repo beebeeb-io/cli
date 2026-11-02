@@ -47,14 +47,14 @@ WantedBy=default.target
 
 /// Install a systemd user service unit for the given sync session.
 #[cfg(target_os = "linux")]
-pub fn install_systemd_unit(local_dir: &Path, remote_path: &str, slug: &str) -> Result<(), String> {
+pub fn install_systemd_unit(local_dir: &Path, remote_path: &str, slug: &str) -> Result<(), DaemonError> {
     ensure_real_home()?;
     let unit_dir = dirs::home_dir()
         .ok_or("cannot find home directory")?
         .join(".config/systemd/user");
-    fs::create_dir_all(&unit_dir).map_err(|e| format!("create systemd user dir: {e}"))?;
+    fs::create_dir_all(&unit_dir).map_err(|e| DaemonError::Other(format!("create systemd user dir: {e}")))?;
 
-    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let exe = std::env::current_exe().map_err(|e| DaemonError::Other(format!("current_exe: {e}")))?;
     let unit_name = format!("beebeeb-sync-{slug}.service");
     let unit_path = unit_dir.join(&unit_name);
 
@@ -66,7 +66,7 @@ pub fn install_systemd_unit(local_dir: &Path, remote_path: &str, slug: &str) -> 
         Some(crate::transport::selected_name()),
     );
 
-    fs::write(&unit_path, &unit_content).map_err(|e| format!("write systemd unit: {e}"))?;
+    fs::write(&unit_path, &unit_content).map_err(|e| DaemonError::Other(format!("write systemd unit: {e}")))?;
 
     // Reload and enable
     let _ = service_manager("systemctl", &["--user", "daemon-reload"]);
@@ -74,7 +74,7 @@ pub fn install_systemd_unit(local_dir: &Path, remote_path: &str, slug: &str) -> 
     let status = service_manager("systemctl", &["--user", "enable", "--now", &unit_name])?;
 
     if !status.success() {
-        return Err(format!("systemctl enable --now {unit_name} failed"));
+        return Err(DaemonError::Other(format!("systemctl enable --now {unit_name} failed")));
     }
 
     Ok(())
@@ -82,7 +82,7 @@ pub fn install_systemd_unit(local_dir: &Path, remote_path: &str, slug: &str) -> 
 
 /// Stop and remove a systemd user service unit for the given slug.
 #[cfg(target_os = "linux")]
-pub fn uninstall_systemd_unit(slug: &str) -> Result<bool, String> {
+pub fn uninstall_systemd_unit(slug: &str) -> Result<bool, DaemonError> {
     let unit_name = format!("beebeeb-sync-{slug}.service");
     let unit_path = dirs::home_dir()
         .ok_or("cannot find home directory")?
@@ -97,7 +97,7 @@ pub fn uninstall_systemd_unit(slug: &str) -> Result<bool, String> {
     let _ = service_manager("systemctl", &["--user", "stop", &unit_name]);
     let _ = service_manager("systemctl", &["--user", "disable", &unit_name]);
 
-    fs::remove_file(&unit_path).map_err(|e| format!("remove systemd unit: {e}"))?;
+    fs::remove_file(&unit_path).map_err(|e| DaemonError::Other(format!("remove systemd unit: {e}")))?;
 
     let _ = service_manager("systemctl", &["--user", "daemon-reload"]);
 
@@ -106,12 +106,12 @@ pub fn uninstall_systemd_unit(slug: &str) -> Result<bool, String> {
 
 /// No-op on non-Linux for systemd install.
 #[cfg(not(target_os = "linux"))]
-pub fn install_systemd_unit(_local_dir: &Path, _remote_path: &str, _slug: &str) -> Result<(), String> {
+pub fn install_systemd_unit(_local_dir: &Path, _remote_path: &str, _slug: &str) -> Result<(), DaemonError> {
     Ok(())
 }
 
 /// No-op on non-Linux for systemd uninstall.
 #[cfg(not(target_os = "linux"))]
-pub fn uninstall_systemd_unit(_slug: &str) -> Result<bool, String> {
+pub fn uninstall_systemd_unit(_slug: &str) -> Result<bool, DaemonError> {
     Ok(false)
 }

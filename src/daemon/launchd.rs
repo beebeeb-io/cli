@@ -26,18 +26,18 @@ pub(super) fn xml_escape(s: &str) -> String {
 /// The plist label is `io.beebeeb.sync.<slug>` to allow multiple
 /// concurrent sync sessions.
 #[cfg(target_os = "macos")]
-pub fn install_launchagent(local_dir: &Path, remote_path: &str, slug: &str) -> Result<(), String> {
+pub fn install_launchagent(local_dir: &Path, remote_path: &str, slug: &str) -> Result<(), DaemonError> {
     // Before anything is written: a plist under a redirected HOME must not exist at all.
     ensure_real_home()?;
     let plist_dir = dirs::home_dir()
         .ok_or("cannot find home directory")?
         .join("Library/LaunchAgents");
-    fs::create_dir_all(&plist_dir).map_err(|e| format!("create LaunchAgents dir: {e}"))?;
+    fs::create_dir_all(&plist_dir).map_err(|e| DaemonError::Other(format!("create LaunchAgents dir: {e}")))?;
 
     let label = format!("io.beebeeb.sync.{slug}");
     let plist_path = plist_dir.join(format!("{label}.plist"));
 
-    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let exe = std::env::current_exe().map_err(|e| DaemonError::Other(format!("current_exe: {e}")))?;
     let logs = log_dir()?;
 
     let args = [
@@ -64,12 +64,12 @@ pub fn install_launchagent(local_dir: &Path, remote_path: &str, slug: &str) -> R
         &env_xml_with_transport(crate::transport::selected_name()),
     );
 
-    fs::write(&plist_path, &plist).map_err(|e| format!("write plist: {e}"))?;
+    fs::write(&plist_path, &plist).map_err(|e| DaemonError::Other(format!("write plist: {e}")))?;
 
     let status = service_manager("launchctl", &["load", &plist_path.to_string_lossy()])?;
 
     if !status.success() {
-        return Err("launchctl load failed".to_string());
+        return Err(DaemonError::Other("launchctl load failed".to_string()));
     }
 
     Ok(())
@@ -152,7 +152,7 @@ pub fn running_as_service(xpc_service_name: Option<&str>, service_marker: Option
 
 /// Unload and remove a macOS LaunchAgent plist for the given slug.
 #[cfg(target_os = "macos")]
-pub fn uninstall_launchagent(slug: &str) -> Result<bool, String> {
+pub fn uninstall_launchagent(slug: &str) -> Result<bool, DaemonError> {
     let label = format!("io.beebeeb.sync.{slug}");
     let agents = dirs::home_dir()
         .ok_or("cannot find home directory")?
@@ -171,18 +171,18 @@ pub fn uninstall_launchagent(slug: &str) -> Result<bool, String> {
     };
     ensure_real_home()?;
     let _ = service_manager("launchctl", &["unload", &target.to_string_lossy()]);
-    fs::remove_file(&target).map_err(|e| format!("remove plist: {e}"))?;
+    fs::remove_file(&target).map_err(|e| DaemonError::Other(format!("remove plist: {e}")))?;
     Ok(true)
 }
 
 /// No-op on non-macOS for LaunchAgent install.
 #[cfg(not(target_os = "macos"))]
-pub fn install_launchagent(_local_dir: &Path, _remote_path: &str, _slug: &str) -> Result<(), String> {
+pub fn install_launchagent(_local_dir: &Path, _remote_path: &str, _slug: &str) -> Result<(), DaemonError> {
     Ok(())
 }
 
 /// No-op on non-macOS for LaunchAgent uninstall.
 #[cfg(not(target_os = "macos"))]
-pub fn uninstall_launchagent(_slug: &str) -> Result<bool, String> {
+pub fn uninstall_launchagent(_slug: &str) -> Result<bool, DaemonError> {
     Ok(false)
 }

@@ -12,6 +12,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod error;
+pub use error::DaemonError;
+
+mod mode;
+pub use mode::DaemonMode;
+
 #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 /// The config directory the process uses must be the one the installed service would use. On Linux
 /// `dirs` reads it from `$XDG_CONFIG_HOME` (when absolute) before `$HOME/.config`, but a systemd user
@@ -19,7 +25,7 @@ use std::path::{Path, PathBuf};
 /// elsewhere with the real HOME would pass the HOME check and still install a unit that reads the
 /// real config (and a live session). (macOS ignores XDG; its config lives under HOME.)
 #[cfg(any(target_os = "linux", test))]
-fn check_config_dir(config: Option<&Path>, account: Option<&Path>, allow: Option<&str>) -> Result<(), String> {
+fn check_config_dir(config: Option<&Path>, account: Option<&Path>, allow: Option<&str>) -> Result<(), DaemonError> {
     if allow == Some("1") {
         return Ok(());
     }
@@ -30,13 +36,13 @@ fn check_config_dir(config: Option<&Path>, account: Option<&Path>, allow: Option
     if same_dir(config, &expected) {
         Ok(())
     } else {
-        Err(format!(
+        Err(DaemonError::Refused(format!(
             "refusing to touch the background-service manager: this run reads its config from {} (is \
              XDG_CONFIG_HOME set?) but the service would read {}. If this is intended, run the command \
              again with {CUSTOM_HOME_OVERRIDE}=1",
             config.display(),
             expected.display()
-        ))
+        )))
     }
 }
 
@@ -82,10 +88,10 @@ fn render_plist_with_env(label: &str, args_xml: &str, stdout_log: &str, stderr_l
 /// The command that starts the detached child, not yet started: its arguments, and the transport
 /// this invocation selected said explicitly in its environment, so `--transport auto` beats an
 /// inherited `BB_TRANSPORT=api` just as `--transport api` beats an inherited `auto`.
-fn daemon_command(exe: &Path, local_dir: &Path, remote_path: &str, api_forced: bool) -> std::process::Command {
+fn daemon_command(exe: &Path, local_dir: &Path, remote_path: &str, mode: DaemonMode) -> std::process::Command {
     let mut cmd = std::process::Command::new(exe);
-    cmd.args(daemon_args(local_dir, remote_path, api_forced))
-        .env("BB_TRANSPORT", if api_forced { "api" } else { "auto" });
+    cmd.args(daemon_args(local_dir, remote_path, mode))
+        .env("BB_TRANSPORT", mode.transport());
     cmd
 }
 

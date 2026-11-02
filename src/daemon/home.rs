@@ -70,7 +70,7 @@ pub(super) fn same_dir(a: &Path, b: &Path) -> bool {
 /// knowing is not a reason to load a service into someone's launchd; the override says "I am sure".
 /// Only an unknown `home` (nothing to compare) passes.
 #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
-pub(super) fn check_home(home: Option<&Path>, account: Option<&Path>, allow: Option<&str>) -> Result<(), String> {
+pub(super) fn check_home(home: Option<&Path>, account: Option<&Path>, allow: Option<&str>) -> Result<(), DaemonError> {
     if allow == Some("1") {
         return Ok(());
     }
@@ -78,29 +78,29 @@ pub(super) fn check_home(home: Option<&Path>, account: Option<&Path>, allow: Opt
         return Ok(());
     };
     let Some(account) = account else {
-        return Err(format!(
+        return Err(DaemonError::Refused(format!(
             "refusing to touch the background-service manager: HOME is {} but this account's home \
              directory cannot be determined (no passwd entry). If you are sure, run the command again \
              with {CUSTOM_HOME_OVERRIDE}=1",
             home.display()
-        ));
+        )));
     };
     if same_dir(home, account) {
         Ok(())
     } else {
-        Err(format!(
+        Err(DaemonError::Refused(format!(
             "refusing to touch the background-service manager: HOME is {} but this account's home is {}. \
              launchd and systemd run services with the account's home, so the service would use that \
              home's config and session, not this one. If this HOME is intended (`sudo -E`, a relocated \
              home directory), run the command again with {CUSTOM_HOME_OVERRIDE}=1",
             home.display(),
             account.display()
-        ))
+        )))
     }
 }
 
 #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
-pub(super) fn ensure_real_home() -> Result<(), String> {
+pub(super) fn ensure_real_home() -> Result<(), DaemonError> {
     let allow = std::env::var(CUSTOM_HOME_OVERRIDE).ok();
     let account = account_home();
     check_home(dirs::home_dir().as_deref(), account.as_deref(), allow.as_deref())?;

@@ -10,7 +10,7 @@ use super::*;
 
 /// Stop a daemon by slug: kill the process, remove PID file, and
 /// uninstall platform auto-start (LaunchAgent / systemd unit).
-pub fn stop_daemon(slug: &str) -> Result<bool, String> {
+pub fn stop_daemon(slug: &str) -> Result<bool, DaemonError> {
     let killed = kill_daemon(slug)?;
     let la_removed = uninstall_launchagent(slug)?;
     let sd_removed = uninstall_systemd_unit(slug)?;
@@ -18,7 +18,7 @@ pub fn stop_daemon(slug: &str) -> Result<bool, String> {
 }
 
 /// Stop all daemons: iterate all PID files and stop each one.
-pub fn stop_all_daemons() -> Result<u32, String> {
+pub fn stop_all_daemons() -> Result<u32, DaemonError> {
     let slugs = list_daemon_slugs()?;
     let mut count = 0u32;
     for slug in &slugs {

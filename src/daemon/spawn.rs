@@ -15,20 +15,20 @@ use super::*;
 /// way this crate starts a service manager (apart from a job removing itself in
 /// [`disarm_launchagent_if_managed`]).
 #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
-pub(super) fn service_manager(program: &str, args: &[&str]) -> Result<std::process::ExitStatus, String> {
+pub(super) fn service_manager(program: &str, args: &[&str]) -> Result<std::process::ExitStatus, DaemonError> {
     ensure_real_home()?;
     std::process::Command::new(program)
         .args(args)
         .status()
-        .map_err(|e| format!("{program}: {e}"))
+        .map_err(|e| DaemonError::Other(format!("{program}: {e}")))
 }
 
 /// The arguments of the detached child: the sync it runs, preceded by the transport this
 /// invocation forced. `BB_TRANSPORT` reaches the child through the environment; the flag does not,
 /// so it is passed on here.
-pub(super) fn daemon_args(local_dir: &Path, remote_path: &str, api_forced: bool) -> Vec<String> {
+pub(super) fn daemon_args(local_dir: &Path, remote_path: &str, mode: DaemonMode) -> Vec<String> {
     let mut args = Vec::new();
-    if api_forced {
+    if mode.is_api_forced() {
         args.extend(["--transport".to_string(), "api".to_string()]);
     }
     args.extend([
@@ -42,31 +42,31 @@ pub(super) fn daemon_args(local_dir: &Path, remote_path: &str, api_forced: bool)
 /// Spawn `bb sync <local> <remote>` as a detached daemon process.
 ///
 /// Stdout/stderr are redirected to log files. Returns the child PID.
-pub fn spawn_daemon(local_dir: &Path, remote_path: &str, slug: &str) -> Result<u32, String> {
+pub fn spawn_daemon(local_dir: &Path, remote_path: &str, slug: &str) -> Result<u32, DaemonError> {
     // Check if already running
     if let Some(pid) = is_daemon_running(slug)? {
-        return Err(format!(
+        return Err(DaemonError::Other(format!(
             "daemon already running for this session (PID {pid}). \
              Use bb sync --stop-session to stop it first."
-        ));
+        )));
     }
 
-    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let exe = std::env::current_exe().map_err(|e| DaemonError::Other(format!("current_exe: {e}")))?;
     let logs = log_dir()?;
 
     let stdout_path = logs.join(format!("{slug}.log"));
     let stderr_path = logs.join(format!("{slug}.err"));
 
-    let stdout_file = fs::File::create(&stdout_path).map_err(|e| format!("create log file: {e}"))?;
-    let stderr_file = fs::File::create(&stderr_path).map_err(|e| format!("create error log file: {e}"))?;
+    let stdout_file = fs::File::create(&stdout_path).map_err(|e| DaemonError::Other(format!("create log file: {e}")))?;
+    let stderr_file = fs::File::create(&stderr_path).map_err(|e| DaemonError::Other(format!("create error log file: {e}")))?;
 
-    let child = daemon_command(&exe, local_dir, remote_path, crate::transport::api_forced())
+    let child = daemon_command(&exe, local_dir, remote_path, DaemonMode::from(crate::transport::api_forced()))
         .stdout(stdout_file)
         .stderr(stderr_file)
         // Detach from the parent process group
         .stdin(std::process::Stdio::null())
         .spawn()
-        .map_err(|e| format!("spawn daemon: {e}"))?;
+        .map_err(|e| DaemonError::Other(format!("spawn daemon: {e}")))?;
 
     let pid = child.id();
     write_pid(slug, pid)?;
@@ -80,9 +80,9 @@ mod transport_tests {
     #[test]
     fn the_daemon_child_inherits_a_forced_api_transport() {
         let dir = Path::new("/tmp/photos");
-        assert_eq!(daemon_args(dir, "/photos", false), ["sync", "/tmp/photos", "/photos"]);
+        assert_eq!(daemon_args(dir, "/photos", DaemonMode::Default), ["sync", "/tmp/photos", "/photos"]);
         assert_eq!(
-            daemon_args(dir, "/photos", true),
+            daemon_args(dir, "/photos", DaemonMode::ApiForced),
             ["--transport", "api", "sync", "/tmp/photos", "/photos"]
         );
     }
@@ -91,17 +91,17 @@ mod transport_tests {
     fn the_daemon_child_is_told_its_transport_in_words_not_by_inheritance() {
         let exe = Path::new("/usr/local/bin/bb");
         let dir = Path::new("/tmp/photos");
-        for (forced, want) in [(true, "api"), (false, "auto")] {
-            let cmd = daemon_command(exe, dir, "/photos", forced);
+        for (mode, want) in [(DaemonMode::ApiForced, "api"), (DaemonMode::Default, "auto")] {
+            let cmd = daemon_command(exe, dir, "/photos", mode);
             let env: Vec<_> = cmd
                 .get_envs()
                 .filter(|(k, _)| *k == "BB_TRANSPORT")
                 .map(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
                 .collect();
-            assert_eq!(env, vec![Some(want.to_string())], "forced={forced}");
+            assert_eq!(env, vec![Some(want.to_string())], "mode={mode:?}");
             let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
             assert_eq!(args.last().map(String::as_str), Some("/photos"));
-            assert_eq!(args.contains(&"--transport".to_string()), forced);
+            assert_eq!(args.contains(&"--transport".to_string()), mode.is_api_forced());
         }
     }
 

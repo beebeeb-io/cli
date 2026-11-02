@@ -10,22 +10,22 @@
 use super::*;
 
 /// Directory for PID files: `~/.local/share/beebeeb/daemons/`
-pub fn daemon_dir() -> Result<PathBuf, String> {
+pub fn daemon_dir() -> Result<PathBuf, DaemonError> {
     let base = dirs::data_local_dir()
         .or_else(dirs::home_dir)
         .ok_or("cannot determine home directory")?;
     let dir = base.join("beebeeb").join("daemons");
-    fs::create_dir_all(&dir).map_err(|e| format!("create daemon dir: {e}"))?;
+    fs::create_dir_all(&dir).map_err(|e| DaemonError::Other(format!("create daemon dir: {e}")))?;
     Ok(dir)
 }
 
 /// Directory for daemon log files: `~/.local/share/beebeeb/logs/`
-pub fn log_dir() -> Result<PathBuf, String> {
+pub fn log_dir() -> Result<PathBuf, DaemonError> {
     let base = dirs::data_local_dir()
         .or_else(dirs::home_dir)
         .ok_or("cannot determine home directory")?;
     let dir = base.join("beebeeb").join("logs");
-    fs::create_dir_all(&dir).map_err(|e| format!("create log dir: {e}"))?;
+    fs::create_dir_all(&dir).map_err(|e| DaemonError::Other(format!("create log dir: {e}")))?;
     Ok(dir)
 }
 
@@ -65,23 +65,23 @@ pub fn slugify(name: &str) -> String {
 }
 
 /// Path to the PID file for a given session slug.
-pub fn pid_path(slug: &str) -> Result<PathBuf, String> {
+pub fn pid_path(slug: &str) -> Result<PathBuf, DaemonError> {
     Ok(daemon_dir()?.join(format!("{slug}.pid")))
 }
 
 /// Write a PID to the PID file for the given slug.
-pub fn write_pid(slug: &str, pid: u32) -> Result<(), String> {
+pub fn write_pid(slug: &str, pid: u32) -> Result<(), DaemonError> {
     let path = pid_path(slug)?;
-    fs::write(&path, pid.to_string()).map_err(|e| format!("write PID file: {e}"))
+    fs::write(&path, pid.to_string()).map_err(|e| DaemonError::Other(format!("write PID file: {e}")))
 }
 
 /// Read the PID from a PID file, if it exists.
-pub fn read_pid(slug: &str) -> Result<Option<u32>, String> {
+pub fn read_pid(slug: &str) -> Result<Option<u32>, DaemonError> {
     let path = pid_path(slug)?;
     if !path.exists() {
         return Ok(None);
     }
-    let content = fs::read_to_string(&path).map_err(|e| format!("read PID file: {e}"))?;
+    let content = fs::read_to_string(&path).map_err(|e| DaemonError::Other(format!("read PID file: {e}")))?;
     match content.trim().parse::<u32>() {
         Ok(pid) => Ok(Some(pid)),
         Err(_) => {
@@ -93,10 +93,10 @@ pub fn read_pid(slug: &str) -> Result<Option<u32>, String> {
 }
 
 /// Remove the PID file for the given slug.
-pub fn remove_pid(slug: &str) -> Result<(), String> {
+pub fn remove_pid(slug: &str) -> Result<(), DaemonError> {
     let path = pid_path(slug)?;
     if path.exists() {
-        fs::remove_file(&path).map_err(|e| format!("remove PID file: {e}"))?;
+        fs::remove_file(&path).map_err(|e| DaemonError::Other(format!("remove PID file: {e}")))?;
     }
     Ok(())
 }
@@ -116,7 +116,7 @@ pub(super) fn process_exists(pid: u32) -> bool {
 /// Check if a daemon for the given session slug is currently running.
 /// Returns `Some(pid)` if running, `None` otherwise.
 /// Cleans up stale PID files automatically.
-pub fn is_daemon_running(slug: &str) -> Result<Option<u32>, String> {
+pub fn is_daemon_running(slug: &str) -> Result<Option<u32>, DaemonError> {
     match read_pid(slug)? {
         Some(pid) => {
             if process_exists(pid) {
@@ -132,10 +132,10 @@ pub fn is_daemon_running(slug: &str) -> Result<Option<u32>, String> {
 }
 
 /// List all daemon slugs that have PID files (running or stale).
-pub fn list_daemon_slugs() -> Result<Vec<String>, String> {
+pub fn list_daemon_slugs() -> Result<Vec<String>, DaemonError> {
     let dir = daemon_dir()?;
     let mut slugs = Vec::new();
-    let entries = fs::read_dir(&dir).map_err(|e| format!("read daemon dir: {e}"))?;
+    let entries = fs::read_dir(&dir).map_err(|e| DaemonError::Other(format!("read daemon dir: {e}")))?;
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
@@ -147,7 +147,7 @@ pub fn list_daemon_slugs() -> Result<Vec<String>, String> {
 }
 
 /// Kill a daemon process by slug. Sends SIGTERM, removes PID file.
-pub fn kill_daemon(slug: &str) -> Result<bool, String> {
+pub fn kill_daemon(slug: &str) -> Result<bool, DaemonError> {
     match read_pid(slug)? {
         Some(pid) => {
             #[cfg(unix)]

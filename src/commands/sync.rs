@@ -185,7 +185,7 @@ pub async fn run(
     match command {
         SyncCommand::StopLegacy => {
             // Legacy --stop: try to uninstall any old single-plist LaunchAgent
-            return crate::daemon::uninstall_launchagent("sync").map(|removed| {
+            return crate::daemon::uninstall_launchagent("sync").map_err(String::from).map(|removed| {
                 if removed {
                     println!(
                         "  {} sync daemon removed",
