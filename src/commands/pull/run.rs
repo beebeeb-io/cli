@@ -71,12 +71,11 @@ pub(super) async fn run_once(
         } else {
             None
         };
-    let explicit_key =
-        if !crate::owned_keys::is_derived_origin(resolved.origin) && request_content_key.is_none() {
-            Some(resolved.key.clone())
-        } else {
-            None
-        };
+    let explicit_key = if !crate::owned_keys::is_derived_origin(resolved.origin) && request_content_key.is_none() {
+        Some(resolved.key.clone())
+    } else {
+        None
+    };
     let decrypted_name = Some(resolved.name);
 
     let is_folder = file_meta.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);

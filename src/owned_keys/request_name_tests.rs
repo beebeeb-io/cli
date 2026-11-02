@@ -16,7 +16,13 @@ async fn a_request_row_with_a_plaintext_name_is_refused() {
     });
     let mut resolver = OwnedKeyResolver::new();
     let err = resolver
-        .resolve_owner_row(&api, &MasterKey::from_bytes([7u8; 32]), row, id, owned_keys::ItemKind::File)
+        .resolve_owner_row(
+            &api,
+            &MasterKey::from_bytes([7u8; 32]),
+            row,
+            id,
+            owned_keys::ItemKind::File,
+        )
         .await
         .err()
         .expect("a plaintext name proves nothing");

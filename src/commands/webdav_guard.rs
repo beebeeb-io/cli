@@ -17,6 +17,7 @@
 
 use std::sync::Arc;
 
+use crate::web_url::{LOCALHOST, LOOPBACK_V4};
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, Method, StatusCode, header};
@@ -25,7 +26,6 @@ use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
-use crate::web_url::{LOCALHOST, LOOPBACK_V4};
 
 /// Methods that change the vault (or would, on a server that implemented them).
 pub fn is_write_method(method: &Method) -> bool {
@@ -215,7 +215,14 @@ mod tests {
     const SECRET: &str = "s3cret-value";
 
     fn guard(read_only: bool) -> Guard {
-        Guard::new(7878, SECRET, GuardOptions { read_only, verbose: false })
+        Guard::new(
+            7878,
+            SECRET,
+            GuardOptions {
+                read_only,
+                verbose: false,
+            },
+        )
     }
 
     fn basic(user: &str, pass: &str) -> HeaderValue {
@@ -284,7 +291,14 @@ mod tests {
 
     #[test]
     fn host_without_port_is_allowed_only_on_port_80() {
-        let g = Guard::new(80, SECRET, GuardOptions { read_only: false, verbose: false });
+        let g = Guard::new(
+            80,
+            SECRET,
+            GuardOptions {
+                read_only: false,
+                verbose: false,
+            },
+        );
         let h = headers("localhost", Some(basic("bb", SECRET)), None);
         assert_eq!(g.check(&Method::GET, &h, None), Ok(()));
     }
@@ -321,7 +335,14 @@ mod tests {
         // The secret as the user name does not count; a colon in the password does.
         let h = headers("localhost:7878", Some(basic(SECRET, "")), None);
         assert_eq!(g.check(&Method::GET, &h, None), Err(Rejection::Unauthorized));
-        let g2 = Guard::new(7878, "a:b", GuardOptions { read_only: false, verbose: false });
+        let g2 = Guard::new(
+            7878,
+            "a:b",
+            GuardOptions {
+                read_only: false,
+                verbose: false,
+            },
+        );
         let h = headers("localhost:7878", Some(basic("bb", "a:b")), None);
         assert_eq!(g2.check(&Method::GET, &h, None), Ok(()));
         // Scheme is case-insensitive.

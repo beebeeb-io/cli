@@ -7,7 +7,15 @@ use sf::*;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn old_format_owner_wrap_is_rejected() {
     let mut f = Fixture::default();
-    let mut r = row(FILE, None, "must-not-open.txt", RowFacts { foreign: true, ..Default::default() });
+    let mut r = row(
+        FILE,
+        None,
+        "must-not-open.txt",
+        RowFacts {
+            foreign: true,
+            ..Default::default()
+        },
+    );
     let legacy_key = beebeeb_core::kdf::derive_file_key(&master(), FILE.as_bytes());
     r["owner_wrapped_file_key"] =
         json!(B64.encode(beebeeb_core::encrypt::encrypt_chunk_raw(&legacy_key, item_key().as_bytes()).unwrap()));
@@ -31,7 +39,15 @@ async fn old_format_owner_wrap_is_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn owner_wrap_after_move() {
     let mut f = Fixture::default();
-    let mut r = row(FILE, None, "moved.txt", RowFacts { foreign: true, ..Default::default() });
+    let mut r = row(
+        FILE,
+        None,
+        "moved.txt",
+        RowFacts {
+            foreign: true,
+            ..Default::default()
+        },
+    );
     r["acted_via_share_id"] = json!(null);
     r["owner_wrapped_file_key"] =
         json!(B64.encode(beebeeb_core::owned_keys::wrap_owner_file_key(&master(), FILE, &item_key()).unwrap()));
@@ -48,7 +64,15 @@ async fn nested_guest_and_member_names() {
     // 2275 L12: a foreign row carries an F (v8) id
     f.rows[1]["parent_id"] = json!(F_SUB);
     // 2275 L12: a foreign row carries an F (v8) id
-    let mut sub = row(F_SUB, Some(ROOT), "Nested", RowFacts { folder: true, foreign: true });
+    let mut sub = row(
+        F_SUB,
+        Some(ROOT),
+        "Nested",
+        RowFacts {
+            folder: true,
+            foreign: true,
+        },
+    );
     sub["acted_via_share_id"] = json!(null);
     sub["uploaded_by"] = json!(BAD);
     f.rows.push(sub);
@@ -85,7 +109,15 @@ async fn nested_guest_and_member_names() {
 async fn canonical_enrichment_wire_shapes() {
     for array in [false, true] {
         let mut f = Fixture::default();
-        let mut canonical = row(FILE, None, "canonical.txt", RowFacts { foreign: true, ..Default::default() });
+        let mut canonical = row(
+            FILE,
+            None,
+            "canonical.txt",
+            RowFacts {
+                foreign: true,
+                ..Default::default()
+            },
+        );
         let frame = beebeeb_core::owned_keys::wrap_owner_file_key(&master(), FILE, &item_key()).unwrap();
         canonical["owner_wrapped_file_key"] = if array { json!(frame) } else { json!(B64.encode(frame)) };
         let mut sparse = canonical.clone();
@@ -111,7 +143,15 @@ async fn cursor_ties_and_bad_rows() {
     }
     f.inventory.push(target);
     // 2275 L12: a foreign row carries an F (v8) id
-    let mut bad = row(F_BAD, Some(ROOT), "not plaintext", RowFacts { foreign: true, ..Default::default() });
+    let mut bad = row(
+        F_BAD,
+        Some(ROOT),
+        "not plaintext",
+        RowFacts {
+            foreign: true,
+            ..Default::default()
+        },
+    );
     bad["name_encrypted"] = json!("unsafe-plaintext");
     f.rows.push(bad);
     let h = Harness::new(f).await;

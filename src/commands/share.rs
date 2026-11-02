@@ -103,7 +103,11 @@ pub async fn run(
                 .to_string(),
         );
     }
-    if !resolved.canonical["name_encrypted"].as_str().unwrap_or("").starts_with('{') {
+    if !resolved.canonical["name_encrypted"]
+        .as_str()
+        .unwrap_or("")
+        .starts_with('{')
+    {
         return Err(format!(
             "can't share {:?}: its name is not encrypted, so no key can be proven to open it",
             resolved.name

@@ -751,7 +751,6 @@ async fn push_directory(
         );
     }
 
-
     // L15 = A (P2-11): a directory push into a shared folder says the owner-only
     // sentence ONCE for the command (the per-file line is suppressed here).
     if uploaded_count > 0 && !ui::is_json() {

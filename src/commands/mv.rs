@@ -86,7 +86,6 @@ async fn move_bulk(
 
     path::invalidate_cache();
 
-
     // L15 = A (P2-11): one notice for the command when anything landed in a
     // shared folder (the user may move many sources in one go).
     if ok > 0 && !ui::is_json() {
@@ -225,9 +224,7 @@ async fn move_single(
                 // Only a request row falls back: its content stays under `C`, so
                 // its name uses the string convention. Anything else without a
                 // target would seal the new name under a key that opens nothing.
-                None if src_keys.origin_for(&src_id)
-                    == Some(beebeeb_core::owned_keys::KeyOrigin::RequestContent) =>
-                (
+                None if src_keys.origin_for(&src_id) == Some(beebeeb_core::owned_keys::KeyOrigin::RequestContent) => (
                     beebeeb_core::kdf::derive_file_key(master_key, src_id.as_bytes()),
                     beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
                 ),

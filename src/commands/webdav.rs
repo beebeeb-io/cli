@@ -177,10 +177,8 @@ mod parent_target_tests {
             // 2275 L12: an owner (v4) file's name is sealed under the key its id
             // derives; a plaintext name would make the row unreadable.
             let src = "33333333-3333-4333-8333-33333333333c";
-            let src_key = beebeeb_core::kdf::derive_file_key(
-                &beebeeb_core::kdf::MasterKey::from_bytes([0; 32]),
-                src.as_bytes(),
-            );
+            let src_key =
+                beebeeb_core::kdf::derive_file_key(&beebeeb_core::kdf::MasterKey::from_bytes([0; 32]), src.as_bytes());
             let src_name = beebeeb_core::encrypt::encrypt_name_for(
                 &src_key,
                 "file.txt",
@@ -189,25 +187,31 @@ mod parent_target_tests {
             )
             .unwrap();
             let app = Router::new()
-                .route("/api/v1/files", get(move || {
-                    let id = id.clone();
-                    let reads = get_reads.clone();
-                    let src_name = src_name.clone();
-                    async move {
-                        reads.fetch_add(1, Ordering::SeqCst);
-                        Json(json!({"files": [
-                            {"id": src, "name_encrypted": src_name, "is_folder": false},
-                            {"id": id, "name_encrypted": "Target", "is_folder": true}
-                        ]}))
-                    }
-                }))
-                .route("/api/v1/files/:id", patch(move || {
-                    let count = patch_count.clone();
-                    async move {
-                        count.fetch_add(1, Ordering::SeqCst);
-                        Json(json!({"ok": true}))
-                    }
-                }));
+                .route(
+                    "/api/v1/files",
+                    get(move || {
+                        let id = id.clone();
+                        let reads = get_reads.clone();
+                        let src_name = src_name.clone();
+                        async move {
+                            reads.fetch_add(1, Ordering::SeqCst);
+                            Json(json!({"files": [
+                                {"id": src, "name_encrypted": src_name, "is_folder": false},
+                                {"id": id, "name_encrypted": "Target", "is_folder": true}
+                            ]}))
+                        }
+                    }),
+                )
+                .route(
+                    "/api/v1/files/:id",
+                    patch(move || {
+                        let count = patch_count.clone();
+                        async move {
+                            count.fetch_add(1, Ordering::SeqCst);
+                            Json(json!({"ok": true}))
+                        }
+                    }),
+                );
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let state = Arc::new(DavState {
                 api: ApiClient::new_for_test(format!("http://{}", listener.local_addr().unwrap())),
@@ -527,8 +531,8 @@ mod item_id_echo_tests {
 }
 
 mod server;
-pub use server::{run, WebdavOptions};
 use server::*;
+pub use server::{WebdavOptions, run};
 
 mod verbs;
 use verbs::*;
@@ -720,8 +724,8 @@ mod rename_key_tests {
         let response = move_response(&state, &listed, "/Shared/Guest2").await;
         server.abort();
         let status = response.status();
-        let body = String::from_utf8_lossy(&axum::body::to_bytes(response.into_body(), 4096).await.unwrap())
-            .into_owned();
+        let body =
+            String::from_utf8_lossy(&axum::body::to_bytes(response.into_body(), 4096).await.unwrap()).into_owned();
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
         assert_eq!(body, crate::owned_keys::RENAME_UNKNOWN_KEY);
         assert_eq!(patches.load(Ordering::SeqCst), 0, "a refused rename sent a PATCH");
@@ -734,7 +738,10 @@ mod rename_key_tests {
 #[cfg(test)]
 mod a9b_webdav_tests {
     use super::*;
-    use axum::{Json, routing::{get, post, put}};
+    use axum::{
+        Json,
+        routing::{get, post, put},
+    };
     use serde_json::json;
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -772,8 +779,7 @@ mod a9b_webdav_tests {
         let inits: Arc<StdMutex<Vec<serde_json::Value>>> = Arc::new(StdMutex::new(Vec::new()));
         let requested: Arc<StdMutex<Option<String>>> = Arc::new(StdMutex::new(None));
         let patches = Arc::new(AtomicUsize::new(0));
-        let (listing_rows, listing_inits, init_requested) =
-            (rows.clone(), inits.clone(), requested.clone());
+        let (listing_rows, listing_inits, init_requested) = (rows.clone(), inits.clone(), requested.clone());
         let (chunk_requested, complete_requested) = (requested.clone(), requested.clone());
         let patch_count = patches.clone();
         let app = Router::new()
@@ -786,30 +792,30 @@ mod a9b_webdav_tests {
             )
             .route(
                 "/api/v1/uploads/init",
-                post(
-                    move |axum::Json(body): axum::Json<serde_json::Value>| {
-                        let inits = listing_inits.clone();
-                        let requested = init_requested.clone();
-                        async move {
-                            let id = body["file_id"].as_str().unwrap_or_default().to_string();
-                            inits.lock().unwrap().push(body.clone());
-                            *requested.lock().unwrap() = Some(id.clone());
-                            Json(json!({
-                                "upload_session_id": "sess-1",
-                                "file_id": id,
-                                "chunk_size_bytes": body["chunk_size_bytes"],
-                                "chunk_count": body["chunk_count"],
-                            }))
-                        }
-                    },
-                ),
+                post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                    let inits = listing_inits.clone();
+                    let requested = init_requested.clone();
+                    async move {
+                        let id = body["file_id"].as_str().unwrap_or_default().to_string();
+                        inits.lock().unwrap().push(body.clone());
+                        *requested.lock().unwrap() = Some(id.clone());
+                        Json(json!({
+                            "upload_session_id": "sess-1",
+                            "file_id": id,
+                            "chunk_size_bytes": body["chunk_size_bytes"],
+                            "chunk_count": body["chunk_count"],
+                        }))
+                    }
+                }),
             )
             .route(
                 "/api/v1/uploads/:session/chunks/:idx",
-                put(move |axum::extract::Path((_s, idx)): axum::extract::Path<(String, u32)>| {
-                    let _ = chunk_requested.clone();
-                    async move { Json(json!({"index": idx, "size": 1, "skipped": false})) }
-                }),
+                put(
+                    move |axum::extract::Path((_s, idx)): axum::extract::Path<(String, u32)>| {
+                        let _ = chunk_requested.clone();
+                        async move { Json(json!({"index": idx, "size": 1, "skipped": false})) }
+                    },
+                ),
             )
             .route(
                 "/api/v1/uploads/:session/complete",
@@ -857,8 +863,8 @@ mod a9b_webdav_tests {
         let response = put_response(&state, "/Shared/request.txt", b"edited body".to_vec(), None).await;
         server.abort();
         let status = response.status();
-        let body = String::from_utf8_lossy(&axum::body::to_bytes(response.into_body(), 4096).await.unwrap())
-            .into_owned();
+        let body =
+            String::from_utf8_lossy(&axum::body::to_bytes(response.into_body(), 4096).await.unwrap()).into_owned();
         assert_eq!(status, StatusCode::CREATED, "{body}");
 
         let init = inits.lock().unwrap()[0].clone();
@@ -867,7 +873,11 @@ mod a9b_webdav_tests {
             Some(REQUEST),
             "the edit is a new item, not a version of the request row"
         );
-        assert_eq!(init["base_version_number"], json!(null), "no version of the request row: {init}");
+        assert_eq!(
+            init["base_version_number"],
+            json!(null),
+            "no version of the request row: {init}"
+        );
         assert_eq!(patches.load(Ordering::SeqCst), 0, "the request row was renamed");
     }
 }

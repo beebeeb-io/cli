@@ -214,7 +214,15 @@ fn nested() -> Fixture {
     // 2275 L12: a foreign row carries an F (v8) id
     f.rows[1]["parent_id"] = json!(F_SUB);
     f.rows[1]["owner_wrapped_file_key"] = Value::Null;
-    f.rows.push(row(F_SUB, Some(ROOT), "sub", RowFacts { folder: true, foreign: true }));
+    f.rows.push(row(
+        F_SUB,
+        Some(ROOT),
+        "sub",
+        RowFacts {
+            folder: true,
+            foreign: true,
+        },
+    ));
     f.nested_legacy = true;
     f.sub_inventory = vec![json!({
         "file_id": FILE,

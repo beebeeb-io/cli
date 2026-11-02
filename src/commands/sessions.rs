@@ -475,7 +475,8 @@ pub async fn revoke_all_others(yes: bool) -> Result<(), String> {
     if !revoke_all_others_may_proceed_without_prompt(RevokeConsent {
         confirmed: yes,
         interactive: ui::is_rich(),
-    })? && !confirm_revoke_all()? {
+    })? && !confirm_revoke_all()?
+    {
         if !ui::is_quiet() {
             println!("  {}", "cancelled".custom_color(colors::INK_DIM));
         }
@@ -936,8 +937,14 @@ mod tests {
 
     #[test]
     fn yes_flag_always_proceeds_without_a_prompt_rich_or_not() {
-        let yes_rich = RevokeConsent { confirmed: true, interactive: true };
-        let yes_quiet = RevokeConsent { confirmed: true, interactive: false };
+        let yes_rich = RevokeConsent {
+            confirmed: true,
+            interactive: true,
+        };
+        let yes_quiet = RevokeConsent {
+            confirmed: true,
+            interactive: false,
+        };
         assert_eq!(revoke_all_others_may_proceed_without_prompt(yes_rich), Ok(true));
         assert_eq!(revoke_all_others_may_proceed_without_prompt(yes_quiet), Ok(true));
     }
@@ -945,7 +952,10 @@ mod tests {
     #[test]
     fn no_yes_but_rich_terminal_falls_through_to_the_prompt() {
         assert_eq!(
-            revoke_all_others_may_proceed_without_prompt(RevokeConsent { confirmed: false, interactive: true }),
+            revoke_all_others_may_proceed_without_prompt(RevokeConsent {
+                confirmed: false,
+                interactive: true
+            }),
             Ok(false)
         );
     }
@@ -955,8 +965,11 @@ mod tests {
         // This is the exact bug the Codex review caught: --json/--quiet
         // (is_rich == false) must NOT silently skip the safety check just
         // because there's no terminal to prompt on.
-        let err = revoke_all_others_may_proceed_without_prompt(RevokeConsent { confirmed: false, interactive: false })
-            .unwrap_err();
+        let err = revoke_all_others_may_proceed_without_prompt(RevokeConsent {
+            confirmed: false,
+            interactive: false,
+        })
+        .unwrap_err();
         assert!(
             err.contains("--yes"),
             "err must tell the caller how to proceed: {err:?}"

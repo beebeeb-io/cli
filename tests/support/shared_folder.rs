@@ -176,7 +176,15 @@ impl Fixture {
         let (wrapped, nonce) = beebeeb_core::file_request::wrap_request_private(&master(), b"", &private).unwrap();
         self.requests_doc = json!({"file_requests":[{"id":SUB,"wrapped_private_key":B64.encode(wrapped),"wrap_nonce":B64.encode(nonce)}]});
         let seal = beebeeb_core::file_request::seal_to_request(&public, b"", item_key().as_bytes()).unwrap();
-        let mut r = row(SUB, None, "request.txt", RowFacts { foreign: true, ..Default::default() });
+        let mut r = row(
+            SUB,
+            None,
+            "request.txt",
+            RowFacts {
+                foreign: true,
+                ..Default::default()
+            },
+        );
         r["acted_via_share_id"] = Value::Null;
         r["file_request_id"] = json!(SUB);
         r["sender_ephemeral_pubkey"] = json!(B64.encode(seal.e_pub));
@@ -199,7 +207,12 @@ impl Fixture {
         f.plaintext = b"SF-0002 read-only repair content".to_vec();
         f.stride = f.plaintext.len() as u64;
         f.frames = vec![beebeeb_core::encrypt::encrypt_chunk_raw(&key, &f.plaintext).unwrap()];
-        let mut r = row(UPPER_FILE, Some(ROOT), "uppercase-repair.pdf", RowFacts { ..Default::default() });
+        let mut r = row(
+            UPPER_FILE,
+            Some(ROOT),
+            "uppercase-repair.pdf",
+            RowFacts { ..Default::default() },
+        );
         r["name_encrypted"] = json!(
             beebeeb_core::encrypt::encrypt_name_for(
                 &key,
@@ -286,7 +299,12 @@ impl Fixture {
         f.plaintext = b"SF-0002 content-only repair payload".to_vec();
         f.stride = f.plaintext.len() as u64;
         f.frames = vec![beebeeb_core::encrypt::encrypt_chunk_raw(&upper, &f.plaintext).unwrap()];
-        let mut r = row(UPPER_FILE, Some(ROOT), "uppercase-repair.pdf", RowFacts { ..Default::default() });
+        let mut r = row(
+            UPPER_FILE,
+            Some(ROOT),
+            "uppercase-repair.pdf",
+            RowFacts { ..Default::default() },
+        );
         r["name_encrypted"] = json!(
             beebeeb_core::encrypt::encrypt_name_for(
                 &normal,
@@ -304,8 +322,24 @@ impl Fixture {
     pub fn basic() -> Self {
         Self {
             rows: vec![
-                row(ROOT, None, "Shared", RowFacts { folder: true, ..Default::default() }),
-                row(FILE, Some(ROOT), "guest.txt", RowFacts { foreign: true, ..Default::default() }),
+                row(
+                    ROOT,
+                    None,
+                    "Shared",
+                    RowFacts {
+                        folder: true,
+                        ..Default::default()
+                    },
+                ),
+                row(
+                    FILE,
+                    Some(ROOT),
+                    "guest.txt",
+                    RowFacts {
+                        foreign: true,
+                        ..Default::default()
+                    },
+                ),
             ],
             inventory: vec![json!({"file_id":FILE,"encrypted_file_key":wrap(FILE,false)})],
             ..Self::default()
@@ -630,7 +664,9 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
             None => (rest, false),
         };
         match f.extra_root_keys.get(id) {
-            Some(key) if !wants_keys => json!({"folder_id":id,"role":"owner","access_level":"edit","key_version":1,"owner_wrapped_folder_key":B64.encode(owned_keys::wrap_folder_custody(&master(),id,&FileKey::from_bytes(*key)).unwrap())}),
+            Some(key) if !wants_keys => {
+                json!({"folder_id":id,"role":"owner","access_level":"edit","key_version":1,"owner_wrapped_folder_key":B64.encode(owned_keys::wrap_folder_custody(&master(),id,&FileKey::from_bytes(*key)).unwrap())})
+            }
             Some(_) => {
                 let rows = f.extra_root_inventories.get(id).cloned().unwrap_or_default();
                 json!({"keys":rows,"next_cursor":null})

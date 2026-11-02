@@ -322,7 +322,8 @@ async fn replace_refuses_when_the_check_cannot_read_the_version() {
         let f = h.state.lock().unwrap();
         assert_eq!(
             // 2275 L12: an owner row carries an O id
-            f.upload_request["file_id"], O_FILE,
+            f.upload_request["file_id"],
+            O_FILE,
             "the replace must version the same id"
         );
         assert_eq!(f.upload_request["base_version_number"], 1);

@@ -167,19 +167,52 @@ mod tests {
 
     #[test]
     fn plan_signup_json_wins_and_never_opens_a_browser() {
-        assert_eq!(plan_signup(SignupPlan { json: true, quiet: true, ..Default::default() }), SignupAction::Json);
-        assert_eq!(plan_signup(SignupPlan { json: true, headless: true, ..Default::default() }), SignupAction::Json);
+        assert_eq!(
+            plan_signup(SignupPlan {
+                json: true,
+                quiet: true,
+                ..Default::default()
+            }),
+            SignupAction::Json
+        );
+        assert_eq!(
+            plan_signup(SignupPlan {
+                json: true,
+                headless: true,
+                ..Default::default()
+            }),
+            SignupAction::Json
+        );
     }
 
     #[test]
     fn plan_signup_quiet_prints_just_the_url() {
-        assert_eq!(plan_signup(SignupPlan { quiet: true, ..Default::default() }), SignupAction::PrintUrl);
-        assert_eq!(plan_signup(SignupPlan { quiet: true, headless: true, ..Default::default() }), SignupAction::PrintUrl);
+        assert_eq!(
+            plan_signup(SignupPlan {
+                quiet: true,
+                ..Default::default()
+            }),
+            SignupAction::PrintUrl
+        );
+        assert_eq!(
+            plan_signup(SignupPlan {
+                quiet: true,
+                headless: true,
+                ..Default::default()
+            }),
+            SignupAction::PrintUrl
+        );
     }
 
     #[test]
     fn plan_signup_headless_does_not_open() {
-        assert_eq!(plan_signup(SignupPlan { headless: true, ..Default::default() }), SignupAction::Headless);
+        assert_eq!(
+            plan_signup(SignupPlan {
+                headless: true,
+                ..Default::default()
+            }),
+            SignupAction::Headless
+        );
     }
 
     #[test]

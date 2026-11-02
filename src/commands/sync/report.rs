@@ -23,11 +23,7 @@ pub(super) struct PassReport<'a> {
 impl PassReport<'_> {
     /// A pass that left uploads failed or conflicts unresolved is not "synced".
     fn incomplete(&self) -> bool {
-        self.failed > 0
-            || self.conflicts > 0
-            || self.held_back > 0
-            || self.read_only_kept > 0
-            || self.delete_refused
+        self.failed > 0 || self.conflicts > 0 || self.held_back > 0 || self.read_only_kept > 0 || self.delete_refused
     }
 }
 
@@ -58,14 +54,8 @@ fn incomplete_error(report: &PassReport<'_>) -> String {
         crate::exit::INCOMPLETE,
         format!(
             "sync incomplete: {} \u{2014} fix the cause and re-run{}",
-            match incomplete_summary(
-                report.failed,
-                report.conflicts,
-                report.held_back,
-                report.read_only_kept
-            ) {
-                s if s.is_empty() && report.delete_refused =>
-                    "--delete refused on a changed remote folder".to_string(),
+            match incomplete_summary(report.failed, report.conflicts, report.held_back, report.read_only_kept) {
+                s if s.is_empty() && report.delete_refused => "--delete refused on a changed remote folder".to_string(),
                 s => s,
             },
             if report.delete_refused {

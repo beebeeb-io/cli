@@ -48,7 +48,15 @@ async fn direct_pull_random_key() {
 async fn folder_zip_and_safe_names() {
     let mut f = Fixture::transfer(false);
     // 2275 L12: a foreign row carries an F (v8) id
-    let mut bad = row(F_BAD, Some(ROOT), "../escape", RowFacts { foreign: true, ..Default::default() });
+    let mut bad = row(
+        F_BAD,
+        Some(ROOT),
+        "../escape",
+        RowFacts {
+            foreign: true,
+            ..Default::default()
+        },
+    );
     bad["name_encrypted"] = json!(name(&item_key(), "../escape"));
     f.rows.push(bad);
     f.inventory

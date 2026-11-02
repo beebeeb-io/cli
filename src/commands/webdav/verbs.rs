@@ -311,10 +311,7 @@ pub(super) async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8
     // chunk-format pin). A fresh item uses the string convention. A listed row
     // this client cannot resolve is never overwritten under a guessed key.
     let (file_key, name_pin) = match existing.as_ref().and_then(|e| e.write_target.clone()) {
-        Some(target) => (
-            crate::crypto::key_copy(target.key()),
-            target.pin(),
-        ),
+        Some(target) => (crate::crypto::key_copy(target.key()), target.pin()),
         None => {
             if existing_file_id.is_some() {
                 return (StatusCode::CONFLICT, crate::owned_keys::UNREADABLE).into_response();
@@ -473,7 +470,12 @@ pub(super) async fn mkcol_response(state: &Arc<DavState>, path: &str) -> Respons
     match crate::item_id::create_owned_folder(&state.api, &state.master_key, &folder_name, parent_id).await {
         Ok(_) => {
             invalidate_cache(state, &normalise_cache_key(parent_path)).await;
-            crate::owned_keys::announce_owner_only(&state.api, &state.master_key, parent_id.map(|p| p.to_string()).as_deref()).await;
+            crate::owned_keys::announce_owner_only(
+                &state.api,
+                &state.master_key,
+                parent_id.map(|p| p.to_string()).as_deref(),
+            )
+            .await;
             let mut headers = HeaderMap::new();
             headers.insert("Location", path.parse().unwrap_or_else(|_| "/".parse().unwrap()));
             (StatusCode::CREATED, headers, "").into_response()

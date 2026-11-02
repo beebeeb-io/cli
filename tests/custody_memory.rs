@@ -258,7 +258,15 @@ async fn a_new_child_without_an_envelope_still_refuses_through_load_root_after_a
             withdraw_custody(&mut f, status);
             // A child added after the adoption: no owner envelope, only the replayed legacy wrap.
             // 2275 L12: a foreign row carries an F (v8) id
-            let mut fresh = row(F_SUB, Some(ROOT), "new.txt", RowFacts { foreign: true, ..Default::default() });
+            let mut fresh = row(
+                F_SUB,
+                Some(ROOT),
+                "new.txt",
+                RowFacts {
+                    foreign: true,
+                    ..Default::default()
+                },
+            );
             fresh["owner_wrapped_file_key"] = Value::Null;
             f.rows.push(fresh);
             let replayed =

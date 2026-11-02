@@ -550,7 +550,8 @@ pub async fn remove(id: String, yes: bool) -> Result<(), String> {
     if !remove_may_proceed_without_prompt(RemoveConsent {
         confirmed: yes,
         interactive,
-    })? && !confirm_remove(&name)? {
+    })? && !confirm_remove(&name)?
+    {
         if !ui::is_quiet() {
             println!("  {}", "cancelled".custom_color(colors::INK_DIM));
         }
@@ -903,7 +904,13 @@ mod tests {
             }),
             AddAction::Json
         );
-        assert_eq!(plan_add(AddPlan { json: true, ..Default::default() }), AddAction::Json);
+        assert_eq!(
+            plan_add(AddPlan {
+                json: true,
+                ..Default::default()
+            }),
+            AddAction::Json
+        );
     }
 
     #[test]
@@ -911,8 +918,21 @@ mod tests {
         // The exact regression this flag exists for: --print-url must route
         // to PrintUrl, never Open — Open is the only variant that calls
         // `open::that`.
-        assert_eq!(plan_add(AddPlan { print_url: true, ..Default::default() }), AddAction::PrintUrl);
-        assert_eq!(plan_add(AddPlan { print_url: true, headless: true, ..Default::default() }), AddAction::PrintUrl);
+        assert_eq!(
+            plan_add(AddPlan {
+                print_url: true,
+                ..Default::default()
+            }),
+            AddAction::PrintUrl
+        );
+        assert_eq!(
+            plan_add(AddPlan {
+                print_url: true,
+                headless: true,
+                ..Default::default()
+            }),
+            AddAction::PrintUrl
+        );
     }
 
     #[test]
@@ -920,12 +940,24 @@ mod tests {
         // --quiet is "bare value, no side effects" everywhere else in this
         // CLI (`sessions list`, `ls`, `quota`, ...) — add must match that
         // convention rather than opening a browser mid-script.
-        assert_eq!(plan_add(AddPlan { quiet: true, ..Default::default() }), AddAction::PrintUrl);
+        assert_eq!(
+            plan_add(AddPlan {
+                quiet: true,
+                ..Default::default()
+            }),
+            AddAction::PrintUrl
+        );
     }
 
     #[test]
     fn plan_add_headless_without_print_url_shows_the_url_but_does_not_open() {
-        assert_eq!(plan_add(AddPlan { headless: true, ..Default::default() }), AddAction::Headless);
+        assert_eq!(
+            plan_add(AddPlan {
+                headless: true,
+                ..Default::default()
+            }),
+            AddAction::Headless
+        );
     }
 
     #[test]
@@ -1014,13 +1046,31 @@ mod tests {
 
     #[test]
     fn remove_yes_flag_always_proceeds_without_a_prompt_rich_or_not() {
-        assert_eq!(remove_may_proceed_without_prompt(RemoveConsent { confirmed: true, interactive: true }), Ok(true));
-        assert_eq!(remove_may_proceed_without_prompt(RemoveConsent { confirmed: true, interactive: false }), Ok(true));
+        assert_eq!(
+            remove_may_proceed_without_prompt(RemoveConsent {
+                confirmed: true,
+                interactive: true
+            }),
+            Ok(true)
+        );
+        assert_eq!(
+            remove_may_proceed_without_prompt(RemoveConsent {
+                confirmed: true,
+                interactive: false
+            }),
+            Ok(true)
+        );
     }
 
     #[test]
     fn remove_no_yes_but_rich_terminal_falls_through_to_the_prompt() {
-        assert_eq!(remove_may_proceed_without_prompt(RemoveConsent { confirmed: false, interactive: true }), Ok(false));
+        assert_eq!(
+            remove_may_proceed_without_prompt(RemoveConsent {
+                confirmed: false,
+                interactive: true
+            }),
+            Ok(false)
+        );
     }
 
     #[test]
@@ -1029,7 +1079,11 @@ mod tests {
         // `sessions revoke-all-others` path (eng-0481): --json/--quiet
         // (is_rich == false) must NOT silently skip the safety check just
         // because there's no terminal to prompt on.
-        let err = remove_may_proceed_without_prompt(RemoveConsent { confirmed: false, interactive: false }).unwrap_err();
+        let err = remove_may_proceed_without_prompt(RemoveConsent {
+            confirmed: false,
+            interactive: false,
+        })
+        .unwrap_err();
         assert!(
             err.contains("--yes"),
             "err must tell the caller how to proceed: {err:?}"

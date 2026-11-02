@@ -79,7 +79,10 @@ async fn a_request_row_edit_in_the_watch_loop_is_a_new_owner_item() {
     let (result, mock) = watch_upload_of_request_edit(Mock::default(), &s).await;
     result.expect("the edit uploads");
     let m = mock.lock().unwrap();
-    assert_ne!(m.inits[0], REQUEST_ROW, "the edit is a new item, not a version of the request row");
+    assert_ne!(
+        m.inits[0], REQUEST_ROW,
+        "the edit is a new item, not a version of the request row"
+    );
     assert!(
         m.init_bodies[0].get("base_version_number").is_none_or(|v| v.is_null()),
         "a new item carries no version base: {:?}",
@@ -102,8 +105,8 @@ async fn a_request_row_edit_in_the_watch_loop_is_a_new_owner_item() {
 /// not the SF-0002 iOS-repair message, which describes a different convention.
 #[tokio::test]
 async fn a_plaintext_name_is_skipped_with_its_own_reason() {
-    use crate::owned_keys::ResolvedCliKey;
     use crate::commands::sync::transfer::{Replace, replace_decision};
+    use crate::owned_keys::ResolvedCliKey;
     use std::sync::Arc;
 
     let master = beebeeb_core::kdf::MasterKey::from_bytes([7u8; 32]);

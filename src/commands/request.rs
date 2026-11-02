@@ -597,25 +597,25 @@ impl RequestKeyResolver {
     /// to `C`. A request row is never adopted, wrapped at share time or
     /// published, and its content is read-only.
     ///
-    /// New envelopes bind the row id and the request id (2236), so core's
-    /// `resolve_request_row` is tried first. Every envelope the shipped CLI and
-    /// web client created before 2236 uses the empty wrap/seal context, because
-    /// neither id existed when the uploader sealed — that is the named legacy
-    /// reader below (R5). Core has no legacy reader for request rows yet, so this
-    /// is the one documented place that reads the pre-2236 shape.
+    /// Only core resolves the row (P2-8, review-2): core refuses a foreign id,
+    /// a plaintext name and an envelope that does not authenticate as
+    /// `CoreError::InvalidInput` — it has no distinct "legacy unbound envelope"
+    /// error to fall back on. The safe side is therefore no local fallback at
+    /// all: a row core refuses stays refused. The pre-2236 legacy reader (R5)
+    /// returns only when core exposes a reader that names that shape.
     pub fn row_keys(
         &mut self,
         master_key: &MasterKey,
         file: &serde_json::Value,
     ) -> Option<beebeeb_core::owned_keys::RequestRowKeys> {
-        use beebeeb_core::owned_keys::{KeyOrigin, RequestRowKeys, resolve_request_row};
+        use beebeeb_core::owned_keys::resolve_request_row;
         let fields = request_upload_fields(file)?;
         let id = file.get("id").and_then(|v| v.as_str())?;
         let enc = file.get("name_encrypted").and_then(|v| v.as_str())?;
         let (w_b64, n_b64) = self.wrapped.get(&fields.request_id)?;
         let wrapped = decode_any_b64(w_b64)?;
         let nonce = decode_any_b64(n_b64)?;
-        if let Ok(keys) = resolve_request_row(
+        resolve_request_row(
             master_key,
             id,
             fields.request_id.as_bytes(),
@@ -624,44 +624,8 @@ impl RequestKeyResolver {
             &fields.e_pub,
             &fields.wrapped_content_key,
             enc,
-        ) {
-            return Some(keys);
-        }
-        // R5 legacy reader: pre-2236 envelopes, empty wrap and seal contexts.
-        let r_priv = self.request_priv(master_key, fields.request_id)?;
-        let content = file_request::open_request_upload(
-            &r_priv,
-            &fields.e_pub,
-            REQUEST_SEAL_CONTEXT,
-            &fields.wrapped_content_key,
         )
-        .ok()?;
-        let content_key = FileKey::from_bytes(*content);
-        let derived = beebeeb_core::kdf::owner_file_key_for_name(master_key, id, enc)
-            .ok()
-            .and_then(|(key, convention)| {
-                let origin = match convention {
-                    beebeeb_core::kdf::OwnerKeyConvention::String => KeyOrigin::Derived,
-                    beebeeb_core::kdf::OwnerKeyConvention::Binary => KeyOrigin::DerivedBinary,
-                    beebeeb_core::kdf::OwnerKeyConvention::UpperRepair => KeyOrigin::DerivedUpperRepair,
-                };
-                let name = beebeeb_core::encrypt::decrypt_name_metadata_with_key(&key, enc).ok()?;
-                Some((key, origin, name))
-            });
-        let (name_key, name_origin, name) = match derived {
-            Some(v) => v,
-            None => (
-                FileKey::from_bytes(*content_key.as_bytes()),
-                KeyOrigin::RequestContent,
-                beebeeb_core::encrypt::decrypt_name_metadata_with_key(&content_key, enc).ok()?,
-            ),
-        };
-        Some(RequestRowKeys {
-            content_key,
-            name_key,
-            name_origin,
-            name,
-        })
+        .ok()
     }
 }
 
@@ -1041,5 +1005,41 @@ mod tests {
             "wrapped_content_key": meta["wrapped_key"].as_str().unwrap(),
         });
         assert!(resolver.content_key(&mk, &orphan_row).is_none());
+    }
+    /// P2-8 (review-2): a row core refuses as a foreign id is refused. bcc7320
+    /// fell back to the local legacy reader on ANY core error, so this row
+    /// resolved under its content key; it must not.
+    #[test]
+    fn a_foreign_id_request_row_is_refused_not_resolved_locally() {
+        let mk = test_master_key();
+        let request_id = "11111111-2222-3333-4444-555555555555".parse::<uuid::Uuid>().unwrap();
+        let (r_priv, r_pub) = generate_request_keypair();
+        let (wrapped, nonce) = file_request::wrap_request_private(&mk, REQUEST_WRAP_CONTEXT, &r_priv).unwrap();
+        let (metadata, _chunks) = seal_file_for_request(&r_pub, "foreign.bin", None, b"foreign id", 16).unwrap();
+        let meta: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+        let foreign_id = "33333333-3333-8333-8333-333333333333";
+        assert_eq!(
+            beebeeb_core::item_id::item_class(foreign_id).unwrap(),
+            beebeeb_core::item_id::ItemClass::Foreign
+        );
+        let file_row = serde_json::json!({
+            "id": foreign_id,
+            "name_encrypted": meta["name_encrypted"].as_str().unwrap(),
+            "is_folder": false,
+            "file_request_id": request_id.to_string(),
+            "sender_ephemeral_pubkey": meta["sender_ephemeral_pubkey"].as_str().unwrap(),
+            "wrapped_content_key": meta["wrapped_key"].as_str().unwrap(),
+        });
+        let mut resolver = RequestKeyResolver {
+            wrapped: std::collections::HashMap::from([(
+                request_id,
+                (b64std().encode(&wrapped), b64std().encode(&nonce)),
+            )]),
+            privs: std::collections::HashMap::new(),
+        };
+        assert!(
+            resolver.row_keys(&mk, &file_row).is_none(),
+            "a foreign-id request row is refused by core and must not fall back"
+        );
     }
 }

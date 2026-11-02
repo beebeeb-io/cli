@@ -72,7 +72,18 @@ fn owner_key_posts(h: &Harness, id: &str) -> usize {
 fn shared_folder(fixture: Fixture) -> Fixture {
     let mut f = fixture;
     if !f.rows.iter().any(|r| r["id"] == ROOT) {
-        f.rows.insert(0, row(ROOT, None, "Shared", RowFacts { folder: true, ..Default::default() }));
+        f.rows.insert(
+            0,
+            row(
+                ROOT,
+                None,
+                "Shared",
+                RowFacts {
+                    folder: true,
+                    ..Default::default()
+                },
+            ),
+        );
     }
     f
 }
@@ -105,7 +116,10 @@ async fn a1_owner_id_with_member_wrap_reads_derived_only() {
         O_FILE,
         Some(ROOT),
         "a1.txt",
-        RowFacts { foreign: true, ..Default::default() },
+        RowFacts {
+            foreign: true,
+            ..Default::default()
+        },
     ));
     f.inventory
         .push(json!({"file_id":O_FILE,"encrypted_file_key":wrap(O_FILE,false)}));
@@ -157,8 +171,7 @@ async fn a3_owner_id_l8_envelope_is_ignored() {
     };
     assert_eq!(decrypt_name(&item_key(), &sealed), "a3.txt");
     assert_eq!(
-        v["files"][0]["name"],
-        "can't open (added via shared folder)",
+        v["files"][0]["name"], "can't open (added via shared folder)",
         "the L8 envelope must not open an O item: {v}"
     );
     assert_eq!(owner_key_posts(&h, O_FILE), 0);
@@ -257,12 +270,30 @@ async fn a9b_sync_request_row_edit_becomes_new_item() {
     let (uploaded, chunks) = {
         let state = h.state.lock().unwrap();
         let body = state.upload_request.clone();
-        (body["file_id"].as_str().unwrap().to_string(), state.uploaded_chunks.clone())
+        (
+            body["file_id"].as_str().unwrap().to_string(),
+            state.uploaded_chunks.clone(),
+        )
     };
-    assert_ne!(uploaded, SUB, "a content edit is a new item, not a version of the request row");
-    assert_eq!(h.count("PATCH", &format!("/api/v1/files/{SUB}")), 0, "the request row is not renamed");
-    assert_eq!(h.count("DELETE", &format!("/api/v1/files/{SUB}")), 0, "the request row is not trashed");
-    assert_eq!(pull_bytes(&h, SUB).await, b"request body", "the request row's content is untouched");
+    assert_ne!(
+        uploaded, SUB,
+        "a content edit is a new item, not a version of the request row"
+    );
+    assert_eq!(
+        h.count("PATCH", &format!("/api/v1/files/{SUB}")),
+        0,
+        "the request row is not renamed"
+    );
+    assert_eq!(
+        h.count("DELETE", &format!("/api/v1/files/{SUB}")),
+        0,
+        "the request row is not trashed"
+    );
+    assert_eq!(
+        pull_bytes(&h, SUB).await,
+        b"request body",
+        "the request row's content is untouched"
+    );
     // The edit was sealed under the new owner id, never under C.
     let new_key = beebeeb_core::kdf::derive_file_key(&master(), uploaded.as_bytes());
     assert_eq!(
@@ -285,7 +316,13 @@ async fn a9c_request_row_renamed_under_derived_keeps_content_under_c() {
     f.rows[row_index]["name_encrypted"] = json!(name(&string_key, "renamed.txt"));
     let h = Harness::new(f).await;
     let v = h.json(&["ls"]).await;
-    assert!(v["files"].as_array().unwrap().iter().any(|r| r["name"] == "renamed.txt"));
+    assert!(
+        v["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["name"] == "renamed.txt")
+    );
     assert_eq!(pull_bytes(&h, SUB).await, b"request body");
     assert_eq!(owner_key_posts(&h, SUB), 0);
     h.close().await;
@@ -317,14 +354,14 @@ async fn a11_index_skips_wrap_of_another_items_key() {
             beebeeb_core::owned_keys::wrap_child_key(&folder_key(), ROOT, FILE, 1, &other).unwrap()
         ),
     })];
-    f.rows[1]["owner_wrapped_file_key"] = json!(B64.encode(
-        beebeeb_core::owned_keys::wrap_owner_file_key(&master(), FILE, &item_key()).unwrap()
-    ));
+    f.rows[1]["owner_wrapped_file_key"] =
+        json!(B64.encode(beebeeb_core::owned_keys::wrap_owner_file_key(&master(), FILE, &item_key()).unwrap()));
     let h = Harness::new(f).await;
     let d = dir(&h);
     let out = sync(&h, &d).await;
     assert_eq!(
-        sync_report(&out)["index_skip_reasons"]["wrap_key_mismatch"], 1,
+        sync_report(&out)["index_skip_reasons"]["wrap_key_mismatch"],
+        1,
         "the wrap names another key"
     );
     assert!(h.state.lock().unwrap().shared_index.is_empty());
@@ -340,18 +377,32 @@ async fn a10_index_skips_item_wrapped_only_in_another_root() {
     let r2_key = FileKey::from_bytes([129; 32]);
     let mut f = Fixture::transfer(true);
     // The victim, listed under R1 (ROOT), reads through its owner envelope.
-    f.rows[1]["owner_wrapped_file_key"] = json!(B64.encode(
-        beebeeb_core::owned_keys::wrap_owner_file_key(&master(), FILE, &item_key()).unwrap()
-    ));
+    f.rows[1]["owner_wrapped_file_key"] =
+        json!(B64.encode(beebeeb_core::owned_keys::wrap_owner_file_key(&master(), FILE, &item_key()).unwrap()));
     // R2 is a proven root the walk reaches (a folder under R1 whose child
     // resolves through R2's custody), and its inventory wraps FILE - an item
     // that lives under R1 - and its own child F_BAD.
-    let mut r2 = row(F_SUB, Some(ROOT), "Other", RowFacts { folder: true, foreign: true });
-    r2["owner_wrapped_file_key"] = json!(B64.encode(
-        beebeeb_core::owned_keys::wrap_owner_file_key(&master(), F_SUB, &item_key()).unwrap()
-    ));
+    let mut r2 = row(
+        F_SUB,
+        Some(ROOT),
+        "Other",
+        RowFacts {
+            folder: true,
+            foreign: true,
+        },
+    );
+    r2["owner_wrapped_file_key"] =
+        json!(B64.encode(beebeeb_core::owned_keys::wrap_owner_file_key(&master(), F_SUB, &item_key()).unwrap()));
     f.rows.push(r2);
-    f.rows.push(row(F_BAD, Some(F_SUB), "inner", RowFacts { folder: true, foreign: true }));
+    f.rows.push(row(
+        F_BAD,
+        Some(F_SUB),
+        "inner",
+        RowFacts {
+            folder: true,
+            foreign: true,
+        },
+    ));
     f.inventory.clear();
     f.extra_root_keys.insert(F_SUB.into(), *r2_key.as_bytes());
     f.extra_root_inventories.insert(
@@ -383,10 +434,17 @@ async fn a10_index_skips_item_wrapped_only_in_another_root() {
 async fn a12_index_does_not_descend_into_unproven_folder() {
     let mut f = Fixture::transfer(true);
     f.rows[1]["parent_id"] = json!(F_SUB);
-    let mut nested = row(F_SUB, Some(ROOT), "Nested", RowFacts { folder: true, foreign: true });
-    nested["owner_wrapped_file_key"] = json!(B64.encode(
-        beebeeb_core::owned_keys::wrap_owner_file_key(&master(), F_SUB, &item_key()).unwrap()
-    ));
+    let mut nested = row(
+        F_SUB,
+        Some(ROOT),
+        "Nested",
+        RowFacts {
+            folder: true,
+            foreign: true,
+        },
+    );
+    nested["owner_wrapped_file_key"] =
+        json!(B64.encode(beebeeb_core::owned_keys::wrap_owner_file_key(&master(), F_SUB, &item_key()).unwrap()));
     f.rows.push(nested);
     // Only the grandchild has a wrap; F_SUB itself has none, so R's key does not
     // prove it and the repair must not descend.
@@ -395,7 +453,8 @@ async fn a12_index_does_not_descend_into_unproven_folder() {
     let d = dir(&h);
     let out = sync(&h, &d).await;
     assert_eq!(
-        sync_report(&out)["index_skip_reasons"]["no_wrap"], 1,
+        sync_report(&out)["index_skip_reasons"]["no_wrap"],
+        1,
         "the unproven folder itself is skipped with its reason"
     );
     assert!(h.state.lock().unwrap().shared_index.is_empty());
@@ -413,9 +472,7 @@ async fn a14b_upload_into_shared_folder_prints_owner_only() {
     let h = Harness::new(f).await;
     let path = h.home.join("note.txt");
     std::fs::write(&path, b"owner only").unwrap();
-    let out = h
-        .run_plain(&["push", path.to_str().unwrap(), "--folder", ROOT])
-        .await;
+    let out = h.run_plain(&["push", path.to_str().unwrap(), "--folder", ROOT]).await;
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
@@ -426,8 +483,7 @@ async fn a14b_upload_into_shared_folder_prints_owner_only() {
     let out = h.run_plain(&["mkdir", "/Shared/only-mine"]).await;
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert!(
-        String::from_utf8_lossy(&out.stdout)
-            .contains("Only you can open this. Share it from the web or the app."),
+        String::from_utf8_lossy(&out.stdout).contains("Only you can open this. Share it from the web or the app."),
         "mkdir lacks the owner-only sentence: {}",
         String::from_utf8_lossy(&out.stdout)
     );
@@ -435,8 +491,7 @@ async fn a14b_upload_into_shared_folder_prints_owner_only() {
     let out = h.run_plain(&["mv", "/host.txt", "/Shared"]).await;
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert!(
-        String::from_utf8_lossy(&out.stdout)
-            .contains("Only you can open this. Share it from the web or the app."),
+        String::from_utf8_lossy(&out.stdout).contains("Only you can open this. Share it from the web or the app."),
         "mv lacks the owner-only sentence: {}",
         String::from_utf8_lossy(&out.stdout)
     );
@@ -449,7 +504,15 @@ async fn a14b_upload_into_shared_folder_prints_owner_only() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a15_remote_move_into_shared_root_publishes_nothing() {
     let mut f = Fixture::default();
-    let mut r = row(FILE, Some(ROOT), "moved-in.txt", RowFacts { foreign: true, ..Default::default() });
+    let mut r = row(
+        FILE,
+        Some(ROOT),
+        "moved-in.txt",
+        RowFacts {
+            foreign: true,
+            ..Default::default()
+        },
+    );
     r["acted_via_share_id"] = json!(null);
     f.rows.push(r);
     let h = Harness::new(shared_folder(f)).await;
@@ -466,17 +529,54 @@ async fn a19_move_out_adopts_foreign_descendants_or_refuses() {
     const NESTED_FILE: &str = "99999999-9999-8999-9999-999999999999";
     let mut f = Fixture::basic();
     f.rows[1]["parent_id"] = json!(F_SUB);
-    f.rows.push(row(F_SUB, Some(ROOT), "Nested", RowFacts { folder: true, foreign: true }));
-    f.rows.push(row(NESTED_FILE, Some(F_SUB), "inner.txt", RowFacts { foreign: true, ..Default::default() }));
-    f.inventory.push(json!({"file_id":F_SUB,"encrypted_file_key":wrap(F_SUB,true)}));
-    f.inventory.push(json!({"file_id":NESTED_FILE,"encrypted_file_key":wrap(NESTED_FILE,false)}));
+    f.rows.push(row(
+        F_SUB,
+        Some(ROOT),
+        "Nested",
+        RowFacts {
+            folder: true,
+            foreign: true,
+        },
+    ));
+    f.rows.push(row(
+        NESTED_FILE,
+        Some(F_SUB),
+        "inner.txt",
+        RowFacts {
+            foreign: true,
+            ..Default::default()
+        },
+    ));
+    f.inventory
+        .push(json!({"file_id":F_SUB,"encrypted_file_key":wrap(F_SUB,true)}));
+    f.inventory
+        .push(json!({"file_id":NESTED_FILE,"encrypted_file_key":wrap(NESTED_FILE,false)}));
     // A real move OUT of the shared root, to a folder at the vault root.
     const DEST: &str = "66666666-6666-4666-8666-666666666666";
-    f.rows.push(row(DEST, None, "Dest", RowFacts { folder: true, ..Default::default() }));
+    f.rows.push(row(
+        DEST,
+        None,
+        "Dest",
+        RowFacts {
+            folder: true,
+            ..Default::default()
+        },
+    ));
     let h = Harness::new(f).await;
     let out = h.run(&["mv", "Shared/Nested", "Dest/Nested"]).await;
-    let trace: Vec<String> = h.state.lock().unwrap().requests.iter().map(|(m,p,_)| format!("{m} {p}")).collect();
-    assert!(out.status.success(), "{} / {trace:?}", String::from_utf8_lossy(&out.stderr));
+    let trace: Vec<String> = h
+        .state
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .map(|(m, p, _)| format!("{m} {p}"))
+        .collect();
+    assert!(
+        out.status.success(),
+        "{} / {trace:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(owner_key_posts(&h, F_SUB), 1);
     assert_eq!(owner_key_posts(&h, FILE), 1);
     let patched = h
@@ -493,8 +593,17 @@ async fn a19_move_out_adopts_foreign_descendants_or_refuses() {
 
     let mut f = Fixture::basic();
     f.rows[1]["parent_id"] = json!(F_SUB);
-    f.rows.push(row(F_SUB, Some(ROOT), "Nested", RowFacts { folder: true, foreign: true }));
-    f.inventory.push(json!({"file_id":F_SUB,"encrypted_file_key":wrap(F_SUB,true)}));
+    f.rows.push(row(
+        F_SUB,
+        Some(ROOT),
+        "Nested",
+        RowFacts {
+            folder: true,
+            foreign: true,
+        },
+    ));
+    f.inventory
+        .push(json!({"file_id":F_SUB,"encrypted_file_key":wrap(F_SUB,true)}));
     f.adopt_failures = 1;
     let h = Harness::new(f).await;
     let out = h.run(&["mv", "Shared/Nested", "Shared/Nested2"]).await;
@@ -513,9 +622,8 @@ async fn a19_move_out_adopts_foreign_descendants_or_refuses() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a24_second_device_does_not_post_a_competing_wrap() {
     let mut f = Fixture::transfer(true);
-    f.rows[1]["owner_wrapped_file_key"] = json!(B64.encode(
-        beebeeb_core::owned_keys::wrap_owner_file_key(&master(), FILE, &item_key()).unwrap()
-    ));
+    f.rows[1]["owner_wrapped_file_key"] =
+        json!(B64.encode(beebeeb_core::owned_keys::wrap_owner_file_key(&master(), FILE, &item_key()).unwrap()));
     let h = Harness::new(f).await;
     let d = dir(&h);
     ok(sync(&h, &d).await);
@@ -612,12 +720,38 @@ async fn a19_bulk_move_out_of_a_shared_root_adopts_each_source_first() {
     const DEST: &str = "66666666-6666-4666-8666-666666666666";
     const NESTED_FILE: &str = "99999999-9999-8999-9999-999999999999";
     let mut f = Fixture::basic();
-    f.rows.push(row(F_SUB, Some(ROOT), "Nested", RowFacts { folder: true, foreign: true }));
-    f.rows.push(row(NESTED_FILE, Some(F_SUB), "inner.txt", RowFacts { foreign: true, ..Default::default() }));
-    f.inventory.push(json!({"file_id":F_SUB,"encrypted_file_key":wrap(F_SUB,true)}));
-    f.inventory.push(json!({"file_id":NESTED_FILE,"encrypted_file_key":wrap(NESTED_FILE,false)}));
+    f.rows.push(row(
+        F_SUB,
+        Some(ROOT),
+        "Nested",
+        RowFacts {
+            folder: true,
+            foreign: true,
+        },
+    ));
+    f.rows.push(row(
+        NESTED_FILE,
+        Some(F_SUB),
+        "inner.txt",
+        RowFacts {
+            foreign: true,
+            ..Default::default()
+        },
+    ));
+    f.inventory
+        .push(json!({"file_id":F_SUB,"encrypted_file_key":wrap(F_SUB,true)}));
+    f.inventory
+        .push(json!({"file_id":NESTED_FILE,"encrypted_file_key":wrap(NESTED_FILE,false)}));
     // A destination at the vault root, outside every shared folder.
-    f.rows.push(row(DEST, None, "Dest", RowFacts { folder: true, ..Default::default() }));
+    f.rows.push(row(
+        DEST,
+        None,
+        "Dest",
+        RowFacts {
+            folder: true,
+            ..Default::default()
+        },
+    ));
     let h = Harness::new(f).await;
     ok(h.run(&["mv", "Shared/Nested", "Shared/guest.txt", "Dest/"]).await);
 
@@ -632,8 +766,7 @@ async fn a19_bulk_move_out_of_a_shared_root_adopts_each_source_first() {
     };
     for id in [F_SUB, FILE] {
         assert!(
-            index("POST", &format!("/api/v1/files/{id}/owner-key"))
-                < index("PATCH", &format!("/api/v1/files/{id}")),
+            index("POST", &format!("/api/v1/files/{id}/owner-key")) < index("PATCH", &format!("/api/v1/files/{id}")),
             "each source is adopted before it moves"
         );
         let patch = requests
@@ -656,7 +789,15 @@ async fn a1_to_a3_through_sync_post_no_child_wrap() {
     const A3: &str = "77777777-7777-4777-8777-777777777777";
     let mut f = Fixture::default();
     // A1: an O item listed foreign, name under K', member-made wrap of K'.
-    f.rows.push(row(O_FILE, Some(ROOT), "a1.txt", RowFacts { foreign: true, ..Default::default() }));
+    f.rows.push(row(
+        O_FILE,
+        Some(ROOT),
+        "a1.txt",
+        RowFacts {
+            foreign: true,
+            ..Default::default()
+        },
+    ));
     f.inventory
         .push(json!({"file_id":O_FILE,"encrypted_file_key":wrap(O_FILE,false)}));
     // A2: an O item whose name really is under its derived key.
@@ -714,9 +855,7 @@ async fn a_owner_only_notice_is_printed_once_per_command() {
     for name in ["x.txt", "y.txt"] {
         std::fs::write(dir.join(name), b"owner only").unwrap();
     }
-    let out = h
-        .run_plain(&["push", dir.to_str().unwrap(), "--folder", ROOT])
-        .await;
+    let out = h.run_plain(&["push", dir.to_str().unwrap(), "--folder", ROOT]).await;
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(
         String::from_utf8_lossy(&out.stdout).matches(NOTICE).count(),

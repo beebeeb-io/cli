@@ -76,7 +76,7 @@ pub(super) fn decode_file_entry(
     master_key: &beebeeb_core::kdf::MasterKey,
     _parent_href: &str,
 ) -> Option<ResolvedEntry> {
-    use beebeeb_core::owned_keys::{KeyOrigin, ItemKind, ResolvedName};
+    use beebeeb_core::owned_keys::{ItemKind, KeyOrigin, ResolvedName};
 
     let file_id = file.get("id")?.as_str()?.to_string();
     let is_folder = file.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -89,16 +89,8 @@ pub(super) fn decode_file_entry(
     // L12: the id class decides the key path, and core resolves it. WebDAV has
     // no shared-folder ancestry here, so a foreign row stays unresolved (and
     // unwritable) rather than being guessed at.
-    let resolved = beebeeb_core::owned_keys::resolve_owned_key(
-        master_key,
-        &file_id,
-        kind,
-        None,
-        None,
-        name_encrypted,
-        None,
-    )
-    .ok();
+    let resolved =
+        beebeeb_core::owned_keys::resolve_owned_key(master_key, &file_id, kind, None, None, name_encrypted, None).ok();
     // L12: a request row is identified by its request fields, not by its id.
     // Its content stays under `C` (read-only here: this request's private key is
     // not in a listing), and an edit becomes a NEW owner item, never a version

@@ -32,8 +32,7 @@ pub const PLAINTEXT_NAME_READ_ONLY: &str = "This file's name isn't encrypted, so
 /// authenticate it, so it is refused rather than guessed (2275 review P2-8).
 pub const REQUEST_NAME_NOT_ENCRYPTED: &str =
     "can't open this request upload: its name is not encrypted, so it can't be authenticated";
-pub const RENAME_UNKNOWN_KEY: &str =
-    "can't rename this item: this device doesn't hold the key its name uses";
+pub const RENAME_UNKNOWN_KEY: &str = "can't rename this item: this device doesn't hold the key its name uses";
 pub const OWNER_ONLY_NOTICE: &str = "Only you can open this. Share it from the web or the app.";
 
 /// Print [`OWNER_ONLY_NOTICE`] when `folder_id` sits in a shared folder.
@@ -144,7 +143,9 @@ impl OwnedKeyResolver {
     }
     /// P2-10: `id`'s stored name is plaintext, not an envelope.
     pub fn name_is_plaintext_for(&self, id: &str) -> bool {
-        self.resolved.get(id).is_some_and(|r| crate::crypto::name_is_plaintext(&r.canonical))
+        self.resolved
+            .get(id)
+            .is_some_and(|r| crate::crypto::name_is_plaintext(&r.canonical))
     }
     /// The key origin `id` resolved to in this resolver, if it was resolved here.
     pub fn origin_for(&self, id: &str) -> Option<KeyOrigin> {
@@ -157,12 +158,7 @@ impl OwnedKeyResolver {
     }
     /// Load (and cache) a shared root's custody and inventory, so the L14 check
     /// has the wrap even when the row itself resolves through an owner envelope.
-    pub async fn load_shared_root(
-        &mut self,
-        api: &ApiClient,
-        master: &MasterKey,
-        id: &str,
-    ) -> Result<(), String> {
+    pub async fn load_shared_root(&mut self, api: &ApiClient, master: &MasterKey, id: &str) -> Result<(), String> {
         self.load_root(api, master, id).await
     }
     /// L15: the shared root `id` sits in, if any. Walks up until a folder with
@@ -288,9 +284,7 @@ impl OwnedKeyResolver {
             owned_keys::ItemKind::File
         };
         match class {
-            beebeeb_core::item_id::ItemClass::Owner => {
-                self.resolve_owner_row(api, master, canonical, &id, kind).await
-            }
+            beebeeb_core::item_id::ItemClass::Owner => self.resolve_owner_row(api, master, canonical, &id, kind).await,
             beebeeb_core::item_id::ItemClass::Foreign => {
                 self.resolve_foreign_row(api, master, canonical, &id, kind).await
             }
@@ -435,8 +429,8 @@ impl OwnedKeyResolver {
                     // reader must not accept it. This is the named legacy reader.
                     let key = legacy_invite_child_key(&root_key, &frame)?;
                     let name = authenticated_name(&key, &canonical)?;
-                    let pending =
-                        owned_keys::wrap_owner_file_key(master, id, &key).map_err(|_| "can't prepare owner envelope")?;
+                    let pending = owned_keys::wrap_owner_file_key(master, id, &key)
+                        .map_err(|_| "can't prepare owner envelope")?;
                     self.pending.insert(id.to_string(), pending.clone());
                     return Ok(ResolvedCliKey {
                         key: Arc::new(key),
@@ -1194,4 +1188,3 @@ mod write_check_tests {
         );
     }
 }
-

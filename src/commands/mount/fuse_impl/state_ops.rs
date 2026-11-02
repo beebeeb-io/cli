@@ -961,12 +961,11 @@ impl BeebeebFsState {
             } else {
                 beebeeb_core::media::guess_mime_type(newname)
             };
-            let sealed = beebeeb_core::encrypt::encrypt_name_for(target.key(), newname, mime, target.pin()).map_err(
-                |e| {
+            let sealed =
+                beebeeb_core::encrypt::encrypt_name_for(target.key(), newname, mime, target.pin()).map_err(|e| {
                     eprintln!("[mount] rename encrypt: {e}");
                     Errno::EIO
-                },
-            )?;
+                })?;
             Some(sealed)
         } else {
             None
@@ -993,8 +992,11 @@ impl BeebeebFsState {
             .flatten()
             .map(|p| p.to_string())
             .or_else(|| self.inodes.get(&newparent).and_then(|e| e.file_id.clone()));
-        self.rt
-            .block_on(crate::owned_keys::announce_owner_only(&self.api, &self.master_key, dest.as_deref()));
+        self.rt.block_on(crate::owned_keys::announce_owner_only(
+            &self.api,
+            &self.master_key,
+            dest.as_deref(),
+        ));
 
         if let Some(conflict_ino) = replaced {
             if let Some(cid) = self.inodes.get(&conflict_ino).and_then(|e| e.file_id.clone()) {

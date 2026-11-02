@@ -200,12 +200,7 @@ fn print_usage(used_bytes: i64, quota_bytes: i64, percentage: f64, file_count: i
     );
 }
 
-fn print_notice(
-    plan: Plan,
-    used_bytes: i64,
-    quota_bytes: i64,
-    account_notice: Option<String>,
-) {
+fn print_notice(plan: Plan, used_bytes: i64, quota_bytes: i64, account_notice: Option<String>) {
     // Account-state notice (task 1037) wins over the over-quota warning:
     // quota is 0 because there is no plan, not because the vault is full.
     if let Some(notice) = &account_notice {

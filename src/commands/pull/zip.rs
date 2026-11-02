@@ -505,12 +505,11 @@ impl ZipWalk<'_> {
                 }
             };
             let decrypted_name = resolved.name;
-            let explicit_key =
-                if !crate::owned_keys::is_derived_origin(resolved.origin) && content_key.is_none() {
-                    Some(resolved.key.clone())
-                } else {
-                    None
-                };
+            let explicit_key = if !crate::owned_keys::is_derived_origin(resolved.origin) && content_key.is_none() {
+                Some(resolved.key.clone())
+            } else {
+                None
+            };
 
             // Zip entry paths are `prefix/name`: a server-provided name with `..`
             // or a separator would be a zip-slip entry for whoever extracts the
