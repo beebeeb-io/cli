@@ -45,8 +45,9 @@ async fn downgrade(status: u16) {
         legacy(&mut f, status);
         // A new child has no cached adoption envelope. Replaying an unbound
         // child must not let a second process open it under a custody root.
-        f.rows[1]["id"] = json!(SUB);
-        f.inventory[0]["file_id"] = json!(SUB);
+        // 2275 L12: a foreign row carries an F (v8) id
+        f.rows[1]["id"] = json!(F_SUB);
+        f.inventory[0]["file_id"] = json!(F_SUB);
         f.requests.clear();
     }
     let before = std::fs::read(dir.join(".bb-sync.json")).unwrap();
@@ -256,13 +257,14 @@ async fn a_new_child_without_an_envelope_still_refuses_through_load_root_after_a
             let mut f = h.state.lock().unwrap();
             withdraw_custody(&mut f, status);
             // A child added after the adoption: no owner envelope, only the replayed legacy wrap.
-            let mut fresh = row(SUB, Some(ROOT), "new.txt", RowFacts { foreign: true, ..Default::default() });
+            // 2275 L12: a foreign row carries an F (v8) id
+            let mut fresh = row(F_SUB, Some(ROOT), "new.txt", RowFacts { foreign: true, ..Default::default() });
             fresh["owner_wrapped_file_key"] = Value::Null;
             f.rows.push(fresh);
             let replayed =
                 B64.encode(beebeeb_core::encrypt::encrypt_chunk_raw(&folder_key(), item_key().as_bytes()).unwrap());
             f.inventory
-                .push(json!({"file_id": SUB, "encrypted_file_key": replayed}));
+                .push(json!({"file_id": F_SUB, "encrypted_file_key": replayed}));
         }
         let second = h.home.join("second");
         std::fs::create_dir(&second).unwrap();

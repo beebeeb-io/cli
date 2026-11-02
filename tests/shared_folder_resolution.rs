@@ -45,13 +45,15 @@ async fn owner_wrap_after_move() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn nested_guest_and_member_names() {
     let mut f = Fixture::basic();
-    f.rows[1]["parent_id"] = json!(SUB);
-    let mut sub = row(SUB, Some(ROOT), "Nested", RowFacts { folder: true, foreign: true });
+    // 2275 L12: a foreign row carries an F (v8) id
+    f.rows[1]["parent_id"] = json!(F_SUB);
+    // 2275 L12: a foreign row carries an F (v8) id
+    let mut sub = row(F_SUB, Some(ROOT), "Nested", RowFacts { folder: true, foreign: true });
     sub["acted_via_share_id"] = json!(null);
     sub["uploaded_by"] = json!(BAD);
     f.rows.push(sub);
     f.inventory
-        .push(json!({"file_id":SUB,"encrypted_file_key":wrap(SUB,true)}));
+        .push(json!({"file_id":F_SUB,"encrypted_file_key":wrap(F_SUB,true)}));
     let h = Harness::new(f).await;
     let v = h.json(&["ls", "Shared/Nested"]).await;
     let resolved_id = v["files"][0]["id"].as_str().unwrap();
@@ -108,7 +110,8 @@ async fn cursor_ties_and_bad_rows() {
             .push(json!({"file_id":uuid::Uuid::from_u128(n+1).to_string(),"encrypted_file_key":"malformed"}));
     }
     f.inventory.push(target);
-    let mut bad = row(BAD, Some(ROOT), "not plaintext", RowFacts { foreign: true, ..Default::default() });
+    // 2275 L12: a foreign row carries an F (v8) id
+    let mut bad = row(F_BAD, Some(ROOT), "not plaintext", RowFacts { foreign: true, ..Default::default() });
     bad["name_encrypted"] = json!("unsafe-plaintext");
     f.rows.push(bad);
     let h = Harness::new(f).await;
@@ -134,7 +137,8 @@ async fn cursor_ties_and_bad_rows() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_and_request_compatibility() {
     let mut f = Fixture::default();
-    let mut legacy = row(FILE, None, "string.txt", RowFacts { ..Default::default() });
+    // 2275 L12: an owner row carries an O id
+    let mut legacy = row(O_FILE, None, "string.txt", RowFacts { ..Default::default() });
     f.rows.push(legacy.clone());
     let binary = beebeeb_core::kdf::derive_file_key(&master(), uuid::Uuid::parse_str(BAD).unwrap().as_bytes());
     legacy["id"] = json!(BAD);

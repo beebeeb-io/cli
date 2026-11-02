@@ -40,11 +40,13 @@ async fn changed_identity_conflicts_before_comparing_versions() {
         {
             let mut f = h.state.lock().unwrap();
             let mut next = f.rows[1].clone();
-            next["id"] = json!(SUB);
+            // 2275 L12: a foreign row carries an F (v8) id
+            next["id"] = json!(F_SUB);
             next["version_number"] = json!(version);
             next["updated_at"] = json!("2030-01-01T00:00:00Z");
-            next["owner_wrapped_file_key"] =
-                json!(B64.encode(beebeeb_core::owned_keys::wrap_owner_file_key(&master(), SUB, &item_key()).unwrap()));
+            next["owner_wrapped_file_key"] = json!(
+                B64.encode(beebeeb_core::owned_keys::wrap_owner_file_key(&master(), F_SUB, &item_key()).unwrap())
+            );
             f.rows[1]["is_trashed"] = json!(true);
             f.rows.push(next);
         }
@@ -61,7 +63,7 @@ async fn changed_identity_conflicts_before_comparing_versions() {
         assert_eq!(std::fs::read(d.join("guest.txt")).unwrap(), edited);
         assert_eq!(manifest(&d)["files"]["guest.txt"]["remote_id"], FILE);
         assert_eq!(
-            h.state.lock().unwrap().rows.iter().find(|r| r["id"] == SUB).unwrap()["version_number"],
+            h.state.lock().unwrap().rows.iter().find(|r| r["id"] == F_SUB).unwrap()["version_number"],
             version
         );
         h.close().await;

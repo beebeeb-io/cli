@@ -47,11 +47,12 @@ async fn direct_pull_random_key() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn folder_zip_and_safe_names() {
     let mut f = Fixture::transfer(false);
-    let mut bad = row(BAD, Some(ROOT), "../escape", RowFacts { foreign: true, ..Default::default() });
+    // 2275 L12: a foreign row carries an F (v8) id
+    let mut bad = row(F_BAD, Some(ROOT), "../escape", RowFacts { foreign: true, ..Default::default() });
     bad["name_encrypted"] = json!(name(&item_key(), "../escape"));
     f.rows.push(bad);
     f.inventory
-        .push(json!({"file_id":BAD,"encrypted_file_key":wrap(BAD,false)}));
+        .push(json!({"file_id":F_BAD,"encrypted_file_key":wrap(F_BAD,false)}));
     let h = Harness::new(f).await;
     let dir = h.home.join("folder");
     let r = h.run(&["pull", ROOT, "-o", dir.to_str().unwrap()]).await;

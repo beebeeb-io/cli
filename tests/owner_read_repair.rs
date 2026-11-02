@@ -283,7 +283,9 @@ fn stderr(out: &std::process::Output) -> String {
 /// version readable, the same replace goes through.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replace_refuses_when_the_check_cannot_read_the_version() {
-    let h = Harness::new(Fixture::owner_file()).await;
+    let mut fixture = Fixture::owner_file();
+    fixture.review_complete_requested_id = true; // an honest server echoes the id it was sent
+    let h = Harness::new(fixture).await;
     let local = h.home.join("owned.txt");
     std::fs::write(&local, b"replacement bytes").unwrap();
     h.state.lock().unwrap().download_status = Some(503);
@@ -302,7 +304,8 @@ async fn replace_refuses_when_the_check_cannot_read_the_version() {
         "an upload session was started"
     );
     assert!(
-        h.count("GET", &format!("/api/v1/files/{FILE}/download")) >= 1,
+        // 2275 L12: an owner row carries an O id
+        h.count("GET", &format!("/api/v1/files/{O_FILE}/download")) >= 1,
         "the check never asked"
     );
 
@@ -318,7 +321,8 @@ async fn replace_refuses_when_the_check_cannot_read_the_version() {
     {
         let f = h.state.lock().unwrap();
         assert_eq!(
-            f.upload_request["file_id"], FILE,
+            // 2275 L12: an owner row carries an O id
+            f.upload_request["file_id"], O_FILE,
             "the replace must version the same id"
         );
         assert_eq!(f.upload_request["base_version_number"], 1);
@@ -340,7 +344,8 @@ async fn rename_refuses_when_the_check_cannot_read_the_version() {
     );
     assert!(stderr(&out).contains(COULD_NOT_CHECK), "stderr={}", stderr(&out));
     assert_eq!(
-        h.count("PATCH", &format!("/api/v1/files/{FILE}")),
+        // 2275 L12: an owner row carries an O id
+        h.count("PATCH", &format!("/api/v1/files/{O_FILE}")),
         0,
         "a rename was sent"
     );
@@ -352,7 +357,8 @@ async fn rename_refuses_when_the_check_cannot_read_the_version() {
         "a readable ordinary row must stay renamable: {}",
         stderr(&out)
     );
-    assert_eq!(h.count("PATCH", &format!("/api/v1/files/{FILE}")), 1);
+    // 2275 L12: an owner row carries an O id
+    assert_eq!(h.count("PATCH", &format!("/api/v1/files/{O_FILE}")), 1);
     h.close().await;
 }
 
@@ -384,15 +390,16 @@ async fn a_folder_rename_downloads_nothing() {
     h.close().await;
 }
 
-/// SF-0002 round 2 (C5): an owner wrap of the uppercase-id key is the same
-/// read-only row for `bb mv` and `push --replace` (the resolver path) as it is
-/// for WebDAV and the mount: refused by its NAME, before any content probe.
-/// The probe is made to fail, so a verdict that waited for the content would
-/// say "couldn't check" instead (WebDAV's half is
+/// SF-0002 round 2 (C5): an uppercase-id repair row is the same read-only row
+/// for `bb mv` and `push --replace` (the resolver path) as it is for WebDAV and
+/// the mount: refused by its NAME, before any content probe. The probe is made
+/// to fail, so a verdict that waited for the content would say "couldn't check"
+/// instead. 2275 L12: a served L8 envelope can never make an owner-class id
+/// writable; this row still carries one and it is ignored (WebDAV's half is
 /// `webdav::sf_0002_write_check_tests::an_owner_wrap_of_the_uppercase_key_is_read_only`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_owner_wrap_of_the_uppercase_key_is_read_only() {
-    let h = Harness::new(Fixture::upper_repair_owner_wrap()).await;
+    let h = Harness::new(Fixture::upper_repair_served_envelope()).await;
     h.state.lock().unwrap().download_status = Some(503);
     let out = h
         .run(&["mv", "Shared/uppercase-repair.pdf", "Shared/renamed.pdf"])
@@ -511,7 +518,9 @@ async fn sync_keeps_a_row_whose_content_is_uppercase() {
 /// `push --replace` versions it in place.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_json_blob_row_is_replaceable() {
-    let h = Harness::new(Fixture::owner_file_json_blob()).await;
+    let mut fixture = Fixture::owner_file_json_blob();
+    fixture.review_complete_requested_id = true; // an honest server echoes the id it was sent
+    let h = Harness::new(fixture).await;
     let local = h.home.join("legacy.txt");
     std::fs::write(&local, b"replacement bytes").unwrap();
     let out = h
@@ -524,7 +533,8 @@ async fn a_json_blob_row_is_replaceable() {
     );
     {
         let f = h.state.lock().unwrap();
-        assert_eq!(f.upload_request["file_id"], FILE);
+        // 2275 L12: an owner row carries an O id
+        assert_eq!(f.upload_request["file_id"], O_FILE);
         assert_eq!(f.upload_request["base_version_number"], 1);
     }
     h.close().await;
@@ -557,14 +567,16 @@ async fn a_json_blob_row_syncs_an_edit() {
     let f = h.state.lock().unwrap();
     assert_ne!(
         f.upload_request["file_id"].as_str(),
-        Some(FILE),
+        // 2275 L12: an owner row carries an O id
+        Some(O_FILE),
         "a new file, as sync does for owner rows"
     );
     let order: Vec<_> = f
         .requests
         .iter()
         .filter_map(|(m, p, _)| {
-            if m == "DELETE" && p.contains(FILE) {
+            // 2275 L12: an owner row carries an O id
+            if m == "DELETE" && p.contains(O_FILE) {
                 Some("trash")
             } else if m == "POST" && p.ends_with("/complete") {
                 Some("complete")

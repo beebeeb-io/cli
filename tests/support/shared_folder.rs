@@ -31,7 +31,7 @@ pub const F_BAD: &str = "44444444-4444-8444-9444-444444444444";
 pub const UPPER_FILE: &str = "5f0c2a9e-3b1d-4c7e-9a2f-6d8e1b4c7a30";
 pub const BAD: &str = "44444444-4444-4444-8444-444444444444";
 pub const ACCOUNT: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-/// The approved legacy invite of SUB, used when `Fixture::nested_legacy` puts SUB inside ROOT.
+/// The approved legacy invite of F_SUB, used when `Fixture::nested_legacy` puts that folder inside ROOT.
 pub const SUB_INVITE: &str = "55555555-5555-4555-8555-555555555555";
 /// A child the owner wrote into the folder: its wrap in the legacy inventory opens to the owner-derived key of
 /// this id, which is what proves the owner copy is the folder's key.
@@ -203,14 +203,14 @@ impl Fixture {
         f.rows[1] = r;
         f
     }
-    /// SF-0002 round 2 (C5): [`Fixture::upper_repair`] whose row also carries an
-    /// owner wrap of the uppercase-id key, so the resolver opens it through the
-    /// wrap (`KeyOrigin::OwnerWrap`) rather than by derivation.
-    pub fn upper_repair_owner_wrap() -> Self {
+    /// SF-0002 round 2 (C5): [`Fixture::upper_repair`] whose row also serves an
+    /// L8 owner envelope. 2275 L12: an owner-class id can never carry an
+    /// envelope (core refuses to mint one, and a served one is ignored), so the
+    /// bytes are deliberately unopenable: the row must still resolve by its
+    /// name convention.
+    pub fn upper_repair_served_envelope() -> Self {
         let mut f = Self::upper_repair();
-        let upper = beebeeb_core::kdf::derive_file_key(&master(), UPPER_FILE.to_uppercase().as_bytes());
-        let wrap = owned_keys::wrap_owner_file_key(&master(), UPPER_FILE, &upper).unwrap();
-        f.rows[1]["owner_wrapped_file_key"] = json!(B64.encode(wrap));
+        f.rows[1]["owner_wrapped_file_key"] = json!(B64.encode([9u8; 60]));
         f
     }
     /// SF-0002 round 2: an ordinary owner row (id `FILE`, under ROOT): its name
@@ -550,7 +550,8 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
             invites.push(json!({"id":BAD,"file_id":ROOT,"is_folder_share":true,"status":"approved","encrypted_owner_folder_key":copy}));
         }
         if f.nested_legacy {
-            invites.push(json!({"id":SUB_INVITE,"file_id":SUB,"is_folder_share":true,"status":"approved","encrypted_owner_folder_key":seed(SUB)}));
+            // 2275 L12: a folder that arrived through a share carries an F (v8) id.
+            invites.push(json!({"id":SUB_INVITE,"file_id":F_SUB,"is_folder_share":true,"status":"approved","encrypted_owner_folder_key":seed(F_SUB)}));
         }
         json!({ "invites": invites })
     } else if method == "GET" && path == format!("/api/v1/shares/invites/{BAD}/folder-keys") {
@@ -590,9 +591,15 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
         if (f.index_partial || f.review_partial_repair_only && root_listings >= 2)
             && query.get("parent_id").map(String::as_str) == Some(ROOT)
         {
-            let mut bad = row(BAD, Some(ROOT), "unreadable", RowFacts { foreign: true, ..Default::default() });
-            bad["name_encrypted"] = json!("corrupt");
-            rows.push(bad);
+            // 2275 L14: an unprovable row is skipped, not partial. The partial
+            // case is a page that lists the same id twice (a listing race).
+            if let Some(again) = rows
+                .iter()
+                .find(|r| r["parent_id"] == json!(ROOT) && r["is_folder"] != json!(true))
+                .cloned()
+            {
+                rows.push(again);
+            }
         }
         json!({"files":rows})
     } else if method == "GET" && path == "/api/v1/files/index" {

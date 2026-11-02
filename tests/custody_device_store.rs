@@ -207,12 +207,14 @@ async fn custody_recorded_after_the_first_check_still_refuses_a_legacy_root() {
     h.close().await;
 }
 
-/// ROOT has custody; SUB inside it only has an approved legacy invite; FILE sits in SUB.
+/// ROOT has custody; F_SUB inside it only has an approved legacy invite; FILE sits in F_SUB.
+/// 2275 L12: a foreign folder carries an F (v8) id, so its invite names that id too.
 fn nested() -> Fixture {
     let mut f = Fixture::transfer(false);
-    f.rows[1]["parent_id"] = json!(SUB);
+    // 2275 L12: a foreign row carries an F (v8) id
+    f.rows[1]["parent_id"] = json!(F_SUB);
     f.rows[1]["owner_wrapped_file_key"] = Value::Null;
-    f.rows.push(row(SUB, Some(ROOT), "sub", RowFacts { folder: true, foreign: true }));
+    f.rows.push(row(F_SUB, Some(ROOT), "sub", RowFacts { folder: true, foreign: true }));
     f.nested_legacy = true;
     f.sub_inventory = vec![json!({
         "file_id": FILE,
@@ -229,9 +231,10 @@ async fn a_legacy_root_is_refused_when_any_ancestor_has_seen_custody() {
     let out = h.run(&["pull", FILE, "-o", output.to_str().unwrap()]).await;
     refusal(&h, &out, &output);
     assert_eq!(
-        h.count("GET", &format!("/api/v1/shared-folders/{SUB}")),
+        // 2275 L12: a foreign folder carries an F (v8) id
+        h.count("GET", &format!("/api/v1/shared-folders/{F_SUB}")),
         1,
-        "instrument must reach SUB's custody request"
+        "instrument must reach F_SUB's custody request"
     );
     h.close().await;
 }
