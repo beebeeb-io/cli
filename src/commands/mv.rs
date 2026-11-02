@@ -221,6 +221,22 @@ async fn move_single(
         return noop(dst_arg);
     }
 
+    // L12/A19: a move of a shared item (or a folder holding shared descendants)
+    // adopts every foreign item involved first, confirmed by a readback.
+    if let Some(parent) = src.parent_id {
+        if src_keys
+            .shared_root_of(api, master_key, &parent.to_string())
+            .await
+            .is_some()
+            && src_keys
+                .adopt_foreign_subtree(api, master_key, &src_id, src.is_folder)
+                .await
+                .is_err()
+        {
+            return Err("move refused: a shared item could not be adopted first".to_string());
+        }
+    }
+
     api.move_file(&src_id, new_name_encrypted.as_deref(), new_parent_send)
         .await?;
     path::invalidate_cache();

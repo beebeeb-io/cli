@@ -532,6 +532,53 @@ impl OwnedKeyResolver {
         );
         Ok(())
     }
+    /// L12/A19: before an owner moves a shared item (or a folder holding shared
+    /// descendants) out of its root or to another root, every foreign item
+    /// involved is adopted and confirmed by reading it back. Any failure refuses
+    /// the move.
+    pub async fn adopt_foreign_subtree(
+        &mut self,
+        api: &ApiClient,
+        master: &MasterKey,
+        root_id: &str,
+        is_folder: bool,
+    ) -> Result<(), String> {
+        let mut queue = vec![(root_id.to_string(), is_folder)];
+        let mut seen = HashSet::new();
+        let mut count = 0;
+        while let Some((id, folder)) = queue.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let row = self.ancestor_row(api, &id).await?;
+            let class = beebeeb_core::item_id::item_class(&id).map_err(|_| "invalid item id")?;
+            if class == beebeeb_core::item_id::ItemClass::Foreign {
+                let resolved = self.resolve(api, master, &row).await?;
+                if !self.adopt(api, master, &resolved).await? {
+                    return Err("adoption not confirmed".into());
+                }
+            }
+            if !folder {
+                continue;
+            }
+            let listing = api.list_files_bounded(&id, 20_000 - count).await?;
+            if crate::sync_safety::listing_truncated(&listing) {
+                return Err("shared listing truncated".into());
+            }
+            let rows = listing["files"].as_array().ok_or("invalid shared listing")?;
+            self.seed(rows);
+            for row in rows {
+                count += 1;
+                if count > 20_000 {
+                    return Err("too many shared items".into());
+                }
+                if let Some(child) = row["id"].as_str() {
+                    queue.push((child.to_string(), row["is_folder"] == true));
+                }
+            }
+        }
+        Ok(())
+    }
     #[allow(dead_code)] // Task 9 is the only mutating caller.
     pub async fn adopt(
         &mut self,
