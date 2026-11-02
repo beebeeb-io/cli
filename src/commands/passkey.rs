@@ -321,12 +321,24 @@ enum AddAction {
 /// over everything (a script asked for a machine-readable contract);
 /// `print_url`/`is_quiet` both mean "just the value"; otherwise branch on
 /// whether a display is reachable.
-fn plan_add(print_url: bool, is_json: bool, is_quiet: bool, headless: bool) -> AddAction {
-    if is_json {
+#[derive(Default)]
+struct AddPlan {
+    /// `--print-url`.
+    print_url: bool,
+    /// `--json` output mode.
+    json: bool,
+    /// `--quiet` output mode.
+    quiet: bool,
+    /// No display is reachable.
+    headless: bool,
+}
+
+fn plan_add(plan: AddPlan) -> AddAction {
+    if plan.json {
         AddAction::Json
-    } else if print_url || is_quiet {
+    } else if plan.print_url || plan.quiet {
         AddAction::PrintUrl
-    } else if headless {
+    } else if plan.headless {
         AddAction::Headless
     } else {
         AddAction::Open
@@ -345,7 +357,12 @@ pub async fn add(print_url: bool) -> Result<(), String> {
     api.require_auth()?;
 
     let url = passkey_enrollment_url();
-    let action = plan_add(print_url, ui::is_json(), ui::is_quiet(), env_detect::is_headless());
+    let action = plan_add(AddPlan {
+        print_url,
+        json: ui::is_json(),
+        quiet: ui::is_quiet(),
+        headless: env_detect::is_headless(),
+    });
 
     match action {
         AddAction::Json => {
@@ -423,11 +440,18 @@ fn resolve_passkey_id(passkeys: &[PasskeyRow], input: &str) -> Result<String, St
 /// non-rich context (`--json`/`--quiet`/non-TTY) without it REFUSES rather
 /// than silently proceeding — an output-format flag is not consent for an
 /// irreversible action the caller never typed `--yes` for.
-fn remove_may_proceed_without_prompt(yes: bool, is_rich: bool) -> Result<bool, String> {
-    if yes {
+/// What the caller already knows about this destructive step-up: whether
+/// `--yes` was passed, and whether a prompt can be shown at all.
+struct RemoveConsent {
+    confirmed: bool,
+    interactive: bool,
+}
+
+fn remove_may_proceed_without_prompt(consent: RemoveConsent) -> Result<bool, String> {
+    if consent.confirmed {
         return Ok(true);
     }
-    if !is_rich {
+    if !consent.interactive {
         return Err(
             "refusing to remove a passkey without a prompt — pass --yes to run this in \
              --json/--quiet mode"
@@ -523,7 +547,10 @@ pub async fn remove(id: String, yes: bool) -> Result<(), String> {
     let name = target.name.clone();
 
     let interactive = ui::is_rich() && stdin_is_tty();
-    if !remove_may_proceed_without_prompt(yes, interactive)? && !confirm_remove(&name)? {
+    if !remove_may_proceed_without_prompt(RemoveConsent {
+        confirmed: yes,
+        interactive,
+    })? && !confirm_remove(&name)? {
         if !ui::is_quiet() {
             println!("  {}", "cancelled".custom_color(colors::INK_DIM));
         }
@@ -867,8 +894,16 @@ mod tests {
 
     #[test]
     fn plan_add_json_wins_over_every_other_flag() {
-        assert_eq!(plan_add(true, true, true, true), AddAction::Json);
-        assert_eq!(plan_add(false, true, false, false), AddAction::Json);
+        assert_eq!(
+            plan_add(AddPlan {
+                print_url: true,
+                json: true,
+                quiet: true,
+                headless: true,
+            }),
+            AddAction::Json
+        );
+        assert_eq!(plan_add(AddPlan { json: true, ..Default::default() }), AddAction::Json);
     }
 
     #[test]
@@ -876,8 +911,8 @@ mod tests {
         // The exact regression this flag exists for: --print-url must route
         // to PrintUrl, never Open — Open is the only variant that calls
         // `open::that`.
-        assert_eq!(plan_add(true, false, false, false), AddAction::PrintUrl);
-        assert_eq!(plan_add(true, false, false, true), AddAction::PrintUrl);
+        assert_eq!(plan_add(AddPlan { print_url: true, ..Default::default() }), AddAction::PrintUrl);
+        assert_eq!(plan_add(AddPlan { print_url: true, headless: true, ..Default::default() }), AddAction::PrintUrl);
     }
 
     #[test]
@@ -885,17 +920,17 @@ mod tests {
         // --quiet is "bare value, no side effects" everywhere else in this
         // CLI (`sessions list`, `ls`, `quota`, ...) — add must match that
         // convention rather than opening a browser mid-script.
-        assert_eq!(plan_add(false, false, true, false), AddAction::PrintUrl);
+        assert_eq!(plan_add(AddPlan { quiet: true, ..Default::default() }), AddAction::PrintUrl);
     }
 
     #[test]
     fn plan_add_headless_without_print_url_shows_the_url_but_does_not_open() {
-        assert_eq!(plan_add(false, false, false, true), AddAction::Headless);
+        assert_eq!(plan_add(AddPlan { headless: true, ..Default::default() }), AddAction::Headless);
     }
 
     #[test]
     fn plan_add_default_interactive_case_opens_the_browser() {
-        assert_eq!(plan_add(false, false, false, false), AddAction::Open);
+        assert_eq!(plan_add(AddPlan::default()), AddAction::Open);
     }
 
     // ── add() JSON body shape ────────────────────────────────────────────
@@ -979,13 +1014,13 @@ mod tests {
 
     #[test]
     fn remove_yes_flag_always_proceeds_without_a_prompt_rich_or_not() {
-        assert_eq!(remove_may_proceed_without_prompt(true, true), Ok(true));
-        assert_eq!(remove_may_proceed_without_prompt(true, false), Ok(true));
+        assert_eq!(remove_may_proceed_without_prompt(RemoveConsent { confirmed: true, interactive: true }), Ok(true));
+        assert_eq!(remove_may_proceed_without_prompt(RemoveConsent { confirmed: true, interactive: false }), Ok(true));
     }
 
     #[test]
     fn remove_no_yes_but_rich_terminal_falls_through_to_the_prompt() {
-        assert_eq!(remove_may_proceed_without_prompt(false, true), Ok(false));
+        assert_eq!(remove_may_proceed_without_prompt(RemoveConsent { confirmed: false, interactive: true }), Ok(false));
     }
 
     #[test]
@@ -994,7 +1029,7 @@ mod tests {
         // `sessions revoke-all-others` path (eng-0481): --json/--quiet
         // (is_rich == false) must NOT silently skip the safety check just
         // because there's no terminal to prompt on.
-        let err = remove_may_proceed_without_prompt(false, false).unwrap_err();
+        let err = remove_may_proceed_without_prompt(RemoveConsent { confirmed: false, interactive: false }).unwrap_err();
         assert!(
             err.contains("--yes"),
             "err must tell the caller how to proceed: {err:?}"

@@ -419,11 +419,20 @@ pub async fn revoke(id: String) -> Result<(), String> {
 /// output-format flag must not double as consent for a destructive action
 /// the caller never typed `--yes` for. Choosing `--json` no longer implies
 /// "also skip the safety check."
-fn revoke_all_others_may_proceed_without_prompt(yes: bool, is_rich: bool) -> Result<bool, String> {
-    if yes {
+/// What the caller already knows about this destructive step-up: whether the
+/// user typed `--yes`, and whether a prompt can be shown at all.
+struct RevokeConsent {
+    /// `--yes` was passed: explicit consent, no prompt needed.
+    confirmed: bool,
+    /// A rich terminal exists, so falling through to the prompt is possible.
+    interactive: bool,
+}
+
+fn revoke_all_others_may_proceed_without_prompt(consent: RevokeConsent) -> Result<bool, String> {
+    if consent.confirmed {
         return Ok(true);
     }
-    if !is_rich {
+    if !consent.interactive {
         return Err(
             "refusing to revoke every other session without a prompt — pass --yes to run this \
              in --json/--quiet mode"
@@ -463,7 +472,10 @@ pub async fn revoke_all_others(yes: bool) -> Result<(), String> {
     let api = ApiClient::from_config();
     api.require_auth()?;
 
-    if !revoke_all_others_may_proceed_without_prompt(yes, ui::is_rich())? && !confirm_revoke_all()? {
+    if !revoke_all_others_may_proceed_without_prompt(RevokeConsent {
+        confirmed: yes,
+        interactive: ui::is_rich(),
+    })? && !confirm_revoke_all()? {
         if !ui::is_quiet() {
             println!("  {}", "cancelled".custom_color(colors::INK_DIM));
         }
@@ -924,13 +936,18 @@ mod tests {
 
     #[test]
     fn yes_flag_always_proceeds_without_a_prompt_rich_or_not() {
-        assert_eq!(revoke_all_others_may_proceed_without_prompt(true, true), Ok(true));
-        assert_eq!(revoke_all_others_may_proceed_without_prompt(true, false), Ok(true));
+        let yes_rich = RevokeConsent { confirmed: true, interactive: true };
+        let yes_quiet = RevokeConsent { confirmed: true, interactive: false };
+        assert_eq!(revoke_all_others_may_proceed_without_prompt(yes_rich), Ok(true));
+        assert_eq!(revoke_all_others_may_proceed_without_prompt(yes_quiet), Ok(true));
     }
 
     #[test]
     fn no_yes_but_rich_terminal_falls_through_to_the_prompt() {
-        assert_eq!(revoke_all_others_may_proceed_without_prompt(false, true), Ok(false));
+        assert_eq!(
+            revoke_all_others_may_proceed_without_prompt(RevokeConsent { confirmed: false, interactive: true }),
+            Ok(false)
+        );
     }
 
     #[test]
@@ -938,7 +955,8 @@ mod tests {
         // This is the exact bug the Codex review caught: --json/--quiet
         // (is_rich == false) must NOT silently skip the safety check just
         // because there's no terminal to prompt on.
-        let err = revoke_all_others_may_proceed_without_prompt(false, false).unwrap_err();
+        let err = revoke_all_others_may_proceed_without_prompt(RevokeConsent { confirmed: false, interactive: false })
+            .unwrap_err();
         assert!(
             err.contains("--yes"),
             "err must tell the caller how to proceed: {err:?}"

@@ -22,25 +22,28 @@ pub enum OutputMode {
     Quiet,
 }
 
+/// Whether the caller has already decided against color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorChoice {
+    /// Let the terminal and `NO_COLOR` decide.
+    Auto,
+    /// `--no-color` was passed: never colorize.
+    Never,
+}
+
 static MODE: OnceLock<OutputMode> = OnceLock::new();
 
 /// Initialise the global output mode.  Call once from `main()`.
 ///
-/// Precedence: `--json` > `--quiet` > rich (default).
-/// If `--no-color` or `NO_COLOR` env var is set, colored output is disabled
+/// The caller resolves `--json` > `--quiet` > rich precedence, so the two
+/// arguments name the decision outright instead of re-deriving it from flags.
+/// `ColorChoice::Never` or the `NO_COLOR` env var disables colored output
 /// globally via the `colored` crate's control mechanism.
-pub fn init(json: bool, quiet: bool, no_color: bool) {
-    let mode = if json {
-        OutputMode::Json
-    } else if quiet {
-        OutputMode::Quiet
-    } else {
-        OutputMode::Rich
-    };
+pub fn init(mode: OutputMode, color: ColorChoice) {
     let _ = MODE.set(mode);
 
     // Respect NO_COLOR (https://no-color.org/) and --no-color flag.
-    if no_color || std::env::var("NO_COLOR").is_ok() || mode == OutputMode::Json {
+    if color == ColorChoice::Never || std::env::var("NO_COLOR").is_ok() || mode == OutputMode::Json {
         colored::control::set_override(false);
     }
 }

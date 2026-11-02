@@ -44,7 +44,7 @@ use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
-use super::webdav_guard::{self, Guard};
+use super::webdav_guard::{self, Guard, GuardOptions};
 use crate::api::ApiClient;
 use crate::commands::move_target;
 use crate::config::load_config;
@@ -500,7 +500,7 @@ mod item_id_echo_tests {
 }
 
 mod server;
-pub use server::run;
+pub use server::{run, WebdavOptions};
 use server::*;
 
 mod verbs;

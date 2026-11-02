@@ -27,12 +27,25 @@ struct Target {
     is_folder: bool,
 }
 
+/// The three destructive-behaviour flags `bb rm` carries, grouped so the call
+/// site reads as the question being asked.
+pub struct RmOptions {
+    /// Allow trashing folders (mirrors `rm -r`).
+    pub recursive: bool,
+    /// Permanently delete instead of soft-trashing; still needs a step-up
+    /// password, which `--yes` cannot bypass.
+    pub permanent: bool,
+    /// Skip the soft-trash confirmation prompt (`-f`/`--yes`).
+    pub yes: bool,
+}
+
 /// Entry point for `bb rm`.
-/// - `recursive`: allow trashing folders (mirrors `rm -r`).
-/// - `permanent`: PERMANENTLY delete (irreversible) instead of soft-trashing —
-///   always requires a step-up password confirmation (`--yes` cannot bypass it).
-/// - `yes`: skip the soft-trash confirmation prompt (`-f`/`--yes`).
-pub async fn run(targets: Vec<String>, recursive: bool, permanent: bool, yes: bool) -> Result<(), String> {
+pub async fn run(targets: Vec<String>, options: RmOptions) -> Result<(), String> {
+    let RmOptions {
+        recursive,
+        permanent,
+        yes,
+    } = options;
     if targets.is_empty() {
         return Err("at least one target required".to_string());
     }

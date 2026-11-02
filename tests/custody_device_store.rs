@@ -212,7 +212,7 @@ fn nested() -> Fixture {
     let mut f = Fixture::transfer(false);
     f.rows[1]["parent_id"] = json!(SUB);
     f.rows[1]["owner_wrapped_file_key"] = Value::Null;
-    f.rows.push(row(SUB, Some(ROOT), "sub", true, true));
+    f.rows.push(row(SUB, Some(ROOT), "sub", RowFacts { folder: true, foreign: true }));
     f.nested_legacy = true;
     f.sub_inventory = vec![json!({
         "file_id": FILE,

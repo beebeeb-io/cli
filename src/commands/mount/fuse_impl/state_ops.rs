@@ -300,7 +300,15 @@ impl BeebeebFsState {
         let source = if is_dir || (pending_create && !has_buffer) {
             TruncateSource::Fresh
         } else {
-            truncate_source(has_buffer, has_stored_content, cache_matches_size, known_size, new_size)
+            truncate_source(
+                TruncateFacts {
+                    has_buffer,
+                    has_stored_content,
+                    cache_matches_size,
+                },
+                known_size,
+                new_size,
+            )
         };
 
         // Same size: leave the buffer, the cache and the dirty set alone,
@@ -523,7 +531,11 @@ impl BeebeebFsState {
         };
         let pending = self.pending_creates.remove(&ino);
         let dirty = self.dirty_inodes.remove(&ino);
-        let action = release_upload(true, pending.is_some(), dirty);
+        let action = release_upload(ReleaseFacts {
+            has_buffer: true,
+            pending_create: pending.is_some(),
+            dirty,
+        });
         (action, buf, pending)
     }
 

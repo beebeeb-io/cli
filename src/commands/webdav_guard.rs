@@ -85,6 +85,15 @@ impl Rejection {
     }
 }
 
+/// How the guard should behave once it is mounted.
+#[derive(Clone, Copy)]
+pub struct GuardOptions {
+    /// Reject every mutating method (the default `bb webdav` mode).
+    pub read_only: bool,
+    /// Log rejected requests.
+    pub verbose: bool,
+}
+
 pub struct Guard {
     port: u16,
     secret_digest: [u8; 32],
@@ -93,12 +102,12 @@ pub struct Guard {
 }
 
 impl Guard {
-    pub fn new(port: u16, secret: &str, read_only: bool, verbose: bool) -> Self {
+    pub fn new(port: u16, secret: &str, options: GuardOptions) -> Self {
         Self {
             port,
             secret_digest: Sha256::digest(secret.as_bytes()).into(),
-            read_only,
-            verbose,
+            read_only: options.read_only,
+            verbose: options.verbose,
         }
     }
 
@@ -205,7 +214,7 @@ mod tests {
     const SECRET: &str = "s3cret-value";
 
     fn guard(read_only: bool) -> Guard {
-        Guard::new(7878, SECRET, read_only, false)
+        Guard::new(7878, SECRET, GuardOptions { read_only, verbose: false })
     }
 
     fn basic(user: &str, pass: &str) -> HeaderValue {
@@ -274,7 +283,7 @@ mod tests {
 
     #[test]
     fn host_without_port_is_allowed_only_on_port_80() {
-        let g = Guard::new(80, SECRET, false, false);
+        let g = Guard::new(80, SECRET, GuardOptions { read_only: false, verbose: false });
         let h = headers("localhost", Some(basic("bb", SECRET)), None);
         assert_eq!(g.check(&Method::GET, &h, None), Ok(()));
     }
@@ -311,7 +320,7 @@ mod tests {
         // The secret as the user name does not count; a colon in the password does.
         let h = headers("localhost:7878", Some(basic(SECRET, "")), None);
         assert_eq!(g.check(&Method::GET, &h, None), Err(Rejection::Unauthorized));
-        let g2 = Guard::new(7878, "a:b", false, false);
+        let g2 = Guard::new(7878, "a:b", GuardOptions { read_only: false, verbose: false });
         let h = headers("localhost:7878", Some(basic("bb", "a:b")), None);
         assert_eq!(g2.check(&Method::GET, &h, None), Ok(()));
         // Scheme is case-insensitive.

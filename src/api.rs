@@ -284,6 +284,7 @@ mod id;
 mod shares;
 mod tree;
 mod upload;
+pub use upload::InitTransport;
 mod versions;
 
 pub(crate) use id::{DirectUploadId, FileId, FolderId, ShareId};

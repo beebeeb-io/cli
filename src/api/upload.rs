@@ -2,6 +2,16 @@
 
 use super::*;
 
+/// Whether an init asks the server for a direct upload (task 2173).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum InitTransport {
+    /// Exactly the pre-2173 request: no capability header.
+    Api,
+    /// Advertise `object-upload-v1` on this call only and let the answer's
+    /// `transport` decide what happens next.
+    Direct,
+}
+
 impl ApiClient {
     /// V2 chunked upload init: `POST /api/v1/uploads/init`.
     ///
@@ -72,7 +82,7 @@ impl ApiClient {
             chunk_count,
             is_media,
             base_version_number,
-            false,
+            InitTransport::Api,
         )
         .await
     }
@@ -80,7 +90,8 @@ impl ApiClient {
     /// [`upload_init_typed`](Self::upload_init_typed), optionally asking for the direct upload
     /// (task 2173): with `direct` the request carries `X-Beebeeb-Capabilities: object-upload-v1`
     /// (on this call only, never globally) and the answer's `transport` says what the server chose.
-    /// Without it the request is byte-identical to what it always was.
+    /// Without it the request is byte-identical to what it always was. Pass
+    /// `InitTransport::Direct` to advertise the capability.
     #[allow(clippy::too_many_arguments)]
     pub async fn upload_init_for_transport(
         &self,
@@ -92,7 +103,7 @@ impl ApiClient {
         chunk_count: i32,
         is_media: bool,
         base_version_number: Option<i32>,
-        direct: bool,
+        transport: InitTransport,
     ) -> Result<UploadInit, ApiError> {
         let token = self.require_auth()?;
         // The v2 server (`routes/uploads.rs::parse_profile`) accepts only
@@ -120,7 +131,7 @@ impl ApiClient {
                 .post(self.url("/api/v1/uploads/init"))
                 .bearer_auth(token)
                 .json(&body);
-            if direct {
+            if transport == InitTransport::Direct {
                 request = request.header(
                     beebeeb_core::direct_transfer::CAPABILITIES_HEADER,
                     beebeeb_core::direct_transfer::CAP_OBJECT_UPLOAD_V1,

@@ -321,19 +321,59 @@ mod truncate_tests {
     fn stored_content_is_loaded_before_it_is_resized() {
         // Neither a write buffer nor a cached copy: the stored content must
         // be read first, never replaced by an empty buffer.
-        assert_eq!(truncate_source(false, true, false, 5, 9), TruncateSource::Download);
-        assert_eq!(truncate_source(false, true, false, 11, 5), TruncateSource::Download);
+        assert_eq!(truncate_source(
+            TruncateFacts {
+                has_buffer: false,
+                has_stored_content: true,
+                cache_matches_size: false,
+            },
+            5,
+            9,
+        ), TruncateSource::Download);
+        assert_eq!(truncate_source(
+            TruncateFacts {
+                has_buffer: false,
+                has_stored_content: true,
+                cache_matches_size: false,
+            },
+            11,
+            5,
+        ), TruncateSource::Download);
     }
 
     #[test]
     fn a_resident_buffer_is_resized_in_place() {
-        assert_eq!(truncate_source(true, true, true, 5, 2), TruncateSource::Buffer);
-        assert_eq!(truncate_source(true, true, false, 5, 9), TruncateSource::Buffer);
+        assert_eq!(truncate_source(
+            TruncateFacts {
+                has_buffer: true,
+                has_stored_content: true,
+                cache_matches_size: true,
+            },
+            5,
+            2,
+        ), TruncateSource::Buffer);
+        assert_eq!(truncate_source(
+            TruncateFacts {
+                has_buffer: true,
+                has_stored_content: true,
+                cache_matches_size: false,
+            },
+            5,
+            9,
+        ), TruncateSource::Buffer);
     }
 
     #[test]
     fn truncating_to_zero_keeps_nothing_so_it_downloads_nothing() {
-        assert_eq!(truncate_source(false, true, false, 1000, 0), TruncateSource::Fresh);
+        assert_eq!(truncate_source(
+            TruncateFacts {
+                has_buffer: false,
+                has_stored_content: true,
+                cache_matches_size: false,
+            },
+            1000,
+            0,
+        ), TruncateSource::Fresh);
 
         let mut fs = state_with_cached_file(b"hello");
         assert_eq!(fs.resize_file(INO, 0).expect("truncate to zero"), TruncateSource::Fresh);
@@ -344,7 +384,15 @@ mod truncate_tests {
     fn a_pending_create_starts_from_an_empty_buffer() {
         // The pure decision sees no stored content, so it refuses; the
         // caller knows a pending create may start from nothing.
-        assert_eq!(truncate_source(false, false, false, 0, 5), TruncateSource::Unavailable);
+        assert_eq!(truncate_source(
+            TruncateFacts {
+                has_buffer: false,
+                has_stored_content: false,
+                cache_matches_size: false,
+            },
+            0,
+            5,
+        ), TruncateSource::Unavailable);
 
         let mut fs = state_with_cached_file(b"");
         fs.pending_creates.remove(&INO);
@@ -496,7 +544,15 @@ mod truncate_tests {
         fs.file_cache.insert(INO, b"abcdef".to_vec());
 
         assert_eq!(
-            truncate_source(false, true, false, 2, 4),
+            truncate_source(
+            TruncateFacts {
+                has_buffer: false,
+                has_stored_content: true,
+                cache_matches_size: false,
+            },
+            2,
+            4,
+        ),
             TruncateSource::Download,
             "a cache of the wrong length is not this file's content"
         );
@@ -641,7 +697,15 @@ mod rename_check_tests {
     const FILE_INO: u64 = 6;
     const RO_INO: u64 = 7;
 
-    fn inode(file_id: &str, is_dir: bool, read_only: bool) -> InodeEntry {
+    #[derive(Default)]
+    struct InodeFacts {
+        is_dir: bool,
+        read_only: bool,
+    }
+
+    fn inode(file_id: &str, facts: InodeFacts) -> InodeEntry {
+        let is_dir = facts.is_dir;
+        let read_only = facts.read_only;
         InodeEntry {
             file_id: Some(file_id.to_string()),
             key_uuid: file_id.parse().ok(),
@@ -663,13 +727,13 @@ mod rename_check_tests {
             Duration::from_secs(5),
         );
         // A folder whose listing even claims a chunk: it must still not be probed.
-        let mut dir = inode("22222222-2222-4222-8222-222222222222", true, false);
+        let mut dir = inode("22222222-2222-4222-8222-222222222222", InodeFacts { is_dir: true, ..Default::default() });
         dir.chunk_count = 1;
         fs.inodes.insert(DIR_INO, dir);
         fs.inodes
-            .insert(FILE_INO, inode("11111111-1111-4111-8111-111111111111", false, false));
+            .insert(FILE_INO, inode("11111111-1111-4111-8111-111111111111", InodeFacts::default()));
         fs.inodes
-            .insert(RO_INO, inode("5f0c2a9e-3b1d-4c7e-9a2f-6d8e1b4c7a30", false, true));
+            .insert(RO_INO, inode("5f0c2a9e-3b1d-4c7e-9a2f-6d8e1b4c7a30", InodeFacts { read_only: true, ..Default::default() }));
         fs
     }
 

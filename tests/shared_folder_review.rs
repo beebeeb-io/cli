@@ -73,7 +73,7 @@ async fn explicit_replacement_discards_resume_for_a_different_identity() {
     for v2 in [true, false] {
         let mut f = Fixture::transfer(v2);
         f.review_complete_requested_id = true;
-        f.rows.push(row(SUB, None, "unrelated-existing.txt", false, false));
+        f.rows.push(row(SUB, None, "unrelated-existing.txt", RowFacts { ..Default::default() }));
         let h = Harness::new(f).await;
         let d = initial(&h).await;
         let path = d.join("guest.txt");

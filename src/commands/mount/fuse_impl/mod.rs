@@ -126,24 +126,28 @@ enum TruncateSource {
 ///
 /// Truncating to zero keeps nothing, so it never downloads — `O_TRUNC`
 /// and `truncate -s 0` stay as cheap as they are today.
-fn truncate_source(
+#[derive(Clone, Copy)]
+struct TruncateFacts {
+    /// A write buffer for this inode exists.
     has_buffer: bool,
+    /// The inode has content stored server-side.
     has_stored_content: bool,
+    /// The read cache holds exactly the inode's current length.
     cache_matches_size: bool,
-    known_size: u64,
-    new_size: u64,
-) -> TruncateSource {
+}
+
+fn truncate_source(facts: TruncateFacts, known_size: u64, new_size: u64) -> TruncateSource {
     if new_size == known_size {
         // Nothing to resize: the file must not become dirty.
         TruncateSource::Unchanged
-    } else if has_buffer {
+    } else if facts.has_buffer {
         TruncateSource::Buffer
     } else if new_size == 0 {
         // Truncating to zero keeps nothing, so it needs no content.
         TruncateSource::Fresh
-    } else if cache_matches_size {
+    } else if facts.cache_matches_size {
         TruncateSource::Cache
-    } else if has_stored_content {
+    } else if facts.has_stored_content {
         TruncateSource::Download
     } else {
         // A file with no stored content and nothing resident (the state
@@ -239,12 +243,22 @@ enum ReleaseUpload {
     Overwrite,
 }
 
-fn release_upload(has_buffer: bool, is_pending_create: bool, is_dirty: bool) -> ReleaseUpload {
-    if !has_buffer {
+#[derive(Clone, Copy)]
+struct ReleaseFacts {
+    /// A write buffer survived until release.
+    has_buffer: bool,
+    /// The inode was created by this mount and never confirmed.
+    pending_create: bool,
+    /// The buffer was written or resized.
+    dirty: bool,
+}
+
+fn release_upload(facts: ReleaseFacts) -> ReleaseUpload {
+    if !facts.has_buffer {
         ReleaseUpload::Nothing
-    } else if is_pending_create {
+    } else if facts.pending_create {
         ReleaseUpload::NewFile
-    } else if is_dirty {
+    } else if facts.dirty {
         ReleaseUpload::Overwrite
     } else {
         ReleaseUpload::Nothing

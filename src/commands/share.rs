@@ -43,13 +43,25 @@ const PASSPHRASE_NOTICE: &[&str] = &[
 ///
 /// Every share is end-to-end encrypted (the server refuses anything else,
 /// task 0538): see "Share wire format" below for exactly what is sent.
+/// The share-time choices that are not part of the link itself.
+pub struct ShareOptions {
+    /// Prompt for a passphrase the server checks before serving the link.
+    pub passphrase: bool,
+    /// The removed `--no-double-encrypt` flag, kept only so the CLI can
+    /// explain why it is gone instead of failing with "unknown flag".
+    pub no_double_encrypt: bool,
+}
+
 pub async fn run(
     file: String,
     expires: Option<String>,
     max_opens: Option<u32>,
-    passphrase: bool,
-    no_double_encrypt: bool,
+    options: ShareOptions,
 ) -> Result<(), String> {
+    let ShareOptions {
+        passphrase,
+        no_double_encrypt,
+    } = options;
     if no_double_encrypt {
         return Err(
             "--no-double-encrypt is no longer supported: every share is end-to-end encrypted, \

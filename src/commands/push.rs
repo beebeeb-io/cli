@@ -140,17 +140,8 @@ pub async fn run(
     path: PathBuf,
     parent_id: Option<String>,
     folder: Option<String>,
-    replace: bool,
-    keep_both: bool,
+    strategy: ConflictStrategy,
 ) -> Result<(), String> {
-    let strategy = if replace {
-        ConflictStrategy::Replace
-    } else if keep_both {
-        ConflictStrategy::KeepBoth
-    } else {
-        ConflictStrategy::Prompt
-    };
-
     if !path.exists() {
         return Err(format!("file not found: {}", path.display()));
     }

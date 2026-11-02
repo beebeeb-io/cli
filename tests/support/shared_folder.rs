@@ -42,7 +42,17 @@ pub fn item_key() -> FileKey {
 pub fn name(key: &FileKey, text: &str) -> String {
     serde_json::to_string(&beebeeb_core::encrypt::encrypt_metadata(key, text).unwrap()).unwrap()
 }
-pub fn row(id: &str, parent: Option<&str>, text: &str, folder: bool, foreign: bool) -> Value {
+/// The two independent columns a mock shared-folder row can vary.
+#[derive(Default)]
+pub struct RowFacts {
+    /// The row is a folder.
+    pub folder: bool,
+    /// The row came through a share, so its key is not locally derivable.
+    pub foreign: bool,
+}
+
+pub fn row(id: &str, parent: Option<&str>, text: &str, facts: RowFacts) -> Value {
+    let RowFacts { folder, foreign } = facts;
     let key = if foreign {
         item_key()
     } else {
@@ -148,7 +158,7 @@ impl Fixture {
         let (wrapped, nonce) = beebeeb_core::file_request::wrap_request_private(&master(), b"", &private).unwrap();
         self.requests_doc = json!({"file_requests":[{"id":SUB,"wrapped_private_key":B64.encode(wrapped),"wrap_nonce":B64.encode(nonce)}]});
         let seal = beebeeb_core::file_request::seal_to_request(&public, b"", item_key().as_bytes()).unwrap();
-        let mut r = row(SUB, None, "request.txt", false, true);
+        let mut r = row(SUB, None, "request.txt", RowFacts { foreign: true, ..Default::default() });
         r["acted_via_share_id"] = Value::Null;
         r["file_request_id"] = json!(SUB);
         r["sender_ephemeral_pubkey"] = json!(B64.encode(seal.e_pub));
@@ -171,7 +181,7 @@ impl Fixture {
         f.plaintext = b"SF-0002 read-only repair content".to_vec();
         f.stride = f.plaintext.len() as u64;
         f.frames = vec![beebeeb_core::encrypt::encrypt_chunk_raw(&key, &f.plaintext).unwrap()];
-        let mut r = row(UPPER_FILE, Some(ROOT), "uppercase-repair.pdf", false, false);
+        let mut r = row(UPPER_FILE, Some(ROOT), "uppercase-repair.pdf", RowFacts { ..Default::default() });
         r["name_encrypted"] = json!(
             beebeeb_core::encrypt::encrypt_name_for(
                 &key,
@@ -206,7 +216,7 @@ impl Fixture {
         f.plaintext = b"an ordinary owner file".to_vec();
         f.stride = f.plaintext.len() as u64;
         f.frames = vec![beebeeb_core::encrypt::encrypt_chunk_raw(&key, &f.plaintext).unwrap()];
-        let mut r = row(FILE, Some(ROOT), "owned.txt", false, false);
+        let mut r = row(FILE, Some(ROOT), "owned.txt", RowFacts { ..Default::default() });
         r["name_encrypted"] = json!(
             beebeeb_core::encrypt::encrypt_name_for(
                 &key,
@@ -233,7 +243,7 @@ impl Fixture {
         f.stride = f.plaintext.len() as u64;
         f.frames =
             vec![serde_json::to_vec(&beebeeb_core::encrypt::encrypt_chunk(&key, &f.plaintext).unwrap()).unwrap()];
-        let mut r = row(FILE, Some(ROOT), "legacy.txt", false, false);
+        let mut r = row(FILE, Some(ROOT), "legacy.txt", RowFacts { ..Default::default() });
         r["name_encrypted"] = json!(
             beebeeb_core::encrypt::encrypt_name_for(
                 &key,
@@ -258,7 +268,7 @@ impl Fixture {
         f.plaintext = b"SF-0002 content-only repair payload".to_vec();
         f.stride = f.plaintext.len() as u64;
         f.frames = vec![beebeeb_core::encrypt::encrypt_chunk_raw(&upper, &f.plaintext).unwrap()];
-        let mut r = row(UPPER_FILE, Some(ROOT), "uppercase-repair.pdf", false, false);
+        let mut r = row(UPPER_FILE, Some(ROOT), "uppercase-repair.pdf", RowFacts { ..Default::default() });
         r["name_encrypted"] = json!(
             beebeeb_core::encrypt::encrypt_name_for(
                 &normal,
@@ -276,8 +286,8 @@ impl Fixture {
     pub fn basic() -> Self {
         Self {
             rows: vec![
-                row(ROOT, None, "Shared", true, false),
-                row(FILE, Some(ROOT), "guest.txt", false, true),
+                row(ROOT, None, "Shared", RowFacts { folder: true, ..Default::default() }),
+                row(FILE, Some(ROOT), "guest.txt", RowFacts { foreign: true, ..Default::default() }),
             ],
             inventory: vec![json!({"file_id":FILE,"encrypted_file_key":wrap(FILE,false)})],
             ..Self::default()
@@ -573,7 +583,7 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
         if (f.index_partial || f.review_partial_repair_only && root_listings >= 2)
             && query.get("parent_id").map(String::as_str) == Some(ROOT)
         {
-            let mut bad = row(BAD, Some(ROOT), "unreadable", false, true);
+            let mut bad = row(BAD, Some(ROOT), "unreadable", RowFacts { foreign: true, ..Default::default() });
             bad["name_encrypted"] = json!("corrupt");
             rows.push(bad);
         }

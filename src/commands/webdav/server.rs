@@ -2,7 +2,24 @@
 
 use super::*;
 
-pub async fn run(port: u16, read_write: bool, cache_ttl: u64, no_cache: bool, verbose: bool) -> Result<(), String> {
+/// Flags that shape a WebDAV server, grouped so `run` does not take a row of
+/// anonymous booleans.
+#[derive(Clone, Copy)]
+pub struct WebdavOptions {
+    /// Serve writes instead of rejecting them.
+    pub read_write: bool,
+    /// Disable the read cache (same effect as `cache_ttl == 0`).
+    pub no_cache: bool,
+    /// Log each request.
+    pub verbose: bool,
+}
+
+pub async fn run(port: u16, cache_ttl: u64, options: WebdavOptions) -> Result<(), String> {
+    let WebdavOptions {
+        read_write,
+        no_cache,
+        verbose,
+    } = options;
     let read_only = !read_write;
     let config = load_config();
 
@@ -46,7 +63,7 @@ pub async fn run(port: u16, read_write: bool, cache_ttl: u64, no_cache: bool, ve
     let listener = bind_loopback(port).await?;
     let port = listener.local_addr().map_err(|e| format!("local_addr: {e}"))?.port();
     let secret = webdav_guard::generate_secret();
-    let guard = Arc::new(Guard::new(port, &secret, read_only, verbose));
+    let guard = Arc::new(Guard::new(port, &secret, GuardOptions { read_only, verbose }));
     let router = build_router(state, guard);
 
     let ro_label = if read_only { "read-only" } else { "read-write" };

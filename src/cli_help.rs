@@ -180,7 +180,7 @@ pub(super) fn build_help_text() -> String {
 
 pub(super) fn print_custom_help() {
     // Ensure color system is initialised (ui::init hasn't been called yet).
-    ui::init(false, false, false);
+    ui::init(ui::OutputMode::Rich, ui::ColorChoice::Auto);
     print!("{}", build_help_text());
 }
 

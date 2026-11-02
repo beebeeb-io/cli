@@ -10,6 +10,7 @@
 //! (session recovery, writer pin) in the sibling files.
 
 use super::*;
+use crate::api::InitTransport;
 
 /// Look-ahead channel depth. `1` keeps peak memory tight while still
 /// overlapping "encrypt N+1" with "PUT N"; bump to `2` for a touch more
@@ -428,7 +429,11 @@ pub(super) async fn upload_attempt(
                     chunk_count as i32,
                     is_media,
                     spec.base_version_number,
-                    offer.is_some(),
+                    if offer.is_some() {
+                        InitTransport::Direct
+                    } else {
+                        InitTransport::Api
+                    },
                 )
                 .await
             {

@@ -563,7 +563,19 @@ async fn main() {
 
     let cli = Cli::parse();
 
-    ui::init(cli.json, cli.quiet, cli.no_color);
+    let output_mode = if cli.json {
+        ui::OutputMode::Json
+    } else if cli.quiet {
+        ui::OutputMode::Quiet
+    } else {
+        ui::OutputMode::Rich
+    };
+    let color = if cli.no_color {
+        ui::ColorChoice::Never
+    } else {
+        ui::ColorChoice::Auto
+    };
+    ui::init(output_mode, color);
     transport::init(cli.transport);
 
     // Explicit updates bypass automatic opt-out/cooldown and report errors.
@@ -599,7 +611,16 @@ async fn main() {
             folder,
             replace,
             keep_both,
-        } => commands::push::run(path, parent, folder, replace, keep_both).await,
+        } => {
+            let strategy = if replace {
+                commands::push::ConflictStrategy::Replace
+            } else if keep_both {
+                commands::push::ConflictStrategy::KeepBoth
+            } else {
+                commands::push::ConflictStrategy::Prompt
+            };
+            commands::push::run(path, parent, folder, strategy).await
+        }
         Commands::Pull {
             file_id,
             output,
@@ -647,7 +668,17 @@ async fn main() {
             recursive,
             permanent,
             yes,
-        } => commands::rm::run(targets, recursive, permanent, yes).await,
+        } => {
+            commands::rm::run(
+                targets,
+                commands::rm::RmOptions {
+                    recursive,
+                    permanent,
+                    yes,
+                },
+            )
+            .await
+        }
         Commands::Restore { target } => commands::restore::run(target).await,
         Commands::Trash { cmd } => match cmd {
             TrashCmd::List => commands::trash::list().await,
@@ -665,7 +696,18 @@ async fn main() {
             max_opens,
             passphrase,
             no_double_encrypt,
-        } => commands::share::run(file_id, expires, max_opens, passphrase, no_double_encrypt).await,
+        } => {
+            commands::share::run(
+                file_id,
+                expires,
+                max_opens,
+                commands::share::ShareOptions {
+                    passphrase,
+                    no_double_encrypt,
+                },
+            )
+            .await
+        }
         Commands::Request(cmd) => match cmd {
             RequestCmd::Create {
                 folder,
@@ -756,7 +798,18 @@ async fn main() {
             cache_ttl,
             no_cache,
             verbose,
-        } => commands::webdav::run(port, read_write, cache_ttl, no_cache, verbose).await,
+        } => {
+            commands::webdav::run(
+                port,
+                cache_ttl,
+                commands::webdav::WebdavOptions {
+                    read_write,
+                    no_cache,
+                    verbose,
+                },
+            )
+            .await
+        }
         Commands::Speedtest => commands::speedtest::run().await,
         Commands::Repair { dry_run } => commands::repair::run(dry_run).await,
         Commands::Billing { action } => match action {
