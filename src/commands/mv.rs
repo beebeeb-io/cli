@@ -209,14 +209,17 @@ async fn move_single(
             // content stays under `C`, so its name uses the string convention.
             let target = src_keys.write_target_for(&src_id);
             let (file_key, pin) = match &target {
-                Some(target) => (
-                    beebeeb_core::kdf::FileKey::from_bytes(*target.key().as_bytes()),
-                    target.pin(),
-                ),
-                None => (
+                Some(target) => (crate::crypto::key_copy(target.key()), target.pin()),
+                // Only a request row falls back: its content stays under `C`, so
+                // its name uses the string convention. Anything else without a
+                // target would seal the new name under a key that opens nothing.
+                None if src_keys.origin_for(&src_id)
+                    == Some(beebeeb_core::owned_keys::KeyOrigin::RequestContent) =>
+                (
                     beebeeb_core::kdf::derive_file_key(master_key, src_id.as_bytes()),
                     beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
                 ),
+                None => return Err(crate::owned_keys::RENAME_UNKNOWN_KEY.to_string()),
             };
             Some(
                 beebeeb_core::encrypt::encrypt_name_for(&file_key, &name, None, pin)

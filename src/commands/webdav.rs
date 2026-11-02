@@ -631,3 +631,98 @@ mod a19_move_tests {
         assert_eq!(patches.load(Ordering::SeqCst), 0, "an unreadable ancestry sent a move");
     }
 }
+
+/// P2-6 (L13): renaming needs the key the name authenticates under. A guest's
+/// folder is listed but not resolvable on this device: a rename is refused with
+/// 409 and an explanation, never sealed under a derived guess and PATCHed.
+#[cfg(test)]
+mod rename_key_tests {
+    use super::*;
+    use axum::{Json, routing::get};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const ROOT: &str = "22222222-2222-4222-8222-222222222222";
+    const GUEST: &str = "33333333-3333-8333-8333-333333333333";
+
+    #[tokio::test]
+    async fn renaming_a_guest_folder_is_refused_without_a_patch() {
+        let master = beebeeb_core::kdf::MasterKey::from_bytes([7u8; 32]);
+        let root_key = beebeeb_core::kdf::derive_file_key(&master, ROOT.as_bytes());
+        let root_name = beebeeb_core::encrypt::encrypt_name_for(
+            &root_key,
+            "Shared",
+            None,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+        )
+        .unwrap();
+        // The guest folder's name is sealed under a key this device never holds.
+        let guest_name = beebeeb_core::encrypt::encrypt_name_for(
+            &beebeeb_core::kdf::FileKey::from_bytes([160; 32]),
+            "Guest",
+            None,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+        )
+        .unwrap();
+        let patches = Arc::new(AtomicUsize::new(0));
+        let patch_count = patches.clone();
+        let rows = Arc::new((
+            json!({"id": ROOT, "parent_id": null, "name_encrypted": root_name, "is_folder": true}),
+            json!({"id": GUEST, "parent_id": ROOT, "name_encrypted": guest_name, "is_folder": true}),
+        ));
+        let listing_rows = rows.clone();
+        let id_rows = rows.clone();
+        let app = Router::new()
+            // No approved legacy invites: the ancestry walk ends at the root.
+            .route(
+                "/api/v1/shares/invites/sent",
+                get(|| async { Json(json!({"invites": []})) }),
+            )
+            .route(
+                "/api/v1/files",
+                get(move || {
+                    let rows = listing_rows.clone();
+                    async move { Json(json!({"files": [rows.0.clone(), rows.1.clone()]})) }
+                }),
+            )
+            .route(
+                "/api/v1/files/:id",
+                get(move |axum::extract::Path(id): axum::extract::Path<String>| {
+                    let rows = id_rows.clone();
+                    async move { Json(if id == ROOT { rows.0.clone() } else { rows.1.clone() }) }
+                })
+                .patch(move || {
+                    let patches = patch_count.clone();
+                    async move {
+                        patches.fetch_add(1, Ordering::SeqCst);
+                        Json(json!({"ok": true}))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let state = Arc::new(DavState {
+            api: ApiClient::new_for_test(format!("http://{}", listener.local_addr().unwrap())),
+            master_key: master,
+            read_only: false,
+            dir_cache: Mutex::new(HashMap::new()),
+            cache_ttl: Duration::ZERO,
+            locks: Mutex::new(HashMap::new()),
+            request_count: std::sync::atomic::AtomicU64::new(0),
+            error_count: std::sync::atomic::AtomicU64::new(0),
+            verbose: false,
+        });
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        // The unresolved row keeps its place in the listing under a short id.
+        let listed = format!("/Shared/[{}]", &GUEST[..8]);
+        let response = move_response(&state, &listed, "/Shared/Guest2").await;
+        server.abort();
+        let status = response.status();
+        let body = String::from_utf8_lossy(&axum::body::to_bytes(response.into_body(), 4096).await.unwrap())
+            .into_owned();
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body, crate::owned_keys::RENAME_UNKNOWN_KEY);
+        assert_eq!(patches.load(Ordering::SeqCst), 0, "a refused rename sent a PATCH");
+    }
+}

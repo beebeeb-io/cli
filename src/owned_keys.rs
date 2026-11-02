@@ -18,6 +18,11 @@ pub const UNREADABLE: &str = "can't open (added via shared folder)";
 pub const CUSTODY_UNAVAILABLE: &str = "This folder's keys are unavailable";
 /// L15 = A: desktop and CLI never publish an owner key, so a write into a shared
 /// folder stays owner-only until the owner shares it from web or mobile (A14b).
+/// A rename needs the key the row's name authenticates under. A row this
+/// device cannot resolve (a guest's folder, an unreadable row) has none, and a
+/// derived guess would seal the new name under a key that opens nothing.
+pub const RENAME_UNKNOWN_KEY: &str =
+    "can't rename this item: this device doesn't hold the key its name uses";
 pub const OWNER_ONLY_NOTICE: &str = "Only you can open this. Share it from the web or the app.";
 
 /// Print [`OWNER_ONLY_NOTICE`] when `folder_id` sits in a shared folder.
@@ -125,6 +130,10 @@ impl OwnedKeyResolver {
     /// The key `id` resolved to in this resolver, if it was resolved here.
     pub fn key_for(&self, id: &str) -> Option<Arc<FileKey>> {
         self.resolved.get(id).map(|r| r.key.clone())
+    }
+    /// The key origin `id` resolved to in this resolver, if it was resolved here.
+    pub fn origin_for(&self, id: &str) -> Option<KeyOrigin> {
+        self.resolved.get(id).map(|r| r.origin)
     }
     /// L13: the seal target core issued for `id`, if the resolver authenticated
     /// the row for writing.
