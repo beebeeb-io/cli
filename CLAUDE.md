@@ -41,16 +41,8 @@ src/test_server.rs        shared loopback mock for tests; tests/ = integration b
   Set `BB_REFUSE_NON_LOOPBACK_API=1` on EVERY run of the binary and pass an explicit local `--api`; `tests/api_guard.rs` fails an unguarded
   `CARGO_BIN_EXE_bb` spawn. Unit tests use `ApiClient::new_for_test` (refuses non-loopback). The config file holds the live session and master
   key (macOS `~/Library/Application Support/beebeeb/config.json`, Linux `~/.config/beebeeb/config.json`): tests isolate HOME.
-- **Never silently overwrite** on `bb pull`: `-f/--force`, a TTY `y/N`, or exit non-zero naming `--force`/`-o` (`tests/pull_overwrite.rs`).
-- **Server-provided names** (file requests: an anonymous stranger) become local paths only via `safe_path`; never `out_dir.join(name)`.
-- **Sync never deletes on absence.** Local removal only for a confirmed server tombstone, byte-identical to the manifest, a trustworthy
-  listing, under the mass-delete breaker (exit 3); removal is a MOVE into `.bb-trash/<UTC stamp>/<rel>`, never an unlink. An undecryptable download writes nothing, exit 3.
-- **Own ids (L13):** every create proposes its own id and fails the op if any answer does not echo it byte for byte; never seal under the echoed id.
-- **The CLI never calls the legacy `/api/v1/files/upload`;** all uploads use `/api/v1/uploads/*`. Init sends the plaintext `file_size_bytes`.
 - **No city is ever printed** (`bb region`, any command, whichever server answers; `tests/no_city_copy.rs`, `tests/region_choice.rs`). The
   region choices come from `GET /api/v1/storage-regions`, never from the binary.
-- **Step-up (`bb trash empty`, `rm --permanent`, `account update`):** OPAQUE confirm; fall back to plaintext `/auth/confirm` ONLY on
-  `409 {"opaque_unavailable": true}`; passwords and OPAQUE state are `Zeroizing`.
 - **`bb share` is always double-encrypted** (web wire format, `nonce(12) || AES-256-GCM(K_c, FileKey)`, pinned by the core `share_key_wrap` KAT);
   `bb signup` never creates accounts (it prints the web link); `bb 2fa status` reads `totp_enabled`.
 - **Direct S3 transfer:** storage requests use their own clients (no default headers, cookies, `Authorization`, redirects; https only);
@@ -58,6 +50,24 @@ src/test_server.rs        shared loopback mock for tests; tests/ = integration b
   call unless `$HOME` is the account's home.
 - **Core pin:** `beebeeb-core` + `beebeeb-types` are Cargo git deps on a full 40-char SHA; bump `rev` ONLY together with `repos/server/CORE_REV`
   in the SAME commit, then fix what the compiler flags (non-exhaustive `match` on core enums is intentional). Local `[patch]` snippet: `docs/agent-notes.md` → "Dependencies".
+
+## Never break
+
+The rules whose breakage costs data, a key, a credential or a user. One line each; the detail is in `docs/agent-notes.md`.
+
+- `bb pull` **Never silently overwrites**: `-f/--force` overwrites; a rich TTY gets `y/N`; non-interactive runs exit non-zero naming `--force`/`-o`.
+- Region choices come from `GET /api/v1/storage-regions`, never from the binary; `set` sends the row's `id` verbatim and sends no request for an unknown name.
+- **Sync never deletes on absence (deletion-safety spec R4/R5):** local removal only for a server tombstone, byte-identical to the manifest.
+- Mass-delete breaker (max(50, 10% of tracked)): over it nothing is removed, exit 3, daemon never gets `--allow-mass-delete`.
+- Sync removal is a MOVE into `.bb-trash/<UTC stamp>/<rel>`, never an unlink.
+- OPAQUE step-up: the plaintext password never reaches the server (confirm-opaque-start/finish).
+- Only `409 {"opaque_unavailable": true}` falls back to plaintext `POST /auth/confirm`; never retried in plaintext otherwise.
+- `bb repair` writes a new version of the same file id and never trashes the original.
+- The legacy `/api/v1/files/upload` route is never called by the CLI.
+- Own ids (L13): a mismatch fails the op, abandons the session it opened (by the client's id, never the echoed one) and seals nothing under the echoed id.
+- Server-provided names are never joined onto a path: `out_dir.join(name)` is never used directly (`safe_path`).
+- Direct S3: `--transport api` / `BB_TRANSPORT=api` force the API; `BB_TRANSPORT_TRACE=1` traces decisions (never a URL); `bb pull --json` reports `transport`.
+- A session's transport never changes after init: a direct session that cannot finish is abandoned and the file inits again WITHOUT the token.
 
 ## How we work
 
