@@ -306,7 +306,6 @@ impl BeebeebFs {
     }
 }
 
-
 // ── Submodules ──────────────────────────────────────────────────────────────
 
 mod state;
@@ -438,7 +437,6 @@ impl Filesystem for BeebeebFs {
 }
 
 // ── Crypto helpers ────────────────────────────────────────────────────────
-
 
 fn decrypt_name(master_key: &beebeeb_core::kdf::MasterKey, file_id: &str, name_encrypted: &str) -> String {
     crate::crypto::decrypt_name(master_key, file_id, name_encrypted)

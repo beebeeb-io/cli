@@ -205,5 +205,4 @@ impl ApiClient {
             .map_err(format_request_error)?;
         parse_response(resp).await
     }
-
 }

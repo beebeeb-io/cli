@@ -320,7 +320,10 @@ mod tests {
             2,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("raw parser:") && err.to_string().contains("json parser:"), "{err}");
+        assert!(
+            err.to_string().contains("raw parser:") && err.to_string().contains("json parser:"),
+            "{err}"
+        );
     }
 
     /// A wrong key must still fail on both parsers (no false success).
@@ -717,13 +720,9 @@ mod tests {
         let (m, fid, name_enc, ..) = v2_file();
         assert_eq!(content_pin(&m, &fid, &name_enc), Ok(ExpectedChunkFormat::V2));
         let legacy_key = beebeeb_core::kdf::derive_file_key(&m, fid.as_bytes());
-        let legacy = beebeeb_core::encrypt::encrypt_name_for(
-            &legacy_key,
-            "old.txt",
-            None,
-            ExpectedChunkFormat::Unrecorded,
-        )
-        .unwrap();
+        let legacy =
+            beebeeb_core::encrypt::encrypt_name_for(&legacy_key, "old.txt", None, ExpectedChunkFormat::Unrecorded)
+                .unwrap();
         assert_eq!(content_pin(&m, &fid, &legacy), Ok(ExpectedChunkFormat::Unrecorded));
         let err = content_pin(&m, &fid, "plain-name.txt").unwrap_err();
         assert!(err.to_string().contains("refusing to guess"), "{err}");
@@ -807,13 +806,9 @@ mod tests {
     fn an_ordinary_owner_row_is_not_read_only() {
         let m = mk();
         let key = beebeeb_core::kdf::derive_file_key(&m, FID.as_bytes());
-        let name_enc = beebeeb_core::encrypt::encrypt_name_for(
-            &key,
-            "ordinary.txt",
-            None,
-            ExpectedChunkFormat::Unrecorded,
-        )
-        .unwrap();
+        let name_enc =
+            beebeeb_core::encrypt::encrypt_name_for(&key, "ordinary.txt", None, ExpectedChunkFormat::Unrecorded)
+                .unwrap();
         assert_eq!(
             decrypt_name_with_convention(&m, FID, &name_enc),
             Some(("ordinary.txt".to_string(), OwnerKeyConvention::String))
@@ -838,35 +833,35 @@ mod tests {
     }
 }
 
+mod chunks;
 mod error;
+mod frames;
 mod names;
 mod pins;
-mod frames;
-mod chunks;
 
-pub use error::CryptoError;
-pub use names::OWNER_REPAIR_READ_ONLY;
-pub use names::decrypt_name;
-pub use names::decrypt_name_with_convention;
-pub use names::name_is_upper_repair;
-#[cfg(test)]
-pub use names::decrypt_name_with_key;
-pub use pins::owner_content_key;
-pub use pins::first_frame_opens;
-pub use pins::first_json_blob_frame;
-pub use pins::content_pin;
-pub use pins::content_pin_with_key;
-pub use pins::file_row_pin;
-pub(crate) use pins::key_copy;
-pub(crate) use frames::probe_first_frame_len;
 pub use chunks::decrypt_file_chunks;
+#[cfg(test)]
+use chunks::decrypt_file_chunks_owned;
 pub use chunks::decrypt_file_chunks_with_chunk_size;
 pub use chunks::try_decrypt_all_chunks;
 pub use chunks::try_decrypt_all_chunks_with_chunk_size;
-#[cfg(test)]
-use chunks::decrypt_file_chunks_owned;
+pub use error::CryptoError;
+pub(crate) use frames::probe_first_frame_len;
 use frames::raw_frame_size;
-use pins::NONCE_LEN;
-use pins::TAG_LEN;
+pub use names::OWNER_REPAIR_READ_ONLY;
+pub use names::decrypt_name;
+pub use names::decrypt_name_with_convention;
+#[cfg(test)]
+pub use names::decrypt_name_with_key;
 #[cfg(test)]
 use names::decrypt_names;
+pub use names::name_is_upper_repair;
+use pins::NONCE_LEN;
+use pins::TAG_LEN;
+pub use pins::content_pin;
+pub use pins::content_pin_with_key;
+pub use pins::file_row_pin;
+pub use pins::first_frame_opens;
+pub use pins::first_json_blob_frame;
+pub(crate) use pins::key_copy;
+pub use pins::owner_content_key;

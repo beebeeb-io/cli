@@ -234,7 +234,11 @@ impl ApiClient {
                 Err(err) => return Err(format_request_error(err).into()),
             }
         }
-        Err(format!("chunk {index} failed after {} attempts: {last_err}", CHUNK_RETRY.max_attempts).into())
+        Err(format!(
+            "chunk {index} failed after {} attempts: {last_err}",
+            CHUNK_RETRY.max_attempts
+        )
+        .into())
     }
 
     /// Finalise a v2 upload session: `POST /api/v1/uploads/{session}/complete`.
@@ -291,5 +295,4 @@ impl ApiClient {
         }
         Err("rate limited after 3 retries".to_string().into())
     }
-
 }

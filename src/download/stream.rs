@@ -9,7 +9,10 @@ use super::*;
 /// a multi-chunk body exactly: every frame but the last is `chunk_size + 28`
 /// bytes and the last one is usually shorter. Like the streaming path it treats
 /// the header as untrusted (zero, or past core's `MAX_CHUNK_SIZE`, is "absent").
-pub async fn download_buffered(api: &ApiClient, file_id: impl Into<crate::api::FileId>) -> Result<(Vec<u8>, Option<u64>), DownloadError> {
+pub async fn download_buffered(
+    api: &ApiClient,
+    file_id: impl Into<crate::api::FileId>,
+) -> Result<(Vec<u8>, Option<u64>), DownloadError> {
     let resp = api.download_stream(file_id).await?;
     let chunk_size = header_u64(&resp, "X-Chunk-Size").filter(|&v| v > 0 && v <= MAX_CHUNK_SIZE);
     let bytes = resp
@@ -277,7 +280,11 @@ pub(super) async fn stream_download_key(
     // bytes are NOT inspected: the format is decided by frame-0 authentication.
     let mut carry: Vec<u8> = Vec::new();
     while carry.is_empty() {
-        match resp.chunk().await.map_err(|e| DownloadError::Other(format!("download read: {e}")))? {
+        match resp
+            .chunk()
+            .await
+            .map_err(|e| DownloadError::Other(format!("download read: {e}")))?
+        {
             Some(b) => carry.extend_from_slice(&b),
             None => break,
         }
@@ -451,7 +458,11 @@ pub(super) fn buffered_fallback(
 /// Read more body chunks until `buf.len() >= want` or EOF.
 pub(super) async fn fill_to(resp: &mut reqwest::Response, buf: &mut Vec<u8>, want: usize) -> Result<(), DownloadError> {
     while buf.len() < want {
-        match resp.chunk().await.map_err(|e| DownloadError::Other(format!("download read: {e}")))? {
+        match resp
+            .chunk()
+            .await
+            .map_err(|e| DownloadError::Other(format!("download read: {e}")))?
+        {
             Some(b) => buf.extend_from_slice(&b),
             None => break,
         }
@@ -461,9 +472,17 @@ pub(super) async fn fill_to(resp: &mut reqwest::Response, buf: &mut Vec<u8>, wan
 
 /// Drain the rest of the response body into `buf`, refusing to hold more than
 /// the cap (see [`fallback_cap`]).
-pub(super) async fn drain_rest(resp: &mut reqwest::Response, buf: &mut Vec<u8>, cap: FallbackCap) -> Result<(), DownloadError> {
+pub(super) async fn drain_rest(
+    resp: &mut reqwest::Response,
+    buf: &mut Vec<u8>,
+    cap: FallbackCap,
+) -> Result<(), DownloadError> {
     check_cap(cap, buf.len() as u64)?;
-    while let Some(b) = resp.chunk().await.map_err(|e| DownloadError::Other(format!("download read: {e}")))? {
+    while let Some(b) = resp
+        .chunk()
+        .await
+        .map_err(|e| DownloadError::Other(format!("download read: {e}")))?
+    {
         check_cap(cap, (buf.len() as u64).saturating_add(b.len() as u64))?;
         buf.extend_from_slice(&b);
     }

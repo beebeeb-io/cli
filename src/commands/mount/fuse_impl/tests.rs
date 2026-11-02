@@ -4,7 +4,6 @@
 //! lives here, one file per concern; the facade keeps the stub, `rename_parent_target`
 //! and the cross-crate test mods.
 
-
 // ── Owner-only tests ──────────────────────────────────────────────────────
 //
 // The mount is the decrypted vault, so no other local account may read it:

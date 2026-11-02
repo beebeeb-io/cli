@@ -48,7 +48,12 @@ pub(super) struct FallbackCap {
     pub(super) chunked: bool,
 }
 
-pub(super) fn fallback_cap(ceiling: u64, content_len: Option<u64>, original_size: Option<u64>, count: u32) -> FallbackCap {
+pub(super) fn fallback_cap(
+    ceiling: u64,
+    content_len: Option<u64>,
+    original_size: Option<u64>,
+    count: u32,
+) -> FallbackCap {
     match content_len {
         Some(cl) => FallbackCap {
             cap: cl,
@@ -73,11 +78,13 @@ pub(super) fn check_cap(c: FallbackCap, len: u64) -> Result<(), DownloadError> {
             "this is a legacy-format file larger than the chunked-download limit ({} bytes; {len} bytes read); \
              retry the download, or the server must send Content-Length for it",
             c.cap
-        ).into())
+        )
+        .into())
     } else {
         Err(format!(
             "download body exceeds its declared Content-Length of {} bytes ({len} bytes read); aborting",
             c.cap
-        ).into())
+        )
+        .into())
     }
 }

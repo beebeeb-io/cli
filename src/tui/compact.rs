@@ -127,4 +127,3 @@ fn render_status_bar(f: &mut Frame, area: Rect, state: &TuiState) {
     ]);
     f.render_widget(Paragraph::new(line), area);
 }
-

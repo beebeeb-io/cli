@@ -31,7 +31,7 @@
 //! names the CLI call sites already use, and keeps the CLI's fixture tests.
 
 pub use beebeeb_core::path_safety::{
-    archive_component, check_component, default_output_path, safe_child, safe_rel_join, Rules,
+    Rules, archive_component, check_component, default_output_path, safe_child, safe_rel_join,
 };
 
 #[cfg(test)]

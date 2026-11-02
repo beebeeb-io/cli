@@ -620,10 +620,14 @@ mod tests {
         let ch = FallbackCap { cap: 10, chunked: true };
         let e = check_cap(ch, 11).unwrap_err();
         assert!(
-            e.to_string().contains("legacy-format file larger than the chunked-download limit"),
+            e.to_string()
+                .contains("legacy-format file larger than the chunked-download limit"),
             "{e}"
         );
-        assert!(e.to_string().contains("retry") && e.to_string().contains("Content-Length"), "{e}");
+        assert!(
+            e.to_string().contains("retry") && e.to_string().contains("Content-Length"),
+            "{e}"
+        );
     }
 
     /// Round 5 P1: legacy JSON-blob body WITH Content-Length above the (test
@@ -830,12 +834,12 @@ mod error;
 pub use error::{DownloadError, DownloadStats};
 
 mod stream;
-#[cfg(test)]
-use stream::{json_chunk0_probe_len, stream_download_decrypt_with};
 pub use stream::download_buffered;
 pub use stream::download_frame_prefix;
 pub use stream::stream_download_decrypt;
 pub use stream::stream_download_decrypt_with_file_key;
+#[cfg(test)]
+use stream::{json_chunk0_probe_len, stream_download_decrypt_with};
 
 mod atomic;
 pub(crate) use atomic::AtomicFile;

@@ -344,7 +344,10 @@ impl ApiClient {
     ) -> UploadCall<dt::UploadGrant> {
         let session = session.into();
         let seen = self
-            .upload_call(&dt::upload_grant_path(session.as_str(), index), &dt::UploadGrantRequest { size })
+            .upload_call(
+                &dt::upload_grant_path(session.as_str(), index),
+                &dt::UploadGrantRequest { size },
+            )
             .await;
         match dt::classify(dt::Call::UploadGrant, &seen.answer) {
             dt::Outcome::Proceed => match dt::UploadGrant::from_answer(&seen.body, index, discovery, &self.base_url) {

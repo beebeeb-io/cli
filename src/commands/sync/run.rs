@@ -61,19 +61,21 @@ pub async fn run(
     match command {
         SyncCommand::StopLegacy => {
             // Legacy --stop: try to uninstall any old single-plist LaunchAgent
-            return crate::daemon::uninstall_launchagent("sync").map_err(String::from).map(|removed| {
-                if removed {
-                    println!(
-                        "  {} sync daemon removed",
-                        "\u{2713}".custom_color(crate::colors::GREEN_OK),
-                    );
-                } else {
-                    println!(
-                        "  {} no legacy sync daemon installed",
-                        "\u{00b7}".custom_color(crate::colors::INK_DIM),
-                    );
-                }
-            });
+            return crate::daemon::uninstall_launchagent("sync")
+                .map_err(String::from)
+                .map(|removed| {
+                    if removed {
+                        println!(
+                            "  {} sync daemon removed",
+                            "\u{2713}".custom_color(crate::colors::GREEN_OK),
+                        );
+                    } else {
+                        println!(
+                            "  {} no legacy sync daemon installed",
+                            "\u{00b7}".custom_color(crate::colors::INK_DIM),
+                        );
+                    }
+                });
         }
         SyncCommand::Daemon => return spawn_sync_daemon(&local_dir, remote_path_arg.as_deref()),
         _ => {}
@@ -244,7 +246,9 @@ pub async fn run(
             Ok(v) => Some(v),
             // A 401 means the server no longer accepts our session: stop now with
             // a distinct exit code so the service manager does not restart us.
-            Err(e) if e.message == crate::api::SESSION_EXPIRED_MESSAGE => return Err(crate::exit::sync_error(e.to_string())),
+            Err(e) if e.message == crate::api::SESSION_EXPIRED_MESSAGE => {
+                return Err(crate::exit::sync_error(e.to_string()));
+            }
             Err(_) => None,
         }
     };
@@ -482,7 +486,11 @@ pub async fn run(
     }
 
     let mut actions: Vec<SyncAction> = Vec::with_capacity(sorted_files.len());
-    let policy = if force { ConflictPolicy::Force } else { ConflictPolicy::Skip };
+    let policy = if force {
+        ConflictPolicy::Force
+    } else {
+        ConflictPolicy::Skip
+    };
 
     for rel in &sorted_files {
         if moved_conflicts.contains(rel) {
@@ -1062,9 +1070,7 @@ pub async fn run(
 
 // ── Plain-text watch loop (non-TTY / json / quiet fallback) ───────────────
 
-
 // ── TUI watch loop (interactive terminal) ─────────────────────────────────
-
 
 // ── Client-metadata envelopes (task 1922) ─────────────────────────────────
 //
@@ -1074,47 +1080,6 @@ pub async fn run(
 // another account's key, a corrupt envelope — is shown as hidden and never
 // fails the command.
 
-
-
-
-
-
-
-
 // ── Session management helpers ─────────────────────────────────────────────
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 // ── Daemon spawning ────────────────────────────────────────────────────────

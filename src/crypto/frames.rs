@@ -21,7 +21,12 @@ pub(super) const FRAME_OVERHEAD: u64 = (NONCE_LEN + TAG_LEN) as u64;
 /// Does `frame` authenticate as frame 0 (not last) of a multi-chunk file under a
 /// format `pin` allows? Core's random-access opener; only the verdict is kept.
 /// A v2 frame 0's own nonce is the upload's version id.
-pub(super) fn opens_as_first_frame(file_key: &FileKey, file_id_str: &str, pin: ExpectedChunkFormat, frame: &[u8]) -> bool {
+pub(super) fn opens_as_first_frame(
+    file_key: &FileKey,
+    file_id_str: &str,
+    pin: ExpectedChunkFormat,
+    frame: &[u8],
+) -> bool {
     let formats: &[ChunkFormat] = match pin {
         ExpectedChunkFormat::V2 => &[ChunkFormat::V2],
         ExpectedChunkFormat::Unrecorded => &[ChunkFormat::V2, ChunkFormat::V1Legacy],

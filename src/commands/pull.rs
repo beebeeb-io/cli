@@ -29,8 +29,8 @@ mod error;
 use error::*;
 
 mod resolve;
-use resolve::*;
 pub(crate) use resolve::resolve_file_arg;
+use resolve::*;
 
 mod folder;
 use folder::*;
@@ -60,8 +60,20 @@ mod options_tests {
     /// `--zip` and `--force` are independent flags.
     #[test]
     fn zip_and_force_are_independent() {
-        assert!(PullOptions { zip: true, force: false }.zip);
-        assert!(PullOptions { zip: false, force: true }.force);
+        assert!(
+            PullOptions {
+                zip: true,
+                force: false
+            }
+            .zip
+        );
+        assert!(
+            PullOptions {
+                zip: false,
+                force: true
+            }
+            .force
+        );
         assert!(PullOptions { zip: true, force: true }.force);
     }
 }

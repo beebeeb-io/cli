@@ -9,7 +9,12 @@
 
 use super::*;
 
-pub(super) async fn pull_folder(api: &ApiClient, folder_id: &str, out_dir: &std::path::Path, force: bool) -> Result<(), String> {
+pub(super) async fn pull_folder(
+    api: &ApiClient,
+    folder_id: &str,
+    out_dir: &std::path::Path,
+    force: bool,
+) -> Result<(), String> {
     // A single resolver, shared across the whole folder tree, so request-uploaded
     // files only trigger one `GET /file-requests` and each R_priv is unwrapped once.
     let mut request_keys: Option<crate::commands::request::RequestKeyResolver> = None;

@@ -88,7 +88,10 @@ pub(super) fn session_text(master: &MasterKey, s: &serde_json::Value) -> Session
 }
 
 /// Parse the JSON response from list_client_sessions into SessionInfo structs.
-pub(super) fn parse_sessions_from_json(resp: &serde_json::Value, master: &MasterKey) -> Vec<crate::tui::state::SessionInfo> {
+pub(super) fn parse_sessions_from_json(
+    resp: &serde_json::Value,
+    master: &MasterKey,
+) -> Vec<crate::tui::state::SessionInfo> {
     use crate::tui::state::SessionInfo;
     let sessions = match resp.get("sessions").and_then(|v| v.as_array()) {
         Some(arr) => arr,

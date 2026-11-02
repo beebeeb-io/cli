@@ -152,7 +152,11 @@ impl ApiClient {
         parse_response(resp).await
     }
 
-    pub async fn get_shared_folder_keys(&self, id: impl Into<FolderId>, cursor: Option<&str>) -> Result<Value, ApiError> {
+    pub async fn get_shared_folder_keys(
+        &self,
+        id: impl Into<FolderId>,
+        cursor: Option<&str>,
+    ) -> Result<Value, ApiError> {
         let id = id.into();
         let mut request = self
             .client
@@ -481,8 +485,8 @@ impl ApiClient {
                 "ambiguous prefix '{}' matches {} files — use more characters",
                 prefix,
                 matches.len()
-            ).into()),
+            )
+            .into()),
         }
     }
-
 }

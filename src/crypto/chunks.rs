@@ -72,7 +72,9 @@ pub fn decrypt_file_chunks_owned(
     chunk_count: u32,
     chunk_size: Option<u64>,
 ) -> Result<(Vec<u8>, Option<beebeeb_core::kdf::OwnerKeyConvention>), CryptoError> {
-    let file_uuid: uuid::Uuid = file_id_str.parse().map_err(|e| CryptoError::InvalidId(format!("invalid file ID: {e}")))?;
+    let file_uuid: uuid::Uuid = file_id_str
+        .parse()
+        .map_err(|e| CryptoError::InvalidId(format!("invalid file ID: {e}")))?;
 
     // A v2 file is written by core, which derives its key from the UUID STRING:
     // that key only. A legacy file may be under either derivation: binary-UUID
@@ -273,7 +275,9 @@ pub(super) fn decrypt_json_chunks(
         );
         plaintext.extend_from_slice(&opened);
     }
-    decryptor.finish().map_err(|e| CryptoError::Malformed(format!("incomplete file: {e}")))?;
+    decryptor
+        .finish()
+        .map_err(|e| CryptoError::Malformed(format!("incomplete file: {e}")))?;
 
     Ok(plaintext)
 }
@@ -346,7 +350,9 @@ pub(super) fn decrypt_raw_chunks(
 
         offset += this_chunk_size;
     }
-    decryptor.finish().map_err(|e| CryptoError::Malformed(format!("incomplete file: {e}")))?;
+    decryptor
+        .finish()
+        .map_err(|e| CryptoError::Malformed(format!("incomplete file: {e}")))?;
 
     Ok(plaintext)
 }

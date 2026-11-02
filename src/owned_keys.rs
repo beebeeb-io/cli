@@ -298,8 +298,8 @@ impl OwnedKeyResolver {
                     owned_keys::unwrap_child_key(&root.key, &root_id, &id, kind, frame).map_err(|_| UNREADABLE)?
                 };
                 let name = authenticated_name(&key, &canonical)?;
-                let pending = owned_keys::wrap_owner_file_key(master, &id, &key)
-                    .map_err(|_| "can't prepare owner envelope")?;
+                let pending =
+                    owned_keys::wrap_owner_file_key(master, &id, &key).map_err(|_| "can't prepare owner envelope")?;
                 self.pending.insert(id.clone(), pending.clone());
                 return Ok(ResolvedCliKey {
                     key: Arc::new(key),

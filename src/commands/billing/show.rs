@@ -6,7 +6,6 @@
 //! Must not: fetch invoices or add-ons (see `billing::invoices`,
 //! `billing::addons`).
 
-
 use super::*;
 
 pub(super) const ADDON_FIELDS: [&str; 10] = [

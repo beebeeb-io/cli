@@ -214,7 +214,11 @@ pub(super) enum RemoteAbsent {
 /// that entry's remote id trashed. This is the ONE place the remote-delete vs
 /// offline-edit vs unconfirmed decision lives; the one-shot classifier and both
 /// continuous-watch resync loops call it so they stay consistent.
-pub(super) fn classify_remote_absent(local: Option<&LocalFile>, prior: Option<&FileEntry>, tombstoned: bool) -> RemoteAbsent {
+pub(super) fn classify_remote_absent(
+    local: Option<&LocalFile>,
+    prior: Option<&FileEntry>,
+    tombstoned: bool,
+) -> RemoteAbsent {
     match (local, prior) {
         // Synced before + still on disk -> compare against the manifest.
         (Some(l), Some(p)) => {
@@ -273,7 +277,12 @@ pub(super) fn root_unreconciled(state: &SyncState, resolved: Uuid) -> bool {
 /// the two copies become a both-sides conflict (skipped unless `--force`),
 /// never a trash, replace-upload or download-over-local on the old entry's
 /// account (#83 review).
-pub(super) fn trusted_prior(state: &SyncState, rel: &str, remote_present: bool, root_changed: bool) -> Option<FileEntry> {
+pub(super) fn trusted_prior(
+    state: &SyncState,
+    rel: &str,
+    remote_present: bool,
+    root_changed: bool,
+) -> Option<FileEntry> {
     if root_changed && remote_present {
         return None;
     }

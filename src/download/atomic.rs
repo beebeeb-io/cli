@@ -15,7 +15,8 @@ impl AtomicFile {
     pub(crate) fn create(out_path: &Path) -> Result<Self, DownloadError> {
         if let Some(parent) = out_path.parent() {
             if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(|e| DownloadError::Other(format!("mkdir {}: {e}", parent.display())))?;
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| DownloadError::Other(format!("mkdir {}: {e}", parent.display())))?;
             }
         }
         let tmp = out_path.with_extension(format!(
@@ -26,7 +27,8 @@ impl AtomicFile {
                 .map(|e| format!("{e}."))
                 .unwrap_or_default()
         ));
-        let file = std::fs::File::create(&tmp).map_err(|e| DownloadError::Other(format!("create {}: {e}", tmp.display())))?;
+        let file =
+            std::fs::File::create(&tmp).map_err(|e| DownloadError::Other(format!("create {}: {e}", tmp.display())))?;
         Ok(Self {
             writer: Some(std::io::BufWriter::new(file)),
             tmp,

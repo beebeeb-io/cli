@@ -284,7 +284,6 @@ mod versions;
 
 pub(crate) use id::{DirectUploadId, FileId, FolderId, ShareId};
 
-
 /// A parsed API error: the server's stable machine `error` code (when
 /// present) alongside the human `message` and HTTP status.
 ///
@@ -545,36 +544,29 @@ pub fn current_version_number(file: &Value) -> Option<i64> {
 #[path = "api/tests/current_version_number_tests.rs"]
 mod current_version_number_tests;
 
-
 #[cfg(test)]
 #[path = "api/tests/api_error_tests.rs"]
 mod api_error_tests;
-
 
 #[cfg(test)]
 #[path = "api/tests/list_pagination_tests.rs"]
 mod list_pagination_tests;
 
-
 #[cfg(test)]
 #[path = "api/tests/client_header_tests.rs"]
 mod client_header_tests;
-
 
 #[cfg(test)]
 #[path = "api/tests/twofa_action_tests.rs"]
 mod twofa_action_tests;
 
-
 #[cfg(test)]
 #[path = "api/tests/session_revoke_request_tests.rs"]
 mod session_revoke_request_tests;
 
-
 #[cfg(test)]
 #[path = "api/tests/passkey_delete_request_tests.rs"]
 mod passkey_delete_request_tests;
-
 
 /// Task 0485 — regression coverage for a real bug found while wiring `bb
 /// billing show` against the live server: `get_billing_usage()` used to
@@ -587,14 +579,12 @@ mod passkey_delete_request_tests;
 #[path = "api/tests/billing_usage_route_tests.rs"]
 mod billing_usage_route_tests;
 
-
 /// Task 0487 — `get_billing_invoices()` / `download_invoice_pdf()` against a
 /// mock of the live server's `/api/v1/billing/invoices[/…/pdf]` routes
 /// (`beebeeb-api/src/routes/billing.rs::invoices` / `invoice_pdf`).
 #[cfg(test)]
 #[path = "api/tests/billing_invoices_route_tests.rs"]
 mod billing_invoices_route_tests;
-
 
 /// Task 1547 finding 3 — regression coverage for `parse_response` dropping the
 /// server's human-readable `message` field on every typed API error and
@@ -608,18 +598,14 @@ mod billing_invoices_route_tests;
 #[path = "api/tests/error_message_priority_tests.rs"]
 mod error_message_priority_tests;
 
-
 #[cfg(test)]
 #[path = "api/tests/upload_refusal_account_state_tests.rs"]
 mod upload_refusal_account_state_tests;
-
 
 #[cfg(test)]
 #[path = "api/tests/move_request_tests.rs"]
 mod move_request_tests;
 
-
 #[cfg(test)]
 #[path = "api/tests/retry_policy_tests.rs"]
 mod retry_policy_tests;
-

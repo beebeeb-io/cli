@@ -29,12 +29,12 @@ pub(crate) const REFUSAL_HOLD: Duration = Duration::from_secs(60);
 // ───────────────────────────── direct uploads (task 2173) ─────────────────────────────
 
 mod http;
-use http::*;
 pub(crate) use http::now_ms;
+use http::*;
 
 mod retry;
-use retry::*;
 pub(crate) use retry::ChunkApiError;
+use retry::*;
 
 mod state;
 use state::*;

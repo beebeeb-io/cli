@@ -83,7 +83,9 @@ impl ApiClient {
     }
 
     pub fn require_auth(&self) -> Result<&str, ApiError> {
-        self.token.as_deref().ok_or_else(|| NOT_LOGGED_IN_MESSAGE.to_string().into())
+        self.token
+            .as_deref()
+            .ok_or_else(|| NOT_LOGGED_IN_MESSAGE.to_string().into())
     }
 
     pub(super) fn url(&self, path: &str) -> String {
@@ -608,7 +610,9 @@ impl ApiClient {
     #[allow(dead_code)]
     pub async fn request_account_export(&self, confirm_token: &str) -> Result<Value, ApiError> {
         if confirm_token.trim().is_empty() {
-            return Err("confirmation token is required to request an account export".to_string().into());
+            return Err("confirmation token is required to request an account export"
+                .to_string()
+                .into());
         }
 
         let token = self.require_auth()?;
@@ -1127,5 +1131,4 @@ impl ApiClient {
             .map_err(format_request_error)?;
         parse_response(resp).await
     }
-
 }

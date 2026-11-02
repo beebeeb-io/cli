@@ -32,7 +32,11 @@ impl ApiClient {
     }
 
     /// Upload an encrypted large thumbnail for a file.
-    pub async fn upload_thumbnail_large(&self, file_id: impl Into<FileId>, encrypted_data: Vec<u8>) -> Result<(), ApiError> {
+    pub async fn upload_thumbnail_large(
+        &self,
+        file_id: impl Into<FileId>,
+        encrypted_data: Vec<u8>,
+    ) -> Result<(), ApiError> {
         let file_id = file_id.into();
         let token = self.require_auth()?;
         for _ in 0..3 {
@@ -105,5 +109,4 @@ impl ApiClient {
     }
 
     // ── Client device + session API ──────────────────────────────────────
-
 }

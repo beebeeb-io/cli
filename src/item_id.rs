@@ -114,8 +114,8 @@ pub async fn create_owned_folder(
     name: &str,
     parent: Option<Uuid>,
 ) -> Result<Uuid, String> {
-    let new_item = beebeeb_core::item_id::NewItemId::owner(master_key)
-        .map_err(|e| format!("failed to mint folder id: {e}"))?;
+    let new_item =
+        beebeeb_core::item_id::NewItemId::owner(master_key).map_err(|e| format!("failed to mint folder id: {e}"))?;
     let new_id = Uuid::parse_str(new_item.as_str()).map_err(|e| format!("invalid minted folder id: {e}"))?;
     let name_encrypted = beebeeb_core::encrypt::encrypt_name_for_new_item(
         master_key,

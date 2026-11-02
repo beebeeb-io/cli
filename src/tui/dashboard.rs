@@ -147,4 +147,3 @@ fn render_hints(f: &mut Frame, area: Rect) {
     ]);
     f.render_widget(Paragraph::new(line), area);
 }
-

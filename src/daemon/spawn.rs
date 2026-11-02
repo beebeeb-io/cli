@@ -57,16 +57,23 @@ pub fn spawn_daemon(local_dir: &Path, remote_path: &str, slug: &str) -> Result<u
     let stdout_path = logs.join(format!("{slug}.log"));
     let stderr_path = logs.join(format!("{slug}.err"));
 
-    let stdout_file = fs::File::create(&stdout_path).map_err(|e| DaemonError::Other(format!("create log file: {e}")))?;
-    let stderr_file = fs::File::create(&stderr_path).map_err(|e| DaemonError::Other(format!("create error log file: {e}")))?;
+    let stdout_file =
+        fs::File::create(&stdout_path).map_err(|e| DaemonError::Other(format!("create log file: {e}")))?;
+    let stderr_file =
+        fs::File::create(&stderr_path).map_err(|e| DaemonError::Other(format!("create error log file: {e}")))?;
 
-    let child = daemon_command(&exe, local_dir, remote_path, DaemonMode::from(crate::transport::api_forced()))
-        .stdout(stdout_file)
-        .stderr(stderr_file)
-        // Detach from the parent process group
-        .stdin(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| DaemonError::Other(format!("spawn daemon: {e}")))?;
+    let child = daemon_command(
+        &exe,
+        local_dir,
+        remote_path,
+        DaemonMode::from(crate::transport::api_forced()),
+    )
+    .stdout(stdout_file)
+    .stderr(stderr_file)
+    // Detach from the parent process group
+    .stdin(std::process::Stdio::null())
+    .spawn()
+    .map_err(|e| DaemonError::Other(format!("spawn daemon: {e}")))?;
 
     let pid = child.id();
     write_pid(slug, pid)?;
@@ -80,7 +87,10 @@ mod transport_tests {
     #[test]
     fn the_daemon_child_inherits_a_forced_api_transport() {
         let dir = Path::new("/tmp/photos");
-        assert_eq!(daemon_args(dir, "/photos", DaemonMode::Default), ["sync", "/tmp/photos", "/photos"]);
+        assert_eq!(
+            daemon_args(dir, "/photos", DaemonMode::Default),
+            ["sync", "/tmp/photos", "/photos"]
+        );
         assert_eq!(
             daemon_args(dir, "/photos", DaemonMode::ApiForced),
             ["--transport", "api", "sync", "/tmp/photos", "/photos"]

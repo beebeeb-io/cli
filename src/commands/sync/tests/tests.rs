@@ -313,8 +313,7 @@ fn reconcile_dry_run_is_side_effect_free() {
     let remote_files: HashMap<String, RemoteFile> = HashMap::new();
 
     let plan = plan_all(&state);
-    let removed =
-        reconcile_remote_deletions(&dir, &mut state, &local_files, &remote_files, &plan, false, true).removed;
+    let removed = reconcile_remote_deletions(&dir, &mut state, &local_files, &remote_files, &plan, false, true).removed;
 
     // It still reports the rel, but touches nothing.
     assert_eq!(removed, vec!["a.txt".to_string()]);

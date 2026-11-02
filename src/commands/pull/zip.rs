@@ -32,7 +32,12 @@ pub(super) fn zip_root_name(name: &str) -> Result<String, String> {
 }
 
 /// Resolve the argument as a folder and download all its files into a zip archive.
-pub(super) async fn run_zip(api: &ApiClient, path_arg: &str, output: Option<PathBuf>, force: bool) -> Result<(), String> {
+pub(super) async fn run_zip(
+    api: &ApiClient,
+    path_arg: &str,
+    output: Option<PathBuf>,
+    force: bool,
+) -> Result<(), String> {
     let master_key = load_master_key()?;
 
     // Resolve the path argument to a folder.

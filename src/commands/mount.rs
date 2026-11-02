@@ -150,7 +150,6 @@ pub async fn unmount(_mountpoint: PathBuf) -> Result<(), String> {
 #[cfg(feature = "fuse")]
 mod fuse_impl;
 
-
 /// L13 (SF-0001): the folder id to record after a create — the one this client
 /// minted, confirmed against the answer's echo. Kept outside the FUSE module so
 /// the decision is unit-tested without a FUSE mount.

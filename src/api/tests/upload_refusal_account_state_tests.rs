@@ -220,10 +220,16 @@ async fn a_successful_init_never_fetches_the_subscription() {
 #[tokio::test]
 async fn share_create_maps_plan_required_and_account_lapsed() {
     let (base, _) = spawn_mock(plan_required(), Some(lapsed_sub())).await;
-    assert_eq!(share(&ApiClient::new_for_test(base)).await.unwrap_err().message, NEEDS_PLAN);
+    assert_eq!(
+        share(&ApiClient::new_for_test(base)).await.unwrap_err().message,
+        NEEDS_PLAN
+    );
 
     let (base, _) = spawn_mock(account_lapsed(), Some(lapsed_sub())).await;
-    assert_eq!(share(&ApiClient::new_for_test(base)).await.unwrap_err().message, LAPSED_DATED);
+    assert_eq!(
+        share(&ApiClient::new_for_test(base)).await.unwrap_err().message,
+        LAPSED_DATED
+    );
 }
 
 #[tokio::test]

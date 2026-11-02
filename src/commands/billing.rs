@@ -81,8 +81,8 @@ use crate::ui;
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 mod show;
-use show::*;
 pub use show::show;
+use show::*;
 
 mod usage;
 pub use usage::usage;

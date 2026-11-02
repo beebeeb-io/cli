@@ -55,7 +55,14 @@ impl BeebeebFsState {
         }
     }
 
-    pub(super) fn readdir(&mut self, _req: &Request, ino: INodeNo, _fh: FileHandle, offset: u64, mut reply: ReplyDirectory) {
+    pub(super) fn readdir(
+        &mut self,
+        _req: &Request,
+        ino: INodeNo,
+        _fh: FileHandle,
+        offset: u64,
+        mut reply: ReplyDirectory,
+    ) {
         let ino = ino.0;
         let parent_ino = self.inodes.get(&ino).map(|e| e.parent_ino).unwrap_or(ROOT_INO);
         let mut entries: Vec<(u64, FileType, String)> = vec![
@@ -523,7 +530,15 @@ impl BeebeebFsState {
     // ─── Directory write operations ───────────────────────────────────────
 
     /// Create an encrypted folder.
-    pub(super) fn mkdir(&mut self, _req: &Request, parent: INodeNo, name: &OsStr, _mode: u32, _umask: u32, reply: ReplyEntry) {
+    pub(super) fn mkdir(
+        &mut self,
+        _req: &Request,
+        parent: INodeNo,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        reply: ReplyEntry,
+    ) {
         let parent = parent.0;
         let name_str = match name.to_str() {
             Some(n) => n.to_string(),
@@ -936,4 +951,3 @@ impl BeebeebFsState {
 }
 
 // ── FUSE trait implementation (locks the state per request) ───────────────
-

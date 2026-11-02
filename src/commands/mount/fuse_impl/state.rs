@@ -93,8 +93,8 @@ impl BeebeebFsState {
                 Some(enc) => decrypt_name(&self.master_key, &file_id, enc),
                 None => format!("[{}]", &file_id[..8.min(file_id.len())]),
             };
-            let read_only = name_encrypted
-                .is_some_and(|enc| crate::crypto::name_is_upper_repair(&self.master_key, &file_id, enc));
+            let read_only =
+                name_encrypted.is_some_and(|enc| crate::crypto::name_is_upper_repair(&self.master_key, &file_id, enc));
             let pin = match (is_folder, name_encrypted) {
                 (true, _) => no_content(),
                 (false, Some(enc)) => crate::crypto::content_pin(&self.master_key, &file_id, enc),
@@ -172,8 +172,7 @@ impl BeebeebFsState {
         // Use the shared helper that handles both CLI-format (JSON) and
         // web-app-format (raw binary) chunks, and both UUID key derivation
         // methods (binary and string).
-        let plaintext =
-            crate::crypto::decrypt_file_chunks(&self.master_key, &file_id, pin, &encrypted, chunk_count)?;
+        let plaintext = crate::crypto::decrypt_file_chunks(&self.master_key, &file_id, pin, &encrypted, chunk_count)?;
 
         if let Some(e) = self.inodes.get_mut(&ino) {
             e.size = plaintext.len() as u64;
@@ -184,7 +183,13 @@ impl BeebeebFsState {
 
     // ── File upload (called from release()) ───────────────────────────────
 
-    pub(super) fn upload_file(&mut self, ino: u64, name: &str, plaintext: Vec<u8>, parent_ino: u64) -> Result<(), String> {
+    pub(super) fn upload_file(
+        &mut self,
+        ino: u64,
+        name: &str,
+        plaintext: Vec<u8>,
+        parent_ino: u64,
+    ) -> Result<(), String> {
         // Resolve parent_id (None = root).
         let parent_file_id: Option<uuid::Uuid> = self
             .inodes
