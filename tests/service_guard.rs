@@ -301,10 +301,18 @@ fn no_source_file_names_a_service_manager_except_through_the_guard() {
             if !names_a_tool || code.starts_with("//") || code.starts_with('*') || name == "tests/service_guard.rs" {
                 continue;
             }
-            let is_message = ["Err(", "format!(", "println!(", "eprintln!(", "panic!(", "assert"]
-                .iter()
-                .any(|t| code.contains(t));
-            let in_disarm = name == "src/daemon.rs" && disarm.is_some_and(|(a, b)| (a..=b).contains(&n));
+            let is_message = [
+                "Err(",
+                "DaemonError::Other(",
+                "format!(",
+                "println!(",
+                "eprintln!(",
+                "panic!(",
+                "assert",
+            ]
+            .iter()
+            .any(|t| code.contains(t));
+            let in_disarm = name == "src/daemon/launchd.rs" && disarm.is_some_and(|(a, b)| (a..=b).contains(&n));
             if in_disarm {
                 disarm_lines += 1;
             }
@@ -320,7 +328,7 @@ fn no_source_file_names_a_service_manager_except_through_the_guard() {
     assert_eq!(disarm_lines, 1, "the one exception must name the tool exactly once");
 
     // And the door itself: `service_manager` checks HOME before it starts the program it is given.
-    let daemon = std::fs::read_to_string(root.join("src/daemon.rs")).unwrap();
+    let daemon = std::fs::read_to_string(root.join("src/daemon/spawn.rs")).unwrap();
     let door = daemon
         .split("fn service_manager")
         .nth(1)
