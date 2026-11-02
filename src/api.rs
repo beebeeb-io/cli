@@ -4,6 +4,8 @@ use serde_json::Value;
 use std::error::Error;
 use std::sync::atomic::{AtomicI64, Ordering};
 
+use uuid::Uuid;
+
 use crate::config::load_config;
 
 mod direct;
@@ -2308,10 +2310,21 @@ impl ApiClient {
     // ── Client device + session API ──────────────────────────────────────
 
     /// Register (upsert) a client device with the server.
-    pub async fn register_device(&self, hostname: &str, platform: &str, bb_version: &str) -> Result<Value, String> {
+    ///
+    /// Task 1922: the hostname is only ever sent as a field-1 `bbcm1.` envelope
+    /// sealed client-side under the device's own record key. The plaintext
+    /// `hostname` key is gone; the server stores no device text it could echo.
+    pub async fn register_device(
+        &self,
+        client_key: &Uuid,
+        hostname_encrypted: &str,
+        platform: &str,
+        bb_version: &str,
+    ) -> Result<Value, String> {
         let token = self.require_auth()?;
         let body = serde_json::json!({
-            "hostname": hostname,
+            "client_key": client_key,
+            "hostname_encrypted": hostname_encrypted,
             "platform": platform,
             "bb_version": bb_version,
         });
@@ -2334,21 +2347,27 @@ impl ApiClient {
     }
 
     /// Create a new client session (sync, mount, etc.).
+    ///
+    /// Task 1922: name and both paths are `bbcm1.` envelopes (fields 2-4) sealed
+    /// under the session's own client-generated record key, with the parent
+    /// device's client key in the AAD. No plaintext name or path is sent.
     pub async fn create_client_session(
         &self,
         device_id: &str,
-        name: &str,
+        client_key: &Uuid,
+        name_encrypted: &str,
         session_type: &str,
-        local_path: Option<&str>,
-        remote_path: &str,
+        local_path_encrypted: &str,
+        remote_path_encrypted: &str,
     ) -> Result<Value, String> {
         let token = self.require_auth()?;
         let body = serde_json::json!({
             "device_id": device_id,
-            "name": name,
+            "client_key": client_key,
+            "name_encrypted": name_encrypted,
             "session_type": session_type,
-            "local_path": local_path,
-            "remote_path": remote_path,
+            "local_path_encrypted": local_path_encrypted,
+            "remote_path_encrypted": remote_path_encrypted,
         });
         for _ in 0..3 {
             pace_if_needed().await;
@@ -2369,6 +2388,9 @@ impl ApiClient {
     }
 
     /// Fire-and-forget heartbeat — no retry on rate limit.
+    ///
+    /// Task 1922: a heartbeat carries numbers and a status word only. There is
+    /// no `current_file` and no `detail`; the server discards both anyway.
     #[allow(clippy::too_many_arguments)]
     pub async fn send_heartbeat(
         &self,
@@ -2378,7 +2400,6 @@ impl ApiClient {
         files_total: Option<u64>,
         bytes_synced: Option<u64>,
         bytes_total: Option<u64>,
-        current_file: Option<&str>,
         speed_bps: Option<u64>,
     ) -> Result<Value, String> {
         let token = self.require_auth()?;
@@ -2388,7 +2409,6 @@ impl ApiClient {
             "files_total": files_total,
             "bytes_synced": bytes_synced,
             "bytes_total": bytes_total,
-            "current_file": current_file,
             "speed_bps": speed_bps,
         });
         // Heartbeats are fire-and-forget — don't retry

@@ -106,12 +106,10 @@ fn render_sessions(f: &mut Frame, area: Rect, state: &TuiState) {
             detail_parts.push(format!("heartbeat {hb}"));
         }
 
-        if let Some(ref file) = session.current_file {
-            let speed_str = session
-                .speed_bps
-                .map(|s| format!(" \u{00b7} {}/s", format_size_binary(s)))
-                .unwrap_or_default();
-            detail_parts.push(format!("uploading {file}{speed_str}"));
+        // Task 1922: the server no longer carries `current_file`; only the
+        // heartbeat's numeric speed remains, so show just that.
+        if let Some(speed) = session.speed_bps.filter(|s| *s > 0) {
+            detail_parts.push(format!("{}/s", format_size_binary(speed)));
         }
 
         let detail_str = if detail_parts.is_empty() {

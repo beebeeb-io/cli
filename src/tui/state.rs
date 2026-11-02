@@ -36,6 +36,9 @@ pub struct SyncFileEvent {
 }
 
 /// Status of a remote sync session (fetched from server).
+///
+/// Task 1922: the server returns no free text beyond these fields. `name`,
+/// `device_name` and `remote_path` are decrypted locally (or "(name hidden)").
 #[derive(Debug, Clone)]
 pub struct SessionInfo {
     pub name: String,
@@ -45,7 +48,6 @@ pub struct SessionInfo {
     pub files_synced: u64,
     pub bytes_synced: u64,
     pub last_heartbeat: Option<String>,
-    pub current_file: Option<String>,
     pub speed_bps: Option<u64>,
 }
 
