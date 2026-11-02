@@ -630,6 +630,9 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
             }
             None => return (StatusCode::NOT_FOUND, Body::empty()).into_response(),
         }
+    } else if method == "POST" && path == "/api/v1/shares" {
+        let req: Value = serde_json::from_slice(&f.requests.last().unwrap().2).unwrap();
+        json!({"id":BAD,"token":req["token"],"expires_at":"never"})
     } else if method == "PATCH" && path.starts_with("/api/v1/files/") {
         // A rename/move: answered so a write the client is allowed to make succeeds.
         let id = path.trim_start_matches("/api/v1/files/").to_string();

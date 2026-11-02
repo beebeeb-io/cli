@@ -84,12 +84,32 @@ pub async fn run(
     let master_key = crate::commands::push::load_master_key()?;
 
     // Resolve a path / short ID / UUID to the full file UUID: the share route
-    // and the key wrap (`build_share_material`) both need the canonical UUID.
-    // Done before the passphrase prompt so a typo fails immediately.
+    // and the row lookup both need the canonical UUID. Done before the
+    // passphrase prompt so a typo fails immediately.
     let (file_id, _) = crate::commands::pull::resolve_file_arg(&api, &file).await?;
-    let file_uuid: uuid::Uuid = file_id
-        .parse()
-        .map_err(|_| format!("invalid file id (expected UUID): {file_id}"))?;
+    uuid::Uuid::parse_str(&file_id).map_err(|_| format!("invalid file id (expected UUID): {file_id}"))?;
+    // R7/L12: the link may only carry the key the row itself authenticated.
+    // Resolve first (fail fast, before the passphrase prompt); a request row or
+    // a plaintext-named row never has a key we can prove opens the item.
+    let row = api.get_file(&file_id).await?;
+    let mut keys = crate::owned_keys::OwnedKeyResolver::new();
+    let resolved = keys
+        .resolve(&api, &master_key, &row)
+        .await
+        .map_err(|e| format!("can't share this file: {e}"))?;
+    if crate::commands::request::is_request_upload(&resolved.canonical) {
+        return Err(
+            "can't share this file: it was sent to you as a request upload, so you never held its key. Ask the sender to share it instead."
+                .to_string(),
+        );
+    }
+    if !resolved.canonical["name_encrypted"].as_str().unwrap_or("").starts_with('{') {
+        return Err(format!(
+            "can't share {:?}: its name is not encrypted, so no key can be proven to open it",
+            resolved.name
+        ));
+    }
+    let file_key = resolved.key.clone();
 
     let passphrase_value = if passphrase {
         print!(
@@ -126,7 +146,7 @@ pub async fn run(
     let client_key: Zeroizing<[u8; 32]> = Zeroizing::new(rand::random());
     let mut material = build_share_material(
         &master_key,
-        &file_uuid,
+        &file_key,
         &client_key,
         beebeeb_core::share_token::generate_share_token(),
     )?;
@@ -152,7 +172,7 @@ pub async fn run(
         Err(e) if e.message.contains("share token already exists") => {
             material = build_share_material(
                 &master_key,
-                &file_uuid,
+                &file_key,
                 &client_key,
                 beebeeb_core::share_token::generate_share_token(),
             )?;
@@ -723,15 +743,15 @@ pub(crate) struct ShareMaterial {
 
 pub(crate) fn build_share_material(
     master_key: &beebeeb_core::kdf::MasterKey,
-    file_uuid: &uuid::Uuid,
+    file_key: &beebeeb_core::kdf::FileKey,
     client_key: &[u8; 32],
     token: String,
 ) -> Result<ShareMaterial, String> {
     let b64 = base64::engine::general_purpose::STANDARD;
     let mk: Zeroizing<[u8; 32]> = Zeroizing::new(master_key.to_bytes());
-    // Same per-file key the web derives in getFileKey(fileId) and the CLI
-    // uses for upload: HKDF(master, file-uuid string).
-    let file_key = beebeeb_core::kdf::derive_file_key(master_key, file_uuid.to_string().as_bytes());
+    // R7: only the key the row's NAME authenticated under may travel in the
+    // link. A derived-from-the-id guess would hand the recipient a key that
+    // does not open a legacy binary-convention item.
     Ok(ShareMaterial {
         wrapped_file_key: wrap_file_key_for_share(client_key, file_key.as_bytes())?,
         owner_wrapped_key: b64.encode(wrap_raw(&mk, client_key)?),
@@ -825,15 +845,15 @@ mod share_wire_tests {
         let file_uuid = uuid::Uuid::parse_str("4c53f27f-c64f-4d65-8872-ea36011ef316").unwrap();
         let k_c = [9u8; 32];
         let token = beebeeb_core::share_token::generate_share_token();
-        let m = build_share_material(&mk, &file_uuid, &k_c, token.clone()).unwrap();
+        let file_key = beebeeb_core::kdf::derive_file_key(&mk, file_uuid.to_string().as_bytes());
+        let m = build_share_material(&mk, &file_key, &k_c, token.clone()).unwrap();
         let b64 = base64::engine::general_purpose::STANDARD;
 
         assert_eq!(m.token.len(), 27);
-        let fk = beebeeb_core::kdf::derive_file_key(&mk, file_uuid.to_string().as_bytes());
         let opened = unwrap_share_blob(&k_c, &b64.decode(&m.wrapped_file_key).unwrap()).unwrap();
         assert_eq!(
             opened,
-            fk.as_bytes().to_vec(),
+            file_key.as_bytes().to_vec(),
             "recipient with #key= must get the upload file key"
         );
         assert_eq!(

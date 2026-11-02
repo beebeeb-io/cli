@@ -453,3 +453,83 @@ async fn a24_second_device_does_not_post_a_competing_wrap() {
     assert_eq!(owner_key_posts(&h, FILE), 0);
     h.close().await;
 }
+
+/// A27 (R7): a share link for a legacy binary-convention O item carries the key
+/// that actually opens it — the one its name authenticated under — never the
+/// string-convention key the old code derived for every row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a27_share_link_carries_the_key_that_opens_a_binary_convention_item() {
+    let h = Harness::new(shared_folder(Fixture::owner_file_json_blob())).await;
+    let out = h.json(&["share", O_FILE]).await;
+    let k_c = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(out["decryption_key"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(k_c.len(), 32, "the printed link carries a 32-byte K_c");
+    let mut k_c_arr = [0u8; 32];
+    k_c_arr.copy_from_slice(&k_c);
+    let body = h
+        .state
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .rev()
+        .find(|(m, p, _)| m == "POST" && p == "/api/v1/shares")
+        .map(|(_, _, b)| b.clone())
+        .expect("share create body");
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    let wrapped = B64.decode(body["wrapped_file_key"].as_str().unwrap()).unwrap();
+    let opened = beebeeb_core::encrypt::decrypt_chunk_raw(&FileKey::from_bytes(k_c_arr), &wrapped).unwrap();
+    assert_eq!(opened.len(), 32);
+    let mut fk = [0u8; 32];
+    fk.copy_from_slice(&opened);
+
+    let uuid = uuid::Uuid::parse_str(O_FILE).unwrap();
+    let binary = beebeeb_core::kdf::derive_file_key(&master(), uuid.as_bytes());
+    let string = beebeeb_core::kdf::derive_file_key(&master(), O_FILE.as_bytes());
+    assert_eq!(
+        opened,
+        binary.as_bytes().to_vec(),
+        "the link must carry the binary-convention key that opens the item"
+    );
+    assert_ne!(
+        opened,
+        string.as_bytes().to_vec(),
+        "R7: never the string-convention key that does not open it"
+    );
+    let row = {
+        let state = h.state.lock().unwrap();
+        state
+            .canonical
+            .get(O_FILE)
+            .cloned()
+            .or_else(|| state.rows.iter().find(|r| r["id"] == O_FILE).cloned())
+            .expect("the shared row")
+    };
+    assert_eq!(
+        decrypt_name(&FileKey::from_bytes(fk), row["name_encrypted"].as_str().unwrap()),
+        "legacy.txt",
+        "the disclosed key is the one the served name authenticated under"
+    );
+    h.close().await;
+}
+
+/// A27/R5: a request row has no key this account can prove, so `bb share`
+/// refuses it and says why instead of wrapping some derived guess.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a27_share_refuses_a_request_row() {
+    let mut f = Fixture::basic();
+    f.plaintext = b"request body".to_vec();
+    f.add_request();
+    let h = Harness::new(shared_folder(f)).await;
+    let out = h.run(&["share", SUB]).await;
+    assert!(!out.status.success(), "a request row must not be shareable");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("request upload"), "{text}");
+    assert_eq!(h.count("POST", "/api/v1/shares"), 0, "nothing was published");
+    h.close().await;
+}
