@@ -302,7 +302,7 @@ pub(super) async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8
     let proposed = match existing_file_id {
         Some(listed) => crate::item_id::Proposed::Listed(listed),
         None => match crate::item_id::mint_owner(&state.master_key) {
-            Ok(id) => crate::item_id::Proposed::Minted(id),
+            Ok(minted) => crate::item_id::Proposed::Minted(minted.id()),
             Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
         },
     };

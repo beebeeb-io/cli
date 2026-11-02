@@ -664,7 +664,7 @@ pub(super) fn new_file_spec(
     Ok(crate::upload::UploadSpec {
         path: file_path.to_path_buf(),
         file_name: file_name.to_string(),
-        file_id: crate::item_id::mint_owner(master_key)?,
+        file_id: crate::item_id::mint_owner(master_key)?.id(),
         // Watch-loop uploads are always new files (fresh id) → no replace.
         base_version_number: None,
         replace_pin: None,

@@ -184,19 +184,21 @@ async fn upload_new_file(
     plaintext: &[u8],
     parent_id: Option<uuid::Uuid>,
 ) -> Result<UploadedFile, String> {
-    let minted = crate::item_id::Proposed::Minted(crate::item_id::mint());
+    // N4: the id and the sealed name both come from core's new-item writer,
+    // exactly as push does; a bare local v4 plus a raw-key seal would drop the
+    // resume tag and write the name in a shape core's name reader refuses.
+    let minted = crate::item_id::mint_owner(master_key)?;
     let key_uuid = minted.id();
     let file_key = beebeeb_core::kdf::derive_file_key(master_key, key_uuid.to_string().as_bytes());
 
     // Encrypt the filename (MIME type is part of the encrypted envelope).
     let mime = beebeeb_core::media::guess_mime_type(name);
-    let name_enc = beebeeb_core::encrypt::encrypt_name_for(
-        &file_key,
+    let name_enc = minted.seal_name(
+        master_key,
         name,
         mime,
         beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
-    )
-    .map_err(|e| format!("encrypt name: {e}"))?;
+    )?;
 
     // Encrypt content using the adaptive chunk-size ladder.
     let plan = beebeeb_types::plan_chunks(plaintext.len() as u64, beebeeb_types::ChunkProfile::Cli);
@@ -230,7 +232,7 @@ async fn upload_new_file(
             None,
         )
         .await?;
-    if let Err(e) = minted.verify(Some(&init.file_id)) {
+    if let Err(e) = crate::item_id::verify_minted_echo(key_uuid, Some(&init.file_id)) {
         let _ = api.upload_abandon(&key_uuid.to_string()).await;
         return Err(e.to_string());
     }
@@ -241,7 +243,7 @@ async fn upload_new_file(
     }
 
     let completed = api.upload_complete(&init.upload_session_id).await?;
-    if let Err(e) = minted.verify(crate::item_id::echoed_id(&completed)) {
+    if let Err(e) = crate::item_id::verify_minted_echo(key_uuid, crate::item_id::echoed_id(&completed)) {
         let _ = api.upload_abandon(&key_uuid.to_string()).await;
         return Err(e.to_string());
     }

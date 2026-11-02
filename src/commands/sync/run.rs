@@ -789,7 +789,7 @@ pub async fn run(
                         file_id: match replacement.as_ref() {
                             Some(_) => replace_id.ok_or("missing replacement id")?,
                             // L13: a new owner item's id is minted by core.
-                            None => crate::item_id::mint_owner(&master_key)?,
+                            None => crate::item_id::mint_owner(&master_key)?.id(),
                         },
                         // A version replace only when the old remote's key is
                         // owned; otherwise a new file under a fresh id (the old

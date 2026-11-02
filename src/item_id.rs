@@ -33,23 +33,59 @@ impl std::fmt::Display for ServerChangedItemId {
 
 impl std::error::Error for ServerChangedItemId {}
 
-/// Mint the id a create proposes: a random (v4) id, the only kind
-/// [`verify_minted_echo`] accepts.
-pub fn mint() -> Uuid {
-    Uuid::new_v4()
+/// An owner (`O`) item id minted by core, with the mint core made for it.
+///
+/// A create that must land as an owner item — a request row's content edit
+/// saved as a new item, any new owner upload, a FUSE mkdir — takes its id from
+/// core [`beebeeb_core::item_id::NewItemId::owner`] and not from a local random
+/// number: core picks the canonical lowercase v4 form the owner key derives
+/// from, and the same mint carries the resume tag. This type keeps the whole
+/// [`beebeeb_core::item_id::NewItemId`] instead of only its id text, so the tag
+/// survives the call (see [`tag`](Self::tag)) and the name can be sealed through
+/// core's new-item writer (see [`seal_name`](Self::seal_name)).
+pub struct MintedOwner {
+    new_item: beebeeb_core::item_id::NewItemId,
+    id: Uuid,
+}
+
+impl MintedOwner {
+    /// The canonical lowercase id core minted.
+    pub fn id(&self) -> Uuid {
+        self.id
+    }
+
+    /// The resume tag minted with this id (core
+    /// [`NewItemId::tag`](beebeeb_core::item_id::NewItemId::tag)): persist it
+    /// with an upload session and pass it back to
+    /// [`NewItemId::resume`](beebeeb_core::item_id::NewItemId::resume) after a
+    /// restart, so only the id core minted can be resumed. No CLI session
+    /// persists one yet, so nothing reads it outside the tests.
+    #[allow(dead_code)]
+    pub fn tag(&self) -> &[u8; 32] {
+        self.new_item.tag()
+    }
+
+    /// Seal a new row's name through core's new-item writer, the only writer a
+    /// create may use (`{"name":..,"mime_type":..}` under the key derived from
+    /// this core-minted id).
+    pub fn seal_name(
+        &self,
+        master_key: &beebeeb_core::kdf::MasterKey,
+        name: &str,
+        mime: Option<&str>,
+        pin: beebeeb_core::chunk_stream::ExpectedChunkFormat,
+    ) -> Result<String, String> {
+        beebeeb_core::encrypt::encrypt_name_for_new_item(master_key, &self.new_item, name, mime, pin)
+            .map_err(|e| format!("failed to encrypt name: {e}"))
+    }
 }
 
 /// Mint an owner (`O`) item id through core (task 2275, L12/L13).
-///
-/// A create that must land as an owner item — a request row's content edit
-/// saved as a new item, or any new owner upload — takes its id from core
-/// [`beebeeb_core::item_id::NewItemId::owner`] and not from a local random
-/// number: core picks the canonical lowercase v4 form the owner key derives
-/// from, and the same mint carries the resume tag.
-pub fn mint_owner(master_key: &beebeeb_core::kdf::MasterKey) -> Result<Uuid, String> {
+pub fn mint_owner(master_key: &beebeeb_core::kdf::MasterKey) -> Result<MintedOwner, String> {
     let new_item =
         beebeeb_core::item_id::NewItemId::owner(master_key).map_err(|e| format!("failed to mint item id: {e}"))?;
-    Uuid::parse_str(new_item.as_str()).map_err(|e| format!("invalid minted item id: {e}"))
+    let id = Uuid::parse_str(new_item.as_str()).map_err(|e| format!("invalid minted item id: {e}"))?;
+    Ok(MintedOwner { new_item, id })
 }
 
 /// Compare the id an init, create or completion answer echoed with the id this
@@ -71,7 +107,8 @@ pub fn verify_echoed_id(expected: Uuid, echoed: Option<&str>) -> Result<Uuid, Se
 }
 
 /// [`verify_echoed_id`] for an id this client MINTED for a create: it must also
-/// be a random (v4, RFC 4122 variant) id, the only kind [`mint`] makes. Anything
+/// be a random (v4, RFC 4122 variant) id, the only kind core mints for an owner
+/// item. Anything
 /// else is refused even when echoed verbatim (fail closed: a caller passed an id
 /// it did not mint). A replace proposes an id it listed, not one it minted, and
 /// uses [`verify_echoed_id`].
@@ -230,14 +267,6 @@ mod tests {
     }
 
     #[test]
-    fn mint_makes_ids_the_minted_check_accepts() {
-        for _ in 0..32 {
-            let id = mint();
-            assert_eq!(verify_minted_echo(id, Some(&id.to_string())), Ok(id));
-        }
-    }
-
-    #[test]
     fn a_different_echo_aborts_with_the_plain_message() {
         let mine = mine();
         let other = Uuid::from_u128(7);
@@ -269,6 +298,48 @@ mod tests {
 
     fn master() -> beebeeb_core::kdf::MasterKey {
         beebeeb_core::kdf::MasterKey::from_bytes([0u8; 32])
+    }
+
+    /// N4 (FUSE mkdir): the folder create mints through core and seals through
+    /// core's new-item name writer — the two calls `state_ops::mkdir` makes.
+    /// The old path took a bare `Uuid::new_v4()` (no resume tag) and sealed raw
+    /// metadata under the derived key, a shape core's name reader refuses.
+    #[test]
+    fn a_folder_mint_for_mkdir_is_core_minted_and_its_name_opens() {
+        let master = master();
+        let minted = mint_owner(&master).expect("core mints an owner id");
+        let id = minted.id();
+        let id_text = id.to_string();
+
+        // Core's mint, not a local v4: an owner class id, carrying its tag and
+        // resumable only with that tag.
+        assert_eq!(
+            beebeeb_core::item_id::item_class(&id_text).expect("a canonical id"),
+            beebeeb_core::item_id::ItemClass::Owner
+        );
+        assert_eq!(id.get_version(), Some(uuid::Version::Random));
+        assert_ne!(minted.tag(), &[0u8; 32], "the mint carries a resume tag");
+        let resumed = beebeeb_core::item_id::NewItemId::resume(&master, &id_text, minted.tag())
+            .expect("the tag core minted resumes this id");
+        assert_eq!(resumed.as_str(), id_text);
+
+        // The name is sealed by core's new-item writer and opens through core.
+        let sealed = minted
+            .seal_name(
+                &master,
+                "Folder",
+                None,
+                beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+            )
+            .expect("core seals the new folder name");
+        let folder_key = beebeeb_core::kdf::derive_file_key(&master, id_text.as_bytes());
+        let meta = beebeeb_core::encrypt::decrypt_name_metadata_with_key(&folder_key, &sealed)
+            .expect("core opens the name it sealed");
+        assert_eq!(meta.name, "Folder");
+        assert_eq!(
+            meta.chunk_format,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded
+        );
     }
 
     /// A8 (every folder create: mkdir, push, sync, webdav MKCOL): the answer

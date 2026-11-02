@@ -559,22 +559,28 @@ impl BeebeebFsState {
             }
         };
 
-        // Generate a UUID for key derivation and folder identity.
-        let folder_uuid = uuid::Uuid::new_v4();
-        let folder_key = beebeeb_core::kdf::derive_file_key(&self.master_key, folder_uuid.to_string().as_bytes());
-
-        let name_blob = match beebeeb_core::encrypt::encrypt_metadata(&folder_key, &name_str) {
-            Ok(b) => b,
+        // N4: core mints the owner id (carrying the resume tag) and core seals
+        // the folder name, the same new-item pair push uses. The old path took
+        // a bare local v4 and sealed raw metadata under the derived key, a
+        // shape core's name reader refuses.
+        let minted = match crate::item_id::mint_owner(&self.master_key) {
+            Ok(m) => m,
             Err(e) => {
-                eprintln!("[mount] mkdir encrypt: {e}");
+                eprintln!("[mount] mkdir mint: {e}");
                 reply.error(Errno::EIO);
                 return;
             }
         };
-        let name_enc = match serde_json::to_string(&name_blob) {
+        let folder_uuid = minted.id();
+        let name_enc = match minted.seal_name(
+            &self.master_key,
+            &name_str,
+            None,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+        ) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("[mount] mkdir serialize: {e}");
+                eprintln!("[mount] mkdir encrypt: {e}");
                 reply.error(Errno::EIO);
                 return;
             }

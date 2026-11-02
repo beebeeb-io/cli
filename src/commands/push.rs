@@ -424,7 +424,7 @@ async fn push_single_file(
                     }
                     // L13: a fresh item's id comes from core's minting type.
                     ConflictResolution::Upload { filename } => {
-                        (crate::item_id::mint_owner(&master_key)?, filename, None)
+                        (crate::item_id::mint_owner(&master_key)?.id(), filename, None)
                     }
                     ConflictResolution::Skip => return Ok(None),
                 }
@@ -463,7 +463,7 @@ async fn push_single_file(
             // new owner item — never sealed under `C`, never published.
             if resolved.origin == beebeeb_core::owned_keys::KeyOrigin::RequestContent {
                 // L13: the edit is a NEW owner item, minted by core.
-                (None, None, None, Some(crate::item_id::mint_owner(&master_key)?))
+                (None, None, None, Some(crate::item_id::mint_owner(&master_key)?.id()))
             } else {
                 // P2-10: a plaintext name proves nothing; say so, not "older iOS app".
                 if resolved.read_only && crate::crypto::name_is_plaintext(&resolved.canonical) {
