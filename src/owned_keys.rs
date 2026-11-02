@@ -54,6 +54,16 @@ fn resolved_name(name: &owned_keys::ResolvedName) -> String {
         owned_keys::ResolvedName::Plaintext(text) => text.clone(),
     }
 }
+/// L12: the three `derived_*` origins all open from the master key itself, so
+/// the legacy master read path (which tries each id convention) and the
+/// new-item-on-edit rule still apply to them. Only a wrap or a request key
+/// needs the explicit-key path.
+pub fn is_derived_origin(origin: KeyOrigin) -> bool {
+    matches!(
+        origin,
+        KeyOrigin::Derived | KeyOrigin::DerivedBinary | KeyOrigin::DerivedUpperRepair
+    )
+}
 struct SharedRoot {
     key: Arc<FileKey>,
     children: HashMap<String, Vec<u8>>,

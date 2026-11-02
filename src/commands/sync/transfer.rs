@@ -32,7 +32,7 @@ pub(super) async fn finish_owned_sync(
     }
     for r in keys.resolved() {
         let id = r.canonical["id"].as_str().unwrap_or("").to_string();
-        if r.origin != KeyOrigin::Derived {
+        if !crate::owned_keys::is_derived_origin(r.origin) {
             let shared_root_id = r
                 .shared_root_id
                 .or_else(|| state.owned_keys.get(&id).and_then(|r| r.shared_root_id.clone()));
@@ -384,7 +384,7 @@ pub(super) async fn replace_decision<'a>(
         chunk_count: r.canonical["chunk_count"].as_u64().unwrap_or(1) as u32,
     };
     match crate::owned_keys::write_check(api, master_key, &target).await {
-        WriteCheck::Writable if r.origin != KeyOrigin::Derived => Replace::InPlace(r),
+        WriteCheck::Writable if !crate::owned_keys::is_derived_origin(r.origin) => Replace::InPlace(r),
         WriteCheck::Writable => Replace::NewFile,
         WriteCheck::UpperRepair => Replace::Skip(crate::crypto::OWNER_REPAIR_READ_ONLY),
         WriteCheck::Unknown => Replace::Skip(WRITE_CHECK_UNKNOWN),
@@ -687,7 +687,11 @@ pub(super) async fn download_to(
         .to_string();
     // Streaming, constant-memory decrypt. The "↓ rel" line is already printed by
     // the caller, so use a no-op progress sink here.
-    if let Some(r) = remote.resolved.as_ref().filter(|r| r.origin != KeyOrigin::Derived) {
+    if let Some(r) = remote
+        .resolved
+        .as_ref()
+        .filter(|r| !crate::owned_keys::is_derived_origin(r.origin))
+    {
         crate::download::stream_download_decrypt_with_file_key(
             api,
             r.key.clone(),

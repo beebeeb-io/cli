@@ -80,7 +80,7 @@ pub(super) async fn pull_folder_inner(
             }
         };
         let decrypted_name = resolved.name;
-        let explicit_key = if resolved.origin != beebeeb_core::owned_keys::KeyOrigin::Derived && content_key.is_none() {
+        let explicit_key = if !crate::owned_keys::is_derived_origin(resolved.origin) && content_key.is_none() {
             Some(resolved.key.clone())
         } else {
             None

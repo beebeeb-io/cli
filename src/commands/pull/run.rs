@@ -72,7 +72,7 @@ pub(super) async fn run_once(
             None
         };
     let explicit_key =
-        if resolved.origin != beebeeb_core::owned_keys::KeyOrigin::Derived && request_content_key.is_none() {
+        if !crate::owned_keys::is_derived_origin(resolved.origin) && request_content_key.is_none() {
             Some(resolved.key.clone())
         } else {
             None

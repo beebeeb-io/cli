@@ -180,7 +180,7 @@ pub(super) fn remote_version(remote: &RemoteFile) -> Option<i64> {
     remote
         .resolved
         .as_ref()
-        .filter(|r| r.origin != KeyOrigin::Derived)
+        .filter(|r| !crate::owned_keys::is_derived_origin(r.origin))
         .and_then(|r| crate::api::current_version_number(&r.canonical))
 }
 
