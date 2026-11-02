@@ -1,3 +1,5 @@
+//! One pass's summary: the json, quiet and rich output and the one-shot exit code.
+
 use super::*;
 
 /// The pass summary: the json / quiet / rich output and the one-shot exit code.

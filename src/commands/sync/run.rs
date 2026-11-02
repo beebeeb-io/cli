@@ -1,3 +1,5 @@
+//! The sync pass itself: the control modes, the one-shot run and the watch handoff.
+
 use super::*;
 
 #[allow(clippy::too_many_arguments)]

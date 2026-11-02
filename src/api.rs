@@ -1,3 +1,7 @@
+//! The HTTP client for the Beebeeb API: the request and reply types, the typed
+//! errors, and the submodules for files, shares, billing and the direct-upload
+//! transport.
+
 use bytes::Bytes;
 use reqwest::Client;
 use serde_json::Value;

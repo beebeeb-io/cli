@@ -1,3 +1,6 @@
+//! The on-disk config: the API URL, the session token, the account email and the
+//! master key, and where each of them lives.
+
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::OnceLock;

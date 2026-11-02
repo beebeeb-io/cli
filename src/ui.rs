@@ -1,5 +1,6 @@
-// UI rendering module — output modes, box drawing, formatting helpers.
-//
+//! Output modes (rich, json, quiet), box drawing and the formatting helpers every
+//! command prints through.
+
 // Every command should call `ui::init()` once at startup (main.rs does this).
 // Then use `is_rich()`, `is_json()`, `is_quiet()` to branch on output mode.
 

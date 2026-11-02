@@ -1,3 +1,5 @@
+//! `bb speedtest`: benchmark the network and the local crypto.
+
 use colored::Colorize;
 use std::time::Instant;
 

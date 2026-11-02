@@ -1,3 +1,6 @@
+//! `bb repair`: find names encrypted with another key derivation and re-encrypt
+//! them.
+
 use colored::Colorize;
 
 use crate::api::ApiClient;

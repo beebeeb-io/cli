@@ -1,3 +1,6 @@
+//! The direct-upload client against a scripted API: the grant, the PUT and the
+//! commit as the server really speaks them.
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 

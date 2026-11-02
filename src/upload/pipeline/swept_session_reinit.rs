@@ -1,3 +1,6 @@
+//! A swept session is re-initialised once, by file id and then from chunk 0 — never
+//! retried against the dead session.
+
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 

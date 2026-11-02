@@ -1,3 +1,5 @@
+//! The dashboard's state: the view, the sync status and the file events.
+
 use std::collections::VecDeque;
 
 /// Maximum number of file events to keep in the scrollback buffer.

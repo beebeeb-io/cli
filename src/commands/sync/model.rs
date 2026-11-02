@@ -1,3 +1,5 @@
+//! What `bb sync` was asked to do and the policy that shapes the pass.
+
 /// What `bb sync` should do this invocation. The control modes return before
 /// any tree work; `Run` is the one-shot or watch sync.
 #[derive(Clone, Debug)]

@@ -1,3 +1,5 @@
+//! The full dashboard: the header, the file table, the progress bars and the hints.
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};

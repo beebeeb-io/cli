@@ -1,3 +1,5 @@
+//! The dashboard's event loop: raw mode, the alternate screen and the key handling.
+
 use std::io;
 use std::time::Duration;
 

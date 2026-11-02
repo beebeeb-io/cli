@@ -1,3 +1,6 @@
+//! The `bb` binary: the clap entry point, the output-mode setup and the dispatch
+//! into `commands`.
+
 mod account_state;
 mod api;
 mod cli_args;

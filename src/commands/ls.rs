@@ -1,3 +1,5 @@
+//! `bb ls`: list a folder, decrypting names locally, with sort and long options.
+
 use colored::Colorize;
 
 use crate::api::ApiClient;

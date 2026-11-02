@@ -1,3 +1,5 @@
+//! `bb push`: upload files, encrypting on the fly, with the conflict policy.
+
 use base64::Engine;
 use beebeeb_types::quota::{Plan, effective_quota, format_storage_si};
 use colored::Colorize;

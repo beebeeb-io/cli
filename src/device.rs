@@ -1,3 +1,6 @@
+//! This machine's identity: the stored device id, hostname and platform, written
+//! once and reused by every session.
+
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use uuid::Uuid;

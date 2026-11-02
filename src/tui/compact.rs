@@ -1,3 +1,5 @@
+//! The compact dashboard: one line per file event, for a narrow terminal.
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};

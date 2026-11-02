@@ -1,3 +1,6 @@
+//! `bb share`: create an encrypted share link with an expiry and an optional
+//! passphrase.
+
 use base64::Engine as _;
 use colored::Colorize;
 use std::io::{self, Write};

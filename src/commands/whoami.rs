@@ -1,3 +1,5 @@
+//! `bb whoami`: the signed-in user, plan, region, quota and session.
+
 use beebeeb_types::quota::{Plan, effective_quota, format_storage_si};
 use colored::Colorize;
 

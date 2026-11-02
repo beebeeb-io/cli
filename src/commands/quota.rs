@@ -1,3 +1,5 @@
+//! `bb quota`: storage usage, file count and the plan's effective quota.
+
 use beebeeb_types::quota::{Plan, effective_quota, format_storage_si};
 use colored::Colorize;
 

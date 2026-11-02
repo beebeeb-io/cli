@@ -20,6 +20,8 @@ the command and pasting its output, not by compiling. The CLI gate needs Linux (
 
 ## Module map
 
+`MAP.md` is the generated index, one `MAP.md` per directory; `make map` writes them and `make map-check` fails on drift — never hand-edit.
+
 ```
 src/main.rs               clap commands; commands/*.rs = one file per command (push, pull, sync, share, request, region, twofa, ...)
 src/api.rs, api/          ApiClient: every endpoint, provenance headers (X-Beebeeb-Client: cli + version), 300 s timeout

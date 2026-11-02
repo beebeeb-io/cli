@@ -1,3 +1,5 @@
+//! The dashboard's input: the polled key events and the actions they map to.
+
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use std::time::Duration;
 

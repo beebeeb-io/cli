@@ -1,3 +1,6 @@
+//! The RSS regression: the pipeline's memory must not grow with the number of
+//! files.
+
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;

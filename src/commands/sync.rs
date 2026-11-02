@@ -1,3 +1,6 @@
+//! `bb sync`: the facade over the pass (run), its model, its report and the
+//! reconcile, watch, session, scan and transfer helpers.
+
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
