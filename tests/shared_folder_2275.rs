@@ -69,6 +69,24 @@ fn ok(r: std::process::Output) {
 fn owner_key_posts(h: &Harness, id: &str) -> usize {
     h.count("POST", &format!("/api/v1/files/{id}/owner-key"))
 }
+/// L15 = A: a pass over a shared folder publishes nothing - not an owner wrap
+/// for the item, and not a child wrap for the tree it sits in. Counts every
+/// key-publishing POST so a future child-wrap route cannot slip past.
+fn published_key_posts(h: &Harness) -> usize {
+    h.state
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .filter(|(m, p, _)| {
+            m == "POST"
+                && (p.ends_with("/owner-key")
+                    || p.ends_with("/keys")
+                    || p.ends_with("/child-key")
+                    || p.ends_with("/folder-keys"))
+        })
+        .count()
+}
 fn shared_folder(fixture: Fixture) -> Fixture {
     let mut f = fixture;
     if !f.rows.iter().any(|r| r["id"] == ROOT) {
@@ -106,9 +124,10 @@ async fn pull_bytes(h: &Harness, id: &str) -> Vec<u8> {
     std::fs::read(out).unwrap()
 }
 
-/// A1: an O item listed foreign, with a member-made wrap of K' and a name under
-/// K'. L12: the id class decides, attribution never - derived only, unavailable,
-/// and no owner-key POST.
+/// A1 (P2-9): an O item listed foreign, with a member-made wrap of K' and a
+/// name under K'. L12: the id class decides, attribution never - derived only,
+/// unavailable, and no owner-key or child-wrap POST, even through the index
+/// walk a sync pass runs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a1_owner_id_with_member_wrap_reads_derived_only() {
     let mut f = Fixture::default();
@@ -124,43 +143,82 @@ async fn a1_owner_id_with_member_wrap_reads_derived_only() {
     f.inventory
         .push(json!({"file_id":O_FILE,"encrypted_file_key":wrap(O_FILE,false)}));
     let h = Harness::new(shared_folder(f)).await;
+    let d = dir(&h);
+    let out = sync(&h, &d).await;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.status.success() && text.contains("can't decrypt item name"),
+        "the pass refuses to open the row instead of adopting the member wrap: {text}"
+    );
     let v = h.json(&["ls", "Shared"]).await;
     assert_eq!(v["files"][0]["name"], "can't open (added via shared folder)");
     assert_eq!(owner_key_posts(&h, O_FILE), 0);
+    assert_eq!(published_key_posts(&h), 0, "L15 = A: nothing is published");
     h.close().await;
 }
 
-/// A2: the same row, but the name really is under the derived key: derived,
-/// readable, and never adopted.
+/// A2 (P2-9): the same row, but the name really is under the derived key:
+/// derived, readable, and never adopted - through the real sync path too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a2_owner_id_with_real_name_reads_without_adoption() {
     let mut f = Fixture::default();
     let mut r = row(O_FILE, Some(ROOT), "a2.txt", RowFacts { ..Default::default() });
     r["acted_via_share_id"] = json!(BAD);
+    // Real content under the derived key, so the sync pass can materialise it.
+    let key = beebeeb_core::kdf::derive_file_key(&master(), O_FILE.as_bytes());
+    f.plaintext = b"a2 body".to_vec();
+    f.stride = f.plaintext.len() as u64;
+    f.frames = vec![beebeeb_core::encrypt::encrypt_chunk_raw(&key, &f.plaintext).unwrap()];
+    r["size_bytes"] = json!(f.plaintext.len());
+    r["chunk_count"] = json!(1);
     f.rows.push(r);
     f.inventory
         .push(json!({"file_id":O_FILE,"encrypted_file_key":wrap(O_FILE,false)}));
     let h = Harness::new(shared_folder(f)).await;
+    let d = dir(&h);
+    ok(sync(&h, &d).await);
+    assert_eq!(
+        std::fs::read(d.join("a2.txt")).unwrap(),
+        b"a2 body",
+        "the pass materialises the owner item by its own name"
+    );
     let v = h.json(&["ls", "Shared"]).await;
     assert_eq!(v["files"][0]["name"], "a2.txt");
     assert_eq!(owner_key_posts(&h, O_FILE), 0);
+    assert_eq!(published_key_posts(&h), 0, "L15 = A: nothing is published");
     h.close().await;
 }
 
 /// A3 (P2-9): an O item carrying a WELL-FORMED historical L8 owner envelope —
 /// one that really opens under its key, with the name sealed under that same
 /// key — is ignored: the id class decides, the derived key wins, the name does
-/// not authenticate under it, and nothing is adopted. If the envelope were
-/// used the item would read "a3.txt", so this test can fail.
+/// not authenticate under it, and nothing is adopted — through the real sync
+/// path, and with no key published. If the envelope were used the item would
+/// read "a3.txt", so this test can fail.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a3_owner_id_l8_envelope_is_ignored() {
     let mut f = Fixture::default();
-    let mut r = row(O_FILE, None, "a3.txt", RowFacts { ..Default::default() });
+    let mut r = row(O_FILE, Some(ROOT), "a3.txt", RowFacts { ..Default::default() });
     r["name_encrypted"] = json!(name(&item_key(), "a3.txt"));
     r["owner_wrapped_file_key"] = json!(l8_envelope(O_FILE, &item_key()));
     f.rows.push(r);
     let h = Harness::new(shared_folder(f)).await;
-    let v = h.json(&["ls"]).await;
+    let d = dir(&h);
+    let out = sync(&h, &d).await;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.status.success() && text.contains("can't decrypt item name"),
+        "the pass refuses the L8 envelope instead of using it: {text}"
+    );
+    let v = h.json(&["ls", "Shared"]).await;
     // The envelope's key really would open this name: the test can fail.
     let sealed = {
         let state = h.state.lock().unwrap();
@@ -175,6 +233,7 @@ async fn a3_owner_id_l8_envelope_is_ignored() {
         "the L8 envelope must not open an O item: {v}"
     );
     assert_eq!(owner_key_posts(&h, O_FILE), 0);
+    assert_eq!(published_key_posts(&h), 0, "L15 = A: nothing is published");
     h.close().await;
 }
 
