@@ -81,6 +81,10 @@ pub(super) async fn finish_owned_sync(
                 report.written += r.written;
                 report.deferred += r.deferred;
                 report.partial |= r.partial;
+                report.skipped += r.skipped;
+                for (reason, n) in r.skip_reasons {
+                    *report.skip_reasons.entry(reason).or_default() += n;
+                }
             }
             Err(e) => {
                 report.deferred += 1;

@@ -197,19 +197,25 @@ pub async fn repair(
                 report.skip("plaintext_name");
                 continue;
             }
-            // L14 (1): this root's inventory must hold a wrap for (R, X, kind).
-            let Some((root_id, root_key, wrap)) = keys.child_wrap_for(&id) else {
-                report.skip("no_wrap");
+            // L14 (1): THIS root's inventory must hold a wrap for (R, X, kind).
+            // A wrap another root holds is not this root's custody: the item is
+            // not provably a member of the folder being repaired.
+            let Some((root_key, wrap)) = keys.child_wrap_in_root(folder_id, &id) else {
+                report.skip(if keys.wrap_held_elsewhere(&id, folder_id) {
+                    "wrap_does_not_open"
+                } else {
+                    "no_wrap"
+                });
                 continue;
             };
             // L14 (2): it must open under the root's proven custody key.
-            if beebeeb_core::owned_keys::unwrap_child_key(&root_key, &root_id, &id, kind.as_u8(), &wrap).is_err() {
+            if beebeeb_core::owned_keys::unwrap_child_key(&root_key, folder_id, &id, kind.as_u8(), &wrap).is_err() {
                 report.skip("wrap_does_not_open");
                 continue;
             }
             // L14 (3): the opened key must equal the resolver's key, in constant
             // time. (4) the name authenticates under it, which `resolve` proved.
-            if !beebeeb_core::owned_keys::child_wrap_matches(&root_key, &root_id, &id, kind.as_u8(), &wrap, &r.key) {
+            if !beebeeb_core::owned_keys::child_wrap_matches(&root_key, folder_id, &id, kind.as_u8(), &wrap, &r.key) {
                 report.skip("wrap_key_mismatch");
                 continue;
             }

@@ -97,6 +97,9 @@ fn print_json(report: &PassReport<'_>) {
         "index_written": report.index_report.written,
         "index_deferred": report.index_report.deferred,
         "index_partial": report.index_report.partial,
+        // L14: rows left out of the shared index, by reason.
+        "index_skipped": report.index_report.skipped,
+        "index_skip_reasons": report.index_report.skip_reasons,
         "bytes": report.total_bytes,
         "elapsed_secs": report.elapsed.as_secs_f64(),
     });

@@ -304,6 +304,52 @@ async fn a11_index_skips_wrap_of_another_items_key() {
     h.close().await;
 }
 
+/// A10/A11 (L14, two roots): an item listed under R1 but wrapped only in R2's
+/// inventory is skipped — R2's wrap proves nothing about R1's custody — so it
+/// is never indexed under R1. Reason: `wrap_does_not_open` (a wrap exists, but
+/// not the one this root would need).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a10_index_skips_item_wrapped_only_in_another_root() {
+    let r2_key = FileKey::from_bytes([129; 32]);
+    let mut f = Fixture::transfer(true);
+    // The victim, listed under R1 (ROOT), reads through its owner envelope.
+    f.rows[1]["owner_wrapped_file_key"] = json!(B64.encode(
+        beebeeb_core::owned_keys::wrap_owner_file_key(&master(), FILE, &item_key()).unwrap()
+    ));
+    // R2 is a proven root the walk reaches (a folder under R1 whose child
+    // resolves through R2's custody), and its inventory wraps FILE - an item
+    // that lives under R1 - and its own child F_BAD.
+    let mut r2 = row(F_SUB, Some(ROOT), "Other", RowFacts { folder: true, foreign: true });
+    r2["owner_wrapped_file_key"] = json!(B64.encode(
+        beebeeb_core::owned_keys::wrap_owner_file_key(&master(), F_SUB, &item_key()).unwrap()
+    ));
+    f.rows.push(r2);
+    f.rows.push(row(F_BAD, Some(F_SUB), "inner", RowFacts { folder: true, foreign: true }));
+    f.inventory.clear();
+    f.extra_root_keys.insert(F_SUB.into(), *r2_key.as_bytes());
+    f.extra_root_inventories.insert(
+        F_SUB.into(),
+        vec![
+            json!({"file_id":FILE,"encrypted_file_key":B64.encode(beebeeb_core::owned_keys::wrap_child_key(&r2_key, F_SUB, FILE, 1, &item_key()).unwrap())}),
+            json!({"file_id":F_BAD,"encrypted_file_key":B64.encode(beebeeb_core::owned_keys::wrap_child_key(&r2_key, F_SUB, F_BAD, 2, &item_key()).unwrap())}),
+        ],
+    );
+    let h = Harness::new(shared_folder(f)).await;
+    let d = dir(&h);
+    let out = sync(&h, &d).await;
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let report: Value = match (stdout.find('{'), stdout.rfind('}')) {
+        (Some(a), Some(b)) if a <= b => serde_json::from_str(&stdout[a..=b]).unwrap_or(Value::Null),
+        _ => Value::Null,
+    };
+    ok(out);
+    assert_eq!(
+        report["index_skip_reasons"]["wrap_does_not_open"], 1,
+        "the other root's wrap must not make the item indexable here: {stdout}"
+    );
+    h.close().await;
+}
+
 /// A12 (L14): a folder listed under R that the proven key does not open is not
 /// descended into, so its (well-wrapped) child is not indexed either.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

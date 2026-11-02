@@ -120,6 +120,10 @@ pub struct Fixture {
     /// SF-0002 round 2: when set, `GET /files/{id}/download` answers this status
     /// (the read-only check's probe cannot read the version).
     pub download_status: Option<u16>,
+    /// L14 two-root tests: further shared roots this account owns, with their
+    /// proven custody key and their own inventory. ROOT keeps `folder_key()`.
+    pub extra_root_keys: HashMap<String, [u8; 32]>,
+    pub extra_root_inventories: HashMap<String, Vec<Value>>,
 }
 impl Fixture {
     pub fn transfer(v2: bool) -> Self {
@@ -610,6 +614,22 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
         let second = query.contains_key("cursor");
         let cut = f.inventory.len().min(500);
         json!({"keys": if second {&f.inventory[cut..]} else {&f.inventory[..cut]},"next_cursor":if f.cycle || (!second && cut<f.inventory.len()) {Some("opaque+cursor/=")} else {None}})
+    } else if method == "GET" && path.starts_with("/api/v1/shared-folders/") {
+        // L14 two-root: any further root this account owns serves its own
+        // custody and its own inventory, never ROOT's.
+        let rest = path.trim_start_matches("/api/v1/shared-folders/");
+        let (id, wants_keys) = match rest.strip_suffix("/keys") {
+            Some(id) => (id, true),
+            None => (rest, false),
+        };
+        match f.extra_root_keys.get(id) {
+            Some(key) if !wants_keys => json!({"folder_id":id,"role":"owner","access_level":"edit","key_version":1,"owner_wrapped_folder_key":B64.encode(owned_keys::wrap_folder_custody(&master(),id,&FileKey::from_bytes(*key)).unwrap())}),
+            Some(_) => {
+                let rows = f.extra_root_inventories.get(id).cloned().unwrap_or_default();
+                json!({"keys":rows,"next_cursor":null})
+            }
+            None => return (StatusCode::NOT_FOUND, Body::empty()).into_response(),
+        }
     } else if method == "PATCH" && path.starts_with("/api/v1/files/") {
         // A rename/move: answered so a write the client is allowed to make succeeds.
         let id = path.trim_start_matches("/api/v1/files/").to_string();

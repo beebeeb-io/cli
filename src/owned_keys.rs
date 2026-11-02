@@ -11,6 +11,8 @@ use std::{
     sync::Arc,
 };
 
+mod l14;
+
 pub const UNREADABLE: &str = "can't open (added via shared folder)";
 pub const CUSTODY_UNAVAILABLE: &str = "This folder's keys are unavailable";
 /// L15 = A: desktop and CLI never publish an owner key, so a write into a shared
@@ -124,19 +126,6 @@ impl OwnedKeyResolver {
     /// the row for writing.
     pub fn write_target_for(&self, id: &str) -> Option<Arc<owned_keys::WriteTarget>> {
         self.resolved.get(id).and_then(|r| r.write_target.clone())
-    }
-    /// L14: the (root id, proven custody key, L7 wrap) the index check needs for
-    /// `id`, when a proven custody root's inventory holds one. A legacy invite
-    /// root is never returned: its copy is unbound and cannot be compared.
-    pub fn child_wrap_for(&self, id: &str) -> Option<(String, Arc<FileKey>, Vec<u8>)> {
-        self.roots.iter().find_map(|(root_id, root)| {
-            if root.legacy_invite {
-                return None;
-            }
-            root.children
-                .get(id)
-                .map(|wrap| (root_id.clone(), root.key.clone(), wrap.clone()))
-        })
     }
     /// Load (and cache) a shared root's custody and inventory, so the L14 check
     /// has the wrap even when the row itself resolves through an owner envelope.
