@@ -405,13 +405,97 @@ pub async fn revoke(share_id: Option<String>) -> Result<(), String> {
 }
 
 /// A share entry parsed from the API response, ready for display.
-struct ShareEntry {
+#[derive(Debug, PartialEq)]
+pub(crate) struct ShareEntry {
     id: String,
     file_name: String,
     expires_display: String,
     open_count: u64,
     is_revoked: bool,
     is_expired: bool,
+}
+
+impl ShareEntry {
+    /// Build from the documented `ShareListItem` shape (the generated wire
+    /// type): the row the server's OpenAPI document describes.
+    fn from_wire(row: &crate::api::generated::ShareListItem, master_key: &beebeeb_core::kdf::MasterKey) -> Self {
+        let file_id = row.file_id.to_string();
+        let file_name = decrypt_share_name(master_key, &file_id, &row.file.name_encrypted);
+        let expires_raw = row.expires_at.as_deref().unwrap_or(NO_EXPIRY);
+        Self {
+            id: row.id.to_string(),
+            file_name,
+            expires_display: display_expiry(expires_raw),
+            open_count: u64::try_from(row.open_count).unwrap_or(0),
+            is_revoked: row.revoked,
+            is_expired: share_is_expired(row.revoked, expires_raw),
+        }
+    }
+
+    /// Build from a row the document does not describe (an older server, or a
+    /// hand-rolled body). Every field keeps the lenient default it had before
+    /// the generated types landed, so an undocumented response still lists.
+    fn from_legacy(share: &serde_json::Value, master_key: &beebeeb_core::kdf::MasterKey) -> Self {
+        let file_id = share.get("file_id").and_then(|v| v.as_str()).unwrap_or("");
+        let name_enc = share
+            .get("file")
+            .and_then(|f| f.get("name_encrypted"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let expires_raw = share.get("expires_at").and_then(|v| v.as_str()).unwrap_or(NO_EXPIRY);
+        let is_revoked = share.get("revoked").and_then(|v| v.as_bool()).unwrap_or(false);
+        Self {
+            id: share.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            file_name: decrypt_share_name(master_key, file_id, name_enc),
+            expires_display: display_expiry(expires_raw),
+            open_count: share
+                .get("open_count")
+                .or_else(|| share.get("opens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            is_revoked,
+            is_expired: share_is_expired(is_revoked, expires_raw),
+        }
+    }
+}
+
+fn decrypt_share_name(master_key: &beebeeb_core::kdf::MasterKey, file_id: &str, name_enc: &str) -> String {
+    if !file_id.is_empty() && !name_enc.is_empty() {
+        crate::crypto::decrypt_name(master_key, file_id, name_enc).unwrap_or_else(|| "(encrypted)".to_string())
+    } else {
+        "(unknown)".to_string()
+    }
+}
+
+fn share_is_expired(revoked: bool, expires_raw: &str) -> bool {
+    !revoked
+        && expires_raw != NO_EXPIRY
+        && chrono::DateTime::parse_from_rfc3339(expires_raw)
+            .map(|dt| dt < chrono::Utc::now())
+            .unwrap_or(false)
+}
+
+fn display_expiry(expires_raw: &str) -> String {
+    if expires_raw == NO_EXPIRY {
+        NO_EXPIRY.to_string()
+    } else {
+        ui::relative_time(expires_raw)
+    }
+}
+
+/// The replacement proof for CL-P3-11: build the display view from the
+/// generated `ShareListItem` and from the old lenient parser, and hand both
+/// back so the fixture test can assert they agree.
+#[cfg(test)]
+pub(crate) fn share_entry_views(
+    row: &serde_json::Value,
+    master_key: &beebeeb_core::kdf::MasterKey,
+) -> (ShareEntry, ShareEntry) {
+    let from_wire = serde_json::from_value::<crate::api::generated::ShareListItem>(row.clone())
+        .map(|parsed| ShareEntry::from_wire(&parsed, master_key))
+        .expect("the fixture is a documented ShareListItem");
+    let from_legacy = ShareEntry::from_legacy(row, master_key);
+    (from_wire, from_legacy)
 }
 
 /// Fetch shares from the API and present an interactive terminal picker.
@@ -435,46 +519,12 @@ async fn pick_share_interactively(api: &ApiClient) -> Result<String, String> {
 
     let entries: Vec<ShareEntry> = shares_json
         .iter()
-        .map(|share| {
-            let id = share.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let file_id = share.get("file_id").and_then(|v| v.as_str()).unwrap_or("");
-            let name_enc = share
-                .get("file")
-                .and_then(|f| f.get("name_encrypted"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let file_name = if !file_id.is_empty() && !name_enc.is_empty() {
-                crate::crypto::decrypt_name(&master_key, file_id, name_enc).unwrap_or_else(|| "(encrypted)".to_string())
-            } else {
-                "(unknown)".to_string()
-            };
-            let expires_raw = share.get("expires_at").and_then(|v| v.as_str()).unwrap_or(NO_EXPIRY);
-            let is_revoked = share.get("revoked").and_then(|v| v.as_bool()).unwrap_or(false);
-            let is_expired = !is_revoked
-                && expires_raw != NO_EXPIRY
-                && chrono::DateTime::parse_from_rfc3339(expires_raw)
-                    .map(|dt| dt < chrono::Utc::now())
-                    .unwrap_or(false);
-            let open_count = share
-                .get("open_count")
-                .or_else(|| share.get("opens"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let expires_display = if expires_raw == NO_EXPIRY {
-                NO_EXPIRY.to_string()
-            } else {
-                ui::relative_time(expires_raw)
-            };
-
-            ShareEntry {
-                id,
-                file_name,
-                expires_display,
-                open_count,
-                is_revoked,
-                is_expired,
-            }
-        })
+        .map(
+            |share| match serde_json::from_value::<crate::api::generated::ShareListItem>(share.clone()) {
+                Ok(row) => ShareEntry::from_wire(&row, &master_key),
+                Err(_) => ShareEntry::from_legacy(share, &master_key),
+            },
+        )
         .collect();
 
     if entries.is_empty() {

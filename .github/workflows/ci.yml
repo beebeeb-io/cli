@@ -35,6 +35,13 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      # The wire types are committed, not built: regenerate them from the
+      # vendored server contract and fail on any drift. The generator is
+      # pinned in the script and runs from a throw-away crate, so nothing here
+      # touches Cargo.toml or Cargo.lock. No private server checkout needed.
+      - name: OpenAPI types match the vendored contract
+        run: ./scripts/openapi-types.sh --check
+
   test:
     name: Tests
     runs-on: ubuntu-latest

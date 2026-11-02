@@ -1,0 +1,401 @@
+{
+  "BillingPlan": {
+    "features": [
+      "x"
+    ],
+    "id": "11111111-1111-4111-8111-111111111111",
+    "name": "example",
+    "purchasable_here": false,
+    "storage_bytes": 1,
+    "storage_label": "example",
+    "tier_rank": 1
+  },
+  "BulkTrashResponse": {
+    "already_trashed": [
+      "11111111-1111-4111-8111-111111111111"
+    ],
+    "missing": [
+      "11111111-1111-4111-8111-111111111111"
+    ],
+    "trashed": [
+      "11111111-1111-4111-8111-111111111111"
+    ]
+  },
+  "ChunkUploadResponse": {
+    "index": 1,
+    "size": 1
+  },
+  "CompleteUploadResponse": {
+    "chunk_count": 1,
+    "created_at": "2026-01-02T03:04:05Z",
+    "id": "11111111-1111-4111-8111-111111111111",
+    "is_uploading": false,
+    "name_encrypted": "encrypted-value",
+    "size_bytes": 1,
+    "storage_location": {
+      "city": "example",
+      "region": "example"
+    },
+    "updated_at": "2026-01-02T03:04:05Z",
+    "uploaded_at": "2026-01-02T03:04:05Z"
+  },
+  "ConfirmationResponse": {
+    "confirmation_token": "x",
+    "expires_at": "2026-01-02T03:04:05Z"
+  },
+  "ConflictCheckResponse": {
+    "files": [
+      {
+        "id": "11111111-1111-4111-8111-111111111111",
+        "name_encrypted": "encrypted-value"
+      }
+    ]
+  },
+  "ConflictFile": {
+    "id": "11111111-1111-4111-8111-111111111111",
+    "name_encrypted": "encrypted-value"
+  },
+  "DownloadChunk": {
+    "index": 1,
+    "size_bytes": 1
+  },
+  "DownloadVersion": {
+    "chunk_count": 1,
+    "chunk_size_bytes": 1,
+    "chunks": [
+      {
+        "index": 1,
+        "size_bytes": 1
+      }
+    ],
+    "ciphertext_size_bytes": 1,
+    "object_version_id": "11111111-1111-4111-8111-111111111111",
+    "plaintext_size_bytes": 1,
+    "version_number": 1
+  },
+  "ErrorResponse": {
+    "error": "x"
+  },
+  "FileCountResponse": {
+    "total_bytes": 1,
+    "total_files": 1,
+    "total_folders": 1,
+    "trashed_bytes": 1,
+    "trashed_files": 1
+  },
+  "FileDetailResponse": {
+    "chunk_count": 1,
+    "created_at": "2026-01-02T03:04:05Z",
+    "has_large_thumbnail": false,
+    "has_preview": false,
+    "id": "11111111-1111-4111-8111-111111111111",
+    "is_folder": false,
+    "is_trashed": false,
+    "is_uploading": false,
+    "name_encrypted": "encrypted-value",
+    "size_bytes": 1,
+    "updated_at": "2026-01-02T03:04:05Z",
+    "uploaded_at": "2026-01-02T03:04:05Z"
+  },
+  "FileListResponse": {
+    "files": [
+      {
+        "chunk_count": 1,
+        "created_at": "2026-01-02T03:04:05Z",
+        "id": "11111111-1111-4111-8111-111111111111",
+        "is_folder": false,
+        "is_trashed": false,
+        "name_encrypted": "encrypted-value",
+        "size_bytes": 1,
+        "storage_location": {
+          "city": "example",
+          "region": "example"
+        },
+        "updated_at": "2026-01-02T03:04:05Z"
+      }
+    ]
+  },
+  "FileMetadata": {
+    "chunk_count": 1,
+    "created_at": "2026-01-02T03:04:05Z",
+    "id": "11111111-1111-4111-8111-111111111111",
+    "is_folder": false,
+    "is_trashed": false,
+    "name_encrypted": "encrypted-value",
+    "size_bytes": 1,
+    "storage_location": {
+      "city": "example",
+      "region": "example"
+    },
+    "updated_at": "2026-01-02T03:04:05Z"
+  },
+  "FilesListResponse": {
+    "files": [
+      {
+        "chunk_count": 1,
+        "created_at": "2026-01-02T03:04:05Z",
+        "has_large_thumbnail": false,
+        "has_preview": false,
+        "has_thumbnail": false,
+        "id": "11111111-1111-4111-8111-111111111111",
+        "is_folder": false,
+        "is_media": false,
+        "is_starred": false,
+        "is_trashed": false,
+        "is_uploading": false,
+        "name_encrypted": "encrypted-value",
+        "share_count": 1,
+        "size_bytes": 1,
+        "updated_at": "2026-01-02T03:04:05Z",
+        "uploaded_at": "2026-01-02T03:04:05Z"
+      }
+    ]
+  },
+  "InvoiceSummary": {
+    "amount_gross_cents": 1,
+    "amount_net_cents": 1,
+    "currency": "x",
+    "description": "x",
+    "id": "11111111-1111-4111-8111-111111111111",
+    "invoice_date": "x",
+    "number": "x",
+    "pdf_url": "x",
+    "period_end": "x",
+    "period_start": "x",
+    "status": "example",
+    "vat_amount_cents": 1,
+    "vat_rate_bps": 1,
+    "vat_treatment": "x"
+  },
+  "InvoicesResponse": {
+    "invoices": [
+      {
+        "amount_gross_cents": 1,
+        "amount_net_cents": 1,
+        "currency": "x",
+        "description": "x",
+        "id": "11111111-1111-4111-8111-111111111111",
+        "invoice_date": "x",
+        "number": "x",
+        "pdf_url": "x",
+        "period_end": "x",
+        "period_start": "x",
+        "status": "example",
+        "vat_amount_cents": 1,
+        "vat_rate_bps": 1,
+        "vat_treatment": "x"
+      }
+    ]
+  },
+  "LastTrial": {
+    "charged": false,
+    "ended_at": "2026-01-02T03:04:05Z",
+    "kind": "example"
+  },
+  "ListedFile": {
+    "chunk_count": 1,
+    "created_at": "2026-01-02T03:04:05Z",
+    "has_large_thumbnail": false,
+    "has_preview": false,
+    "has_thumbnail": false,
+    "id": "11111111-1111-4111-8111-111111111111",
+    "is_folder": false,
+    "is_media": false,
+    "is_starred": false,
+    "is_trashed": false,
+    "is_uploading": false,
+    "name_encrypted": "encrypted-value",
+    "share_count": 1,
+    "size_bytes": 1,
+    "updated_at": "2026-01-02T03:04:05Z",
+    "uploaded_at": "2026-01-02T03:04:05Z"
+  },
+  "MeResponse": {
+    "created_at": "2026-01-02T03:04:05Z",
+    "email": "user@example.com",
+    "email_verified": false,
+    "is_impersonation": false,
+    "role": "example",
+    "totp_enabled": false,
+    "user_id": "11111111-1111-4111-8111-111111111111"
+  },
+  "MessageResponse": {
+    "message": "example"
+  },
+  "OkResponse": {
+    "ok": false
+  },
+  "PlansResponse": {
+    "plans": [
+      {
+        "features": [
+          "x"
+        ],
+        "id": "11111111-1111-4111-8111-111111111111",
+        "name": "example",
+        "purchasable_here": false,
+        "storage_bytes": 1,
+        "storage_label": "example",
+        "tier_rank": 1
+      }
+    ]
+  },
+  "RegionChoice": {
+    "id": "11111111-1111-4111-8111-111111111111",
+    "is_default": false,
+    "kind": "example",
+    "name": "example",
+    "selectable": false,
+    "status": "example"
+  },
+  "RegionPreferenceWithChoices": {
+    "available_regions": [
+      {}
+    ],
+    "choices": [
+      {
+        "id": "11111111-1111-4111-8111-111111111111",
+        "is_default": false,
+        "kind": "example",
+        "name": "example",
+        "selectable": false,
+        "status": "example"
+      }
+    ],
+    "region_strict": false
+  },
+  "RestoreFileResponse": {
+    "message": "example",
+    "rehomed_to_root": false,
+    "restored_count": 1
+  },
+  "SessionListItem": {
+    "created_at": "2026-01-02T03:04:05Z",
+    "expires_at": "2026-01-02T03:04:05Z",
+    "id": "11111111-1111-4111-8111-111111111111",
+    "is_current": false
+  },
+  "SessionListResponse": {
+    "sessions": [
+      {
+        "created_at": "2026-01-02T03:04:05Z",
+        "expires_at": "2026-01-02T03:04:05Z",
+        "id": "11111111-1111-4111-8111-111111111111",
+        "is_current": false
+      }
+    ]
+  },
+  "ShareFileRef": {
+    "name_encrypted": "encrypted-value",
+    "size_bytes": 1
+  },
+  "ShareListItem": {
+    "created_at": "2026-01-02T03:04:05Z",
+    "download_count": 7,
+    "expires_at": "2099-01-02T03:04:05Z",
+    "file": {
+      "name_encrypted": "Documents",
+      "size_bytes": 4096
+    },
+    "file_id": "22222222-2222-4222-8222-222222222222",
+    "has_passphrase": false,
+    "id": "11111111-1111-4111-8111-111111111111",
+    "item_count": 2,
+    "max_opens": 10,
+    "open_count": 3,
+    "revoked": false,
+    "share_type": "file"
+  },
+  "ShareListResponse": {
+    "shares": [
+      {
+        "created_at": "2026-01-02T03:04:05Z",
+        "download_count": 1,
+        "file": {
+          "name_encrypted": "encrypted-value",
+          "size_bytes": 1
+        },
+        "file_id": "11111111-1111-4111-8111-111111111111",
+        "has_passphrase": false,
+        "id": "11111111-1111-4111-8111-111111111111",
+        "item_count": 1,
+        "open_count": 1,
+        "revoked": false,
+        "share_type": "example"
+      }
+    ]
+  },
+  "ShareResponse": {
+    "created_at": "2026-01-02T03:04:05Z",
+    "double_encrypted": false,
+    "has_passphrase": false,
+    "id": "11111111-1111-4111-8111-111111111111",
+    "share_type": "example",
+    "token": "x"
+  },
+  "StorageLocation": {
+    "city": "example",
+    "region": "example"
+  },
+  "StorageUsageResponse": {
+    "plan_limit_bytes": 1,
+    "plan_name": "x",
+    "used_bytes": 1
+  },
+  "SubscriptionResponse": {
+    "billing_cycle": "example",
+    "effective_plan": "x",
+    "plan": "example",
+    "quota_bytes": 1,
+    "status": "example",
+    "used_bytes": 1
+  },
+  "ThumbnailUploadResponse": {
+    "message": "example",
+    "variant": "example"
+  },
+  "TokenListItem": {
+    "created_at": "2026-01-02T03:04:05Z",
+    "id": "11111111-1111-4111-8111-111111111111",
+    "is_active": false,
+    "name": "example",
+    "scopes": [
+      "x"
+    ]
+  },
+  "TokenListResponse": {
+    "tokens": [
+      {
+        "created_at": "2026-01-02T03:04:05Z",
+        "id": "11111111-1111-4111-8111-111111111111",
+        "is_active": false,
+        "name": "example",
+        "scopes": [
+          "x"
+        ]
+      }
+    ]
+  },
+  "TrashFileResponse": {
+    "message": "example",
+    "trashed_count": 1
+  },
+  "UpdateFileResponse": {
+    "chunk_count": 1,
+    "created_at": "2026-01-02T03:04:05Z",
+    "id": "11111111-1111-4111-8111-111111111111",
+    "is_folder": false,
+    "is_trashed": false,
+    "is_uploading": false,
+    "name_encrypted": "encrypted-value",
+    "size_bytes": 1,
+    "updated_at": "2026-01-02T03:04:05Z",
+    "uploaded_at": "2026-01-02T03:04:05Z"
+  },
+  "UsageResponse": {
+    "percentage": 0.5,
+    "quota_bytes": 1,
+    "trash_retention_days": 1,
+    "used_bytes": 1
+  }
+}

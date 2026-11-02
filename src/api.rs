@@ -15,6 +15,15 @@ use crate::config::load_config;
 mod direct;
 pub(crate) use direct::{ChunkApiError, DirectOffer, GrantReply, UploadCall, now_ms};
 
+// Wire types generated from `contracts/openapi.json` (see
+// `scripts/openapi-types.sh`). The document is the server's contract; the
+// types are the shapes `src/` parses, and the fixture round-trip test in this
+// module's tests is what keeps them honest. Not every type has a caller yet:
+// the ones the client branches on are used, the rest are the contract it is
+// written against.
+#[allow(dead_code)]
+pub(crate) mod generated;
+
 static RATE_REMAINING: AtomicI64 = AtomicI64::new(-1);
 static RATE_LIMIT: AtomicI64 = AtomicI64::new(-1);
 static RATE_RESET: AtomicI64 = AtomicI64::new(0);
@@ -552,6 +561,12 @@ pub fn current_version_number(file: &Value) -> Option<i64> {
 #[cfg(test)]
 #[path = "api/tests/current_version_number_tests.rs"]
 mod current_version_number_tests;
+
+/// CL-P3-11 — every generated wire type accepts its fixture and round-trips,
+/// and the one replaced struct produces the same view as the old parser.
+#[cfg(test)]
+#[path = "api/tests/openapi_types_roundtrip_tests.rs"]
+mod openapi_types_roundtrip_tests;
 
 #[cfg(test)]
 #[path = "api/tests/api_error_tests.rs"]
