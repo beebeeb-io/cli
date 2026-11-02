@@ -263,8 +263,12 @@ pub(super) async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8
     let existing_file_id: Option<uuid::Uuid> = if let Some(ref existing) = existing {
         // SF-0002: never version-replace a file sealed by the old iOS app (its
         // name or its CURRENT version), and never one the check could not read.
-        if let Err(refusal) = write_refusal(state, existing).await {
-            return refusal;
+        // L13/A9b: a request row's content is not replaced at all — the edit
+        // becomes a new owner item below — so there is no version to check.
+        if existing.origin != beebeeb_core::owned_keys::KeyOrigin::RequestContent {
+            if let Err(refusal) = write_refusal(state, existing).await {
+                return refusal;
+            }
         }
         if let Some(ref eid) = existing.file_id {
             // If-Match precondition: client must supply current ETag
@@ -297,7 +301,10 @@ pub(super) async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8
     // (SF-0001): every answer below must echo exactly this id.
     let proposed = match existing_file_id {
         Some(listed) => crate::item_id::Proposed::Listed(listed),
-        None => crate::item_id::Proposed::Minted(crate::item_id::mint()),
+        None => match crate::item_id::mint_owner(&state.master_key) {
+            Ok(id) => crate::item_id::Proposed::Minted(id),
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        },
     };
     let file_uuid = proposed.id();
     // L13: a replacement seals through the resolver's write target (key and

@@ -92,6 +92,13 @@ pub(super) fn decode_file_entry(
         None,
     )
     .ok();
+    // L12: a request row is identified by its request fields, not by its id.
+    // Its content stays under `C` (read-only here: this request's private key is
+    // not in a listing), and an edit becomes a NEW owner item, never a version
+    // of the request row (A9b).
+    let is_request_row = ["file_request_id", "sender_ephemeral_pubkey", "wrapped_content_key"]
+        .iter()
+        .any(|f| file.get(f).is_some_and(|v| !v.is_null()));
     // L12: a plaintext name proves nothing; core identifies such a file by its
     // first content chunk, which a listing does not carry. Keep the name the
     // server sent, but mark the row read-only and give it no seal target.
@@ -114,6 +121,20 @@ pub(super) fn decode_file_entry(
             KeyOrigin::Derived,
             Ok(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded),
         ),
+        Some(_) if is_request_row => {
+            let key = std::sync::Arc::new(beebeeb_core::kdf::derive_file_key(master_key, file_id.as_bytes()));
+            let name = beebeeb_core::encrypt::decrypt_name_metadata_with_key(&key, name_encrypted)
+                .map(|m| m.name)
+                .unwrap_or_else(|_| format!("[{}]", &file_id[..8.min(file_id.len())]));
+            (
+                name,
+                false,
+                Some(key),
+                None,
+                KeyOrigin::RequestContent,
+                Err("a request row's content opens only under its request key".to_string()),
+            )
+        }
         Some(r) => {
             let name = match &r.name {
                 ResolvedName::Encrypted(meta) => meta.name.clone(),

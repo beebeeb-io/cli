@@ -726,3 +726,147 @@ mod rename_key_tests {
         assert_eq!(patches.load(Ordering::SeqCst), 0, "a refused rename sent a PATCH");
     }
 }
+
+/// P2-7 (A9b): a request row is recognised by its request fields, so a WebDAV
+/// PUT over it is saved as a NEW owner item — never a new version of the request
+/// row, never sealed under the request row's id.
+#[cfg(test)]
+mod a9b_webdav_tests {
+    use super::*;
+    use axum::{Json, routing::{get, post, put}};
+    use serde_json::json;
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const ROOT: &str = "22222222-2222-4222-8222-222222222222";
+    const REQUEST: &str = "33333333-3333-4333-8333-333333333333";
+
+    #[tokio::test]
+    async fn a_put_over_a_request_row_creates_a_new_owner_item() {
+        let master = beebeeb_core::kdf::MasterKey::from_bytes([7u8; 32]);
+        let root_key = beebeeb_core::kdf::derive_file_key(&master, ROOT.as_bytes());
+        let root_name = beebeeb_core::encrypt::encrypt_name_for(
+            &root_key,
+            "Shared",
+            None,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+        )
+        .unwrap();
+        let request_key = beebeeb_core::kdf::derive_file_key(&master, REQUEST.as_bytes());
+        let request_name = beebeeb_core::encrypt::encrypt_name_for(
+            &request_key,
+            "request.txt",
+            None,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+        )
+        .unwrap();
+        let rows = Arc::new((
+            json!({"id": ROOT, "parent_id": null, "name_encrypted": root_name, "is_folder": true}),
+            json!({
+                "id": REQUEST, "parent_id": ROOT, "name_encrypted": request_name, "is_folder": false,
+                "size_bytes": 12, "chunk_count": 1,
+                "file_request_id": "req-1", "sender_ephemeral_pubkey": "pub", "wrapped_content_key": "wrap"
+            }),
+        ));
+        let inits: Arc<StdMutex<Vec<serde_json::Value>>> = Arc::new(StdMutex::new(Vec::new()));
+        let requested: Arc<StdMutex<Option<String>>> = Arc::new(StdMutex::new(None));
+        let patches = Arc::new(AtomicUsize::new(0));
+        let (listing_rows, listing_inits, init_requested) =
+            (rows.clone(), inits.clone(), requested.clone());
+        let (chunk_requested, complete_requested) = (requested.clone(), requested.clone());
+        let patch_count = patches.clone();
+        let app = Router::new()
+            .route(
+                "/api/v1/files",
+                get(move || {
+                    let rows = listing_rows.clone();
+                    async move { Json(json!({"files": [rows.0.clone(), rows.1.clone()]})) }
+                }),
+            )
+            .route(
+                "/api/v1/uploads/init",
+                post(
+                    move |axum::Json(body): axum::Json<serde_json::Value>| {
+                        let inits = listing_inits.clone();
+                        let requested = init_requested.clone();
+                        async move {
+                            let id = body["file_id"].as_str().unwrap_or_default().to_string();
+                            inits.lock().unwrap().push(body.clone());
+                            *requested.lock().unwrap() = Some(id.clone());
+                            Json(json!({
+                                "upload_session_id": "sess-1",
+                                "file_id": id,
+                                "chunk_size_bytes": body["chunk_size_bytes"],
+                                "chunk_count": body["chunk_count"],
+                            }))
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/api/v1/uploads/:session/chunks/:idx",
+                put(move |axum::extract::Path((_s, idx)): axum::extract::Path<(String, u32)>| {
+                    let _ = chunk_requested.clone();
+                    async move { Json(json!({"index": idx, "size": 1, "skipped": false})) }
+                }),
+            )
+            .route(
+                "/api/v1/uploads/:session/complete",
+                post(move || {
+                    let requested = complete_requested.clone();
+                    async move {
+                        let id = requested.lock().unwrap().clone().unwrap_or_default();
+                        Json(json!({"id": id, "size_bytes": 8, "chunk_count": 1}))
+                    }
+                }),
+            )
+            .route(
+                "/api/v1/files/:id/upload/abandon",
+                post(|| async { Json(json!({"status": "abandoned"})) }),
+            )
+            .route(
+                "/api/v1/shares/invites/sent",
+                get(|| async { Json(json!({"invites": []})) }),
+            )
+            .route(
+                "/api/v1/files/:id",
+                axum::routing::patch(move || {
+                    let patches = patch_count.clone();
+                    async move {
+                        patches.fetch_add(1, Ordering::SeqCst);
+                        Json(json!({"ok": true}))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let state = Arc::new(DavState {
+            api: ApiClient::new_for_test(format!("http://{}", listener.local_addr().unwrap())),
+            master_key: master,
+            read_only: false,
+            dir_cache: Mutex::new(HashMap::new()),
+            cache_ttl: Duration::ZERO,
+            locks: Mutex::new(HashMap::new()),
+            request_count: std::sync::atomic::AtomicU64::new(0),
+            error_count: std::sync::atomic::AtomicU64::new(0),
+            verbose: false,
+        });
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let response = put_response(&state, "/Shared/request.txt", b"edited body".to_vec(), None).await;
+        server.abort();
+        let status = response.status();
+        let body = String::from_utf8_lossy(&axum::body::to_bytes(response.into_body(), 4096).await.unwrap())
+            .into_owned();
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+
+        let init = inits.lock().unwrap()[0].clone();
+        assert_ne!(
+            init["file_id"].as_str(),
+            Some(REQUEST),
+            "the edit is a new item, not a version of the request row"
+        );
+        assert_eq!(init["base_version_number"], json!(null), "no version of the request row: {init}");
+        assert_eq!(patches.load(Ordering::SeqCst), 0, "the request row was renamed");
+    }
+}
