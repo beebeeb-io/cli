@@ -12,10 +12,10 @@ pub(crate) struct AtomicFile {
 }
 
 impl AtomicFile {
-    pub(crate) fn create(out_path: &Path) -> Result<Self, String> {
+    pub(crate) fn create(out_path: &Path) -> Result<Self, DownloadError> {
         if let Some(parent) = out_path.parent() {
             if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+                std::fs::create_dir_all(parent).map_err(|e| DownloadError::Other(format!("mkdir {}: {e}", parent.display())))?;
             }
         }
         let tmp = out_path.with_extension(format!(
@@ -26,7 +26,7 @@ impl AtomicFile {
                 .map(|e| format!("{e}."))
                 .unwrap_or_default()
         ));
-        let file = std::fs::File::create(&tmp).map_err(|e| format!("create {}: {e}", tmp.display()))?;
+        let file = std::fs::File::create(&tmp).map_err(|e| DownloadError::Other(format!("create {}: {e}", tmp.display())))?;
         Ok(Self {
             writer: Some(std::io::BufWriter::new(file)),
             tmp,
@@ -35,20 +35,20 @@ impl AtomicFile {
         })
     }
 
-    pub(crate) fn write_all(&mut self, data: &[u8]) -> Result<(), String> {
+    pub(crate) fn write_all(&mut self, data: &[u8]) -> Result<(), DownloadError> {
         self.writer
             .as_mut()
             .expect("writer present until commit/abort")
             .write_all(data)
-            .map_err(|e| format!("write {}: {e}", self.final_path.display()))
+            .map_err(|e| DownloadError::Other(format!("write {}: {e}", self.final_path.display())))
     }
 
-    pub(crate) fn commit(mut self) -> Result<(), String> {
+    pub(crate) fn commit(mut self) -> Result<(), DownloadError> {
         let mut w = self.writer.take().expect("writer present");
-        w.flush().map_err(|e| format!("flush: {e}"))?;
+        w.flush().map_err(|e| DownloadError::Other(format!("flush: {e}")))?;
         drop(w);
         std::fs::rename(&self.tmp, &self.final_path)
-            .map_err(|e| format!("rename {}: {e}", self.final_path.display()))?;
+            .map_err(|e| DownloadError::Other(format!("rename {}: {e}", self.final_path.display())))?;
         self.committed = true;
         Ok(())
     }

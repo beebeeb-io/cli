@@ -1,5 +1,7 @@
 //! Size caps that bound the buffered fallback and the wire-size guessing.
 
+use super::DownloadError;
+
 /// Per-chunk AEAD overhead: `nonce(12) + tag(16)`.
 pub(super) const CHUNK_OVERHEAD: u64 = 28;
 
@@ -62,7 +64,7 @@ pub(super) fn fallback_cap(ceiling: u64, content_len: Option<u64>, original_size
 }
 
 /// `Err` when `len` bytes exceed the cap, with a message that says why.
-pub(super) fn check_cap(c: FallbackCap, len: u64) -> Result<(), String> {
+pub(super) fn check_cap(c: FallbackCap, len: u64) -> Result<(), DownloadError> {
     if len <= c.cap {
         return Ok(());
     }
@@ -71,11 +73,11 @@ pub(super) fn check_cap(c: FallbackCap, len: u64) -> Result<(), String> {
             "this is a legacy-format file larger than the chunked-download limit ({} bytes; {len} bytes read); \
              retry the download, or the server must send Content-Length for it",
             c.cap
-        ))
+        ).into())
     } else {
         Err(format!(
             "download body exceeds its declared Content-Length of {} bytes ({len} bytes read); aborting",
             c.cap
-        ))
+        ).into())
     }
 }

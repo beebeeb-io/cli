@@ -386,7 +386,7 @@ async fn try_download_inner(
                     if let Some(o) = out.as_mut() {
                         if let Err(e) = o.writer.write_all(&chunk.data) {
                             discard(out, progress);
-                            return Err(e.into());
+                            return Err(e);
                         }
                         o.plaintext_bytes += chunk.data.len() as u64;
                         o.encrypted_bytes += frame.len() as u64;
@@ -449,7 +449,7 @@ fn finish(
     } = out;
     if let Err(e) = writer.commit() {
         progress.finish(false);
-        return Err(e.into());
+        return Err(e);
     }
     progress.finish(true);
     Ok(DirectResult::Done(DownloadStats {

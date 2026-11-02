@@ -46,13 +46,13 @@ pub async fn stream_encrypt_upload(
     master_key: Arc<MasterKey>,
     spec: UploadSpec,
     progress: &dyn ChunkProgress,
-) -> Result<UploadOutcome, String> {
+) -> Result<UploadOutcome, UploadError> {
     if spec.replace_file_key.is_some() && (spec.base_version_number.is_none() || spec.replace_pin.is_none()) {
         return Err("explicit replacement key requires an existing ID, base version and pin".into());
     }
     // Cheap cancellation path for files that never started.
     if spec.shutdown.load(Ordering::Relaxed) {
-        return Err(INTERRUPTED.to_string());
+        return Err(UploadError::Interrupted);
     }
 
     // 1. Stat for size + mtime — no full read.
@@ -109,7 +109,8 @@ pub async fn stream_encrypt_upload(
                         "{}: could not end the interrupted upload ({}); it is tried again next run",
                         display_name(&spec.file_name),
                         e.message
-                    ));
+                    )
+                    .into());
                 }
             }
             if !crate::ui::is_quiet() {
@@ -177,7 +178,7 @@ pub async fn stream_encrypt_upload(
                 // file per run (the loop bound). A session this run opened
                 // itself vanishing is not the case this recovery is for.
                 let SessionPlan::Resume { file_id, .. } = plan else {
-                    return Err(msg);
+                    return Err(msg.into());
                 };
                 // The dead attempt's chunk_confirmed reports must not survive
                 // into the retry's own count (Codex thread #2): the retry gets
@@ -244,7 +245,7 @@ pub async fn stream_encrypt_upload(
                     is_recovery: false,
                 };
             }
-            Err(e) => return Err(e.into_message()),
+            Err(e) => return Err(e.into_message().into()),
         }
     }
 }
@@ -1027,7 +1028,7 @@ pub(super) mod swept_session_reinit {
         }
     }
 
-    async fn run(state: &Shared, spec: UploadSpec) -> Result<super::UploadOutcome, String> {
+    async fn run(state: &Shared, spec: UploadSpec) -> Result<super::UploadOutcome, super::UploadError> {
         let base = spawn(state.clone()).await;
         let api = ApiClient::new_for_test(base);
         let mk = Arc::new(MasterKey::from_bytes([9u8; 32]));
@@ -1038,7 +1039,7 @@ pub(super) mod swept_session_reinit {
         state: &Shared,
         spec: UploadSpec,
         progress: &dyn ChunkProgress,
-    ) -> Result<super::UploadOutcome, String> {
+    ) -> Result<super::UploadOutcome, super::UploadError> {
         let base = spawn(state.clone()).await;
         let api = ApiClient::new_for_test(base);
         let mk = Arc::new(MasterKey::from_bytes([9u8; 32]));
@@ -1816,7 +1817,7 @@ pub(super) mod swept_session_reinit {
         }));
 
         let err = run(&state, spec(&path, mine)).await.expect_err("must abort");
-        assert_eq!(err, CHANGED_ID_MESSAGE);
+        assert_eq!(err.to_string(), CHANGED_ID_MESSAGE);
         let m = state.lock().unwrap();
         assert_eq!(m.inits, vec![mine.to_string()], "the client's own id was proposed");
         assert!(
@@ -1850,7 +1851,7 @@ pub(super) mod swept_session_reinit {
         }));
 
         let err = run(&state, replace_spec).await.expect_err("must abort");
-        assert_eq!(err, CHANGED_ID_MESSAGE);
+        assert_eq!(err.to_string(), CHANGED_ID_MESSAGE);
         let m = state.lock().unwrap();
         assert_eq!(m.inits, vec![listed.to_string()], "the listed row's id was sent");
         assert!(m.chunk_puts.is_empty());
@@ -1873,7 +1874,7 @@ pub(super) mod swept_session_reinit {
         }));
 
         let err = run(&state, spec(&path, mine)).await.expect_err("must abort");
-        assert_eq!(err, CHANGED_ID_MESSAGE);
+        assert_eq!(err.to_string(), CHANGED_ID_MESSAGE);
         {
             let m = state.lock().unwrap();
             assert_eq!(m.completed.len(), 1, "the session was completed before the check");
@@ -2018,7 +2019,7 @@ pub(super) mod swept_session_reinit {
         let err = run(&state, spec(&path, first))
             .await
             .expect_err("the session could not be ended");
-        assert!(err.contains("tried again next run"), "{err}");
+        assert!(err.to_string().contains("tried again next run"), "{err}");
         assert!(
             crate::resume::unresumable_upload(&path, size, mtime, None).is_some(),
             "the record is kept so the next run retries the abandon"

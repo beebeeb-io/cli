@@ -616,14 +616,14 @@ mod tests {
         };
         assert!(check_cap(cl, 10).is_ok());
         let e = check_cap(cl, 11).unwrap_err();
-        assert!(e.contains("declared Content-Length of 10"), "{e}");
+        assert!(e.to_string().contains("declared Content-Length of 10"), "{e}");
         let ch = FallbackCap { cap: 10, chunked: true };
         let e = check_cap(ch, 11).unwrap_err();
         assert!(
-            e.contains("legacy-format file larger than the chunked-download limit"),
+            e.to_string().contains("legacy-format file larger than the chunked-download limit"),
             "{e}"
         );
-        assert!(e.contains("retry") && e.contains("Content-Length"), "{e}");
+        assert!(e.to_string().contains("retry") && e.to_string().contains("Content-Length"), "{e}");
     }
 
     /// Round 5 P1: legacy JSON-blob body WITH Content-Length above the (test

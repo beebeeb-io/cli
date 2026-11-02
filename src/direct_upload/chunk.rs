@@ -515,7 +515,7 @@ mod tests {
         Arc::new(Mutex::new(mock))
     }
 
-    async fn run(state: &Shared, spec: UploadSpec) -> Result<crate::upload::UploadOutcome, String> {
+    async fn run(state: &Shared, spec: UploadSpec) -> Result<crate::upload::UploadOutcome, crate::upload::UploadError> {
         run_with(state, spec, &NoopProgress).await
     }
 
@@ -523,7 +523,7 @@ mod tests {
         state: &Shared,
         spec: UploadSpec,
         progress: &dyn ChunkProgress,
-    ) -> Result<crate::upload::UploadOutcome, String> {
+    ) -> Result<crate::upload::UploadOutcome, crate::upload::UploadError> {
         let base = spawn(state.clone()).await;
         let api = crate::api::ApiClient::new_for_test(base);
         let master_key = Arc::new(MasterKey::from_bytes([9u8; 32]));
@@ -788,7 +788,7 @@ mod tests {
             "waited {:?}",
             started.elapsed()
         );
-        assert_eq!(result.unwrap_err(), crate::upload::INTERRUPTED);
+        assert_eq!(result.unwrap_err(), crate::upload::UploadError::Interrupted);
         snapshot(&state, |m| {
             assert_eq!(m.grants.len(), 1, "one grant, refused, then the wait");
             assert!(m.storage_puts.is_empty() && m.commits.is_empty() && m.completed.is_empty());
@@ -900,9 +900,9 @@ mod tests {
             m.commit_script = VecDeque::from([Commit::Reply(403, json!({"error": "forbidden"}), None)]);
         });
         let error = run(&state, spec(&path, Uuid::new_v4())).await.unwrap_err();
-        assert!(error.contains("forbidden"), "{error}");
+        assert!(error.to_string().contains("forbidden"), "{error}");
         assert!(
-            !error.contains("X-Amz") && !error.contains("SIGSECRET") && !error.contains("127.0.0.1"),
+            !error.to_string().contains("X-Amz") && !error.to_string().contains("SIGSECRET") && !error.to_string().contains("127.0.0.1"),
             "{error}"
         );
         snapshot(&state, |m| {
@@ -1202,7 +1202,7 @@ mod tests {
         let state = shared(|m| m.offers = Some(Discovery::Fails));
         let (file_id, sid) = resumed_session(&state, &path, size, mtime, true, &[0]);
         let err = run(&state, spec(&path, file_id)).await.unwrap_err();
-        assert!(err.contains("capabilities") && err.contains("--transport api"), "{err}");
+        assert!(err.to_string().contains("capabilities") && err.to_string().contains("--transport api"), "{err}");
         snapshot(&state, |m| {
             assert!(
                 m.abandons.is_empty(),
@@ -1258,7 +1258,7 @@ mod tests {
         });
         let record = crate::resume::resumable_upload_now(&path).expect("the record is kept");
         assert!(record.direct && record.session_id == sid, "{record:?}");
-        err
+        err.to_string()
     }
 
     #[tokio::test]
@@ -1401,7 +1401,7 @@ mod tests {
             m.commit_script = VecDeque::from([Commit::Reply(401, json!({"error": "unauthorized"}), None)]);
         });
         let error = run(&state, spec(&path, Uuid::new_v4())).await.unwrap_err();
-        assert!(error.contains(crate::api::SESSION_EXPIRED_MESSAGE), "{error}");
+        assert!(error.to_string().contains(crate::api::SESSION_EXPIRED_MESSAGE), "{error}");
         snapshot(&state, |m| assert!(m.abandons.is_empty() && m.completed.is_empty()));
     }
 }

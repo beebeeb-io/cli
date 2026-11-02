@@ -66,6 +66,9 @@ mod model;
 use model::*;
 pub use model::{INTERRUPTED, UploadOutcome, UploadSpec};
 
+mod error;
+pub use error::UploadError;
+
 // ── No-op progress (used for --json / --quiet / non-TTY and the watch loops) ──
 // ── indicatif progress (rich + TTY only) ──────────────────────────────────────
 

@@ -9,13 +9,13 @@ use super::*;
 /// a multi-chunk body exactly: every frame but the last is `chunk_size + 28`
 /// bytes and the last one is usually shorter. Like the streaming path it treats
 /// the header as untrusted (zero, or past core's `MAX_CHUNK_SIZE`, is "absent").
-pub async fn download_buffered(api: &ApiClient, file_id: &str) -> Result<(Vec<u8>, Option<u64>), String> {
+pub async fn download_buffered(api: &ApiClient, file_id: impl Into<crate::api::FileId>) -> Result<(Vec<u8>, Option<u64>), DownloadError> {
     let resp = api.download_stream(file_id).await?;
     let chunk_size = header_u64(&resp, "X-Chunk-Size").filter(|&v| v > 0 && v <= MAX_CHUNK_SIZE);
     let bytes = resp
         .bytes()
         .await
-        .map_err(|e| format!("failed to read response: {e}"))?;
+        .map_err(|e| DownloadError::Other(format!("failed to read response: {e}")))?;
     Ok((bytes.to_vec(), chunk_size))
 }
 
@@ -30,11 +30,11 @@ pub async fn download_buffered(api: &ApiClient, file_id: &str) -> Result<(Vec<u8
 /// `(total - 28) / (count - 1)` (the read path's bound), so that much is read.
 pub async fn download_frame_prefix(
     api: &ApiClient,
-    file_id: &str,
+    file_id: impl Into<crate::api::FileId>,
     size_bytes: Option<u64>,
     chunk_count: u32,
     wide: bool,
-) -> Result<(Vec<u8>, Option<u64>, bool), String> {
+) -> Result<(Vec<u8>, Option<u64>, bool), DownloadError> {
     let mut resp = api.download_stream(file_id).await?;
     let chunk_size = header_u64(&resp, "X-Chunk-Size").filter(|&v| v > 0 && v <= MAX_CHUNK_SIZE);
     let count = chunk_count.max(1);
@@ -277,7 +277,7 @@ pub(super) async fn stream_download_key(
     // bytes are NOT inspected: the format is decided by frame-0 authentication.
     let mut carry: Vec<u8> = Vec::new();
     while carry.is_empty() {
-        match resp.chunk().await.map_err(|e| format!("download read: {e}"))? {
+        match resp.chunk().await.map_err(|e| DownloadError::Other(format!("download read: {e}")))? {
             Some(b) => carry.extend_from_slice(&b),
             None => break,
         }
@@ -365,8 +365,7 @@ pub(super) async fn stream_raw(
                 let master_key = key.legacy()?;
                 let mut full = std::mem::take(&mut carry);
                 drain_rest(resp, &mut full, fb_cap).await?;
-                return buffered_fallback(master_key, file_id, pin, &full, count, chunk_size, out_path, prog)
-                    .map_err(DownloadError::from);
+                return buffered_fallback(master_key, file_id, pin, &full, count, chunk_size, out_path, prog);
             }
             if carry.len() < frame_size {
                 return Err(format!(
@@ -397,8 +396,7 @@ pub(super) async fn stream_raw(
                 // then drain the remainder under the fallback cap.
                 full.append(&mut carry);
                 drain_rest(resp, &mut full, fb_cap).await?;
-                return buffered_fallback(master_key, file_id, pin, &full, count, chunk_size, out_path, prog)
-                    .map_err(DownloadError::from);
+                return buffered_fallback(master_key, file_id, pin, &full, count, chunk_size, out_path, prog);
             }
             Err(e) => {
                 writer.abort();
@@ -436,7 +434,7 @@ pub(super) fn buffered_fallback(
     chunk_size: Option<u64>,
     out_path: &Path,
     prog: &dyn crate::upload::FileProgress,
-) -> Result<DownloadStats, String> {
+) -> Result<DownloadStats, DownloadError> {
     let plaintext =
         crate::crypto::decrypt_file_chunks_with_chunk_size(master_key, file_id, pin, encrypted, count, chunk_size)?;
     let mut writer = AtomicFile::create(out_path)?;
@@ -451,9 +449,9 @@ pub(super) fn buffered_fallback(
 }
 
 /// Read more body chunks until `buf.len() >= want` or EOF.
-pub(super) async fn fill_to(resp: &mut reqwest::Response, buf: &mut Vec<u8>, want: usize) -> Result<(), String> {
+pub(super) async fn fill_to(resp: &mut reqwest::Response, buf: &mut Vec<u8>, want: usize) -> Result<(), DownloadError> {
     while buf.len() < want {
-        match resp.chunk().await.map_err(|e| format!("download read: {e}"))? {
+        match resp.chunk().await.map_err(|e| DownloadError::Other(format!("download read: {e}")))? {
             Some(b) => buf.extend_from_slice(&b),
             None => break,
         }
@@ -463,9 +461,9 @@ pub(super) async fn fill_to(resp: &mut reqwest::Response, buf: &mut Vec<u8>, wan
 
 /// Drain the rest of the response body into `buf`, refusing to hold more than
 /// the cap (see [`fallback_cap`]).
-pub(super) async fn drain_rest(resp: &mut reqwest::Response, buf: &mut Vec<u8>, cap: FallbackCap) -> Result<(), String> {
+pub(super) async fn drain_rest(resp: &mut reqwest::Response, buf: &mut Vec<u8>, cap: FallbackCap) -> Result<(), DownloadError> {
     check_cap(cap, buf.len() as u64)?;
-    while let Some(b) = resp.chunk().await.map_err(|e| format!("download read: {e}"))? {
+    while let Some(b) = resp.chunk().await.map_err(|e| DownloadError::Other(format!("download read: {e}")))? {
         check_cap(cap, (buf.len() as u64).saturating_add(b.len() as u64))?;
         buf.extend_from_slice(&b);
     }
