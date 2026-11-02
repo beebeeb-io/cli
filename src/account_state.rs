@@ -76,7 +76,7 @@ impl AccountState {
     /// that blocks uploads; `None` for `Ok`. Used both when an upload is
     /// refused and as the notice under `bb whoami` / `bb quota` /
     /// `bb billing show`. `app_base` is the web app's base URL
-    /// (`crate::web_url::web_app_base()`), no trailing slash.
+    /// (`web_app_base()` in `web_url`), no trailing slash.
     pub(crate) fn notice(&self, app_base: &str) -> Option<String> {
         let base = app_base.trim_end_matches('/');
         match self {

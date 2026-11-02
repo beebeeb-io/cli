@@ -101,7 +101,7 @@ pub(super) fn frame_probe_len(size_bytes: Option<u64>, chunk_count: u32, chunk_s
 /// binary-UUID / unknown-frame-size files (see module docs).
 ///
 /// `pin` is the file's read pin from its authenticated metadata
-/// ([`crate::crypto::content_pin`], task 1943): core's reader opens a
+/// ([`content_pin`] in `crypto::pins`, task 1943): core's reader opens a
 /// v2-pinned file only as v2, and rejects one that ends before its last chunk.
 #[allow(clippy::too_many_arguments)]
 pub async fn stream_download_decrypt(

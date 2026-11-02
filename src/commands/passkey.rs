@@ -283,7 +283,7 @@ const PASSKEY_ENROLLMENT_PATH: &str = "/settings/passkeys";
 
 /// Derive the web app's passkey-enrollment URL from a configured API base
 /// URL, never a hard-coded production host: the host comes from
-/// `crate::web_url::web_app_base_from_api` (shared with `bb signup` and the
+/// `web_app_base_from_api()` in `web_url` (shared with `bb signup` and the
 /// account-state notices — see its docs for the localhost / `api.`→`app.` /
 /// unknown-host rules).
 fn passkey_enrollment_url_from_api(api_url: &str) -> String {

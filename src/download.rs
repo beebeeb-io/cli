@@ -15,7 +15,8 @@
 //! format is never guessed from the first byte (a random raw nonce starts with
 //! `{` 1 time in 256, task 1759): raw streaming is always tried first, and the
 //! frame-0 AEAD tag is the arbiter. If the first frame fails to authenticate,
-//! the whole payload is buffered and handed to [`crate::crypto::decrypt_file_chunks_with_chunk_size`],
+//! the whole payload is buffered and handed to [`decrypt_file_chunks_with_chunk_size`] in
+//! `crypto::chunks`,
 //! which covers both legacy shapes:
 //!
 //! - **JSON-blob chunks** (old CLI uploads) — buffered + decrypted as before.

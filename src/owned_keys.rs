@@ -540,7 +540,7 @@ pub struct WriteTarget<'a> {
     pub file_id: &'a str,
     /// A folder has no content: only its name decides, nothing is downloaded.
     pub is_folder: bool,
-    /// The name verdict: [`crate::crypto::name_is_upper_repair`], which is what
+    /// The name verdict: [`name_is_upper_repair`] in `crypto::names`, which is what
     /// the resolver's `read_only` and every listing's flag carry.
     pub name_read_only: bool,
     /// The key the row resolved to, when the surface resolved one (a shared
@@ -736,7 +736,7 @@ fn chunk0_lengths(
 }
 
 /// The resolver's name verdict for a row it opened through an owner wrap:
-/// [`crate::crypto::name_is_upper_repair`], the one every listing uses.
+/// [`name_is_upper_repair`] in `crypto::names`, the one every listing uses.
 fn name_read_only(master: &MasterKey, id: &str, row: &Value) -> bool {
     row["name_encrypted"]
         .as_str()

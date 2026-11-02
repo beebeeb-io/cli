@@ -322,7 +322,7 @@ pub(crate) enum UploadCall<T> {
 }
 
 /// Is this failed answer "the session is gone"? The one rule of the proxy routes
-/// ([`upload_session_gone`](crate::api::upload_session_gone)), with one difference that is a fact about the
+/// (`upload_session_gone` in `api`), with one difference that is a fact about the
 /// route: here a BARE 404 is a node without the route, not a swept session, so only a JSON 404 counts.
 pub(super) fn upload_session_gone(seen: &Seen) -> bool {
     crate::api::upload_session_gone(

@@ -25,7 +25,7 @@ pub(super) const MAX_ZIP_DEPTH: usize = 64;
 /// name, so it needs the same single-safe-component check as every descendant
 /// (task 1733 round 2): `..` would make a child the zip entry `../child`.
 /// Names that are only unsafe on Windows are rewritten (see
-/// [`crate::safe_path::archive_component`]).
+/// [`archive_component`] in `safe_path`).
 pub(super) fn zip_root_name(name: &str) -> Result<String, String> {
     crate::safe_path::archive_component(name)
         .map_err(|e| format!("folder name {name:?} is not safe to use as an archive name ({e}); refusing to zip it"))
@@ -383,7 +383,7 @@ impl<W: std::io::Write + std::io::Seek> ZipSink<W> {
 }
 
 /// Every `/`-separated component of an archive path must already be a safe
-/// archive name (unchanged by [`crate::safe_path::archive_component`]).
+/// archive name (unchanged by [`archive_component`] in `safe_path`).
 pub(super) fn check_archive_path(path: &str) -> Result<(), String> {
     for seg in path.split('/') {
         match crate::safe_path::archive_component(seg) {

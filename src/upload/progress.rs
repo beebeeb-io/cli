@@ -172,7 +172,7 @@ pub(super) fn display_name(name: &str) -> String {
         .collect();
     format!("…{tail}")
 }
-/// Task 1589, Codex thread at `src/upload.rs:234`: `BarProgress::rollback`
+/// Task 1589, Codex thread on `BarProgress::rollback`: it
 /// used to read `overall.position()` then `set_position(...)` on the
 /// run-wide SHARED bar — a non-atomic read-modify-write. A concurrent
 /// `bb sync` upload calling `chunk_confirmed` (→ `overall.inc()`) between

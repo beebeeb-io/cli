@@ -347,7 +347,7 @@ pub(super) fn read_only_notice(rel: &str) -> String {
 
 /// SF-0002 round 2 (C2): what a sync upload may do with the remote row it
 /// would replace. One decision for the pass's upload phase and the watch-mode
-/// resync, from the one write check ([`crate::owned_keys::write_check`]).
+/// resync, from the one write check ([`write_check`] in `owned_keys`).
 pub(super) enum Replace<'a> {
     /// Version-replace the row in place under its own key (a shared-folder,
     /// owner-wrap or file-request row).

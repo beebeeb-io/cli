@@ -744,8 +744,8 @@ impl ApiClient {
     }
 
     /// GET /api/v1/billing/usage — `{ used_bytes, quota_bytes, percentage }`,
-    /// server-authoritative (`crate::quota::get_user_quota` on the live
-    /// server: base plan quota from the DB `plans` catalog + referral
+    /// server-authoritative (the server's quota module: base plan quota
+    /// from the DB `plans` catalog + referral
     /// `bonus_storage_bytes` + `extra_storage_tb`, capped at `MAX_TOTAL_STORAGE`).
     /// 0485: this used to alias `get_usage()`, which actually calls
     /// `/api/v1/files/usage` — a DIFFERENT route returning `plan_limit_bytes`/
