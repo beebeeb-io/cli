@@ -365,10 +365,16 @@ fn unguarded_spawns(source: &str) -> Vec<String> {
     problems
 }
 
-/// A file below `tests/` (not a test target of its own): other test files can `mod` it and call into it, so a spawn
-/// there could be run, and unguarded, from a file the scan reads separately.
+/// A file below `tests/` (not a test target of its own): other test files can `mod` it and call into it.
 fn is_helper_module(relative_path: &str) -> bool {
     relative_path.contains('/') || relative_path.contains('\\')
+}
+
+/// A helper module hands a command to a caller in another file with `-> Command`. That caller is not read here and
+/// could remove the guard before it runs the command, so the shape stays refused; a spawn that runs inside the helper
+/// itself is checked by [`unguarded_spawns`] like any other.
+fn hands_out_a_command(source: &str) -> bool {
+    without_comments(source).contains("-> Command")
 }
 
 /// Every `.rs` file under `dir`, recursively.
@@ -391,9 +397,15 @@ fn exempt(relative_path: &str) -> bool {
 }
 
 #[test]
-fn a_spawn_in_a_helper_module_is_refused_because_its_callers_cannot_be_followed() {
+fn a_helper_module_may_spawn_but_not_hand_a_command_to_an_unread_caller() {
     assert!(is_helper_module("common/mod.rs") && is_helper_module("common/deeper/more.rs"));
     assert!(!is_helper_module("auth_errors.rs") && !is_helper_module("zero_byte_files.rs"));
+    assert!(hands_out_a_command(
+        "fn bb(home: &Path) -> Command { Command::new(env!(\"CARGO_BIN_EXE_bb\")) }"
+    ));
+    assert!(!hands_out_a_command(
+        "fn bb(home: &Path) -> Output { Command::new(env!(\"CARGO_BIN_EXE_bb\")).output().unwrap() }"
+    ));
 }
 
 #[test]
@@ -420,9 +432,9 @@ fn every_test_that_runs_the_binary_sets_the_guard() {
         if !text.contains("CARGO_BIN_EXE_") {
             continue;
         }
-        if is_helper_module(&relative) {
+        if is_helper_module(&relative) && hands_out_a_command(&text) {
             offenders.push(format!(
-                "{relative}: runs the binary from a helper module: its callers are in other files, which the scan cannot follow back to it"
+                "{relative}: hands a Command to a caller in another file, which the scan cannot follow back to it"
             ));
         }
         scanned += 1;
