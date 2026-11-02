@@ -720,13 +720,13 @@ fn draw_picker(stdout: &mut io::Stdout, entries: &[ShareEntry], selected: usize)
 
 /// Wrap `plaintext` under a raw 32-byte key: nonce(12) || ciphertext+tag.
 fn wrap_raw(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, String> {
-    beebeeb_core::encrypt::encrypt_chunk_raw(&beebeeb_core::kdf::FileKey::from_bytes(*key), plaintext)
+    beebeeb_core::encrypt::encrypt_chunk_raw(&crate::crypto::key_from_bytes(key), plaintext)
         .map_err(|e| format!("wrap share key: {e}"))
 }
 
 /// Open a nonce(12) || ciphertext+tag blob under a raw 32-byte key.
 pub(crate) fn unwrap_share_blob(key: &[u8; 32], blob: &[u8]) -> Result<Vec<u8>, String> {
-    beebeeb_core::encrypt::decrypt_chunk_raw(&beebeeb_core::kdf::FileKey::from_bytes(*key), blob)
+    beebeeb_core::encrypt::decrypt_chunk_raw(&crate::crypto::key_from_bytes(key), blob)
         .map_err(|_| "share key blob does not decrypt".to_string())
 }
 
@@ -835,7 +835,7 @@ mod share_wire_tests {
             .decode(&wire)
             .expect("wrapped_file_key must be STANDARD base64 (server check)");
         assert_eq!(raw.len(), 60, "nonce(12) || ct(32+16) = 60 bytes (K3 wire format)");
-        let opened = beebeeb_core::encrypt::decrypt_chunk_raw(&beebeeb_core::kdf::FileKey::from_bytes(k_c), &raw)
+        let opened = beebeeb_core::encrypt::decrypt_chunk_raw(&crate::crypto::key_from_bytes(&k_c), &raw)
             .expect("must open under the raw K_c exactly as web unwrapKeyFromShare does");
         assert_eq!(opened, fk.to_vec());
     }

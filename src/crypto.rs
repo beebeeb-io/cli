@@ -865,4 +865,5 @@ pub use pins::file_row_pin;
 pub use pins::first_frame_opens;
 pub use pins::first_json_blob_frame;
 pub(crate) use pins::key_copy;
+pub(crate) use pins::key_from_bytes;
 pub use pins::owner_content_key;

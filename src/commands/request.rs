@@ -600,7 +600,7 @@ impl RequestKeyResolver {
             &fields.wrapped_content_key,
         )
         .ok()?;
-        Some(FileKey::from_bytes(*c))
+        Some(crate::crypto::key_from_bytes(&c))
     }
 
     /// Resolve a request row's keys (task 2275 §4 / T4.1). The content key is
@@ -730,7 +730,7 @@ fn seal_file_for_request(
     // Random per-file content key C.
     let mut content_key = Zeroizing::new([0u8; 32]);
     rand::rngs::OsRng.fill_bytes(&mut *content_key);
-    let file_key = FileKey::from_bytes(*content_key);
+    let file_key = crate::crypto::key_from_bytes(&content_key);
 
     // Encrypt the filename (ZK-safe JSON envelope, matching `encrypt_name`).
     let name_meta = serde_json::json!({ "name": filename, "mime_type": mime }).to_string();
@@ -916,7 +916,7 @@ mod tests {
         let recovered_priv = file_request::unwrap_request_private(&mk, REQUEST_WRAP_CONTEXT, &wrapped, &nonce).unwrap();
         let content_key =
             file_request::open_request_upload(&recovered_priv, &e_pub, REQUEST_SEAL_CONTEXT, &wrapped_key).unwrap();
-        let file_key = FileKey::from_bytes(*content_key);
+        let file_key = crate::crypto::key_from_bytes(&content_key);
 
         // Decrypt filename.
         let blob: beebeeb_types::EncryptedBlob = serde_json::from_str(name_encrypted).unwrap();

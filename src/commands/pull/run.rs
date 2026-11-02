@@ -67,7 +67,7 @@ pub(super) async fn run_once(
     let resolved = keys.resolve(&api, &master_key, &file_meta).await?;
     let request_content_key =
         if crate::commands::request::is_request_upload(&file_meta) && file_meta["owner_wrapped_file_key"].is_null() {
-            Some(beebeeb_core::kdf::FileKey::from_bytes(*resolved.key.as_bytes()))
+            Some(crate::crypto::key_copy(&resolved.key))
         } else {
             None
         };

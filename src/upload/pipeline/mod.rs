@@ -292,7 +292,7 @@ pub(super) async fn upload_attempt(
     let file = std::fs::File::open(&spec.path).map_err(|e| format!("open {}: {e}", spec.path.display()))?;
     let encryptor = match &spec.replace_file_key {
         Some(key) => ChunkEncryptor::from_reader_with_file_key(
-            beebeeb_core::kdf::FileKey::from_bytes(*key.as_bytes()),
+            crate::crypto::key_copy(key),
             &file_id_str,
             size,
             chunk_size,

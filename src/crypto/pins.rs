@@ -1,6 +1,7 @@
 //! Content pins and per-row key material split out of `crypto.rs`.
 
 use super::*;
+use zeroize::Zeroize;
 
 /// Resolve the owner's content key for ONE stored version from its first chunk
 /// frame (SF-0002). Only call this after the existing key failed to
@@ -110,37 +111,81 @@ pub(super) fn pin_error(file_id: &str, e: impl std::fmt::Display) -> CryptoError
     ))
 }
 
-/// A second owned copy of `file_key` (core's `FileKey` is not `Clone`). The
-/// by-value bytes it passes through are wiped on drop (SF-0002 round 2, C6);
-/// `FileKey::from_bytes` wipes its own argument and the copy zeroizes on drop.
+/// A second owned copy of `file_key` (core's `FileKey` is not `Clone`).
 pub(crate) fn key_copy(file_key: &FileKey) -> FileKey {
-    let bytes = zeroize::Zeroizing::new(*file_key.as_bytes());
-    FileKey::from_bytes(*bytes)
+    key_from_bytes(file_key.as_bytes())
+}
+
+/// Build a `FileKey` from bytes already in hand (task 2275 review-2, N5).
+///
+/// This is the one place in the CLI that spells the by-value copy core's
+/// `FileKey::from_bytes` takes: the bytes are copied into a `Zeroizing`
+/// buffer, the buffer is wiped before this returns, and core wipes the
+/// argument it received. Every other site passes a reference here, so a key
+/// array never sits un-wiped in a caller's frame.
+pub(crate) fn key_from_bytes(bytes: &[u8; 32]) -> FileKey {
+    let mut copy = zeroize::Zeroizing::new(*bytes);
+    let key = FileKey::from_bytes(*copy);
+    copy.zeroize();
+    key
 }
 
 #[cfg(test)]
 mod key_copy_tests {
     use super::*;
 
-    /// P2-12: the named write sites pass a key by reference through key_copy,
-    /// which wipes the bytes it passes by value. A bare
-    /// FileKey::from_bytes(*k.as_bytes()) leaves an unwiped stack copy of a
-    /// file key, so the sources are checked for it.
+    /// N5: no write site spells core's by-value key copy itself. Every
+    /// `FileKey` built from bytes goes through [`key_from_bytes`] (or
+    /// [`key_copy`]), which copies into a `Zeroizing` buffer and wipes it; a
+    /// bare `FileKey::from_bytes(*k.as_bytes())` leaves a stack copy whose wipe
+    /// depends on core's callee and cannot be checked from here.
     #[test]
-    fn the_named_write_sites_hold_no_unwiped_stack_copy() {
+    fn no_write_site_spells_its_own_by_value_key_copy() {
         for (name, src) in [
             ("commands/mv.rs", include_str!("../commands/mv.rs")),
             ("commands/webdav/verbs.rs", include_str!("../commands/webdav/verbs.rs")),
             ("owned_keys.rs", include_str!("../owned_keys.rs")),
+            ("commands/pull/run.rs", include_str!("../commands/pull/run.rs")),
+            ("commands/request.rs", include_str!("../commands/request.rs")),
+            ("commands/share.rs", include_str!("../commands/share.rs")),
+            ("upload/pipeline/mod.rs", include_str!("../upload/pipeline/mod.rs")),
+            (
+                "upload/pipeline/swept_session_reinit.rs",
+                include_str!("../upload/pipeline/swept_session_reinit.rs"),
+            ),
+            ("commands/push.rs", include_str!("../commands/push.rs")),
+            ("commands/sync/run.rs", include_str!("../commands/sync/run.rs")),
+            ("commands/sync/transfer.rs", include_str!("../commands/sync/transfer.rs")),
+            ("commands/mount.rs", include_str!("../commands/mount.rs")),
+            ("crypto.rs", include_str!("../crypto.rs")),
+            ("download.rs", include_str!("../download.rs")),
         ] {
-            for banned in [
-                "FileKey::from_bytes(*target.key().as_bytes())",
-                "FileKey::from_bytes(*keys.name_key.as_bytes())",
-                "FileKey::from_bytes(*src.key().as_bytes())",
-            ] {
-                assert!(!src.contains(banned), "{name} keeps an unwiped copy: {banned}");
-            }
+            assert!(
+                !src.contains("FileKey::from_bytes(*"),
+                "{name} spells its own by-value key copy; use crypto::key_from_bytes / key_copy"
+            );
         }
+        // The one blessed copy is this file's helper, into a buffer it wipes.
+        let pins = include_str!("pins.rs");
+        assert!(
+            pins.contains("let mut copy = zeroize::Zeroizing::new(*bytes);"),
+            "key_from_bytes copies into a Zeroizing buffer"
+        );
+        assert!(pins.contains("copy.zeroize();"), "key_from_bytes wipes that buffer");
+        // Split so this assertion's own text is not a second match.
+        let helper = concat!("let key = FileKey::from_bytes(*", "copy);");
+        assert_eq!(
+            pins.matches(helper).count(),
+            1,
+            "exactly one by-value construction in prod"
+        );
+    }
+
+    /// The helper keeps the key it was given.
+    #[test]
+    fn key_from_bytes_keeps_the_key() {
+        let key = key_from_bytes(&[7u8; 32]);
+        assert_eq!(key.as_bytes(), &[7u8; 32]);
     }
 
     /// Copying keeps the source: a wipe-in-place would break every caller that
