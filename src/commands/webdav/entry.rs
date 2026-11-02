@@ -118,7 +118,16 @@ pub(super) fn decode_file_entry(
             ))),
             None,
             KeyOrigin::Derived,
-            Ok(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded),
+            // N1: a plaintext name carries no readable pin. Reading it as
+            // `Unrecorded` would let the server re-enable frame-0 detection for
+            // a v2 file (core round 3, P1-B), so this refuses exactly as pull
+            // does (`crypto::content_pin`), never guessing.
+            Err(crate::crypto::content_pin(master_key, &file_id, name_encrypted)
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| {
+                    format!("file {file_id} carries no content pin under its plaintext name; refusing to guess")
+                })),
         ),
         Some(_) if is_request_row => {
             let key = std::sync::Arc::new(beebeeb_core::kdf::derive_file_key(master_key, file_id.as_bytes()));

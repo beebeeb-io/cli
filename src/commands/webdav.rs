@@ -396,6 +396,47 @@ mod sf_0002_write_check_tests {
         m.server.abort();
     }
 
+    /// N1 (P2): a v2-pinned file whose name envelope the server swapped for
+    /// plain text carries no readable pin. Reading it as `Unrecorded` would let
+    /// the server re-enable frame-0 detection for a v2 file (core round 3,
+    /// P1-B); pull refuses such a row, so a WebDAV GET refuses it too.
+    #[tokio::test]
+    async fn a_v2_file_whose_name_is_plain_text_is_refused_on_read() {
+        use beebeeb_core::chunk_stream::{ChunkEncryptor, ExpectedChunkFormat};
+        const PLAINTEXT_NAME: &str = "owned.txt";
+        let key = beebeeb_core::kdf::derive_file_key(&master(), OWNED.as_bytes());
+        let plaintext = b"v2 content under an owner key";
+        let mut row = file_row(OWNED, PLAINTEXT_NAME, &key, plaintext);
+        // The server swapped the authenticated name for plain text.
+        row["name_encrypted"] = json!(PLAINTEXT_NAME);
+        let mut enc = ChunkEncryptor::from_reader_with_file_key(
+            key,
+            OWNED,
+            plaintext.len() as u64,
+            plaintext.len() as u64,
+            std::io::Cursor::new(plaintext.to_vec()),
+        )
+        .unwrap()
+        .with_recorded_pin(ExpectedChunkFormat::V2)
+        .unwrap();
+        let mut frame = Vec::new();
+        while let Some(chunk) = enc.next_chunk().unwrap() {
+            frame.extend_from_slice(&chunk.data);
+        }
+        enc.finish().unwrap();
+        let m = mock(vec![row], frame).await;
+
+        let response = get_response(&m.state, &format!("/{PLAINTEXT_NAME}"), &HeaderMap::new()).await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_text(response).await;
+        assert!(
+            body.contains("refusing to guess") && body.contains(OWNED),
+            "the plaintext name carries no pin, so the read refuses: {body}"
+        );
+        assert_eq!(m.downloads.load(Ordering::SeqCst), 0, "refused before downloading");
+        m.server.abort();
+    }
+
     /// C5: the owner-wrap-of-uppercase row `bb mv` refuses
     /// (`owner_read_repair::an_owner_wrap_of_the_uppercase_key_is_read_only`) is
     /// refused here as well: 403 by its name, no probe, no write.
