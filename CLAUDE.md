@@ -128,7 +128,7 @@ The full rules live in the workspace `CLAUDE.md` → "How we work". The repo-spe
 
 ## Graphify
 
-This repo has a knowledge graph at graphify-out/. Read `graphify-out/GRAPH_REPORT.md` before exploring code; run `graphify update .` after modifying code and commit; `graphify query "<question>"`; `graphify path "<A>" "<B>"`.
+This repo has a knowledge graph at graphify-out/. Architecture question: `graphify query "<question>"` / `graphify explain <symbol>` / `graphify path "<A>" "<B>"`; for an overview read `graphify-out/GRAPH_SUMMARY.md` (≤ 3k tokens). Never read `GRAPH_REPORT.md` whole. Run `graphify update .` after modifying code and commit.
 
 ## Keep shared docs in sync
 
