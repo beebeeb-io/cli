@@ -116,6 +116,13 @@ async fn run_recursive(
         parent_id = Some(new_id);
     }
 
+    // L15 = A: a folder created in a shared folder stays owner-only.
+    if !ui::is_json() {
+        if let Some((_, first)) = created.first() {
+            crate::owned_keys::announce_owner_only(api, master_key, Some(first)).await;
+        }
+    }
+
     if ui::is_json() {
         let json = serde_json::json!({
             "ok": true,

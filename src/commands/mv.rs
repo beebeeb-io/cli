@@ -190,6 +190,7 @@ async fn move_single(
     // Preserve omitted/NULL/UUID: a changed parent at root is an explicit
     // Some(None), while a rename within the same directory omits parent_id.
     let new_parent_send = (src.parent_id != new_parent_id).then_some(new_parent_id);
+    let dest_parent = new_parent_send.clone().flatten();
     let mut name_changed = false;
     let new_name_encrypted = match new_name {
         Some(name) if name != src.name => {
@@ -243,6 +244,13 @@ async fn move_single(
             "ok ·".custom_color(colors::GREEN_OK),
             msg.custom_color(colors::INK)
         );
+    }
+
+    // L15 = A: a move into a shared folder stays owner-only.
+    if !ui::is_json() && new_parent_send.is_some() {
+        if let Some(parent) = dest_parent {
+            crate::owned_keys::announce_owner_only(api, master_key, Some(&parent.to_string())).await;
+        }
     }
 
     Ok(())

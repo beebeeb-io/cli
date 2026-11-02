@@ -556,6 +556,12 @@ async fn push_single_file(
         println!("{}", server_id);
     }
 
+    // L15 = A: the CLI never publishes an owner key. A write into a shared
+    // folder stays owner-only until the owner shares it from web or mobile.
+    if !suppress_output && !ui::is_json() {
+        crate::owned_keys::announce_owner_only(api, &master_key, parent_uuid.map(|p| p.to_string()).as_deref()).await;
+    }
+
     Ok(Some(upload_result))
 }
 

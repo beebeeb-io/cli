@@ -13,6 +13,19 @@ use std::{
 
 pub const UNREADABLE: &str = "can't open (added via shared folder)";
 pub const CUSTODY_UNAVAILABLE: &str = "This folder's keys are unavailable";
+/// L15 = A: desktop and CLI never publish an owner key, so a write into a shared
+/// folder stays owner-only until the owner shares it from web or mobile (A14b).
+pub const OWNER_ONLY_NOTICE: &str = "Only you can open this. Share it from the web or the app.";
+
+/// Print [`OWNER_ONLY_NOTICE`] when `folder_id` sits in a shared folder.
+pub async fn announce_owner_only(api: &ApiClient, master: &MasterKey, folder_id: Option<&str>) {
+    let Some(folder_id) = folder_id else {
+        return;
+    };
+    if OwnedKeyResolver::new().shared_root_of(api, master, folder_id).await.is_some() {
+        println!("{OWNER_ONLY_NOTICE}");
+    }
+}
 #[derive(Clone)]
 pub struct ResolvedCliKey {
     pub key: Arc<FileKey>,
@@ -121,6 +134,23 @@ impl OwnedKeyResolver {
         id: &str,
     ) -> Result<(), String> {
         self.load_root(api, master, id).await
+    }
+    /// L15: the shared root `id` sits in, if any. Walks up until a folder with
+    /// owner custody is found.
+    pub async fn shared_root_of(&mut self, api: &ApiClient, master: &MasterKey, id: &str) -> Option<String> {
+        let mut current = Some(id.to_string());
+        let mut visited = HashSet::new();
+        while let Some(folder) = current {
+            if !visited.insert(folder.clone()) || visited.len() > 256 {
+                return None;
+            }
+            if self.load_root(api, master, &folder).await.is_ok() && self.roots.contains_key(&folder) {
+                return Some(folder);
+            }
+            let row = self.ancestor_row(api, &folder).await.ok()?;
+            current = row["parent_id"].as_str().map(str::to_string);
+        }
+        None
     }
     pub fn pending(&self, id: &str) -> Option<Vec<u8>> {
         self.pending.get(id).cloned()
