@@ -1,0 +1,18 @@
+# file-size-baseline.txt: source files over the size limit when the ratchet started, `<lines> <path>`.
+# Limits: 1,200 lines per source file, 1,500 under tests/. Written by scripts/check-file-sizes.sh --init-baseline
+# (workspace) from 42a722a4c157 on 2026-11-02. Entries only go down: `check-file-sizes.sh . --update-baseline`
+# lowers or drops them. Never add a path or raise a count here; split the file instead (token plan Phase 4).
+3739 src/api.rs
+1985 src/api/direct.rs
+1458 src/commands/billing.rs
+2597 src/commands/mount.rs
+1368 src/commands/pull.rs
+4606 src/commands/sync.rs
+1715 src/commands/webdav.rs
+1280 src/crypto.rs
+1219 src/daemon.rs
+1428 src/direct_upload.rs
+1328 src/download.rs
+1325 src/main.rs
+2621 src/upload.rs
+1569 tests/direct_download.rs
