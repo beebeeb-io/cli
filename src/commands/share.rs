@@ -684,7 +684,9 @@ fn app_url() -> String {
 }
 
 pub(crate) fn share_link(app_url: &str, token: &str, key_fragment: &str) -> String {
-    format!("{app_url}/s/{token}#key={key_fragment}")
+    // Core owns the grammar (and percent-encodes like encodeURIComponent); a
+    // base64url fragment is unreserved, so the printed link is byte-identical.
+    beebeeb_core::share_link::build(app_url, token, key_fragment)
 }
 
 /// Rebuild a share's working link from the owner-wrapped blobs returned by
