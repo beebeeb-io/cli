@@ -25,6 +25,7 @@ use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
+use crate::web_url::{LOCALHOST, LOOPBACK_V4};
 
 /// Methods that change the vault (or would, on a server that implemented them).
 pub fn is_write_method(method: &Method) -> bool {
@@ -115,11 +116,11 @@ impl Guard {
     fn host_allowed(&self, authority: &str) -> bool {
         let a = authority.to_ascii_lowercase();
         let port = self.port;
-        if a == format!("127.0.0.1:{port}") || a == format!("localhost:{port}") {
+        if a == format!("{LOOPBACK_V4}:{port}") || a == format!("{LOCALHOST}:{port}") {
             return true;
         }
         // Clients omit the port when it is the scheme default.
-        port == 80 && (a == "127.0.0.1" || a == "localhost")
+        port == 80 && (a == LOOPBACK_V4 || a == LOCALHOST)
     }
 
     fn credential_ok(&self, headers: &HeaderMap) -> bool {

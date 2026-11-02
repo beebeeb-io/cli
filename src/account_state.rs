@@ -20,6 +20,9 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
+/// Capability name the onboarding document uses for deletion.
+const CAPABILITY_DELETE: &str = "delete";
+
 /// See the module docs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AccountState {
@@ -384,7 +387,7 @@ impl OnboardingDoc {
         // document denies it, say so and why instead of assuming it is allowed.
         let delete_note = denied
             .iter()
-            .find(|d| d.capability == "delete")
+            .find(|d| d.capability == CAPABILITY_DELETE)
             .map(|d| match d.reason.as_deref() {
                 Some(r) => format!(" Deleting files is not available right now ({}).", r.replace('_', " ")),
                 None => " Deleting files is not available right now.".to_string(),
@@ -909,7 +912,7 @@ mod tests {
     #[test]
     fn read_only_says_deletion_is_unavailable_when_the_document_denies_it() {
         let ro = summary("account.read_only.web");
-        assert!(ro.denied.iter().any(|d| d.capability == "delete"));
+        assert!(ro.denied.iter().any(|d| d.capability == CAPABILITY_DELETE));
         let n = ro.notice.unwrap();
         assert!(!n.contains("download and delete"), "{n}");
         assert!(
@@ -963,7 +966,7 @@ mod tests {
         let d = s
             .denied
             .iter()
-            .find(|d| d.capability == "delete")
+            .find(|d| d.capability == CAPABILITY_DELETE)
             .expect("delete denied");
         assert_eq!(d.reason, None);
         let n = s.notice.unwrap();

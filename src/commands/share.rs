@@ -12,6 +12,9 @@ use crossterm::terminal;
 use crate::api::ApiClient;
 use crate::ui;
 
+/// Wire sentinel the server sends for `expires_at` when a share has no expiry.
+const NO_EXPIRY: &str = "never";
+
 /// Parse a human duration like "24h", "7d", "1h" into hours.
 fn parse_hours(s: &str) -> Result<u64, String> {
     let s = s.trim();
@@ -167,7 +170,7 @@ pub async fn run(
 
     let share_id = result.get("id").and_then(|v| v.as_str()).unwrap_or("(unknown)");
     let token = result.get("token").and_then(|v| v.as_str()).unwrap_or(&material.token);
-    let expires_at = result.get("expires_at").and_then(|v| v.as_str()).unwrap_or("never");
+    let expires_at = result.get("expires_at").and_then(|v| v.as_str()).unwrap_or(NO_EXPIRY);
 
     let bare_url = format!("{}/s/{token}", app_url());
     let full_url = share_link(&app_url(), token, &material.key_fragment);
@@ -204,8 +207,8 @@ pub async fn run(
         "url       ".custom_color(crate::colors::INK_DIM),
         full_url.custom_color(crate::colors::AMBER),
     );
-    let expires_display = if expires_at == "never" {
-        "never".to_string()
+    let expires_display = if expires_at == NO_EXPIRY {
+        NO_EXPIRY.to_string()
     } else {
         ui::relative_time(expires_at)
     };
@@ -317,7 +320,7 @@ pub async fn list() -> Result<(), String> {
                 .unwrap_or_else(|| "(link not recoverable)".to_string()),
             _ => "(link not stored \u{00b7} created by an older client)".to_string(),
         };
-        let expires_raw = share.get("expires_at").and_then(|v| v.as_str()).unwrap_or("never");
+        let expires_raw = share.get("expires_at").and_then(|v| v.as_str()).unwrap_or(NO_EXPIRY);
         let is_revoked = share.get("revoked").and_then(|v| v.as_bool()).unwrap_or(false);
         let opens = share
             .get("open_count")
@@ -330,7 +333,7 @@ pub async fn list() -> Result<(), String> {
             ("\u{2717}".custom_color(crate::colors::RED_ERR), crate::colors::INK_DIM)
         } else {
             // Check if expired by trying to parse the timestamp
-            let is_expired = expires_raw != "never"
+            let is_expired = expires_raw != NO_EXPIRY
                 && chrono::DateTime::parse_from_rfc3339(expires_raw)
                     .map(|dt| dt < chrono::Utc::now())
                     .unwrap_or(false);
@@ -345,8 +348,8 @@ pub async fn list() -> Result<(), String> {
         };
 
         // Relative expiry display
-        let expires_display = if expires_raw == "never" {
-            "never".to_string()
+        let expires_display = if expires_raw == NO_EXPIRY {
+            NO_EXPIRY.to_string()
         } else {
             ui::relative_time(expires_raw)
         };
@@ -445,10 +448,10 @@ async fn pick_share_interactively(api: &ApiClient) -> Result<String, String> {
             } else {
                 "(unknown)".to_string()
             };
-            let expires_raw = share.get("expires_at").and_then(|v| v.as_str()).unwrap_or("never");
+            let expires_raw = share.get("expires_at").and_then(|v| v.as_str()).unwrap_or(NO_EXPIRY);
             let is_revoked = share.get("revoked").and_then(|v| v.as_bool()).unwrap_or(false);
             let is_expired = !is_revoked
-                && expires_raw != "never"
+                && expires_raw != NO_EXPIRY
                 && chrono::DateTime::parse_from_rfc3339(expires_raw)
                     .map(|dt| dt < chrono::Utc::now())
                     .unwrap_or(false);
@@ -457,8 +460,8 @@ async fn pick_share_interactively(api: &ApiClient) -> Result<String, String> {
                 .or_else(|| share.get("opens"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            let expires_display = if expires_raw == "never" {
-                "never".to_string()
+            let expires_display = if expires_raw == NO_EXPIRY {
+                NO_EXPIRY.to_string()
             } else {
                 ui::relative_time(expires_raw)
             };

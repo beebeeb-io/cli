@@ -73,6 +73,9 @@ pub(super) fn print_addons(addons: &Value) {
     }
 }
 
+/// `billing_cycle` value the catalog keys yearly prices under.
+const YEARLY: &str = "yearly";
+
 /// Price for an arbitrary plan slug, read from the public plan catalog
 /// (`GET /api/v1/billing/plans`). Used to price a *pending downgrade* plan,
 /// whose amount isn't on the current subscription. Returns `None` when the slug
@@ -82,7 +85,7 @@ pub(super) fn price_from_catalog(plans: &Value, slug: &str, billing_cycle: &str)
     let plan = list
         .iter()
         .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(slug))?;
-    let key = if billing_cycle == "yearly" {
+    let key = if billing_cycle == YEARLY {
         "price_yearly_eur"
     } else {
         "price_eur"
@@ -97,6 +100,6 @@ pub(super) fn price_from_catalog(plans: &Value, slug: &str, billing_cycle: &str)
 
 /// Format an integer cents amount as `€X.XX / month` (or `/ year`).
 pub(super) fn format_price(cents: i64, billing_cycle: &str) -> String {
-    let period = if billing_cycle == "yearly" { "year" } else { "month" };
+    let period = if billing_cycle == YEARLY { "year" } else { "month" };
     format!("€{}.{:02} / {}", cents / 100, cents % 100, period)
 }

@@ -23,7 +23,7 @@ impl ApiClient {
                 .await
                 .map_err(format_request_error)?;
             match parse_response(resp).await {
-                Err(e) if e.message == "__rate_limited__" => continue,
+                Err(e) if e.message == super::RATE_LIMITED_MESSAGE => continue,
                 Err(e) => return Err(format!("thumbnail upload: {e}").into()),
                 Ok(_) => return Ok(()),
             }
@@ -50,7 +50,7 @@ impl ApiClient {
                 .await
                 .map_err(format_request_error)?;
             match parse_response(resp).await {
-                Err(e) if e.message == "__rate_limited__" => continue,
+                Err(e) if e.message == super::RATE_LIMITED_MESSAGE => continue,
                 Err(e) => return Err(format!("large thumbnail upload: {e}").into()),
                 Ok(_) => return Ok(()),
             }

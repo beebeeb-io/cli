@@ -39,6 +39,9 @@ use colored::Colorize;
 use rand::RngCore;
 use zeroize::Zeroizing;
 
+/// Wire sentinel for "this request never expires".
+const NO_EXPIRY: &str = "never";
+
 use crate::api::ApiClient;
 use crate::ui;
 
@@ -302,7 +305,7 @@ pub async fn create(
     }
     let expires_display = match expires_at {
         Some(e) => ui::relative_time(e),
-        None => "never".to_string(),
+        None => NO_EXPIRY.to_string(),
     };
     println!(
         "  {} {}",
@@ -410,7 +413,7 @@ pub async fn list() -> Result<(), String> {
         };
         let expires_display = match expires_raw {
             Some(e) => ui::relative_time(e),
-            None => "never".to_string(),
+            None => NO_EXPIRY.to_string(),
         };
         let link = rebuild_link(&master_key, r).unwrap_or_else(|| "(no link)".to_string());
 

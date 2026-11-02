@@ -1017,7 +1017,7 @@ impl ApiClient {
                 .await
                 .map_err(format_request_error)?;
             match parse_response(resp).await {
-                Err(e) if e.message == "__rate_limited__" => continue,
+                Err(e) if e.message == super::RATE_LIMITED_MESSAGE => continue,
                 other => return other,
             }
         }
@@ -1058,7 +1058,7 @@ impl ApiClient {
                 .await
                 .map_err(format_request_error)?;
             match parse_response(resp).await {
-                Err(e) if e.message == "__rate_limited__" => continue,
+                Err(e) if e.message == super::RATE_LIMITED_MESSAGE => continue,
                 other => return other,
             }
         }

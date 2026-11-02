@@ -139,7 +139,7 @@ impl ApiClient {
             }
             let resp = request.send().await.map_err(format_request_error)?;
             match parse_response_typed(resp).await {
-                Err(e) if e.message == "__rate_limited__" => continue,
+                Err(e) if e.message == super::RATE_LIMITED_MESSAGE => continue,
                 Err(e) => return Err(self.explain_account_refusal(e).await),
                 Ok(v) => return UploadInit::from_value(&v),
             }
@@ -228,7 +228,7 @@ impl ApiClient {
             match send {
                 Ok(resp) => match parse_response_typed(resp).await {
                     // parse_response already slept for Retry-After; just re-try.
-                    Err(e) if e.message == "__rate_limited__" => {
+                    Err(e) if e.message == super::RATE_LIMITED_MESSAGE => {
                         last_err = "rate limited".to_string();
                         continue;
                     }
@@ -275,7 +275,7 @@ impl ApiClient {
                 .await
                 .map_err(format_request_error)?;
             match parse_response_typed(resp).await {
-                Err(e) if e.message == "__rate_limited__" => continue,
+                Err(e) if e.message == super::RATE_LIMITED_MESSAGE => continue,
                 other => return other,
             }
         }
@@ -300,7 +300,7 @@ impl ApiClient {
                 .await
                 .map_err(format_request_error)?;
             match parse_response_typed(resp).await {
-                Err(e) if e.message == "__rate_limited__" => continue,
+                Err(e) if e.message == super::RATE_LIMITED_MESSAGE => continue,
                 other => return other,
             }
         }

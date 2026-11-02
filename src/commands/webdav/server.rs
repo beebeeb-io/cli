@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// DAV verb Finder/Explorer use to probe a collection.
+const PROPFIND: &str = "PROPFIND";
+
 /// Flags that shape a WebDAV server, grouped so `run` does not take a row of
 /// anonymous booleans.
 #[derive(Clone, Copy)]
@@ -235,7 +238,7 @@ pub(super) async fn handle_webdav(State(state): State<Arc<DavState>>, req: Reque
     // Reject macOS/Windows metadata files that Finder and Explorer create.
     // These pollute the vault with system junk that users never want stored.
     if is_metadata {
-        let is_propfind = method.as_str() == "PROPFIND";
+        let is_propfind = method.as_str() == PROPFIND;
         if is_propfind {
             // Return an empty 207 so Finder doesn't spam retries.
             let body = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
@@ -261,7 +264,7 @@ pub(super) async fn handle_webdav(State(state): State<Arc<DavState>>, req: Reque
 
     let response = match method {
         Method::OPTIONS => options_response(&state),
-        ref m if m.as_str() == "PROPFIND" => {
+        ref m if m.as_str() == PROPFIND => {
             let depth = headers.get("depth").and_then(|v| v.to_str().ok()).unwrap_or("1");
             propfind_response(&state, &path, depth).await
         }

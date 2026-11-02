@@ -261,6 +261,10 @@ const CLIENT_HEADER_VALUE: &str = "cli";
 const CLIENT_VERSION_HEADER_NAME: &str = "X-Beebeeb-Client-Version";
 const CLIENT_VERSION_HEADER_VALUE: &str = env!("CARGO_PKG_VERSION");
 
+/// Sentinel `message` an [`ApiError`] carries when the request was rate
+/// limited; every retry loop compares against this exact value.
+pub const RATE_LIMITED_MESSAGE: &str = "__rate_limited__";
+
 /// Builds the shared `reqwest::Client` with the writer-provenance headers set
 /// as `default_headers`, so every request made through it — real traffic and
 /// tests alike — carries them without each call site adding them by hand.
@@ -482,12 +486,12 @@ async fn parse_response_typed(resp: reqwest::Response) -> Result<Value, ApiError
 
         tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
         // `parse_response`'s callers retry-loop on this exact sentinel
-        // string (`e == "__rate_limited__"`) — `.map_err(|e| e.message)`
+        // string (`e.message == RATE_LIMITED_MESSAGE`) — `.map_err(|e| e.message)`
         // above preserves it byte-for-byte, so none of those call sites
         // need to change.
         return Err(ApiError {
             code: None,
-            message: "__rate_limited__".to_string(),
+            message: RATE_LIMITED_MESSAGE.to_string(),
             status: status.as_u16(),
         });
     }
