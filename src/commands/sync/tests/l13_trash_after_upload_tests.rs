@@ -42,6 +42,7 @@ async fn upload_over(mut mock: Mock, s: &Scratch, old: Uuid) -> (Result<(), Stri
             shared_root_id: None,
             name: REL.to_string(),
             read_only: false,
+            write_target: None,
         }),
         chunk_count: 1,
         updated_at: Utc::now(),

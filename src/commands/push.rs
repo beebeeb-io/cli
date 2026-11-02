@@ -441,7 +441,7 @@ async fn push_single_file(
     // A replace also carries the existing file's read pin (task 1943), so a
     // v2-pinned file is written as v2 again: the server keeps its v2 metadata,
     // and a v1 replace would complete and never open.
-    let (base_version_number, replace_pin, replace_file_key) = match replace_file_id {
+    let (base_version_number, replace_pin, replace_file_key, fresh_id) = match replace_file_id {
         Some(existing_id) => {
             let existing = existing_id.to_string();
             let meta = api.get_file(&existing).await?;
@@ -456,28 +456,40 @@ async fn push_single_file(
             let resolved = crate::owned_keys::OwnedKeyResolver::new()
                 .resolve(api, &master_key, &meta)
                 .await?;
-            // SF-0002: a row sealed by the old iOS app (its name or its CURRENT
-            // version) is read-only, and a check that could not decide refuses
-            // too: only a proven-writable row gets a new version.
-            crate::owned_keys::write_check(
-                api,
-                &master_key,
-                &crate::owned_keys::WriteTarget {
-                    file_id: &existing,
-                    is_folder: false,
-                    name_read_only: resolved.read_only,
-                    row_key: Some(resolved.key.as_ref()),
-                    size_bytes: meta.get("size_bytes").and_then(|v| v.as_u64()),
-                    chunk_count: meta.get("chunk_count").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
-                },
-            )
-            .await
-            .ensure()?;
-            let pin = crate::crypto::content_pin_with_key(&resolved.key, &existing, name_encrypted)?;
-            (Some(version), Some(pin), Some(resolved.key))
+            // L13: a request row's content is read-only. An edit is saved as a
+            // new owner item — never sealed under `C`, never published.
+            if resolved.origin == beebeeb_core::owned_keys::KeyOrigin::RequestContent {
+                (None, None, None, Some(uuid::Uuid::new_v4()))
+            } else {
+                // SF-0002: a row sealed by the old iOS app (its name or its CURRENT
+                // version) is read-only, and a check that could not decide refuses
+                // too: only a proven-writable row gets a new version.
+                crate::owned_keys::write_check(
+                    api,
+                    &master_key,
+                    &crate::owned_keys::WriteTarget {
+                        file_id: &existing,
+                        is_folder: false,
+                        name_read_only: resolved.read_only,
+                        row_key: Some(resolved.key.as_ref()),
+                        size_bytes: meta.get("size_bytes").and_then(|v| v.as_u64()),
+                        chunk_count: meta.get("chunk_count").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
+                    },
+                )
+                .await
+                .ensure()?;
+                // L13: the replacement takes its chunk-format pin from the
+                // resolver's write target, not from a local re-read.
+                let pin = match &resolved.write_target {
+                    Some(target) => target.pin(),
+                    None => crate::crypto::content_pin_with_key(&resolved.key, &existing, name_encrypted)?,
+                };
+                (Some(version), Some(pin), Some(resolved.key), None)
+            }
         }
-        None => (None, None, None),
+        None => (None, None, None, None),
     };
+    let file_id = fresh_id.unwrap_or(file_id);
     let master_key = std::sync::Arc::new(master_key);
     let display_name = upload_name.clone();
 

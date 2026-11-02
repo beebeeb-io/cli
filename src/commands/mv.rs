@@ -194,15 +194,23 @@ async fn move_single(
     let new_name_encrypted = match new_name {
         Some(name) if name != src.name => {
             name_changed = true;
-            let file_key = beebeeb_core::kdf::derive_file_key(master_key, src_id.as_bytes());
-            Some(
-                beebeeb_core::encrypt::encrypt_name_for(
-                    &file_key,
-                    &name,
-                    None,
+            // L13: a rename seals the new name through the resolver's write
+            // target (key + chunk-format pin). A request row has no target: its
+            // content stays under `C`, so its name uses the string convention.
+            let target = src_keys.write_target_for(&src_id);
+            let (file_key, pin) = match &target {
+                Some(target) => (
+                    beebeeb_core::kdf::FileKey::from_bytes(*target.key().as_bytes()),
+                    target.pin(),
+                ),
+                None => (
+                    beebeeb_core::kdf::derive_file_key(master_key, src_id.as_bytes()),
                     beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
-                )
-                .map_err(|e| format!("failed to encrypt new name: {e}"))?,
+                ),
+            };
+            Some(
+                beebeeb_core::encrypt::encrypt_name_for(&file_key, &name, None, pin)
+                    .map_err(|e| format!("failed to encrypt new name: {e}"))?,
             )
         }
         _ => None,

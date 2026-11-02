@@ -259,10 +259,11 @@ pub(super) async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8
     // Check if a file already exists at this path — handles overwrite + If-Match.
     // For versioning: reuse the existing file_id so the server creates a version
     // entry rather than a new file (keeps share links valid, builds history).
-    let existing_file_id: Option<uuid::Uuid> = if let Ok(existing) = resolve_path(state, path).await {
+    let existing: Option<ResolvedEntry> = resolve_path(state, path).await.ok();
+    let existing_file_id: Option<uuid::Uuid> = if let Some(ref existing) = existing {
         // SF-0002: never version-replace a file sealed by the old iOS app (its
         // name or its CURRENT version), and never one the check could not read.
-        if let Err(refusal) = write_refusal(state, &existing).await {
+        if let Err(refusal) = write_refusal(state, existing).await {
             return refusal;
         }
         if let Some(ref eid) = existing.file_id {
@@ -281,6 +282,12 @@ pub(super) async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8
     } else {
         None
     };
+    // L13: a request row's content is read-only. An edit is saved as a new
+    // owner item — never sealed under `C`, never published.
+    let existing_file_id = match existing.as_ref() {
+        Some(e) if e.origin == beebeeb_core::owned_keys::KeyOrigin::RequestContent => None,
+        _ => existing_file_id,
+    };
 
     // Invalidate parent directory cache so the new file appears immediately
     let parent_cache_key = normalise_cache_key(parent_path);
@@ -293,16 +300,28 @@ pub(super) async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8
         None => crate::item_id::Proposed::Minted(crate::item_id::mint()),
     };
     let file_uuid = proposed.id();
-    let file_key = beebeeb_core::kdf::derive_file_key(&state.master_key, file_uuid.to_string().as_bytes());
+    // L13: a replacement seals through the resolver's write target (key and
+    // chunk-format pin). A fresh item uses the string convention. A listed row
+    // this client cannot resolve is never overwritten under a guessed key.
+    let (file_key, name_pin) = match existing.as_ref().and_then(|e| e.write_target.clone()) {
+        Some(target) => (
+            beebeeb_core::kdf::FileKey::from_bytes(*target.key().as_bytes()),
+            target.pin(),
+        ),
+        None => {
+            if existing_file_id.is_some() {
+                return (StatusCode::CONFLICT, crate::owned_keys::UNREADABLE).into_response();
+            }
+            (
+                beebeeb_core::kdf::derive_file_key(&state.master_key, file_uuid.to_string().as_bytes()),
+                beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+            )
+        }
+    };
 
     // Encrypt filename (MIME type is now part of the encrypted envelope)
     let mime = beebeeb_core::media::guess_mime_type(&filename);
-    let name_encrypted = match beebeeb_core::encrypt::encrypt_name_for(
-        &file_key,
-        &filename,
-        mime,
-        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
-    ) {
+    let name_encrypted = match beebeeb_core::encrypt::encrypt_name_for(&file_key, &filename, mime, name_pin) {
         Ok(s) => s,
         Err(e) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
@@ -542,13 +561,17 @@ pub(super) async fn move_response(state: &Arc<DavState>, src_path: &str, destina
         } else {
             beebeeb_core::media::guess_mime_type(&new_name)
         };
-        let file_key = beebeeb_core::kdf::derive_file_key(&state.master_key, file_id.as_bytes());
-        match beebeeb_core::encrypt::encrypt_name_for(
-            &file_key,
-            &new_name,
-            mime_for_rename,
+        let file_key = match &src.write_target {
+            // L13: the rename seals through the resolver's write target.
+            Some(target) => beebeeb_core::kdf::FileKey::from_bytes(*target.key().as_bytes()),
+            // A request row's content stays under `C`; its name uses the string
+            // convention. Any other row without a target was refused above.
+            None => beebeeb_core::kdf::derive_file_key(&state.master_key, file_id.as_bytes()),
+        };
+        let rename_pin = src.write_target.as_ref().map(|t| t.pin()).unwrap_or(
             beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
-        ) {
+        );
+        match beebeeb_core::encrypt::encrypt_name_for(&file_key, &new_name, mime_for_rename, rename_pin) {
             Ok(s) => Some(s),
             Err(e) => {
                 return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();

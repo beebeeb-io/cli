@@ -13,8 +13,8 @@ pub(super) async fn write_refusal(state: &Arc<DavState>, entry: &ResolvedEntry) 
         file_id,
         is_folder: entry.is_collection,
         name_read_only: entry.read_only,
-        // Rows here open under the owner's own conventions (the master key).
-        row_key: None,
+        // L12: the probe uses the key core resolved for this row, never a guess.
+        row_key: entry.key.as_deref(),
         size_bytes: entry.size_bytes,
         chunk_count: entry.chunk_count,
     };
@@ -45,6 +45,14 @@ pub(super) struct ResolvedEntry {
     /// SF-0002: the name resolved under the read-only uppercase repair
     /// convention. PUT-overwrite and rename are refused; move-only is allowed.
     pub(super) read_only: bool,
+    /// L12: the key core resolved for this row, when it authenticated. `None`
+    /// means this client cannot open the row (or it is not a row), so a write
+    /// must never guess one.
+    pub(super) key: Option<std::sync::Arc<beebeeb_core::kdf::FileKey>>,
+    /// L13: the seal target core issued for this row, if it is writable.
+    pub(super) write_target: Option<std::sync::Arc<beebeeb_core::owned_keys::WriteTarget>>,
+    /// L12: where the key came from (a request row's content is read-only).
+    pub(super) origin: beebeeb_core::owned_keys::KeyOrigin,
 }
 
 /// What a collection carries in [`ResolvedEntry::pin`].
@@ -58,22 +66,56 @@ pub(super) fn decode_file_entry(
     master_key: &beebeeb_core::kdf::MasterKey,
     _parent_href: &str,
 ) -> Option<ResolvedEntry> {
+    use beebeeb_core::owned_keys::{KeyOrigin, ItemKind, ResolvedName};
+
     let file_id = file.get("id")?.as_str()?.to_string();
     let is_folder = file.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
     let size_bytes = file.get("size_bytes").and_then(|v| v.as_u64());
     let chunk_count = file.get("chunk_count").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
     let modified = file.get("updated_at").and_then(|v| v.as_str()).map(|s| s.to_string());
-
     let name_encrypted = file.get("name_encrypted").and_then(|v| v.as_str())?;
-    let (display_name, read_only) =
-        match crate::crypto::decrypt_name_with_convention(master_key, &file_id, name_encrypted) {
-            Some((name, convention)) => (name, convention == beebeeb_core::kdf::OwnerKeyConvention::UpperRepair),
-            None => (format!("[{}]", &file_id[..8]), false),
-        };
-    let pin = if is_folder {
-        no_content()
-    } else {
-        crate::crypto::content_pin(master_key, &file_id, name_encrypted).map_err(String::from)
+    let kind = if is_folder { ItemKind::Folder } else { ItemKind::File };
+
+    // L12: the id class decides the key path, and core resolves it. WebDAV has
+    // no shared-folder ancestry here, so a foreign row stays unresolved (and
+    // unwritable) rather than being guessed at.
+    let resolved = beebeeb_core::owned_keys::resolve_owned_key(
+        master_key,
+        &file_id,
+        kind,
+        None,
+        None,
+        name_encrypted,
+        None,
+    )
+    .ok();
+    let (display_name, read_only, key, write_target, origin, pin) = match resolved {
+        Some(r) => {
+            let name = match &r.name {
+                ResolvedName::Encrypted(meta) => meta.name.clone(),
+                ResolvedName::Plaintext(text) => text.clone(),
+            };
+            let pin = match &r.name {
+                ResolvedName::Encrypted(meta) => Ok(meta.chunk_format),
+                ResolvedName::Plaintext(_) => Ok(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded),
+            };
+            (
+                name,
+                r.origin == KeyOrigin::DerivedUpperRepair,
+                Some(std::sync::Arc::new(r.key)),
+                r.write_target.map(std::sync::Arc::new),
+                r.origin,
+                if is_folder { no_content() } else { pin },
+            )
+        }
+        None => (
+            format!("[{}]", &file_id[..8]),
+            false,
+            None,
+            None,
+            KeyOrigin::Derived,
+            Err("this row's name does not authenticate under its own key".to_string()),
+        ),
     };
 
     Some(ResolvedEntry {
@@ -85,6 +127,9 @@ pub(super) fn decode_file_entry(
         modified,
         pin,
         read_only,
+        key,
+        write_target,
+        origin,
     })
 }
 
@@ -107,6 +152,9 @@ pub(super) async fn resolve_path(state: &Arc<DavState>, path: &str) -> Result<Re
             modified: None,
             pin: no_content(),
             read_only: false,
+            key: None,
+            write_target: None,
+            origin: beebeeb_core::owned_keys::KeyOrigin::Derived,
         });
     }
 

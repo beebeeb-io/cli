@@ -590,6 +590,79 @@ impl RequestKeyResolver {
         .ok()?;
         Some(FileKey::from_bytes(*c))
     }
+
+    /// Resolve a request row's keys (task 2275 §4 / T4.1). The content key is
+    /// always the sealed `C`. The **name** key is derived from the row id first
+    /// (string, binary, then the read-only uppercase repair) and only falls back
+    /// to `C`. A request row is never adopted, wrapped at share time or
+    /// published, and its content is read-only.
+    ///
+    /// New envelopes bind the row id and the request id (2236), so core's
+    /// `resolve_request_row` is tried first. Every envelope the shipped CLI and
+    /// web client created before 2236 uses the empty wrap/seal context, because
+    /// neither id existed when the uploader sealed — that is the named legacy
+    /// reader below (R5). Core has no legacy reader for request rows yet, so this
+    /// is the one documented place that reads the pre-2236 shape.
+    pub fn row_keys(
+        &mut self,
+        master_key: &MasterKey,
+        file: &serde_json::Value,
+    ) -> Option<beebeeb_core::owned_keys::RequestRowKeys> {
+        use beebeeb_core::owned_keys::{KeyOrigin, RequestRowKeys, resolve_request_row};
+        let fields = request_upload_fields(file)?;
+        let id = file.get("id").and_then(|v| v.as_str())?;
+        let enc = file.get("name_encrypted").and_then(|v| v.as_str())?;
+        let (w_b64, n_b64) = self.wrapped.get(&fields.request_id)?;
+        let wrapped = decode_any_b64(w_b64)?;
+        let nonce = decode_any_b64(n_b64)?;
+        if let Ok(keys) = resolve_request_row(
+            master_key,
+            id,
+            fields.request_id.as_bytes(),
+            &wrapped,
+            &nonce,
+            &fields.e_pub,
+            &fields.wrapped_content_key,
+            enc,
+        ) {
+            return Some(keys);
+        }
+        // R5 legacy reader: pre-2236 envelopes, empty wrap and seal contexts.
+        let r_priv = self.request_priv(master_key, fields.request_id)?;
+        let content = file_request::open_request_upload(
+            &r_priv,
+            &fields.e_pub,
+            REQUEST_SEAL_CONTEXT,
+            &fields.wrapped_content_key,
+        )
+        .ok()?;
+        let content_key = FileKey::from_bytes(*content);
+        let derived = beebeeb_core::kdf::owner_file_key_for_name(master_key, id, enc)
+            .ok()
+            .and_then(|(key, convention)| {
+                let origin = match convention {
+                    beebeeb_core::kdf::OwnerKeyConvention::String => KeyOrigin::Derived,
+                    beebeeb_core::kdf::OwnerKeyConvention::Binary => KeyOrigin::DerivedBinary,
+                    beebeeb_core::kdf::OwnerKeyConvention::UpperRepair => KeyOrigin::DerivedUpperRepair,
+                };
+                let name = beebeeb_core::encrypt::decrypt_name_metadata_with_key(&key, enc).ok()?;
+                Some((key, origin, name))
+            });
+        let (name_key, name_origin, name) = match derived {
+            Some(v) => v,
+            None => (
+                FileKey::from_bytes(*content_key.as_bytes()),
+                KeyOrigin::RequestContent,
+                beebeeb_core::encrypt::decrypt_name_metadata_with_key(&content_key, enc).ok()?,
+            ),
+        };
+        Some(RequestRowKeys {
+            content_key,
+            name_key,
+            name_origin,
+            name,
+        })
+    }
 }
 
 /// `bb request rm <id>` — close (default) or hard-delete (`--delete`) a request.

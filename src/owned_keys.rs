@@ -25,6 +25,18 @@ pub struct ResolvedCliKey {
     /// SF-0002: the name resolved under the read-only uppercase repair
     /// convention. No rename, no new version; an edit becomes a new file.
     pub read_only: bool,
+    /// L13: the seal target core issued for this row. Present only when the
+    /// resolver could authenticate the row for writing; a write must take its
+    /// key and chunk-format pin from here, never re-derive them.
+    pub write_target: Option<Arc<owned_keys::WriteTarget>>,
+}
+
+/// The authenticated name from a core resolution (L12).
+fn resolved_name(name: &owned_keys::ResolvedName) -> String {
+    match name {
+        owned_keys::ResolvedName::Encrypted(meta) => meta.name.clone(),
+        owned_keys::ResolvedName::Plaintext(text) => text.clone(),
+    }
 }
 struct SharedRoot {
     key: Arc<FileKey>,
@@ -81,6 +93,11 @@ impl OwnedKeyResolver {
     /// The key `id` resolved to in this resolver, if it was resolved here.
     pub fn key_for(&self, id: &str) -> Option<Arc<FileKey>> {
         self.resolved.get(id).map(|r| r.key.clone())
+    }
+    /// L13: the seal target core issued for `id`, if the resolver authenticated
+    /// the row for writing.
+    pub fn write_target_for(&self, id: &str) -> Option<Arc<owned_keys::WriteTarget>> {
+        self.resolved.get(id).and_then(|r| r.write_target.clone())
     }
     pub fn pending(&self, id: &str) -> Option<Vec<u8>> {
         self.pending.get(id).cloned()
@@ -154,7 +171,9 @@ impl OwnedKeyResolver {
         row: &Value,
     ) -> Result<ResolvedCliKey, String> {
         let id = row["id"].as_str().ok_or("missing item id")?.to_string();
-        uuid::Uuid::parse_str(&id).map_err(|_| "invalid item id")?;
+        // L12: the id class decides the key path; attribution never does. A
+        // non-canonical id is not an item this client can open.
+        let class = beebeeb_core::item_id::item_class(&id).map_err(|_| "invalid item id")?;
         let mut canonical = row.clone();
         // Old servers lack C0 attribution. Enrich only their unresolved rows;
         // ordinary legacy rows remain readable on servers without the new routes.
@@ -168,109 +187,102 @@ impl OwnedKeyResolver {
             }
         }
         self.rows.insert(id.clone(), canonical.clone());
-        let foreign = canonical["acted_via_share_id"].as_str().is_some() || canonical["uploaded_by"].as_str().is_some();
-        let owner = normalize_wrap(&canonical["owner_wrapped_file_key"]);
-        let has_owner = !canonical["owner_wrapped_file_key"].is_null();
-        if let Ok(Some(ref frame)) = owner {
-            if let Ok(key) = owned_keys::unwrap_owner_file_key(master, &id, frame) {
-                if let Ok(name) = authenticated_name(&key, &canonical) {
-                    self.pending.remove(&id);
-                    // SF-0002 r2 (C5): the same name verdict as every other
-                    // surface. An owner wrap of the uppercase-id key is read-only
-                    // here too, not writable because it was reached by the wrap.
-                    let read_only = name_read_only(master, &id, &canonical);
-                    return Ok(ResolvedCliKey {
-                        key: Arc::new(key),
-                        origin: KeyOrigin::OwnerWrap,
-                        canonical,
-                        pending_owner_wrap: None,
-                        shared_root_id: None,
-                        name,
-                        read_only,
-                    });
-                }
+        let kind = if canonical["is_folder"].as_bool() == Some(true) {
+            owned_keys::ItemKind::Folder
+        } else {
+            owned_keys::ItemKind::File
+        };
+        match class {
+            beebeeb_core::item_id::ItemClass::Owner => {
+                self.resolve_owner_row(api, master, canonical, &id, kind).await
+            }
+            beebeeb_core::item_id::ItemClass::Foreign => {
+                self.resolve_foreign_row(api, master, canonical, &id, kind).await
             }
         }
-        // A pending key is never confirmation that adoption committed. Authenticate
-        // it against the current name, retain its envelope, then retry in sync.
-        if let Some(frame) = self.pending.get(&id) {
-            if let Ok(key) = owned_keys::unwrap_owner_file_key(master, &id, frame) {
-                if let Ok(name) = authenticated_name(&key, &canonical) {
-                    let read_only = name_read_only(master, &id, &canonical);
-                    return Ok(ResolvedCliKey {
-                        key: Arc::new(key),
-                        origin: KeyOrigin::OwnerWrap,
-                        canonical,
-                        pending_owner_wrap: Some(frame.clone()),
-                        shared_root_id: None,
-                        name,
-                        read_only,
-                    });
-                }
-            }
-        }
-        if crate::commands::request::is_request_upload(&canonical) && !has_owner {
+    }
+    /// L12: an owner item's key is derived from its id. A served L8 envelope, a
+    /// pending one this device prepared, or an L7 child wrap is ignored for an
+    /// owner id — core refuses to open an owner envelope for one, because it
+    /// would be a second, competing key. Upper-repair rows stay read-only.
+    async fn resolve_owner_row(
+        &mut self,
+        api: &ApiClient,
+        master: &MasterKey,
+        canonical: Value,
+        id: &str,
+        kind: owned_keys::ItemKind,
+    ) -> Result<ResolvedCliKey, String> {
+        let enc = text(&canonical, "name_encrypted")?;
+        // L12 §4 (2236): a request row is content-under-`C`, name derived first.
+        // It is never adopted, wrapped at share time or published, and its
+        // content is read-only.
+        if crate::commands::request::is_request_upload(&canonical) {
             if self.requests.is_none() {
                 self.requests = Some(RequestKeyResolver::load(api).await?);
             }
-            let key = self
+            let keys = self
                 .requests
                 .as_mut()
-                .and_then(|r| r.content_key(master, &canonical))
+                .and_then(|r| r.row_keys(master, &canonical))
                 .ok_or("can't open request upload")?;
-            let name = authenticated_name(&key, &canonical)?;
             return Ok(ResolvedCliKey {
-                key: Arc::new(key),
-                origin: KeyOrigin::FolderWrap,
+                key: Arc::new(keys.content_key),
+                origin: KeyOrigin::RequestContent,
                 canonical,
                 pending_owner_wrap: None,
                 shared_root_id: None,
-                name,
+                name: keys.name.name,
                 read_only: false,
+                write_target: None,
             });
         }
-        if !foreign && !has_owner {
-            let enc = text(&canonical, "name_encrypted")?;
-            let (name, read_only) = match crate::crypto::decrypt_name_with_convention(master, &id, enc) {
-                Some((name, convention)) => (name, convention == beebeeb_core::kdf::OwnerKeyConvention::UpperRepair),
-                None => return Err("can't decrypt item name".into()),
-            };
-            // SF-0002: the iOS File Provider sealed this row under the
-            // uppercase id. Only the owner can derive that key; hand it back
-            // read-only so every write path refuses.
-            if read_only {
-                let (key, _) = beebeeb_core::kdf::owner_file_key_for_name(master, &id, enc)
-                    .map_err(|_| "can't resolve item key")?;
+        let resolved = owned_keys::resolve_owned_key(master, id, kind, None, None, enc, None)
+            .map_err(|_| "can't decrypt item name".to_string())?;
+        let read_only = resolved.write_target.is_none();
+        Ok(ResolvedCliKey {
+            key: Arc::new(resolved.key),
+            origin: resolved.origin,
+            canonical,
+            pending_owner_wrap: None,
+            shared_root_id: None,
+            name: resolved_name(&resolved.name),
+            read_only,
+            write_target: resolved.write_target.map(Arc::new),
+        })
+    }
+    /// L12: a foreign id is never derived. Its key is an L8 owner envelope that
+    /// opens and authenticates the name, else an L7 child wrap of a proven
+    /// custody root. An L8 envelope for a foreign id is adopted once (written
+    /// back) by sync; an L7 wrap is prepared for adoption the same way.
+    async fn resolve_foreign_row(
+        &mut self,
+        api: &ApiClient,
+        master: &MasterKey,
+        canonical: Value,
+        id: &str,
+        kind: owned_keys::ItemKind,
+    ) -> Result<ResolvedCliKey, String> {
+        let enc = text(&canonical, "name_encrypted")?;
+        let served = normalize_wrap(&canonical["owner_wrapped_file_key"]).ok().flatten();
+        let pending = self.pending.get(id).cloned();
+        if let Some(frame) = served.as_deref().or(pending.as_deref()) {
+            if let Ok(resolved) = owned_keys::resolve_owned_key(master, id, kind, Some(frame), None, enc, None) {
+                self.pending.remove(id);
+                let read_only = resolved.write_target.is_none();
                 return Ok(ResolvedCliKey {
-                    key: Arc::new(key),
-                    origin: KeyOrigin::Derived,
+                    key: Arc::new(resolved.key),
+                    origin: resolved.origin,
                     canonical,
-                    pending_owner_wrap: None,
+                    // A pending envelope is never confirmation that adoption
+                    // committed; keep it so sync retries the write.
+                    pending_owner_wrap: pending,
                     shared_root_id: None,
-                    name,
-                    read_only: true,
+                    name: resolved_name(&resolved.name),
+                    read_only,
+                    write_target: resolved.write_target.map(Arc::new),
                 });
             }
-            // No wrap applies here, so the key is derived from the id alone. Core's
-            // `resolve_owned_key` now demands a name kind and, for a plaintext-name
-            // file, chunk 0; this site has neither, so keep the derivation local.
-            let mut key = beebeeb_core::kdf::derive_file_key(master, id.as_bytes());
-            // Preserve the pre-string-UUID key convention when that is the key
-            // which authenticated this ordinary legacy item's encrypted name.
-            if enc.starts_with('{') && authenticated_name(&key, &canonical).is_err() {
-                let binary = beebeeb_core::kdf::derive_file_key(master, uuid::Uuid::parse_str(&id).unwrap().as_bytes());
-                authenticated_name(&binary, &canonical)?;
-                key = binary;
-            }
-            return Ok(ResolvedCliKey {
-                key: Arc::new(key),
-                origin: KeyOrigin::Derived,
-                canonical,
-                pending_owner_wrap: None,
-                shared_root_id: None,
-                name,
-                read_only: false,
-            });
         }
         let mut parent = canonical["parent_id"].as_str().map(str::to_string);
         let mut visited = HashSet::new();
@@ -282,33 +294,52 @@ impl OwnedKeyResolver {
             if self.roots.get(&root_id).is_some_and(|r| r.legacy_invite) {
                 self.refuse_if_custody_above(api, &root_id).await?;
             }
-            if let Some(root) = self.roots.get(&root_id) {
-                let frame = root.children.get(&id).ok_or(UNREADABLE)?;
-                let kind = if canonical["is_folder"].as_bool() == Some(true) {
-                    2
-                } else {
-                    1
+            let found = self
+                .roots
+                .get(&root_id)
+                .map(|r| (r.key.clone(), r.children.get(id).cloned(), r.legacy_invite));
+            if let Some((root_key, Some(frame), legacy_invite)) = found {
+                if legacy_invite {
+                    // L7b: the shipped legacy invite copy binds neither the
+                    // folder id nor the item kind, so core's bound child-wrap
+                    // reader must not accept it. This is the named legacy reader.
+                    let key = legacy_invite_child_key(&root_key, &frame)?;
+                    let name = authenticated_name(&key, &canonical)?;
+                    let pending =
+                        owned_keys::wrap_owner_file_key(master, id, &key).map_err(|_| "can't prepare owner envelope")?;
+                    self.pending.insert(id.to_string(), pending.clone());
+                    return Ok(ResolvedCliKey {
+                        key: Arc::new(key),
+                        origin: KeyOrigin::FolderWrap,
+                        canonical,
+                        pending_owner_wrap: Some(pending),
+                        shared_root_id: Some(root_id),
+                        name,
+                        read_only: false,
+                        write_target: None,
+                    });
+                }
+                let folder_wrap = owned_keys::FolderWrap {
+                    shared_folder_id: &root_id,
+                    kind: kind.as_u8(),
+                    folder_key: &root_key,
+                    wrapped_key: &frame,
                 };
-                // Core's `resolve_owned_key` now classifies the id (v8 = foreign) and
-                // would treat a legacy v4 shared row as an owner item, ignoring the
-                // folder wrap; this site already holds the wrap, so unwrap it here.
-                let key = if root.legacy_invite {
-                    legacy_invite_child_key(&root.key, frame)?
-                } else {
-                    owned_keys::unwrap_child_key(&root.key, &root_id, &id, kind, frame).map_err(|_| UNREADABLE)?
-                };
-                let name = authenticated_name(&key, &canonical)?;
-                let pending =
-                    owned_keys::wrap_owner_file_key(master, &id, &key).map_err(|_| "can't prepare owner envelope")?;
-                self.pending.insert(id.clone(), pending.clone());
+                let resolved = owned_keys::resolve_owned_key(master, id, kind, None, Some(folder_wrap), enc, None)
+                    .map_err(|_| UNREADABLE.to_string())?;
+                let pending = owned_keys::wrap_owner_file_key(master, id, &resolved.key)
+                    .map_err(|_| "can't prepare owner envelope")?;
+                self.pending.insert(id.to_string(), pending.clone());
+                let read_only = resolved.write_target.is_none();
                 return Ok(ResolvedCliKey {
-                    key: Arc::new(key),
-                    origin: KeyOrigin::FolderWrap,
+                    key: Arc::new(resolved.key),
+                    origin: resolved.origin,
                     canonical,
                     pending_owner_wrap: Some(pending),
                     shared_root_id: Some(root_id),
-                    name,
-                    read_only: false,
+                    name: resolved_name(&resolved.name),
+                    read_only,
+                    write_target: resolved.write_target.map(Arc::new),
                 });
             }
             let ancestor = self.ancestor_row(api, &root_id).await?;
@@ -733,14 +764,6 @@ fn chunk0_lengths(
         push(have as u64);
     }
     out
-}
-
-/// The resolver's name verdict for a row it opened through an owner wrap:
-/// [`name_is_upper_repair`] in `crypto::names`, the one every listing uses.
-fn name_read_only(master: &MasterKey, id: &str, row: &Value) -> bool {
-    row["name_encrypted"]
-        .as_str()
-        .is_some_and(|enc| crate::crypto::name_is_upper_repair(master, id, enc))
 }
 
 fn text<'a>(row: &'a Value, key: &str) -> Result<&'a str, String> {
