@@ -70,21 +70,19 @@ fn owner_key_posts(h: &Harness, id: &str) -> usize {
     h.count("POST", &format!("/api/v1/files/{id}/owner-key"))
 }
 /// L15 = A: a pass over a shared folder publishes nothing - not an owner wrap
-/// for the item, and not a child wrap for the tree it sits in. Counts every
-/// key-publishing POST so a future child-wrap route cannot slip past.
+/// for the item, and not a child wrap for the tree it sits in. Counts the POST
+/// routes the CLI really has: `POST /files/{id}/owner-key` (api/tree.rs:200)
+/// and the shared-folder keys URL (`/shared-folders/{id}/keys`, a GET today at
+/// api/tree.rs:187 and the route a future child-wrap writer would POST to).
+/// `/child-key` and `/folder-keys` are no CLI POST routes (`/folder-keys` is
+/// the invites GET at owned_keys.rs:536), so counting them proved nothing.
 fn published_key_posts(h: &Harness) -> usize {
     h.state
         .lock()
         .unwrap()
         .requests
         .iter()
-        .filter(|(m, p, _)| {
-            m == "POST"
-                && (p.ends_with("/owner-key")
-                    || p.ends_with("/keys")
-                    || p.ends_with("/child-key")
-                    || p.ends_with("/folder-keys"))
-        })
+        .filter(|(m, p, _)| m == "POST" && (p.ends_with("/owner-key") || p.ends_with("/keys")))
         .count()
 }
 fn shared_folder(fixture: Fixture) -> Fixture {
