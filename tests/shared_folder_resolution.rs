@@ -33,8 +33,7 @@ async fn owner_wrap_after_move() {
     let mut f = Fixture::default();
     let mut r = row(FILE, None, "moved.txt", RowFacts { foreign: true, ..Default::default() });
     r["acted_via_share_id"] = json!(null);
-    r["owner_wrapped_file_key"] =
-        json!(B64.encode(beebeeb_core::owned_keys::wrap_owner_file_key(&master(), FILE, &item_key()).unwrap()));
+    r["owner_wrapped_file_key"] = json!(B64.encode(wrap_owner(FILE, &item_key())));
     f.rows.push(r);
     let h = Harness::new(f).await;
     let v = h.json(&["ls"]).await;
@@ -84,7 +83,7 @@ async fn canonical_enrichment_wire_shapes() {
     for array in [false, true] {
         let mut f = Fixture::default();
         let mut canonical = row(FILE, None, "canonical.txt", RowFacts { foreign: true, ..Default::default() });
-        let frame = beebeeb_core::owned_keys::wrap_owner_file_key(&master(), FILE, &item_key()).unwrap();
+        let frame = wrap_owner(FILE, &item_key());
         canonical["owner_wrapped_file_key"] = if array { json!(frame) } else { json!(B64.encode(frame)) };
         let mut sparse = canonical.clone();
         sparse.as_object_mut().unwrap().remove("owner_wrapped_file_key");

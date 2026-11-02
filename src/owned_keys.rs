@@ -1,4 +1,5 @@
-//! Owner key routing. Envelopes stay opaque on disk; every unwrap is core's.
+//! Owner key routing. Envelopes stay opaque on disk; every unwrap is core's,
+//! except the L8 fallback for legacy owner-class ids (see `wrap_owner_envelope`).
 use crate::{api::ApiClient, commands::request::RequestKeyResolver};
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use beebeeb_core::{
@@ -172,7 +173,7 @@ impl OwnedKeyResolver {
         let owner = normalize_wrap(&canonical["owner_wrapped_file_key"]);
         let has_owner = !canonical["owner_wrapped_file_key"].is_null();
         if let Ok(Some(ref frame)) = owner {
-            if let Ok(key) = owned_keys::unwrap_owner_file_key(master, &id, frame) {
+            if let Some(key) = open_owner_envelope(master, &id, frame) {
                 if let Ok(name) = authenticated_name(&key, &canonical) {
                     self.pending.remove(&id);
                     // SF-0002 r2 (C5): the same name verdict as every other
@@ -194,7 +195,7 @@ impl OwnedKeyResolver {
         // A pending key is never confirmation that adoption committed. Authenticate
         // it against the current name, retain its envelope, then retry in sync.
         if let Some(frame) = self.pending.get(&id) {
-            if let Ok(key) = owned_keys::unwrap_owner_file_key(master, &id, frame) {
+            if let Some(key) = open_owner_envelope(master, &id, frame) {
                 if let Ok(name) = authenticated_name(&key, &canonical) {
                     let read_only = name_read_only(master, &id, &canonical);
                     return Ok(ResolvedCliKey {
@@ -298,8 +299,7 @@ impl OwnedKeyResolver {
                     owned_keys::unwrap_child_key(&root.key, &root_id, &id, kind, frame).map_err(|_| UNREADABLE)?
                 };
                 let name = authenticated_name(&key, &canonical)?;
-                let pending =
-                    owned_keys::wrap_owner_file_key(master, &id, &key).map_err(|_| "can't prepare owner envelope")?;
+                let pending = wrap_owner_envelope(master, &id, &key).map_err(|_| "can't prepare owner envelope")?;
                 self.pending.insert(id.clone(), pending.clone());
                 return Ok(ResolvedCliKey {
                     key: Arc::new(key),
@@ -469,7 +469,7 @@ impl OwnedKeyResolver {
                 return Err("adoption identity changed".to_string());
             }
             let wrapped = normalize_wrap(&winner["owner_wrapped_file_key"])?.ok_or("adoption pending")?;
-            let key = owned_keys::unwrap_owner_file_key(master, id, &wrapped).map_err(|_| "invalid adoption winner")?;
+            let key = open_owner_envelope(master, id, &wrapped).ok_or("invalid adoption winner")?;
             authenticated_name(&key, &winner)?;
             if key.as_bytes() != resolved.key.as_bytes() {
                 return Err("adoption winner key differs".into());
@@ -775,6 +775,83 @@ pub fn normalize_wrap(v: &Value) -> Result<Option<Vec<u8>>, String> {
     Ok(Some(bytes))
 }
 
+/// L8 owner envelope for a legacy owner-class id.
+///
+/// Core seals and opens an owner envelope only for a foreign (v8) item id: an
+/// owner id's key is derived from the id, so a wrap for it would be a competing
+/// key. Rows that predate the item-id classes (and the iOS uppercase repair)
+/// still carry owner-class ids, and the CLI still has to adopt them after a
+/// move-out — with the historical L8 construction, so a client that predates
+/// the id classes can open the wrap it posts. That construction is reproduced
+/// here for exactly the ids core refuses; a foreign id always goes to core.
+pub(crate) fn wrap_owner_envelope(master: &MasterKey, id: &str, key: &FileKey) -> Result<Vec<u8>, String> {
+    if let Ok(frame) = owned_keys::wrap_owner_file_key(master, id, key) {
+        return Ok(frame);
+    }
+    let mut nonce = [0u8; 12];
+    rand::RngCore::try_fill_bytes(&mut rand::rngs::OsRng, &mut nonce)
+        .map_err(|e| format!("OS randomness unavailable: {e}"))?;
+    seal_owner_frame(master, id, key, &nonce)
+}
+
+/// The historical L8 seal with a given nonce. Split out so a test can pin the
+/// construction against core's own reader for a foreign id.
+fn seal_owner_frame(master: &MasterKey, id: &str, key: &FileKey, nonce: &[u8; 12]) -> Result<Vec<u8>, String> {
+    use aes_gcm::KeyInit;
+    let (purpose, context) = owner_purpose(master, id)?;
+    let cipher = aes_gcm::Aes256Gcm::new_from_slice(&purpose).map_err(|_| "invalid owner purpose key")?;
+    let ciphertext = aes_gcm::aead::Aead::encrypt(
+        &cipher,
+        aes_gcm::Nonce::from_slice(nonce),
+        aes_gcm::aead::Payload {
+            msg: key.as_bytes(),
+            aad: &context,
+        },
+    )
+    .map_err(|_| "owner envelope seal failed")?;
+    Ok([nonce.as_slice(), ciphertext.as_slice()].concat())
+}
+
+/// Open [`wrap_owner_envelope`]: core first (foreign ids), then the historical
+/// construction for an owner-class id. `None` is "this frame is not our key".
+pub(crate) fn open_owner_envelope(master: &MasterKey, id: &str, frame: &[u8]) -> Option<FileKey> {
+    if let Ok(key) = owned_keys::unwrap_owner_file_key(master, id, frame) {
+        return Some(key);
+    }
+    if frame.len() != 60 {
+        return None;
+    }
+    use aes_gcm::KeyInit;
+    let (purpose, context) = owner_purpose(master, id).ok()?;
+    let cipher = aes_gcm::Aes256Gcm::new_from_slice(&purpose).ok()?;
+    let plain = aes_gcm::aead::Aead::decrypt(
+        &cipher,
+        aes_gcm::Nonce::from_slice(&frame[..12]),
+        aes_gcm::aead::Payload {
+            msg: &frame[12..],
+            aad: &context,
+        },
+    )
+    .ok()?;
+    let key: [u8; 32] = plain.as_slice().try_into().ok()?;
+    Some(FileKey::from_bytes(key))
+}
+
+/// The L8 purpose key and AAD: HKDF-SHA256 over the master, bound to the label
+/// and the item id (core's `purpose_context` for the historical labels).
+fn owner_purpose(master: &MasterKey, id: &str) -> Result<([u8; 32], Vec<u8>), String> {
+    if id.is_empty() {
+        return Err("wrap record id must not be empty".into());
+    }
+    let context = [beebeeb_core::kdf::OWNER_FILE_KEY_LABEL, id.as_bytes()].concat();
+    let mut okm = [0u8; 32];
+    let ikm = zeroize::Zeroizing::new(master.to_bytes());
+    hkdf::Hkdf::<sha2::Sha256>::new(None, &*ikm)
+        .expand(&context, &mut okm)
+        .map_err(|_| "owner key derivation failed")?;
+    Ok((okm, context))
+}
+
 /// L7b flag-off invite reader. Reached only after permanent custody was absent;
 /// custody-backed roots always use core's bound reader and never fall back here.
 fn legacy_invite_child_key(folder_key: &FileKey, frame: &[u8]) -> Result<FileKey, String> {
@@ -1037,5 +1114,51 @@ mod write_check_tests {
             first_chunk_check(&m, ID, Some(&upper), &sealed, size, 1, None, false),
             WriteCheck::UpperRepair
         );
+    }
+}
+
+#[cfg(test)]
+mod owner_envelope_tests {
+    use super::*;
+
+    const FOREIGN: &str = "11111111-1111-8111-8111-111111111111";
+    const OWNER: &str = "5f0c2a9e-3b1d-4c7e-9a2f-6d8e1b4c7a30";
+
+    fn master() -> MasterKey {
+        MasterKey::from_bytes([7u8; 32])
+    }
+
+    /// The historical seal is core's L8: core's own reader opens it for a
+    /// foreign id (same HKDF info, same AAD, same 60-byte frame), and the CLI
+    /// opens core's wrap. That pins the construction the owner-id fallback uses.
+    #[test]
+    fn the_legacy_seal_is_byte_compatible_with_core() {
+        let m = master();
+        let key = FileKey::from_bytes([9u8; 32]);
+        let frame = seal_owner_frame(&m, FOREIGN, &key, &[0x37; 12]).unwrap();
+        assert_eq!(frame.len(), 60);
+        let opened = beebeeb_core::owned_keys::unwrap_owner_file_key(&m, FOREIGN, &frame).unwrap();
+        assert_eq!(opened.as_bytes(), key.as_bytes());
+        let core = beebeeb_core::owned_keys::wrap_owner_file_key(&m, FOREIGN, &key).unwrap();
+        assert_eq!(
+            open_owner_envelope(&m, FOREIGN, &core).unwrap().as_bytes(),
+            key.as_bytes()
+        );
+    }
+
+    /// An owner-class id (v4) is refused by core, sealed and opened by the
+    /// fallback, and never opens under another id or master.
+    #[test]
+    fn an_owner_id_roundtrips_through_the_legacy_envelope() {
+        let m = master();
+        let key = FileKey::from_bytes([9u8; 32]);
+        assert!(beebeeb_core::owned_keys::wrap_owner_file_key(&m, OWNER, &key).is_err());
+        let frame = wrap_owner_envelope(&m, OWNER, &key).unwrap();
+        assert_eq!(
+            open_owner_envelope(&m, OWNER, &frame).unwrap().as_bytes(),
+            key.as_bytes()
+        );
+        assert!(open_owner_envelope(&m, FOREIGN, &frame).is_none());
+        assert!(open_owner_envelope(&MasterKey::from_bytes([8u8; 32]), OWNER, &frame).is_none());
     }
 }
