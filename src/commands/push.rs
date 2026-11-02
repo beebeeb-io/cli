@@ -422,7 +422,10 @@ async fn push_single_file(
                         // file was first uploaded).
                         (existing_id, file_name.clone(), Some(existing_id))
                     }
-                    ConflictResolution::Upload { filename } => (uuid::Uuid::new_v4(), filename, None),
+                    // L13: a fresh item's id comes from core's minting type.
+                    ConflictResolution::Upload { filename } => {
+                        (crate::item_id::mint_owner(&master_key)?, filename, None)
+                    }
                     ConflictResolution::Skip => return Ok(None),
                 }
             }
@@ -459,7 +462,8 @@ async fn push_single_file(
             // L13: a request row's content is read-only. An edit is saved as a
             // new owner item — never sealed under `C`, never published.
             if resolved.origin == beebeeb_core::owned_keys::KeyOrigin::RequestContent {
-                (None, None, None, Some(uuid::Uuid::new_v4()))
+                // L13: the edit is a NEW owner item, minted by core.
+                (None, None, None, Some(crate::item_id::mint_owner(&master_key)?))
             } else {
                 // SF-0002: a row sealed by the old iOS app (its name or its CURRENT
                 // version) is read-only, and a check that could not decide refuses

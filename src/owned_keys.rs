@@ -13,6 +13,9 @@ use std::{
 
 mod adopt;
 mod l14;
+#[cfg(test)]
+#[path = "owned_keys/request_name_tests.rs"]
+mod request_name_tests;
 
 pub const UNREADABLE: &str = "can't open (added via shared folder)";
 pub const CUSTODY_UNAVAILABLE: &str = "This folder's keys are unavailable";
@@ -21,6 +24,10 @@ pub const CUSTODY_UNAVAILABLE: &str = "This folder's keys are unavailable";
 /// A rename needs the key the row's name authenticates under. A row this
 /// device cannot resolve (a guest's folder, an unreadable row) has none, and a
 /// derived guess would seal the new name under a key that opens nothing.
+/// A request row whose name is not an encrypted envelope: nothing can
+/// authenticate it, so it is refused rather than guessed (2275 review P2-8).
+pub const REQUEST_NAME_NOT_ENCRYPTED: &str =
+    "can't open this request upload: its name is not encrypted, so it can't be authenticated";
 pub const RENAME_UNKNOWN_KEY: &str =
     "can't rename this item: this device doesn't hold the key its name uses";
 pub const OWNER_ONLY_NOTICE: &str = "Only you can open this. Share it from the web or the app.";
@@ -298,6 +305,13 @@ impl OwnedKeyResolver {
         // It is never adopted, wrapped at share time or published, and its
         // content is read-only.
         if crate::commands::request::is_request_upload(&canonical) {
+            // L12 (P2-8): a request row's name authenticates under a derived key
+            // or under `C`. A plaintext name proves neither, and no path here may
+            // accept it: refuse before any envelope is opened.
+            if !enc.starts_with('{') {
+                return Err(REQUEST_NAME_NOT_ENCRYPTED.into());
+            }
+
             if self.requests.is_none() {
                 self.requests = Some(RequestKeyResolver::load(api).await?);
             }
@@ -1165,3 +1179,4 @@ mod write_check_tests {
         );
     }
 }
+
