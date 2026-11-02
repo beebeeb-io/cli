@@ -2655,35 +2655,25 @@ async fn parse_response_typed(resp: reqwest::Response) -> Result<Value, ApiError
     })?;
 
     if !status.is_success() {
-        // Every typed server error is `{ error: <stable code>, message: <human
-        // text> }` (`beebeeb-api/src/error.rs`'s documented two-field
-        // contract). Prefer the friendly `message` — it's what ~20 typed
-        // errors (billing_no_payment_method, quota_exceeded,
-        // account_suspended, email_unverified, …) author specifically for
-        // display; fall back to the bare `error` code, then to the raw
-        // status+body when neither field is present (task 1547 finding 3).
-        let parsed = serde_json::from_str::<Value>(&body).ok();
-        let code = parsed
-            .as_ref()
-            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from));
-        let server_message = parsed
-            .as_ref()
-            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from));
+        // One decoder for the server contract (spec move 7): the body is the
+        // documented `{ error, message }` pair, and core keeps the stable code,
+        // the display text (message, else the bare code, else status+body) and
+        // the whole parsed body.
+        let server = beebeeb_core::api_error::ServerError::parse_body(status.as_u16(), &body);
+        let code = server.code.clone();
         // A 401 without a human `message` is the server's generic
         // `ApiError::Unauthorized` — the session token was rejected. Say so,
         // and say how to fix it. The stable `code` is kept untouched, so the
-        // `classify_*` helpers that tell "wrong 2FA code" / "wrong password"
-        // apart from a dead session (they match `is_code("unauthorized")`)
+        // classify_* helpers that tell "wrong 2FA code" / "wrong password"
+        // apart from a dead session (they match is_code("unauthorized"))
         // behave exactly as before.
         let message = if status == reqwest::StatusCode::UNAUTHORIZED
-            && server_message.is_none()
+            && server.details.get("message").and_then(Value::as_str).is_none()
             && code.as_deref().is_none_or(|c| c == "unauthorized")
         {
             SESSION_EXPIRED_MESSAGE.to_string()
         } else {
-            server_message
-                .or_else(|| code.clone())
-                .unwrap_or_else(|| format!("{status}: {body}"))
+            server.message
         };
         return Err(ApiError {
             code,
