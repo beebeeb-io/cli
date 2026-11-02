@@ -10,6 +10,16 @@ pub struct IndexRepairReport {
     pub written: usize,
     pub deferred: usize,
     pub partial: bool,
+    /// L14: rows left out of the index because they failed a condition, by
+    /// reason. A skipped row never makes the repair partial.
+    pub skipped: usize,
+    pub skip_reasons: BTreeMap<&'static str, usize>,
+}
+impl IndexRepairReport {
+    fn skip(&mut self, reason: &'static str) {
+        self.skipped += 1;
+        *self.skip_reasons.entry(reason).or_default() += 1;
+    }
 }
 type Pages = BTreeMap<(u32, u32), u64>;
 async fn pages(api: &ApiClient, base: &str) -> Result<Pages, String> {
@@ -133,6 +143,9 @@ pub async fn repair(
     let Some(key) = keys.folder_key(api, master, folder_id).await? else {
         return Ok(IndexRepairReport::default());
     };
+    // L14: the check compares against this root's inventory, so load it even
+    // when a row resolves through an owner envelope.
+    keys.load_shared_root(api, master, folder_id).await?;
     let previous = keys.descendant_ids(folder_id);
     let mut current = HashSet::new();
     let mut queue = vec![folder_id.to_string()];
@@ -140,6 +153,9 @@ pub async fn repair(
     let mut entries = Vec::new();
     let mut partial = false;
     let mut count = 0;
+    let mut report = IndexRepairReport::default();
+    // L14: only a folder that passed every condition is descended into; an
+    // unproven folder is skipped, never walked.
     while let Some(id) = queue.pop() {
         if !seen.insert(id.clone()) {
             partial = true;
@@ -159,20 +175,52 @@ pub async fn repair(
                 partial = true;
                 break;
             }
-            match keys.resolve(api, master, row).await {
-                Ok(r) => {
-                    let id = r.canonical["id"].as_str().ok_or("missing item id")?.to_string();
-                    if !current.insert(id.clone()) {
-                        partial = true;
-                        continue;
-                    }
-                    if r.canonical["is_folder"] == true {
-                        queue.push(id.clone());
-                    }
-                    entries.push((id, r.name));
-                }
-                Err(_) => partial = true,
+            let Ok(r) = keys.resolve(api, master, row).await else {
+                // L14: a row whose name does not authenticate is left out and
+                // counted. It does not make the repair partial.
+                report.skip("name_unauthenticated");
+                continue;
+            };
+            let id = r.canonical["id"].as_str().ok_or("missing item id")?.to_string();
+            let is_folder = r.canonical["is_folder"] == true;
+            let kind = if is_folder {
+                beebeeb_core::owned_keys::ItemKind::Folder
+            } else {
+                beebeeb_core::owned_keys::ItemKind::File
+            };
+            let enc = r.canonical["name_encrypted"].as_str().unwrap_or("");
+            if crate::commands::request::is_request_upload(&r.canonical) {
+                report.skip("request_row");
+                continue;
             }
+            if !enc.starts_with('{') {
+                report.skip("plaintext_name");
+                continue;
+            }
+            // L14 (1): this root's inventory must hold a wrap for (R, X, kind).
+            let Some((root_id, root_key, wrap)) = keys.child_wrap_for(&id) else {
+                report.skip("no_wrap");
+                continue;
+            };
+            // L14 (2): it must open under the root's proven custody key.
+            if beebeeb_core::owned_keys::unwrap_child_key(&root_key, &root_id, &id, kind.as_u8(), &wrap).is_err() {
+                report.skip("wrap_does_not_open");
+                continue;
+            }
+            // L14 (3): the opened key must equal the resolver's key, in constant
+            // time. (4) the name authenticates under it, which `resolve` proved.
+            if !beebeeb_core::owned_keys::child_wrap_matches(&root_key, &root_id, &id, kind.as_u8(), &wrap, &r.key) {
+                report.skip("wrap_key_mismatch");
+                continue;
+            }
+            if !current.insert(id.clone()) {
+                partial = true;
+                continue;
+            }
+            if is_folder {
+                queue.push(id.clone());
+            }
+            entries.push((id, r.name));
         }
         if count > 20_000 {
             break;
@@ -182,7 +230,7 @@ pub async fn repair(
         return Ok(IndexRepairReport {
             partial: true,
             deferred: 1,
-            written: 0,
+            ..report
         });
     }
     let mut removed = Vec::new();
@@ -221,7 +269,7 @@ pub async fn repair(
             }
         }
     }
-    write_deltas(
+    let mut written = write_deltas(
         api,
         &format!("/api/v1/shared-folders/{folder_id}/search-index/shards"),
         ShardKeySource::Folder(&key),
@@ -229,5 +277,8 @@ pub async fn repair(
         &removed,
         true,
     )
-    .await
+    .await?;
+    written.skipped = report.skipped;
+    written.skip_reasons = report.skip_reasons;
+    Ok(written)
 }
