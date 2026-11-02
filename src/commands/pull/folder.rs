@@ -119,7 +119,7 @@ pub(super) async fn pull_folder_inner(
             // (This used to abort the whole folder pull.)
             match pull_single_file(api, item_id, &target, content_key.as_ref(), explicit_key.clone()).await {
                 Ok(()) => {}
-                Err(PullFailure::Changed(_)) => {
+                Err(PullError::Changed(_)) => {
                     eprintln!(
                         "  {} {}: changed while it downloaded; reading it again",
                         "!".custom_color(crate::colors::AMBER),
@@ -146,7 +146,7 @@ pub(super) async fn pull_single_file(
     out_path: &std::path::Path,
     request_content_key: Option<&beebeeb_core::kdf::FileKey>,
     explicit_key: Option<std::sync::Arc<beebeeb_core::kdf::FileKey>>,
-) -> Result<(), PullFailure> {
+) -> Result<(), PullError> {
     let master_key = load_master_key()?;
 
     let file_meta = api.get_file(file_id).await?;

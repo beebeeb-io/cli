@@ -166,15 +166,15 @@ mod failure_tests {
     #[test]
     fn only_a_version_change_is_retried() {
         assert!(matches!(
-            PullFailure::from(DownloadError::Changed("m".into())),
-            PullFailure::Changed(m) if m == "m"
+            PullError::from(DownloadError::Changed("m".into())),
+            PullError::Changed(m) if m == "m"
         ));
         for other in [DownloadError::Unreadable("u".into()), DownloadError::Other("o".into())] {
             let text = other.to_string();
-            assert!(matches!(PullFailure::from(other), PullFailure::Other(m) if m == text));
+            assert!(matches!(PullError::from(other), PullError::Other(m) if m == text));
         }
-        assert_eq!(String::from(PullFailure::Changed("c".into())), "c");
-        assert_eq!(String::from(PullFailure::Other("o".into())), "o");
+        assert_eq!(String::from(PullError::Changed("c".into())), "c");
+        assert_eq!(String::from(PullError::Other("o".into())), "o");
     }
 
     #[test]

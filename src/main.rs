@@ -603,7 +603,14 @@ async fn main() {
             output_flag,
             zip,
             force,
-        } => commands::pull::run(file_id, output.or(output_flag), zip, force).await,
+        } => {
+            commands::pull::run(
+                file_id,
+                output.or(output_flag),
+                commands::pull::PullOptions { zip, force },
+            )
+            .await
+        }
         Commands::Ls {
             path,
             long,

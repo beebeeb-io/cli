@@ -1,25 +1,25 @@
 //! The `bb pull` entry point: load the key, dispatch to single-file or folder
 //! download, and retry only when the remote file changed underneath us.
 //!
-//! Owns: `run` and `run_once`, including the retry loop over `PullFailure`.
+//! Owns: `run` and `run_once`, including the retry loop over `PullError`.
 //! Must not: resolve targets or write bytes itself (see `pull::resolve` and
 //! `pull::folder`).
 
 use super::*;
 
-pub async fn run(file_id: String, output: Option<PathBuf>, zip: bool, force: bool) -> Result<(), String> {
-    match run_once(file_id.clone(), output.clone(), zip, force, false).await {
+pub async fn run(file_id: String, output: Option<PathBuf>, options: PullOptions) -> Result<(), String> {
+    match run_once(file_id.clone(), output.clone(), options, false).await {
         // Someone published a new version while this one was downloading. Nothing was written;
         // the new version's chunk count and read pin need a fresh look, so start over, once.
-        Err(PullFailure::Changed(_)) => {
+        Err(PullError::Changed(_)) => {
             if !crate::ui::is_quiet() {
                 eprintln!("The file changed while it was downloading; starting again from its new version.");
             }
             // The overwrite question was answered in the first attempt (it is asked before any
             // byte is fetched); the retry must not ask it again.
-            run_once(file_id, output, zip, force, true).await.map_err(|e| match e {
-                PullFailure::Changed(m) => format!("{m}. It changed again; run the command again"),
-                PullFailure::Other(m) => m,
+            run_once(file_id, output, options, true).await.map_err(|e| match e {
+                PullError::Changed(m) => format!("{m}. It changed again; run the command again"),
+                PullError::Other(m) => m,
             })
         }
         other => other.map_err(String::from),
@@ -29,16 +29,15 @@ pub async fn run(file_id: String, output: Option<PathBuf>, zip: bool, force: boo
 pub(super) async fn run_once(
     file_id: String,
     output: Option<PathBuf>,
-    zip: bool,
-    force: bool,
+    options: PullOptions,
     already_confirmed: bool,
-) -> Result<(), PullFailure> {
+) -> Result<(), PullError> {
     let api = ApiClient::from_config();
     api.require_auth()?;
 
     // --zip mode: resolve as folder and download as a zip archive
-    if zip {
-        return Ok(run_zip(&api, &file_id, output, force).await?);
+    if options.zip {
+        return Ok(run_zip(&api, &file_id, output, options.force).await?);
     }
 
     let (file_id, resolved_name) = resolve_file_arg(&api, &file_id).await?;
@@ -89,7 +88,7 @@ pub(super) async fn run_once(
             Some(o) => o,
             None => crate::safe_path::default_output_path(folder_name)?,
         };
-        return Ok(pull_folder(&api, &file_id, &out_dir, force).await?);
+        return Ok(pull_folder(&api, &file_id, &out_dir, options.force).await?);
     }
 
     let display_name = decrypted_name.as_deref().unwrap_or(&file_id);
@@ -104,7 +103,7 @@ pub(super) async fn run_once(
 
     // Never clobber a local file silently (flow "CLI end to end", issue 5):
     // checked before any bytes are downloaded, for both decrypt paths below.
-    ask_once(already_confirmed, &out_path, force, guard_existing_output)?;
+    ask_once(already_confirmed, &out_path, options.force, guard_existing_output)?;
 
     // The chunk format comes from the file's authenticated metadata, never a
     // server field (task 1943): core's reader opens a v2-pinned file only as v2.

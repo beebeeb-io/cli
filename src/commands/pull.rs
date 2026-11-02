@@ -15,6 +15,16 @@ use std::path::PathBuf;
 use crate::api::ApiClient;
 use crate::commands::push::load_master_key;
 
+/// The user's pull policy, grouped so the entry point does not take a row of
+/// bare booleans.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PullOptions {
+    /// Download a folder as a zip archive.
+    pub zip: bool,
+    /// Overwrite an existing local file without asking.
+    pub force: bool,
+}
+
 mod error;
 use error::*;
 
@@ -34,3 +44,24 @@ use zip::*;
 
 mod run;
 pub use run::run;
+
+#[cfg(test)]
+mod options_tests {
+    use super::PullOptions;
+
+    /// The defaults match `bb pull <file>`: write in place, ask before overwrite.
+    #[test]
+    fn default_pull_is_in_place_and_asks_before_overwrite() {
+        let o = PullOptions::default();
+        assert!(!o.zip);
+        assert!(!o.force);
+    }
+
+    /// `--zip` and `--force` are independent flags.
+    #[test]
+    fn zip_and_force_are_independent() {
+        assert!(PullOptions { zip: true, force: false }.zip);
+        assert!(PullOptions { zip: false, force: true }.force);
+        assert!(PullOptions { zip: true, force: true }.force);
+    }
+}
