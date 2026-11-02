@@ -1,0 +1,131 @@
+//! Upload session selection and recovery: resume a recorded session, or re-init
+//! it once when the server has swept it, and classify which failures a fresh id
+//! could actually fix.
+//!
+//! Owns: `SessionPlan`, `AttemptErr`, `session_err`, `fresh_id_can_fix`, and the
+//! bounded same-id retry constants.
+//! Must not: PUT chunks or own the channel (see `upload::pipeline`).
+//! Tests: the swept-session and classifier cases live in
+//! `upload::pipeline`'s `swept_session_reinit`.
+
+use super::*;
+
+/// How one upload attempt obtains its v2 session.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum SessionPlan {
+    /// Reuse a session recorded by an interrupted earlier run (skip init). `direct`: the session was
+    /// opened as a direct upload (task 2173) and must be continued as one.
+    Resume {
+        file_id: Uuid,
+        session_id: Uuid,
+        direct: bool,
+    },
+    /// Open a new session for `file_id`.
+    Init {
+        file_id: Uuid,
+        /// Set only on the re-init after a swept session (task 1589): if the
+        /// server refuses the stored id with the ONE status that proves it is
+        /// unusable, the driver may try once more with this fresh id. `None`
+        /// for a `--replace` recovery — there IS no fresh id a replace could
+        /// use, since it must land on this exact existing file (Codex thread
+        /// #1 follow-up on 3cb4daf).
+        fallback_file_id: Option<Uuid>,
+        /// True for a re-init after a swept (resumed) session — eligible for
+        /// the bounded SAME-id 5xx retry regardless of whether
+        /// `fallback_file_id` is set. Kept SEPARATE from `fallback_file_id`
+        /// precisely because a replace recovery has no fallback id but must
+        /// still get the retry: gating the retry on `fallback_file_id.is_some()`
+        /// silently skipped it for every `--replace` upload.
+        is_recovery: bool,
+    },
+}
+
+/// Why one attempt failed, kept typed so the driver can react to exactly the
+/// two recoverable cases and nothing else.
+pub(super) enum AttemptErr {
+    /// The server no longer has the upload session (task 1589: its lease
+    /// expired and the sweeper removed it). Recoverable once per file per run by
+    /// a re-init. `bytes_confirmed` is how much ciphertext THIS attempt had
+    /// already reported to `FileProgress::chunk_confirmed` before it died —
+    /// the retry restarts at chunk 0 under a fresh progress handle, so the
+    /// caller must roll this amount back on the shared/overall counter before
+    /// looping, or a full resend double-counts it (Codex thread #2).
+    SessionGone { message: String, bytes_confirmed: u64 },
+    /// The init for the stored `file_id` was refused in a way a fresh id can
+    /// fix. Carries the fresh id to try (at most once).
+    InitRefused { message: String, fresh_file_id: Uuid },
+    /// Task 2173: the session was opened as a direct upload and cannot finish as one (the server turned
+    /// the direction off, a node has no direct routes, a link was refused, storage kept failing). Its
+    /// transport cannot change, so the driver abandons it and inits again WITHOUT the capability token,
+    /// once per file per run. `bytes_confirmed` is rolled back like for [`AttemptErr::SessionGone`].
+    DirectUnavailable { bytes_confirmed: u64 },
+    /// Anything else — surfaced to the caller unchanged.
+    Other(String),
+}
+
+impl AttemptErr {
+    pub(super) fn into_message(self) -> String {
+        match self {
+            AttemptErr::SessionGone { message, .. }
+            | AttemptErr::InitRefused { message, .. }
+            | AttemptErr::Other(message) => message,
+            AttemptErr::DirectUnavailable { .. } => "the direct upload is unavailable for this file".to_string(),
+        }
+    }
+}
+
+impl From<String> for AttemptErr {
+    fn from(m: String) -> Self {
+        AttemptErr::Other(m)
+    }
+}
+
+/// Map a chunk-PUT / complete failure: a swept session becomes
+/// [`AttemptErr::SessionGone`], everything else [`AttemptErr::Other`] with the
+/// same text the caller always saw. `bytes_confirmed` is the ciphertext this
+/// attempt had already gotten past the server before `e` — see
+/// [`AttemptErr::SessionGone`].
+pub(super) fn session_err(prefix: Option<String>, e: crate::api::ApiError, bytes_confirmed: u64) -> AttemptErr {
+    let gone = crate::api::is_upload_session_gone(&e);
+    let text = match prefix {
+        Some(p) => format!("{p}: {e}"),
+        None => e.message,
+    };
+    if gone {
+        AttemptErr::SessionGone {
+            message: text,
+            bytes_confirmed,
+        }
+    } else {
+        AttemptErr::Other(text)
+    }
+}
+
+/// Whether an init refused for the STORED `file_id` (the swept-session
+/// recovery path) may be retried with a fresh id instead. Grounded in the v2
+/// init handler (`beebeeb-api/src/routes/uploads.rs`, `init_upload`): the
+/// ONLY response that PROVES the stored id itself is unusable — rather than
+/// merely reflecting a transient or unrelated failure — is `404`, returned
+/// when an explicit `file_id` resolves to a file this caller can no longer
+/// read at all (cross-owner, shared access since revoked; ~line 433). Every
+/// other 4xx that handler can return is unrelated to the id: `400` is generic
+/// request validation (file name / chunk-plan shape) that would reject a
+/// fresh id identically; `409` is a live upload or a stale base version, and
+/// swapping ids there would create a duplicate file (excluded below); `402`/
+/// `413` are quota. A `5xx` proves nothing about the id EITHER WAY — it can be
+/// transient, or the server may have committed the init despite the response
+/// never arriving (task 1589, Codex thread #1) — so it is never treated as an
+/// id problem here; the caller retries it with the SAME id
+/// (`STORED_ID_INIT_RETRIES`, bounded, with backoff) and surfaces it if that
+/// runs out. Never for 401/403 (auth), 429 (handled in `api`).
+pub(super) fn fresh_id_can_fix(status: u16) -> bool {
+    status == 404
+}
+
+/// How many extra attempts a `5xx` from the STORED-id recovery init gets, with
+/// the SAME id, before it is surfaced — never replaced with a fresh id (task
+/// 1589, Codex thread #1). Exponential backoff starting at
+/// `STORED_ID_INIT_BACKOFF_BASE`, doubling each attempt.
+pub(super) const STORED_ID_INIT_RETRIES: u32 = 3;
+
+pub(super) const STORED_ID_INIT_BACKOFF_BASE: Duration = Duration::from_millis(150);
