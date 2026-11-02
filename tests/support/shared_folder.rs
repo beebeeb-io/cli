@@ -79,6 +79,13 @@ pub fn proof_row() -> Value {
         ),
     })
 }
+/// A historical (pre-L12) L8 owner envelope for `id`, wrapping `key` under the
+/// key the id derives. TEST-ONLY: a test needs an envelope that really opens to
+/// prove an O item ignores it.
+pub fn l8_envelope(id: &str, key: &FileKey) -> String {
+    let derived = beebeeb_core::kdf::derive_file_key(&master(), id.as_bytes());
+    B64.encode(beebeeb_core::encrypt::encrypt_chunk_raw(&derived, key.as_bytes()).unwrap())
+}
 pub fn wrap(id: &str, folder: bool) -> String {
     B64.encode(owned_keys::wrap_child_key(&folder_key(), ROOT, id, if folder { 2 } else { 1 }, &item_key()).unwrap())
 }
@@ -633,6 +640,10 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
     } else if method == "POST" && path == "/api/v1/shares" {
         let req: Value = serde_json::from_slice(&f.requests.last().unwrap().2).unwrap();
         json!({"id":BAD,"token":req["token"],"expires_at":"never"})
+    } else if method == "POST" && path == "/api/v1/files/folder" {
+        // A create echoes the id this client minted (L13).
+        let req: Value = serde_json::from_slice(&f.requests.last().unwrap().2).unwrap();
+        json!({"id": req["folder_id"].as_str().unwrap_or_default()})
     } else if method == "PATCH" && path.starts_with("/api/v1/files/") {
         // A rename/move: answered so a write the client is allowed to make succeeds.
         let id = path.trim_start_matches("/api/v1/files/").to_string();

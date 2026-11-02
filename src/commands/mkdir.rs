@@ -67,6 +67,9 @@ pub async fn run(path_arg: String, parents: bool) -> Result<(), String> {
         println!("{}", serde_json::to_string_pretty(&json).unwrap());
     } else {
         print_created(&path_arg, &created_id);
+        // L15 = A: a folder created in a shared folder stays owner-only. The
+        // notice names the folder it was created IN, not the new folder.
+        crate::owned_keys::announce_owner_only(&api, &master_key, parent_uuid.as_deref()).await;
     }
     Ok(())
 }
@@ -88,6 +91,8 @@ async fn run_recursive(
     let mut parent_id: Option<String> = None;
     let mut cumulative = String::new();
     let mut created: Vec<(String, String)> = Vec::new(); // (path, id)
+    // The folder the first created segment was made in (for the L15 notice).
+    let mut first_parent: Option<String> = None;
 
     for segment in &segments {
         cumulative.push('/');
@@ -104,6 +109,9 @@ async fn run_recursive(
         }
 
         let parent_uuid_typed: Option<Uuid> = parent_id.as_deref().and_then(|s| s.parse().ok());
+        if first_parent.is_none() {
+            first_parent = parent_id.clone();
+        }
         // L13 (SF-0001): the folder's id is minted by the client and echoed unchanged.
         let new_id = crate::item_id::create_owned_folder(api, master_key, segment, parent_uuid_typed)
             .await?
@@ -117,10 +125,8 @@ async fn run_recursive(
     }
 
     // L15 = A: a folder created in a shared folder stays owner-only.
-    if !ui::is_json() {
-        if let Some((_, first)) = created.first() {
-            crate::owned_keys::announce_owner_only(api, master_key, Some(first)).await;
-        }
+    if !ui::is_json() && !created.is_empty() {
+        crate::owned_keys::announce_owner_only(api, master_key, first_parent.as_deref()).await;
     }
 
     if ui::is_json() {

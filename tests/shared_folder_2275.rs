@@ -76,6 +76,14 @@ fn shared_folder(fixture: Fixture) -> Fixture {
     }
     f
 }
+/// The sync pass's JSON report sits among its log lines: take the object span.
+fn sync_report(out: &std::process::Output) -> Value {
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    match (stdout.find('{'), stdout.rfind('}')) {
+        (Some(a), Some(b)) if a <= b => serde_json::from_str(&stdout[a..=b]).unwrap_or(Value::Null),
+        _ => Value::Null,
+    }
+}
 fn decrypt_name(key: &FileKey, encrypted: &str) -> String {
     beebeeb_core::encrypt::decrypt_name_metadata_with_key(key, encrypted)
         .unwrap()
@@ -125,20 +133,34 @@ async fn a2_owner_id_with_real_name_reads_without_adoption() {
     h.close().await;
 }
 
-/// A3: an O item carrying an L8 owner envelope is ignored: the derived key wins,
-/// so the item still reads, and nothing is adopted.
+/// A3 (P2-9): an O item carrying a WELL-FORMED historical L8 owner envelope —
+/// one that really opens under its key, with the name sealed under that same
+/// key — is ignored: the id class decides, the derived key wins, the name does
+/// not authenticate under it, and nothing is adopted. If the envelope were
+/// used the item would read "a3.txt", so this test can fail.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a3_owner_id_l8_envelope_is_ignored() {
     let mut f = Fixture::default();
-    let derived = beebeeb_core::kdf::derive_file_key(&master(), O_FILE.as_bytes());
     let mut r = row(O_FILE, None, "a3.txt", RowFacts { ..Default::default() });
-    r["owner_wrapped_file_key"] = json!(B64.encode(
-        beebeeb_core::encrypt::encrypt_chunk_raw(&derived, item_key().as_bytes()).unwrap()
-    ));
+    r["name_encrypted"] = json!(name(&item_key(), "a3.txt"));
+    r["owner_wrapped_file_key"] = json!(l8_envelope(O_FILE, &item_key()));
     f.rows.push(r);
     let h = Harness::new(shared_folder(f)).await;
     let v = h.json(&["ls"]).await;
-    assert_eq!(v["files"][0]["name"], "a3.txt");
+    // The envelope's key really would open this name: the test can fail.
+    let sealed = {
+        let state = h.state.lock().unwrap();
+        state.rows.iter().find(|r| r["id"] == O_FILE).unwrap()["name_encrypted"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(decrypt_name(&item_key(), &sealed), "a3.txt");
+    assert_eq!(
+        v["files"][0]["name"],
+        "can't open (added via shared folder)",
+        "the L8 envelope must not open an O item: {v}"
+    );
     assert_eq!(owner_key_posts(&h, O_FILE), 0);
     h.close().await;
 }
@@ -277,7 +299,8 @@ async fn a10_index_skips_listed_item_without_wrap() {
     f.inventory.clear();
     let h = Harness::new(f).await;
     let d = dir(&h);
-    ok(sync(&h, &d).await);
+    let out = sync(&h, &d).await;
+    assert_eq!(sync_report(&out)["index_skip_reasons"]["no_wrap"], 1, "reason");
     assert!(h.state.lock().unwrap().shared_index.is_empty());
     h.close().await;
 }
@@ -299,7 +322,11 @@ async fn a11_index_skips_wrap_of_another_items_key() {
     ));
     let h = Harness::new(f).await;
     let d = dir(&h);
-    ok(sync(&h, &d).await);
+    let out = sync(&h, &d).await;
+    assert_eq!(
+        sync_report(&out)["index_skip_reasons"]["wrap_key_mismatch"], 1,
+        "the wrap names another key"
+    );
     assert!(h.state.lock().unwrap().shared_index.is_empty());
     h.close().await;
 }
@@ -366,7 +393,11 @@ async fn a12_index_does_not_descend_into_unproven_folder() {
     f.inventory = vec![json!({"file_id":FILE,"encrypted_file_key":wrap(FILE,false)})];
     let h = Harness::new(f).await;
     let d = dir(&h);
-    ok(sync(&h, &d).await);
+    let out = sync(&h, &d).await;
+    assert_eq!(
+        sync_report(&out)["index_skip_reasons"]["no_wrap"], 1,
+        "the unproven folder itself is skipped with its reason"
+    );
     assert!(h.state.lock().unwrap().shared_index.is_empty());
     h.close().await;
 }
@@ -375,7 +406,9 @@ async fn a12_index_does_not_descend_into_unproven_folder() {
 /// CLI says the item is owner-only.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a14b_upload_into_shared_folder_prints_owner_only() {
+    const HOST: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     let mut f = Fixture::basic();
+    f.rows.push(row(HOST, None, "host.txt", RowFacts::default()));
     f.review_complete_requested_id = true;
     let h = Harness::new(f).await;
     let path = h.home.join("note.txt");
@@ -388,6 +421,24 @@ async fn a14b_upload_into_shared_folder_prints_owner_only() {
     assert!(
         stdout.contains("Only you can open this. Share it from the web or the app."),
         "missing the owner-only sentence: {stdout}"
+    );
+    // mkdir into the shared root says the same sentence.
+    let out = h.run_plain(&["mkdir", "/Shared/only-mine"]).await;
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .contains("Only you can open this. Share it from the web or the app."),
+        "mkdir lacks the owner-only sentence: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    // and so does a move into it.
+    let out = h.run_plain(&["mv", "/host.txt", "/Shared"]).await;
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .contains("Only you can open this. Share it from the web or the app."),
+        "mv lacks the owner-only sentence: {}",
+        String::from_utf8_lossy(&out.stdout)
     );
     assert_eq!(h.count("POST", "/owner-key"), 0);
     h.close().await;
@@ -414,14 +465,30 @@ async fn a15_remote_move_into_shared_root_publishes_nothing() {
 async fn a19_move_out_adopts_foreign_descendants_or_refuses() {
     const NESTED_FILE: &str = "99999999-9999-8999-9999-999999999999";
     let mut f = Fixture::basic();
+    f.rows[1]["parent_id"] = json!(F_SUB);
     f.rows.push(row(F_SUB, Some(ROOT), "Nested", RowFacts { folder: true, foreign: true }));
     f.rows.push(row(NESTED_FILE, Some(F_SUB), "inner.txt", RowFacts { foreign: true, ..Default::default() }));
     f.inventory.push(json!({"file_id":F_SUB,"encrypted_file_key":wrap(F_SUB,true)}));
     f.inventory.push(json!({"file_id":NESTED_FILE,"encrypted_file_key":wrap(NESTED_FILE,false)}));
+    // A real move OUT of the shared root, to a folder at the vault root.
+    const DEST: &str = "66666666-6666-4666-8666-666666666666";
+    f.rows.push(row(DEST, None, "Dest", RowFacts { folder: true, ..Default::default() }));
     let h = Harness::new(f).await;
-    ok(h.run(&["mv", "Shared/Nested", "Shared/Nested2"]).await);
+    let out = h.run(&["mv", "Shared/Nested", "Dest/Nested"]).await;
+    let trace: Vec<String> = h.state.lock().unwrap().requests.iter().map(|(m,p,_)| format!("{m} {p}")).collect();
+    assert!(out.status.success(), "{} / {trace:?}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(owner_key_posts(&h, F_SUB), 1);
     assert_eq!(owner_key_posts(&h, FILE), 1);
+    let patched = h
+        .state
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .find(|(m, p, _)| m == "PATCH" && p == &format!("/api/v1/files/{F_SUB}"))
+        .map(|(_, _, b)| serde_json::from_slice::<Value>(b).unwrap())
+        .expect("the folder is moved out");
+    assert_eq!(patched["parent_id"], json!(DEST), "moved out of the shared root");
     h.close().await;
 
     let mut f = Fixture::basic();
@@ -576,5 +643,43 @@ async fn a19_bulk_move_out_of_a_shared_root_adopts_each_source_first() {
         let body: Value = serde_json::from_slice(&patch.2).unwrap();
         assert_eq!(body["parent_id"], json!(DEST), "moved into the destination: {body}");
     }
+    h.close().await;
+}
+
+/// A1–A3 through the SYNC path (P2-9): the three O-item shapes (a member-made
+/// wrap, a real derived name, and a well-formed historical L8 envelope) are
+/// listed by a sync pass too, and none of them posts a child wrap. `bb ls` alone
+/// never exercised the index walk.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a1_to_a3_through_sync_post_no_child_wrap() {
+    const A2: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const A3: &str = "77777777-7777-4777-8777-777777777777";
+    let mut f = Fixture::default();
+    // A1: an O item listed foreign, name under K', member-made wrap of K'.
+    f.rows.push(row(O_FILE, Some(ROOT), "a1.txt", RowFacts { foreign: true, ..Default::default() }));
+    f.inventory
+        .push(json!({"file_id":O_FILE,"encrypted_file_key":wrap(O_FILE,false)}));
+    // A2: an O item whose name really is under its derived key.
+    let mut a2 = row(A2, Some(ROOT), "a2.txt", RowFacts::default());
+    a2["acted_via_share_id"] = json!(BAD);
+    f.rows.push(a2);
+    f.inventory
+        .push(json!({"file_id":A2,"encrypted_file_key":wrap(A2,false)}));
+    // A3: an O item carrying a well-formed historical L8 envelope.
+    let mut a3 = row(A3, Some(ROOT), "a3.txt", RowFacts::default());
+    a3["name_encrypted"] = json!(name(&item_key(), "a3.txt"));
+    a3["owner_wrapped_file_key"] = json!(l8_envelope(A3, &item_key()));
+    f.rows.push(a3);
+    f.inventory
+        .push(json!({"file_id":A3,"encrypted_file_key":wrap(A3,false)}));
+    let h = Harness::new(shared_folder(f)).await;
+    let d = dir(&h);
+    let out = sync(&h, &d).await;
+    assert!(
+        Path::new(&d).exists(),
+        "the sync pass ran: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(h.count("POST", "/owner-key"), 0, "no O item is ever adopted");
     h.close().await;
 }
