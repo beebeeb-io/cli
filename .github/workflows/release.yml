@@ -108,6 +108,12 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/check-release-notes.sh "${TAG#v}"
+      - name: Refuse a release before task 2275 T4 lands
+        if: ${{ !github.event.pull_request && steps.existing.outputs.skip != 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/check-2275-owner-items.sh
       - name: Install dist
         shell: bash
         # W3: replaced curl|sh with `cargo install` from crates.io. The crates.io
