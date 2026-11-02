@@ -140,7 +140,7 @@ pub(super) async fn get_response(state: &Arc<DavState>, path: &str, req_headers:
     // Download encrypted bytes
     let encrypted_bytes = match state.api.download_file(&file_id).await {
         Ok(b) => b,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.message).into_response(),
     };
 
     // Decrypt all chunks using the shared helper that handles both
@@ -373,7 +373,7 @@ pub(super) async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8
         .await
     {
         Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.message).into_response(),
     };
 
     // L13 (SF-0001): the init must echo the id this client chose (a fresh one
@@ -390,7 +390,7 @@ pub(super) async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8
 
     for (idx, data) in encrypted_chunks {
         if let Err(e) = state.api.upload_chunk(&session_id, idx, bytes::Bytes::from(data)).await {
-            return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.message).into_response();
         }
     }
 
@@ -406,7 +406,7 @@ pub(super) async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8
             headers.insert("Location", path.parse().unwrap_or_else(|_| "/".parse().unwrap()));
             (StatusCode::CREATED, headers, "").into_response()
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.message).into_response(),
     }
 }
 
@@ -487,7 +487,7 @@ pub(super) async fn delete_response(state: &Arc<DavState>, path: &str, if_match:
 
     match state.api.trash_file(&file_id).await {
         Ok(_) => (StatusCode::NO_CONTENT, "").into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.message).into_response(),
     }
 }
 
@@ -602,7 +602,7 @@ pub(super) async fn move_response(state: &Arc<DavState>, src_path: &str, destina
             invalidate_cache(state, &normalise_cache_key(dst_parent_path)).await;
             (StatusCode::CREATED, "").into_response()
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.message).into_response(),
     }
 }
 

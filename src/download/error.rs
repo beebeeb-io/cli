@@ -28,6 +28,12 @@ impl From<String> for DownloadError {
     }
 }
 
+impl From<crate::api::ApiError> for DownloadError {
+    fn from(e: crate::api::ApiError) -> Self {
+        Self::Other(e.into())
+    }
+}
+
 impl From<DownloadError> for String {
     fn from(e: DownloadError) -> String {
         e.to_string()

@@ -26,6 +26,12 @@ impl From<&str> for PullFailure {
     }
 }
 
+impl From<crate::api::ApiError> for PullFailure {
+    fn from(e: crate::api::ApiError) -> Self {
+        Self::Other(e.into())
+    }
+}
+
 impl From<crate::download::DownloadError> for PullFailure {
     fn from(e: crate::download::DownloadError) -> Self {
         match e {

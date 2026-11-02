@@ -71,7 +71,7 @@ async fn move_bulk(
     for (input, id) in resolved_srcs {
         match api.move_file(&id, None, Some(dst_id)).await {
             Ok(_) => ok += 1,
-            Err(e) => failures.push((input, e)),
+            Err(e) => failures.push((input, e.to_string())),
         }
     }
 

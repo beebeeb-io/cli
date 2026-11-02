@@ -131,7 +131,7 @@ pub async fn run(
     {
         // A client-minted token collided with an existing one (≈ never at 160
         // random bits): the server answers 409 — mint a fresh token once.
-        Err(e) if e.contains("share token already exists") => {
+        Err(e) if e.message.contains("share token already exists") => {
             material = build_share_material(
                 &master_key,
                 &file_uuid,

@@ -131,6 +131,10 @@ pub async fn show() -> Result<(), String> {
     // stable code elsewhere; see `commands::sessions`/`commands::passkey`).
     // This display-only payload wants the same plain string every other arm
     // here already carries.
+    let me = me.map_err(String::from);
+    let sub = sub.map_err(String::from);
+    let region = region.map_err(String::from);
+    let score = score.map_err(String::from);
     let sessions = sessions.map_err(String::from);
     let passkeys = passkeys.map_err(String::from);
 
@@ -313,7 +317,7 @@ pub async fn update_email(new_email: String) -> Result<(), String> {
                 .await
             {
                 Ok(_) => print_email_change_success("legacy", &new_email),
-                Err(e) => Err(map_email_change_error(e)),
+                Err(e) => Err(map_email_change_error(e.to_string())),
             }
         }
     }

@@ -289,7 +289,7 @@ pub async fn run(
             Ok(v) => Some(v),
             // A 401 means the server no longer accepts our session: stop now with
             // a distinct exit code so the service manager does not restart us.
-            Err(e) if e == crate::api::SESSION_EXPIRED_MESSAGE => return Err(crate::exit::sync_error(e)),
+            Err(e) if e.message == crate::api::SESSION_EXPIRED_MESSAGE => return Err(crate::exit::sync_error(e.to_string())),
             Err(_) => None,
         }
     };

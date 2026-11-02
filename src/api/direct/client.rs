@@ -228,7 +228,7 @@ impl ApiClient {
     ) -> Result<Vec<u8>, PinnedFailure> {
         let token = self
             .require_auth()
-            .map_err(|m| PinnedFailure::Final(ChunkApiError::Terminal(m)))?;
+            .map_err(|m| PinnedFailure::Final(ChunkApiError::Terminal(m.to_string())))?;
         let sending = self
             .client
             .get(self.url(&format!("/api/v1/files/{file_id}/chunks/{index}")))
