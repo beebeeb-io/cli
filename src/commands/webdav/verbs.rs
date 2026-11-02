@@ -312,7 +312,7 @@ pub(super) async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8
     // this client cannot resolve is never overwritten under a guessed key.
     let (file_key, name_pin) = match existing.as_ref().and_then(|e| e.write_target.clone()) {
         Some(target) => (
-            beebeeb_core::kdf::FileKey::from_bytes(*target.key().as_bytes()),
+            crate::crypto::key_copy(target.key()),
             target.pin(),
         ),
         None => {

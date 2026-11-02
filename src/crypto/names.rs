@@ -9,6 +9,14 @@ pub const OWNER_REPAIR_READ_ONLY: &str =
 #[cfg(test)]
 pub use beebeeb_core::encrypt::decrypt_name_with_key;
 
+/// Is this row's stored name a plaintext value rather than an envelope?
+/// (P2-10: such a name proves nothing about the row's key.)
+pub fn name_is_plaintext(canonical: &serde_json::Value) -> bool {
+    canonical["name_encrypted"]
+        .as_str()
+        .is_some_and(|enc| !enc.starts_with('{'))
+}
+
 /// Decrypt a `name_encrypted` value from the API.
 ///
 /// Returns `Some(name)` on success, `None` only if the value looks encrypted

@@ -28,12 +28,6 @@ pub const CUSTODY_UNAVAILABLE: &str = "This folder's keys are unavailable";
 /// It stays readable, but every surface refuses to change it with this sentence
 /// (not the SF-0002 iOS-repair one, which is about a different convention).
 pub const PLAINTEXT_NAME_READ_ONLY: &str = "This file's name isn't encrypted, so this device can't verify or change it. You can still open and download it; to change it, save a copy with the web or mobile app.";
-/// Is this row's stored name a plaintext value rather than an envelope?
-pub fn name_is_plaintext(canonical: &Value) -> bool {
-    canonical["name_encrypted"]
-        .as_str()
-        .is_some_and(|enc| !enc.starts_with('{'))
-}
 /// A request row whose name is not an encrypted envelope: nothing can
 /// authenticate it, so it is refused rather than guessed (2275 review P2-8).
 pub const REQUEST_NAME_NOT_ENCRYPTED: &str =
@@ -150,7 +144,7 @@ impl OwnedKeyResolver {
     }
     /// P2-10: `id`'s stored name is plaintext, not an envelope.
     pub fn name_is_plaintext_for(&self, id: &str) -> bool {
-        self.resolved.get(id).is_some_and(|r| name_is_plaintext(&r.canonical))
+        self.resolved.get(id).is_some_and(|r| crate::crypto::name_is_plaintext(&r.canonical))
     }
     /// The key origin `id` resolved to in this resolver, if it was resolved here.
     pub fn origin_for(&self, id: &str) -> Option<KeyOrigin> {
@@ -334,15 +328,22 @@ impl OwnedKeyResolver {
                 .as_mut()
                 .and_then(|r| r.row_keys(master, &canonical))
                 .ok_or("can't open request upload")?;
-            let name_key = FileKey::from_bytes(*keys.name_key.as_bytes());
+            // Move core's keys into the resolution: no by-value byte copy.
+            // Move core's keys into the resolution: no by-value byte copy.
+            let beebeeb_core::owned_keys::RequestRowKeys {
+                content_key,
+                name_key,
+                name,
+                ..
+            } = keys;
             return Ok(ResolvedCliKey {
-                key: Arc::new(keys.content_key),
+                key: Arc::new(content_key),
                 name_key: Some(Arc::new(name_key)),
                 origin: KeyOrigin::RequestContent,
                 canonical,
                 pending_owner_wrap: None,
                 shared_root_id: None,
-                name: keys.name.name,
+                name: name.name,
                 read_only: false,
                 write_target: None,
             });

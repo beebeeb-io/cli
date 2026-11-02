@@ -117,3 +117,39 @@ pub(crate) fn key_copy(file_key: &FileKey) -> FileKey {
     let bytes = zeroize::Zeroizing::new(*file_key.as_bytes());
     FileKey::from_bytes(*bytes)
 }
+
+#[cfg(test)]
+mod key_copy_tests {
+    use super::*;
+
+    /// P2-12: the named write sites pass a key by reference through key_copy,
+    /// which wipes the bytes it passes by value. A bare
+    /// FileKey::from_bytes(*k.as_bytes()) leaves an unwiped stack copy of a
+    /// file key, so the sources are checked for it.
+    #[test]
+    fn the_named_write_sites_hold_no_unwiped_stack_copy() {
+        for (name, src) in [
+            ("commands/mv.rs", include_str!("../commands/mv.rs")),
+            ("commands/webdav/verbs.rs", include_str!("../commands/webdav/verbs.rs")),
+            ("owned_keys.rs", include_str!("../owned_keys.rs")),
+        ] {
+            for banned in [
+                "FileKey::from_bytes(*target.key().as_bytes())",
+                "FileKey::from_bytes(*keys.name_key.as_bytes())",
+                "FileKey::from_bytes(*src.key().as_bytes())",
+            ] {
+                assert!(!src.contains(banned), "{name} keeps an unwiped copy: {banned}");
+            }
+        }
+    }
+
+    /// Copying keeps the source: a wipe-in-place would break every caller that
+    /// still needs the key it copied.
+    #[test]
+    fn key_copy_leaves_the_source_key_intact() {
+        let source = FileKey::from_bytes([9u8; 32]);
+        let copy = key_copy(&source);
+        assert_eq!(copy.as_bytes(), source.as_bytes());
+        assert_eq!(source.as_bytes(), &[9u8; 32]);
+    }
+}

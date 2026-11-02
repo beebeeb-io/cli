@@ -855,6 +855,7 @@ pub use names::decrypt_name_with_convention;
 pub use names::decrypt_name_with_key;
 #[cfg(test)]
 use names::decrypt_names;
+pub use names::name_is_plaintext;
 pub use names::name_is_upper_repair;
 use pins::NONCE_LEN;
 use pins::TAG_LEN;

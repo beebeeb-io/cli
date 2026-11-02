@@ -385,7 +385,7 @@ pub(super) async fn replace_decision<'a>(
     };
     // P2-10: a plaintext name is not the SF-0002 repair convention, and the
     // sentence must say what is actually wrong.
-    if r.read_only && crate::owned_keys::name_is_plaintext(&r.canonical) {
+    if r.read_only && crate::crypto::name_is_plaintext(&r.canonical) {
         return Replace::Skip(crate::owned_keys::PLAINTEXT_NAME_READ_ONLY);
     }
     let target = WriteTarget {
