@@ -751,6 +751,17 @@ async fn push_directory(
         );
     }
 
+
+    // L15 = A (P2-11): a directory push into a shared folder says the owner-only
+    // sentence ONCE for the command (the per-file line is suppressed here).
+    if uploaded_count > 0 && !ui::is_json() {
+        // The folder the batch landed IN decides; when the push is the folder
+        // itself, its parent is the shared one.
+        let target = parent_uuid
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| root_id.to_string());
+        crate::owned_keys::announce_owner_only(api, &master_key, Some(&target)).await;
+    }
     if !failures.is_empty() {
         let names: Vec<&str> = failures.iter().map(|(path, _)| path.as_str()).collect();
         return Err(format!(

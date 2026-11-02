@@ -86,6 +86,14 @@ async fn move_bulk(
 
     path::invalidate_cache();
 
+
+    // L15 = A (P2-11): one notice for the command when anything landed in a
+    // shared folder (the user may move many sources in one go).
+    if ok > 0 && !ui::is_json() {
+        if let Some(dst) = dst_id {
+            crate::owned_keys::announce_owner_only(api, master_key, Some(&dst.to_string())).await;
+        }
+    }
     if ui::is_json() {
         let json = serde_json::json!({
             "ok": failures.is_empty(),

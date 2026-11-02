@@ -683,3 +683,47 @@ async fn a1_to_a3_through_sync_post_no_child_wrap() {
     assert_eq!(h.count("POST", "/owner-key"), 0, "no O item is ever adopted");
     h.close().await;
 }
+
+/// P2-11 (L15 = A): the owner-only sentence is printed ONCE per command for a
+/// write into a shared root — bulk `bb mv` and a directory `bb push` included,
+/// where the per-file notice is suppressed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_owner_only_notice_is_printed_once_per_command() {
+    const NOTICE: &str = "Only you can open this. Share it from the web or the app.";
+    const A: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const B: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    let mut f = Fixture::basic();
+    f.review_complete_requested_id = true;
+    f.rows.push(row(A, None, "one.txt", RowFacts::default()));
+    f.rows.push(row(B, None, "two.txt", RowFacts::default()));
+    let h = Harness::new(f).await;
+
+    // Bulk move of two items into the shared root: one sentence, not two.
+    let out = h.run_plain(&["mv", "/one.txt", "/two.txt", "/Shared"]).await;
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).matches(NOTICE).count(),
+        1,
+        "one notice for the command: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // A directory push into the shared folder: one sentence for the batch.
+    let dir = h.home.join("batch");
+    std::fs::create_dir(&dir).unwrap();
+    for name in ["x.txt", "y.txt"] {
+        std::fs::write(dir.join(name), b"owner only").unwrap();
+    }
+    let out = h
+        .run_plain(&["push", dir.to_str().unwrap(), "--folder", ROOT])
+        .await;
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).matches(NOTICE).count(),
+        1,
+        "one notice for the batch: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(h.count("POST", "/owner-key"), 0);
+    h.close().await;
+}

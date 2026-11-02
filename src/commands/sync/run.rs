@@ -1012,6 +1012,13 @@ pub async fn run(
 
     let elapsed = sync_start.elapsed();
 
+    // L15 = A (P2-11): ONE notice per pass for a write into a shared root. The
+    // root the sync writes into is the only destination, so asking it once is
+    // enough; a non-shared root prints nothing.
+    if !dry_run && up_count > 0 && !ui::is_json() {
+        crate::owned_keys::announce_owner_only(&api, &master_key, Some(&remote_folder_id.to_string())).await;
+    }
+
     report_pass(PassReport {
         uploaded: up_count,
         downloaded: down_count,

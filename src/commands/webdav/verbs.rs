@@ -421,6 +421,8 @@ pub(super) async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8
                 let _ = state.api.upload_abandon(&file_uuid.to_string()).await;
                 return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
             }
+            // L15 = A (P2-11): a write into a shared folder stays owner-only.
+            crate::owned_keys::announce_owner_only(&state.api, &state.master_key, parent_id.as_deref()).await;
             let mut headers = HeaderMap::new();
             headers.insert("Location", path.parse().unwrap_or_else(|_| "/".parse().unwrap()));
             (StatusCode::CREATED, headers, "").into_response()
@@ -471,6 +473,7 @@ pub(super) async fn mkcol_response(state: &Arc<DavState>, path: &str) -> Respons
     match crate::item_id::create_owned_folder(&state.api, &state.master_key, &folder_name, parent_id).await {
         Ok(_) => {
             invalidate_cache(state, &normalise_cache_key(parent_path)).await;
+            crate::owned_keys::announce_owner_only(&state.api, &state.master_key, parent_id.map(|p| p.to_string()).as_deref()).await;
             let mut headers = HeaderMap::new();
             headers.insert("Location", path.parse().unwrap_or_else(|_| "/".parse().unwrap()));
             (StatusCode::CREATED, headers, "").into_response()
@@ -641,6 +644,8 @@ pub(super) async fn move_response(state: &Arc<DavState>, src_path: &str, destina
             // Invalidate both source and destination parent directories
             invalidate_cache(state, &normalise_cache_key(src_parent_path)).await;
             invalidate_cache(state, &normalise_cache_key(dst_parent_path)).await;
+            let moved_into = patch_parent.clone().flatten().map(|p| p.to_string());
+            crate::owned_keys::announce_owner_only(&state.api, &state.master_key, moved_into.as_deref()).await;
             (StatusCode::CREATED, "").into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.message).into_response(),

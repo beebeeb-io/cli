@@ -598,6 +598,13 @@ impl BeebeebFsState {
             }
         };
 
+        // L15 = A (P2-11): a folder created in a shared folder stays owner-only.
+        self.rt.block_on(crate::owned_keys::announce_owner_only(
+            &self.api,
+            &self.master_key,
+            parent_file_id.map(|p| p.to_string()).as_deref(),
+        ));
+
         // L13 (SF-0001): only the id this client minted; a different echo
         // aborts before the folder is listed or used as a parent.
         let server_id = match super::super::folder_create_reply(&resp, folder_uuid) {
@@ -980,6 +987,14 @@ impl BeebeebFsState {
             eprintln!("[mount] rename move_file: {e}");
             return Err(Errno::EIO);
         }
+
+        // L15 = A (P2-11): a rename into a shared folder stays owner-only.
+        let dest = new_parent_file_id
+            .flatten()
+            .map(|p| p.to_string())
+            .or_else(|| self.inodes.get(&newparent).and_then(|e| e.file_id.clone()));
+        self.rt
+            .block_on(crate::owned_keys::announce_owner_only(&self.api, &self.master_key, dest.as_deref()));
 
         if let Some(conflict_ino) = replaced {
             if let Some(cid) = self.inodes.get(&conflict_ino).and_then(|e| e.file_id.clone()) {
