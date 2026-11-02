@@ -279,7 +279,7 @@ impl OwnedKeyResolver {
         id: &str,
         kind: owned_keys::ItemKind,
     ) -> Result<ResolvedCliKey, String> {
-        let enc = text(&canonical, "name_encrypted")?;
+        let enc = text(&canonical, "name_encrypted")?.to_string();
         // L12 §4 (2236): a request row is content-under-`C`, name derived first.
         // It is never adopted, wrapped at share time or published, and its
         // content is read-only.
@@ -305,7 +305,24 @@ impl OwnedKeyResolver {
                 write_target: None,
             });
         }
-        let resolved = owned_keys::resolve_owned_key(master, id, kind, None, None, enc, None)
+        // L12: a plaintext name authenticates nothing, so core identifies such
+        // a file by its first content chunk, which a listing does not carry.
+        // The row is still shown under the name the server sent, but nothing
+        // about it is proven: it is read-only and gets no seal target.
+        if kind == owned_keys::ItemKind::File && !enc.starts_with('{') {
+            return Ok(ResolvedCliKey {
+                key: Arc::new(beebeeb_core::kdf::derive_file_key(master, id.as_bytes())),
+                name_key: None,
+                origin: KeyOrigin::Derived,
+                canonical,
+                pending_owner_wrap: None,
+                shared_root_id: None,
+                name: enc.to_string(),
+                read_only: true,
+                write_target: None,
+            });
+        }
+        let resolved = owned_keys::resolve_owned_key(master, id, kind, None, None, &enc, None)
             .map_err(|_| "can't decrypt item name".to_string())?;
         let read_only = resolved.write_target.is_none();
         Ok(ResolvedCliKey {

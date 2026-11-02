@@ -89,7 +89,28 @@ pub(super) fn decode_file_entry(
         None,
     )
     .ok();
+    // L12: a plaintext name proves nothing; core identifies such a file by its
+    // first content chunk, which a listing does not carry. Keep the name the
+    // server sent, but mark the row read-only and give it no seal target.
+    let plaintext_owner_file = resolved.is_none()
+        && kind == ItemKind::File
+        && !name_encrypted.starts_with('{')
+        && matches!(
+            beebeeb_core::item_id::item_class(&file_id),
+            Ok(beebeeb_core::item_id::ItemClass::Owner)
+        );
     let (display_name, read_only, key, write_target, origin, pin) = match resolved {
+        None if plaintext_owner_file => (
+            name_encrypted.to_string(),
+            true,
+            Some(std::sync::Arc::new(beebeeb_core::kdf::derive_file_key(
+                master_key,
+                file_id.as_bytes(),
+            ))),
+            None,
+            KeyOrigin::Derived,
+            Ok(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded),
+        ),
         Some(r) => {
             let name = match &r.name {
                 ResolvedName::Encrypted(meta) => meta.name.clone(),
