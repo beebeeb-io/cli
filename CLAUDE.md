@@ -13,6 +13,7 @@ cargo test 2>&1 | tee /tmp/bb-cli-test.log
 cargo clippy -- -D warnings; echo exit=$?
 cargo fmt -- --check; echo exit=$?
 make check-onboarding-contract         # from the workspace root; drift guard: contracts/onboarding/ vs repos/server/contracts/onboarding/
+make test-quiet REPO=cli               # cargo test --locked: one PASS line per binary + log path; check-quiet (clippy -D warnings) and build-quiet (release) likewise
 ```
 
 Truth lines: per test binary `test result: ok. N passed; 0 failed`; clippy and fmt assert the exit code. A CLI task is verified by running
