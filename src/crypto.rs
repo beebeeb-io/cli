@@ -37,7 +37,6 @@
 //! key (core's string-UUID derivation), raw frames, no JSON parser and no v1
 //! fallback. The legacy combinations above apply only to `Unrecorded` files.
 
-use base64::Engine as _;
 use beebeeb_core::chunk_stream::{ChunkDecryptor, ChunkFormat, ExpectedChunkFormat, open_chunk};
 use beebeeb_core::kdf::FileKey;
 use beebeeb_types::EncryptedBlob;
