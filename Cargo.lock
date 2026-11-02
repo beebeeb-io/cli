@@ -27,6 +27,7 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures 0.2.17",
+ "zeroize",
 ]
 
 [[package]]
@@ -41,6 +42,7 @@ dependencies = [
  "ctr",
  "ghash",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -318,8 +320,9 @@ dependencies = [
 [[package]]
 name = "beebeeb-core"
 version = "0.1.0"
-source = "git+https://github.com/beebeeb-io/core?rev=d9a70885f6306fc5b4da0163a7690ed4200eff1f#d9a70885f6306fc5b4da0163a7690ed4200eff1f"
+source = "git+https://github.com/beebeeb-io/core?rev=3d2fd6d1f49bd5965211ecb2a522533e3a0a9955#3d2fd6d1f49bd5965211ecb2a522533e3a0a9955"
 dependencies = [
+ "aes",
  "aes-gcm",
  "argon2",
  "base64",
@@ -329,6 +332,7 @@ dependencies = [
  "chrono",
  "flate2",
  "hkdf",
+ "hmac",
  "image",
  "opaque-ke",
  "p256",
@@ -353,7 +357,7 @@ dependencies = [
 [[package]]
 name = "beebeeb-types"
 version = "0.1.0"
-source = "git+https://github.com/beebeeb-io/core?rev=d9a70885f6306fc5b4da0163a7690ed4200eff1f#d9a70885f6306fc5b4da0163a7690ed4200eff1f"
+source = "git+https://github.com/beebeeb-io/core?rev=3d2fd6d1f49bd5965211ecb2a522533e3a0a9955#3d2fd6d1f49bd5965211ecb2a522533e3a0a9955"
 dependencies = [
  "serde",
 ]
@@ -369,6 +373,7 @@ dependencies = [
  "rand_core 0.6.4",
  "serde",
  "unicode-normalization",
+ "zeroize",
 ]
 
 [[package]]
