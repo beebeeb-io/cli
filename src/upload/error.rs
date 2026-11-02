@@ -31,13 +31,19 @@ impl std::fmt::Display for UploadError {
 
 impl From<String> for UploadError {
     fn from(message: String) -> Self {
-        Self::Other(message)
+        // The one string sentinel is the shutdown flag reaching the typed
+        // boundary: everything else is a message.
+        if message == super::INTERRUPTED {
+            Self::Interrupted
+        } else {
+            Self::Other(message)
+        }
     }
 }
 
 impl From<&str> for UploadError {
     fn from(message: &str) -> Self {
-        Self::Other(message.to_string())
+        Self::from(message.to_string())
     }
 }
 
@@ -64,5 +70,10 @@ mod tests {
         assert!(UploadError::Interrupted.is_interrupted());
         assert!(!UploadError::Other("boom".into()).is_interrupted());
         assert_eq!(String::from(UploadError::Other("x".into())), "x");
+        assert_eq!(UploadError::from(super::super::INTERRUPTED), UploadError::Interrupted);
+        assert_eq!(
+            UploadError::from(UploadError::Interrupted.to_string()),
+            UploadError::Interrupted
+        );
     }
 }
