@@ -75,12 +75,27 @@ async fn run_with_target(args: &[&str], target_id: Value, success: bool) -> Vec<
         )
         .route(
             "/api/v1/files/:id",
-            patch(
+            // A19: the move checks the source's ancestry before it moves, so the
+            // row itself is readable (nothing here is inside a shared folder).
+            get(|Path(id): Path<String>| async move {
+                let parent = if id == SOURCE {
+                    Value::Null
+                } else {
+                    json!(SOURCE)
+                };
+                Json(json!({"id": id, "parent_id": parent, "is_folder": true}))
+            })
+            .patch(
                 |State(c): State<Calls>, Path(id): Path<String>, Json(body): Json<Value>| async move {
                     c.lock().unwrap().push((id, body));
                     Json(json!({"ok": true}))
                 },
             ),
+        )
+        // No approved legacy invites: the ancestry walk ends at the vault root.
+        .route(
+            "/api/v1/shares/invites/sent",
+            get(|| async { Json(json!({"invites": []})) }),
         )
         .with_state(calls.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
