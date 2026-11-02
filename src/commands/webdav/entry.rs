@@ -129,15 +129,19 @@ pub(super) fn decode_file_entry(
                     format!("file {file_id} carries no content pin under its plaintext name; refusing to guess")
                 })),
         ),
-        Some(_) if is_request_row => {
-            let key = std::sync::Arc::new(beebeeb_core::kdf::derive_file_key(master_key, file_id.as_bytes()));
-            let name = beebeeb_core::encrypt::decrypt_name_metadata_with_key(&key, name_encrypted)
-                .map(|m| m.name)
-                .unwrap_or_else(|_| format!("[{}]", &file_id[..8.min(file_id.len())]));
+        Some(r) if is_request_row => {
+            // N3: use the key core resolved for this row - the one that actually
+            // authenticated the name (A27: a legacy row may be sealed under the
+            // binary convention). Re-deriving the string convention here would
+            // lose a renamed request row's real name.
+            let name = match &r.name {
+                ResolvedName::Encrypted(meta) => meta.name.clone(),
+                ResolvedName::Plaintext(text) => text.clone(),
+            };
             (
                 name,
                 false,
-                Some(key),
+                Some(std::sync::Arc::new(r.key)),
                 None,
                 KeyOrigin::RequestContent,
                 Err("a request row's content opens only under its request key".to_string()),

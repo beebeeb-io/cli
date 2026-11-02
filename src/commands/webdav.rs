@@ -396,6 +396,29 @@ mod sf_0002_write_check_tests {
         m.server.abort();
     }
 
+    /// N3 (P3): a request row whose name was sealed under the legacy BINARY
+    /// convention lists by its real name. Re-deriving the string convention
+    /// would lose it and show `[xxxxxxxx]`.
+    #[tokio::test]
+    async fn a_request_row_named_under_the_binary_convention_lists_its_real_name() {
+        use beebeeb_core::chunk_stream::ExpectedChunkFormat;
+        const REQUEST: &str = "33333333-3333-4333-8333-333333333333";
+        let binary = beebeeb_core::kdf::derive_file_key(&master(), Uuid::parse_str(REQUEST).unwrap().as_bytes());
+        let sealed =
+            beebeeb_core::encrypt::encrypt_name_for(&binary, "renamed.txt", None, ExpectedChunkFormat::Unrecorded)
+                .unwrap();
+        let row = json!({"id": REQUEST, "parent_id": null, "name_encrypted": sealed, "is_folder": false,
+               "size_bytes": 12, "chunk_count": 1, "updated_at": "2026-10-31T10:00:00Z",
+               "file_request_id": REQUEST, "sender_ephemeral_pubkey": "AA", "wrapped_content_key": "AA"});
+        let entry = decode_file_entry(&row, &master(), "").expect("the row decodes");
+        assert_eq!(entry.display_name, "renamed.txt");
+        let key = entry.key.expect("core resolved the name key");
+        assert_eq!(
+            beebeeb_core::encrypt::decrypt_name_metadata_with_key(&key, &sealed).unwrap().name,
+            "renamed.txt"
+        );
+    }
+
     /// N1 (P2): a v2-pinned file whose name envelope the server swapped for
     /// plain text carries no readable pin. Reading it as `Unrecorded` would let
     /// the server re-enable frame-0 detection for a v2 file (core round 3,
