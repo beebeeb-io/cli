@@ -181,7 +181,12 @@ impl ApiClient {
     /// upload simply re-PUTs every chunk and the server short-circuits the ones
     /// it already has. `data` is `Bytes` so each retry reuses the same allocation
     /// (a clone is just an `Arc` refcount bump).
-    pub async fn upload_chunk(&self, upload_session_id: &str, index: u32, data: Bytes) -> Result<Value, ApiError> {
+    pub async fn upload_chunk(
+        &self,
+        upload_session_id: impl Into<DirectUploadId>,
+        index: u32,
+        data: Bytes,
+    ) -> Result<Value, ApiError> {
         self.upload_chunk_typed(upload_session_id, index, data).await
     }
 
@@ -191,10 +196,11 @@ impl ApiClient {
     /// failure (task 1589). See [`is_upload_session_gone`].
     pub async fn upload_chunk_typed(
         &self,
-        upload_session_id: &str,
+        upload_session_id: impl Into<DirectUploadId>,
         index: u32,
         data: Bytes,
     ) -> Result<Value, ApiError> {
+        let upload_session_id = upload_session_id.into();
         let token = self.require_auth()?;
         let url = self.url(&format!("/api/v1/uploads/{upload_session_id}/chunks/{index}"));
         let mut last_err = String::new();
@@ -235,13 +241,14 @@ impl ApiClient {
     /// Verifies all chunks landed, flips the file to the new version, and returns
     /// the full file metadata. Idempotent (a second call on a completed session
     /// returns `{already_completed: true}`).
-    pub async fn upload_complete(&self, upload_session_id: &str) -> Result<Value, ApiError> {
+    pub async fn upload_complete(&self, upload_session_id: impl Into<DirectUploadId>) -> Result<Value, ApiError> {
         self.upload_complete_typed(upload_session_id).await
     }
 
     /// [`upload_complete`](Self::upload_complete), keeping the HTTP status +
     /// server code (task 1589; see [`upload_chunk_typed`](Self::upload_chunk_typed)).
-    pub async fn upload_complete_typed(&self, upload_session_id: &str) -> Result<Value, ApiError> {
+    pub async fn upload_complete_typed(&self, upload_session_id: impl Into<DirectUploadId>) -> Result<Value, ApiError> {
+        let upload_session_id = upload_session_id.into();
         let token = self.require_auth()?;
         for _ in 0..3 {
             pace_if_needed().await;

@@ -33,7 +33,7 @@ pub(super) async fn wait(total: Duration, shutdown: &AtomicBool) -> bool {
 pub(crate) async fn upload_chunk(
     api: &ApiClient,
     discovery: &dt::Discovery,
-    session: &str,
+    session: &crate::api::DirectUploadId,
     index: u32,
     data: Bytes,
     shutdown: &Arc<AtomicBool>,
@@ -47,7 +47,7 @@ pub(crate) async fn upload_chunk(
             return Err(DirectUploadError::Interrupted);
         }
         let failure = match call {
-            dt::Call::UploadGrant => match api.upload_grant(session, index, size, discovery).await {
+            dt::Call::UploadGrant => match api.upload_grant(session.as_str(), index, size, discovery).await {
                 UploadCall::Ok(dt::UploadGrant::Skipped) => return Ok(()),
                 UploadCall::Ok(dt::UploadGrant::Link(link)) => {
                     state.link_issued();
@@ -61,7 +61,7 @@ pub(crate) async fn upload_chunk(
                 UploadCall::Failed(outcome) => dt::UploadFailure::Grant(outcome),
                 UploadCall::SessionGone(message) => return Err(DirectUploadError::SessionGone(message)),
             },
-            dt::Call::UploadCommit => match api.upload_commit(session, index, size).await {
+            dt::Call::UploadCommit => match api.upload_commit(session.as_str(), index, size).await {
                 UploadCall::Ok(_) => return Ok(()),
                 UploadCall::Failed(outcome) => dt::UploadFailure::Commit(outcome),
                 UploadCall::SessionGone(message) => return Err(DirectUploadError::SessionGone(message)),

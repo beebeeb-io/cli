@@ -25,7 +25,7 @@ pub fn decrypt_file_chunks(
     pin: ExpectedChunkFormat,
     encrypted_bytes: &[u8],
     chunk_count: u32,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, CryptoError> {
     decrypt_file_chunks_with_chunk_size(master_key, file_id_str, pin, encrypted_bytes, chunk_count, None)
 }
 
@@ -40,7 +40,7 @@ pub fn decrypt_file_chunks_with_chunk_size(
     encrypted_bytes: &[u8],
     chunk_count: u32,
     chunk_size: Option<u64>,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, CryptoError> {
     decrypt_file_chunks_owned(
         master_key,
         file_id_str,
@@ -71,8 +71,8 @@ pub fn decrypt_file_chunks_owned(
     encrypted_bytes: &[u8],
     chunk_count: u32,
     chunk_size: Option<u64>,
-) -> Result<(Vec<u8>, Option<beebeeb_core::kdf::OwnerKeyConvention>), String> {
-    let file_uuid: uuid::Uuid = file_id_str.parse().map_err(|e| format!("invalid file ID: {e}"))?;
+) -> Result<(Vec<u8>, Option<beebeeb_core::kdf::OwnerKeyConvention>), CryptoError> {
+    let file_uuid: uuid::Uuid = file_id_str.parse().map_err(|e| CryptoError::InvalidId(format!("invalid file ID: {e}")))?;
 
     // A v2 file is written by core, which derives its key from the UUID STRING:
     // that key only. A legacy file may be under either derivation: binary-UUID
@@ -111,7 +111,7 @@ pub fn decrypt_file_chunks_owned(
     // this fallback; a row opened with an explicit key must never switch to an
     // owner key.
     if explicit_key.is_some() {
-        return Err(match pin {
+        return Err(CryptoError::Decrypt(match pin {
             ExpectedChunkFormat::V2 => format!(
                 "failed to decrypt file {file_id_str}: its metadata records chunk format v2 and the content does not open under the key this row supplied"
             ),
@@ -120,7 +120,7 @@ pub fn decrypt_file_chunks_owned(
                     "failed to decrypt file {file_id_str}: the content does not authenticate under the key this row supplied"
                 )
             }
-        });
+        }));
     }
     for len in first_frame_candidates(encrypted_bytes, chunk_count, chunk_size) {
         let Some((key, convention)) = owner_content_key(master_key, file_id_str, &encrypted_bytes[..len]) else {
@@ -133,14 +133,14 @@ pub fn decrypt_file_chunks_owned(
         }
     }
 
-    Err(match pin {
+    Err(CryptoError::Decrypt(match pin {
         ExpectedChunkFormat::V2 => format!(
             "failed to decrypt file {file_id_str}: its metadata records chunk format v2 and the content does not open as v2"
         ),
         ExpectedChunkFormat::Unrecorded => {
             format!("failed to decrypt file {file_id_str}: no known owner key derivation authenticates its content")
         }
-    })
+    }))
 }
 
 /// Candidate lengths for the first wire frame, used only to let core's
@@ -186,7 +186,7 @@ pub fn try_decrypt_all_chunks(
     pin: ExpectedChunkFormat,
     encrypted_bytes: &[u8],
     chunk_count: u32,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, CryptoError> {
     try_decrypt_all_chunks_with_chunk_size(file_key, file_id_str, pin, encrypted_bytes, chunk_count, None)
 }
 
@@ -199,12 +199,12 @@ pub fn try_decrypt_all_chunks_with_chunk_size(
     encrypted_bytes: &[u8],
     chunk_count: u32,
     chunk_size: Option<u64>,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, CryptoError> {
     if encrypted_bytes.is_empty() && chunk_count == 0 {
         return Ok(Vec::new());
     }
     if encrypted_bytes.is_empty() {
-        return Err("no data but chunk_count > 0".to_string());
+        return Err(CryptoError::Malformed("no data but chunk_count > 0".to_string()));
     }
     if pin == ExpectedChunkFormat::V2 {
         // v2 frames are raw, always: no JSON parser to fall back to.
@@ -226,7 +226,7 @@ pub fn try_decrypt_all_chunks_with_chunk_size(
         Ok(p) => Ok(p),
         Err(e1) => attempt(!raw_first).map_err(|e2| {
             let (raw_err, json_err) = if raw_first { (&e1, &e2) } else { (&e2, &e1) };
-            format!("raw parser: {raw_err}; json parser: {json_err}")
+            CryptoError::Decrypt(format!("raw parser: {raw_err}; json parser: {json_err}"))
         }),
     }
 }
@@ -239,7 +239,7 @@ pub(super) fn decrypt_json_chunks(
     file_id_str: &str,
     encrypted_bytes: &[u8],
     chunk_count: u32,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, CryptoError> {
     let mut decryptor =
         ChunkDecryptor::for_push_with_file_key(key_copy(file_key), file_id_str, ExpectedChunkFormat::Unrecorded);
     let mut plaintext = Vec::new();
@@ -247,9 +247,9 @@ pub(super) fn decrypt_json_chunks(
 
     for i in 0..chunk_count {
         if offset >= encrypted_bytes.len() {
-            return Err(format!(
+            return Err(CryptoError::Malformed(format!(
                 "unexpected end of data at chunk {i}/{chunk_count} (offset {offset})"
-            ));
+            )));
         }
 
         let remaining = &encrypted_bytes[offset..];
@@ -257,8 +257,8 @@ pub(super) fn decrypt_json_chunks(
 
         let blob = match de.next() {
             Some(Ok(b)) => b,
-            Some(Err(e)) => return Err(format!("parse chunk {i}: {e}")),
-            None => return Err(format!("no data for chunk {i}")),
+            Some(Err(e)) => return Err(CryptoError::Malformed(format!("parse chunk {i}: {e}"))),
+            None => return Err(CryptoError::Malformed(format!("no data for chunk {i}"))),
         };
         offset += de.byte_offset();
 
@@ -268,12 +268,12 @@ pub(super) fn decrypt_json_chunks(
         let opened = zeroize::Zeroizing::new(
             decryptor
                 .push_frame(&frame)
-                .map_err(|e| format!("decrypt chunk {i}: {e}"))?
+                .map_err(|e| CryptoError::Decrypt(format!("decrypt chunk {i}: {e}")))?
                 .data,
         );
         plaintext.extend_from_slice(&opened);
     }
-    decryptor.finish().map_err(|e| format!("incomplete file: {e}"))?;
+    decryptor.finish().map_err(|e| CryptoError::Malformed(format!("incomplete file: {e}")))?;
 
     Ok(plaintext)
 }
@@ -295,7 +295,7 @@ pub(super) fn decrypt_raw_chunks(
     encrypted_bytes: &[u8],
     chunk_count: u32,
     chunk_size: Option<u64>,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, CryptoError> {
     let total = encrypted_bytes.len();
     let count = chunk_count as usize;
 
@@ -307,11 +307,11 @@ pub(super) fn decrypt_raw_chunks(
     let min_chunk_overhead = NONCE_LEN + TAG_LEN;
     let min_total = count
         .checked_mul(min_chunk_overhead)
-        .ok_or_else(|| format!("chunk count {count} is too large"))?;
+        .ok_or_else(|| CryptoError::Malformed(format!("chunk count {count} is too large")))?;
     if total < min_total {
-        return Err(format!(
+        return Err(CryptoError::Malformed(format!(
             "raw data too short: {total} bytes for {count} chunks (minimum {min_total})"
-        ));
+        )));
     }
 
     // A single chunk is the whole buffer; otherwise find the uniform frame size.
@@ -331,22 +331,22 @@ pub(super) fn decrypt_raw_chunks(
         let this_chunk_size = if i == count - 1 { remaining } else { frame_size };
 
         if this_chunk_size < min_chunk_overhead || this_chunk_size > remaining {
-            return Err(format!(
+            return Err(CryptoError::Malformed(format!(
                 "chunk {i} has an invalid size: {this_chunk_size} bytes (minimum {min_chunk_overhead}, {remaining} left)"
-            ));
+            )));
         }
 
         let opened = zeroize::Zeroizing::new(
             decryptor
                 .push_frame(&encrypted_bytes[offset..offset + this_chunk_size])
-                .map_err(|e| format!("decrypt raw chunk {i}: {e}"))?
+                .map_err(|e| CryptoError::Decrypt(format!("decrypt raw chunk {i}: {e}")))?
                 .data,
         );
         plaintext.extend_from_slice(&opened);
 
         offset += this_chunk_size;
     }
-    decryptor.finish().map_err(|e| format!("incomplete file: {e}"))?;
+    decryptor.finish().map_err(|e| CryptoError::Malformed(format!("incomplete file: {e}")))?;
 
     Ok(plaintext)
 }

@@ -59,7 +59,7 @@ pub fn content_pin(
     master_key: &beebeeb_core::kdf::MasterKey,
     file_id_str: &str,
     name_encrypted_str: &str,
-) -> Result<ExpectedChunkFormat, String> {
+) -> Result<ExpectedChunkFormat, CryptoError> {
     match beebeeb_core::encrypt::decrypt_file_metadata(master_key, file_id_str, name_encrypted_str) {
         Ok(m) => Ok(m.chunk_format),
         Err(e) => {
@@ -84,7 +84,7 @@ pub fn content_pin_with_key(
     file_key: &FileKey,
     file_id_str: &str,
     name_encrypted_str: &str,
-) -> Result<ExpectedChunkFormat, String> {
+) -> Result<ExpectedChunkFormat, CryptoError> {
     beebeeb_core::encrypt::decrypt_file_metadata_with_key(file_key, name_encrypted_str)
         .map(|m| m.chunk_format)
         .map_err(|e| pin_error(file_id_str, e))
@@ -97,17 +97,17 @@ pub fn file_row_pin(
     file_id_str: &str,
     name_encrypted_str: &str,
     content_key: Option<&FileKey>,
-) -> Result<ExpectedChunkFormat, String> {
+) -> Result<ExpectedChunkFormat, CryptoError> {
     match content_key {
         Some(c) => content_pin_with_key(c, file_id_str, name_encrypted_str),
         None => content_pin(master_key, file_id_str, name_encrypted_str),
     }
 }
 
-pub(super) fn pin_error(file_id: &str, e: impl std::fmt::Display) -> String {
-    format!(
+pub(super) fn pin_error(file_id: &str, e: impl std::fmt::Display) -> CryptoError {
+    CryptoError::Metadata(format!(
         "cannot read the encrypted metadata of file {file_id} ({e}), so its chunk format is unknown; refusing to guess"
-    )
+    ))
 }
 
 /// A second owned copy of `file_key` (core's `FileKey` is not `Clone`). The

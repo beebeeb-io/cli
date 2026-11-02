@@ -102,6 +102,7 @@ fn decrypt_chunks_with_binary_key(
         encrypted_bytes,
         chunk_count,
     )
+    .map_err(String::from)
 }
 
 /// Encrypt all chunks with the string-UUID key, returning serialized blobs.

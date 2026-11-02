@@ -34,6 +34,12 @@ impl From<crate::api::ApiError> for DownloadError {
     }
 }
 
+impl From<crate::crypto::CryptoError> for DownloadError {
+    fn from(e: crate::crypto::CryptoError) -> Self {
+        Self::Other(e.into())
+    }
+}
+
 impl From<DownloadError> for String {
     fn from(e: DownloadError) -> String {
         e.to_string()

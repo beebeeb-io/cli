@@ -612,6 +612,7 @@ pub(super) async fn run_pipeline(
 ) -> Result<(), AttemptErr> {
     use tokio::sync::mpsc;
 
+    let upload_id = crate::api::DirectUploadId::from(upload_session_id);
     let (tx, mut rx) = mpsc::channel::<EncryptedChunk>(CHANNEL_CAP);
     let shutdown_p = Arc::clone(shutdown);
 
@@ -669,7 +670,7 @@ pub(super) async fn run_pipeline(
                 match crate::direct_upload::upload_chunk(
                     api,
                     discovery,
-                    upload_session_id,
+                    &upload_id,
                     index,
                     Bytes::from(chunk.data),
                     shutdown,

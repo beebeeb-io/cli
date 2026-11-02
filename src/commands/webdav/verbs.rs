@@ -154,7 +154,7 @@ pub(super) async fn get_response(state: &Arc<DavState>, path: &str, req_headers:
         resolved.chunk_count,
     ) {
         Ok(p) => p,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
 
     let mut headers = HeaderMap::new();

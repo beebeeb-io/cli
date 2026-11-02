@@ -55,7 +55,7 @@ pub(super) fn raw_frame_size(
     data: &[u8],
     count: usize,
     chunk_size: Option<u64>,
-) -> Result<usize, String> {
+) -> Result<usize, CryptoError> {
     probe_first_frame_len(data, data.len() as u64, count, chunk_size, &mut |frame| {
         opens_as_first_frame(file_key, file_id_str, pin, frame)
     })
@@ -74,15 +74,15 @@ pub(crate) fn probe_first_frame_len(
     count: usize,
     chunk_size: Option<u64>,
     opens: &mut dyn FnMut(&[u8]) -> bool,
-) -> Result<usize, String> {
+) -> Result<usize, CryptoError> {
     let n = count as u64;
     // total = (n-1)*F + last, 28 <= last <= F  =>  F in [ceil(total/n), (total-28)/(n-1)].
     let lo = total.div_ceil(n);
     let hi = total.saturating_sub(FRAME_OVERHEAD) / (n - 1);
     if lo > hi {
-        return Err(format!(
+        return Err(CryptoError::Malformed(format!(
             "raw data of {total} bytes cannot be split into {count} chunks of >= {FRAME_OVERHEAD} bytes"
-        ));
+        )));
     }
 
     let mut probe = FrameProbe {
@@ -114,11 +114,11 @@ pub(crate) fn probe_first_frame_len(
         }
         f += 1;
     }
-    Err(format!(
+    Err(CryptoError::Malformed(format!(
         "no chunk size splits {total} bytes into {count} authenticating chunks \
          (tried {} candidate frame sizes)",
         probe.tried.len()
-    ))
+    )))
 }
 
 /// Candidate-frame-size prober for [`probe_first_frame_len`].

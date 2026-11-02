@@ -9,6 +9,7 @@
 //! offer/refusal text, the pinned route and the upload-session fallbacks.
 
 use super::*;
+use crate::api::DirectUploadId;
 
 impl ApiClient {
     /// The API origin this client talks to (the authority check needs it).
@@ -336,13 +337,14 @@ impl ApiClient {
     /// session's transport was chosen at init and never changes.
     pub(crate) async fn upload_grant(
         &self,
-        session: &str,
+        session: impl Into<DirectUploadId>,
         index: u32,
         size: u64,
         discovery: &dt::Discovery,
     ) -> UploadCall<dt::UploadGrant> {
+        let session = session.into();
         let seen = self
-            .upload_call(&dt::upload_grant_path(session, index), &dt::UploadGrantRequest { size })
+            .upload_call(&dt::upload_grant_path(session.as_str(), index), &dt::UploadGrantRequest { size })
             .await;
         match dt::classify(dt::Call::UploadGrant, &seen.answer) {
             dt::Outcome::Proceed => match dt::UploadGrant::from_answer(&seen.body, index, discovery, &self.base_url) {
@@ -356,10 +358,16 @@ impl ApiClient {
     }
 
     /// `POST /api/v1/uploads/{session}/chunks/{index}/commit {"size"}`.
-    pub(crate) async fn upload_commit(&self, session: &str, index: u32, size: u64) -> UploadCall<dt::UploadCommitted> {
+    pub(crate) async fn upload_commit(
+        &self,
+        session: impl Into<DirectUploadId>,
+        index: u32,
+        size: u64,
+    ) -> UploadCall<dt::UploadCommitted> {
+        let session = session.into();
         let seen = self
             .upload_call(
-                &dt::upload_commit_path(session, index),
+                &dt::upload_commit_path(session.as_str(), index),
                 &dt::UploadCommitRequest { size },
             )
             .await;

@@ -321,7 +321,7 @@ pub(super) async fn walk_remote(
                     id,
                     chunk_count,
                     updated_at,
-                    pin,
+                    pin: pin.map_err(String::from),
                     resolved: Some(resolved),
                 },
             );

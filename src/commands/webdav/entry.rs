@@ -74,7 +74,7 @@ pub(super) fn decode_file_entry(
     let pin = if is_folder {
         no_content()
     } else {
-        crate::crypto::content_pin(master_key, &file_id, name_encrypted)
+        crate::crypto::content_pin(master_key, &file_id, name_encrypted).map_err(String::from)
     };
 
     Some(ResolvedEntry {

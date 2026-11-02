@@ -65,6 +65,7 @@ id_type!(FileId, "file");
 id_type!(FolderId, "folder");
 id_type!(VersionId, "version");
 id_type!(ShareId, "share");
+id_type!(DirectUploadId, "direct upload");
 
 #[cfg(test)]
 mod tests {
@@ -76,11 +77,13 @@ mod tests {
         assert!(FolderId::parse("   ").is_err());
         assert!(VersionId::parse("").is_err());
         assert!(ShareId::parse("").is_err());
+        assert!(DirectUploadId::parse("").is_err());
     }
 
     #[test]
     fn parse_keeps_a_real_id() {
         assert_eq!(FileId::parse(" file-1 ").unwrap().as_str(), "file-1");
         assert_eq!(ShareId::from("s1").to_string(), "s1");
+        assert_eq!(DirectUploadId::parse(" up-1 ").unwrap().as_str(), "up-1");
     }
 }

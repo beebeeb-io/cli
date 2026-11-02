@@ -32,6 +32,12 @@ impl From<crate::api::ApiError> for PullError {
     }
 }
 
+impl From<crate::crypto::CryptoError> for PullError {
+    fn from(e: crate::crypto::CryptoError) -> Self {
+        Self::Other(e.into())
+    }
+}
+
 impl From<crate::download::DownloadError> for PullError {
     fn from(e: crate::download::DownloadError) -> Self {
         match e {

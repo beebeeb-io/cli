@@ -320,7 +320,7 @@ mod tests {
             2,
         )
         .unwrap_err();
-        assert!(err.contains("raw parser:") && err.contains("json parser:"), "{err}");
+        assert!(err.to_string().contains("raw parser:") && err.to_string().contains("json parser:"), "{err}");
     }
 
     /// A wrong key must still fail on both parsers (no false success).
@@ -707,7 +707,7 @@ mod tests {
         let err =
             decrypt_file_chunks_with_chunk_size(&m, &fid, ExpectedChunkFormat::V2, &wire[..cut], count - 1, Some(cs))
                 .unwrap_err();
-        assert!(err.contains("v2"), "{err}");
+        assert!(err.to_string().contains("v2"), "{err}");
     }
 
     /// The pin comes only from authenticated metadata: v2 envelope → V2, a
@@ -726,7 +726,7 @@ mod tests {
         .unwrap();
         assert_eq!(content_pin(&m, &fid, &legacy), Ok(ExpectedChunkFormat::Unrecorded));
         let err = content_pin(&m, &fid, "plain-name.txt").unwrap_err();
-        assert!(err.contains("refusing to guess"), "{err}");
+        assert!(err.to_string().contains("refusing to guess"), "{err}");
         // A key that does not open the envelope is no pin either.
         let other = MasterKey::from_bytes([0x24u8; 32]);
         assert!(content_pin(&other, &fid, &name_enc).is_err());
@@ -838,11 +838,13 @@ mod tests {
     }
 }
 
+mod error;
 mod names;
 mod pins;
 mod frames;
 mod chunks;
 
+pub use error::CryptoError;
 pub use names::OWNER_REPAIR_READ_ONLY;
 pub use names::decrypt_name;
 pub use names::decrypt_name_with_convention;

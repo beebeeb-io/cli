@@ -282,7 +282,7 @@ mod tree;
 mod upload;
 mod versions;
 
-pub(crate) use id::{FileId, FolderId, ShareId};
+pub(crate) use id::{DirectUploadId, FileId, FolderId, ShareId};
 
 
 /// A parsed API error: the server's stable machine `error` code (when
