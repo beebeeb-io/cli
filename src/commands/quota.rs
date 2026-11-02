@@ -7,6 +7,31 @@ use crate::api::ApiClient;
 use crate::ui;
 
 pub async fn run() -> Result<(), String> {
+    let view = fetch_quota().await?;
+    if ui::is_json() {
+        print_json(&view);
+    } else if ui::is_quiet() {
+        print_quiet(&view);
+    } else {
+        print_rich(&view);
+    }
+    Ok(())
+}
+
+/// Everything `bb quota` reports, read once so the three output modes differ
+/// only in how they render it.
+struct QuotaView {
+    used_bytes: i64,
+    quota_bytes: i64,
+    percentage: f64,
+    file_count: i64,
+    plan: Plan,
+    extra_tb: i64,
+    plan_label: String,
+    account_state: crate::account_state::AccountState,
+}
+
+async fn fetch_quota() -> Result<QuotaView, String> {
     let api = ApiClient::from_config();
     api.require_auth()?;
 
@@ -50,39 +75,86 @@ pub async fn run() -> Result<(), String> {
 
     // Task 1037: `needs_plan` / `lapsed` ⇒ quota 0 and uploads refused.
     let account_state = crate::account_state::AccountState::from_subscription(&sub);
+
+    Ok(QuotaView {
+        used_bytes,
+        quota_bytes,
+        percentage,
+        file_count,
+        plan,
+        extra_tb,
+        plan_label,
+        account_state,
+    })
+}
+
+fn print_json(view: &QuotaView) {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "used_bytes": view.used_bytes,
+            "quota_bytes": view.quota_bytes,
+            "percentage": view.percentage * 100.0,
+            "files": view.file_count,
+            "plan": view.plan.slug(),
+            "extra_storage_tb": view.extra_tb,
+            "account_state": view.account_state.slug(),
+            "data_deletion_at": view.account_state.data_deletion_at_rfc3339(),
+        }))
+        .unwrap()
+    );
+}
+
+fn print_quiet(view: &QuotaView) {
+    println!("{}", format_storage_si(view.used_bytes));
+    println!("{}", format_storage_si(view.quota_bytes));
+    println!("{:.2}%", view.percentage * 100.0);
+}
+
+fn print_rich(view: &QuotaView) {
+    let QuotaView {
+        used_bytes,
+        quota_bytes,
+        percentage,
+        file_count,
+        plan,
+        plan_label,
+        account_state,
+        ..
+    } = view;
+    let used_bytes = *used_bytes;
+    let quota_bytes = *quota_bytes;
+    let percentage = *percentage;
+    let file_count = *file_count;
+    let plan = *plan;
     let account_notice = account_state.notice(&crate::web_url::web_app_base());
 
-    // ── JSON mode ────────────────────────────────────────────────────────────
+    println!();
+    print_plan_line(plan_label, account_state, account_notice.is_some());
+    print_usage(used_bytes, quota_bytes, percentage, file_count);
+    print_notice(plan, used_bytes, quota_bytes, account_notice);
+    println!();
+}
 
-    if ui::is_json() {
+fn print_plan_line(plan_label: &str, account_state: &crate::account_state::AccountState, has_notice: bool) {
+    let dim = |s: &str| s.custom_color(crate::colors::INK_DIM);
+    if has_notice {
+        println!("  {} {}", dim("plan    "), "none".custom_color(crate::colors::AMBER));
         println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "used_bytes": used_bytes,
-                "quota_bytes": quota_bytes,
-                "percentage": percentage * 100.0,
-                "files": file_count,
-                "plan": plan.slug(),
-                "extra_storage_tb": extra_tb,
-                "account_state": account_state.slug(),
-                "data_deletion_at": account_state.data_deletion_at_rfc3339(),
-            }))
-            .unwrap()
+            "  {} {}",
+            dim("state   "),
+            account_state.label().custom_color(crate::colors::RED_ERR)
         );
-        return Ok(());
+    } else {
+        println!(
+            "  {} {}",
+            dim("plan    "),
+            plan_label.custom_color(crate::colors::AMBER)
+        );
     }
+}
 
-    // ── Quiet mode ───────────────────────────────────────────────────────────
-
-    if ui::is_quiet() {
-        println!("{}", format_storage_si(used_bytes));
-        println!("{}", format_storage_si(quota_bytes));
-        println!("{:.2}%", percentage * 100.0);
-        return Ok(());
-    }
-
-    // ── Rich mode ────────────────────────────────────────────────────────────
-
+fn print_usage(used_bytes: i64, quota_bytes: i64, percentage: f64, file_count: i64) {
     let dim = |s: &str| s.custom_color(crate::colors::INK_DIM);
 
     let used_str = format_storage_si(used_bytes);
@@ -108,21 +180,6 @@ pub async fn run() -> Result<(), String> {
         "\u{2014}".to_string() // —
     };
 
-    println!();
-    if account_notice.is_some() {
-        println!("  {} {}", dim("plan    "), "none".custom_color(crate::colors::AMBER));
-        println!(
-            "  {} {}",
-            dim("state   "),
-            account_state.label().custom_color(crate::colors::RED_ERR)
-        );
-    } else {
-        println!(
-            "  {} {}",
-            dim("plan    "),
-            plan_label.custom_color(crate::colors::AMBER)
-        );
-    }
     println!(
         "  {} {}",
         dim("used    "),
@@ -142,7 +199,14 @@ pub async fn run() -> Result<(), String> {
         dim("files   "),
         files_str.custom_color(crate::colors::INK_DIM)
     );
+}
 
+fn print_notice(
+    plan: Plan,
+    used_bytes: i64,
+    quota_bytes: i64,
+    account_notice: Option<String>,
+) {
     // Account-state notice (task 1037) wins over the over-quota warning:
     // quota is 0 because there is no plan, not because the vault is full.
     if let Some(notice) = &account_notice {
@@ -165,9 +229,6 @@ pub async fn run() -> Result<(), String> {
             msg.custom_color(crate::colors::RED_ERR),
         );
     }
-
-    println!();
-    Ok(())
 }
 
 /// Build a descriptive plan label like "Pro — 8.0 TB (1.0 TB base + 7.0 TB extra)".

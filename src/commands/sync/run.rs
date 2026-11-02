@@ -1008,9 +1008,9 @@ pub async fn run(
 
     let elapsed = sync_start.elapsed();
 
-    report_pass(
-        up_count,
-        down_count,
+    report_pass(PassReport {
+        uploaded: up_count,
+        downloaded: down_count,
         conflicts,
         failed,
         skipped,
@@ -1019,11 +1019,11 @@ pub async fn run(
         read_only_kept,
         total_bytes,
         elapsed,
-        &index_report,
+        index_report: &index_report,
         dry_run,
         will_enter_watch,
         delete_refused,
-    )?;
+    })?;
 
     // ── Continuous watch mode ───────────────────────────────────────────────
     if will_enter_watch {

@@ -2,164 +2,127 @@
 
 use super::*;
 
-/// The pass summary: the json / quiet / rich output and the one-shot exit code.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn report_pass(
-    up_count: u32,
-    down_count: u32,
-    conflicts: u32,
-    failed: u32,
-    skipped: u32,
-    deletes: u32,
-    held_back: u32,
-    read_only_kept: u32,
-    total_bytes: u64,
-    elapsed: std::time::Duration,
-    index_report: &crate::shared_folder_index::IndexRepairReport,
-    dry_run: bool,
-    will_enter_watch: bool,
-    delete_refused: bool,
-) -> Result<(), String> {
-    let elapsed_secs = elapsed.as_secs_f64();
+/// One sync pass's tally plus the flags that decide how it is reported.
+pub(super) struct PassReport<'a> {
+    pub uploaded: u32,
+    pub downloaded: u32,
+    pub conflicts: u32,
+    pub failed: u32,
+    pub skipped: u32,
+    pub deletes: u32,
+    pub held_back: u32,
+    pub read_only_kept: u32,
+    pub total_bytes: u64,
+    pub elapsed: std::time::Duration,
+    pub index_report: &'a crate::shared_folder_index::IndexRepairReport,
+    pub dry_run: bool,
+    pub will_enter_watch: bool,
+    pub delete_refused: bool,
+}
 
-    // A pass that left uploads failed or conflicts unresolved is not "synced".
+impl PassReport<'_> {
+    /// A pass that left uploads failed or conflicts unresolved is not "synced".
+    fn incomplete(&self) -> bool {
+        self.failed > 0
+            || self.conflicts > 0
+            || self.held_back > 0
+            || self.read_only_kept > 0
+            || self.delete_refused
+    }
+}
+
+/// The pass summary: the json / quiet / rich output and the one-shot exit code.
+pub(super) fn report_pass(report: PassReport<'_>) -> Result<(), String> {
+    let incomplete = report.incomplete();
+    if ui::is_json() {
+        print_json(&report);
+    } else if ui::is_quiet() {
+        print_quiet(&report);
+    } else {
+        print_rich(&report, incomplete);
+    }
+
     // A one-shot run (`--once`, json/quiet, …) exits 3 so scripts and cron jobs
     // notice (flow-6: it used to print "✓ synced" and exit 0). A dry run only
     // previews, and the watch loop keeps retrying, so neither fails here.
-    let incomplete = failed > 0 || conflicts > 0 || held_back > 0 || read_only_kept > 0 || delete_refused;
-    let incomplete_err = || {
-        crate::exit::with_code(
-            crate::exit::INCOMPLETE,
-            format!(
-                "sync incomplete: {} \u{2014} fix the cause and re-run{}",
-                match incomplete_summary(failed, conflicts, held_back, read_only_kept) {
-                    s if s.is_empty() && delete_refused => "--delete refused on a changed remote folder".to_string(),
-                    s => s,
-                },
-                if delete_refused {
-                    " (`bb sync --rebind` accepts the new remote folder before --delete may trash anything)"
-                } else if held_back > 0 {
-                    " (`--allow-mass-delete` confirms the held-back removals)"
-                } else if conflicts > 0 {
-                    " (`--force` overwrites conflicts with the local copy)"
-                } else if read_only_kept > 0 {
-                    " (save each read-only file's edit under a new name; sync uploads it as a new file)"
-                } else {
-                    ""
-                }
-            ),
-        )
-    };
-    let fail_one_shot = incomplete && !dry_run && !will_enter_watch;
-
-    if ui::is_json() {
-        let json_out = serde_json::json!({
-            "ok": !incomplete,
-            "uploaded": up_count,
-            "downloaded": down_count,
-            "failed": failed,
-            "conflicts": conflicts,
-            "deleted": deletes,
-            "held_back": held_back,
-            "read_only_kept": read_only_kept,
-            "skipped": skipped,
-            "index_written": index_report.written,
-            "index_deferred": index_report.deferred,
-            "index_partial": index_report.partial,
-            "bytes": total_bytes,
-            "elapsed_secs": elapsed_secs,
-        });
-        println!("{}", serde_json::to_string_pretty(&json_out).unwrap_or_default());
-        return if fail_one_shot { Err(incomplete_err()) } else { Ok(()) };
-    }
-
-    if ui::is_quiet() {
-        println!(
-            "{} up {} down {} conflict{}{}",
-            up_count,
-            down_count,
-            conflicts,
-            if failed > 0 {
-                format!(" {failed} failed")
-            } else {
-                String::new()
-            },
-            if deletes > 0 {
-                format!(" {deletes} del")
-            } else {
-                String::new()
-            },
-        );
-        return if fail_one_shot { Err(incomplete_err()) } else { Ok(()) };
-    }
-
-    println!();
-    // Rich summary: ✓ synced · 2 ↑ 1 ↓ 1 ⚡ · 3.3 MB · avg 45 MB/s · 1.8s
-    let avg_speed = if elapsed_secs > 0.0 {
-        total_bytes as f64 / elapsed_secs
+    let fail_one_shot = incomplete && !report.dry_run && !report.will_enter_watch;
+    if fail_one_shot {
+        Err(incomplete_error(&report))
     } else {
-        0.0
-    };
+        Ok(())
+    }
+}
 
-    let mut parts: Vec<String> = Vec::new();
-    if up_count > 0 {
-        parts.push(format!(
-            "{}",
-            format!("{up_count} \u{2191}").custom_color(crate::colors::GREEN_OK)
-        ));
-    }
-    if down_count > 0 {
-        parts.push(format!(
-            "{}",
-            format!("{down_count} \u{2193}").custom_color(crate::colors::CYAN)
-        ));
-    }
-    if conflicts > 0 {
-        parts.push(format!(
-            "{}",
-            format!("{conflicts} \u{26A1}").custom_color(crate::colors::AMBER)
-        ));
-    }
-    if failed > 0 {
-        parts.push(format!(
-            "{}",
-            format!("{failed} failed").custom_color(crate::colors::RED_ERR)
-        ));
-    }
-    if held_back > 0 {
-        parts.push(format!(
-            "{}",
-            format!("{held_back} held back").custom_color(crate::colors::AMBER)
-        ));
-    }
-    if read_only_kept > 0 {
-        parts.push(format!(
-            "{}",
-            format!("{read_only_kept} read-only").custom_color(crate::colors::AMBER)
-        ));
-    }
-    if deletes > 0 {
-        parts.push(format!(
-            "{}",
-            format!("{deletes} \u{2717}").custom_color(crate::colors::RED_ERR)
-        ));
-    }
+fn incomplete_error(report: &PassReport<'_>) -> String {
+    crate::exit::with_code(
+        crate::exit::INCOMPLETE,
+        format!(
+            "sync incomplete: {} \u{2014} fix the cause and re-run{}",
+            match incomplete_summary(
+                report.failed,
+                report.conflicts,
+                report.held_back,
+                report.read_only_kept
+            ) {
+                s if s.is_empty() && report.delete_refused =>
+                    "--delete refused on a changed remote folder".to_string(),
+                s => s,
+            },
+            if report.delete_refused {
+                " (`bb sync --rebind` accepts the new remote folder before --delete may trash anything)"
+            } else if report.held_back > 0 {
+                " (`--allow-mass-delete` confirms the held-back removals)"
+            } else if report.conflicts > 0 {
+                " (`--force` overwrites conflicts with the local copy)"
+            } else if report.read_only_kept > 0 {
+                " (save each read-only file's edit under a new name; sync uploads it as a new file)"
+            } else {
+                ""
+            }
+        ),
+    )
+}
 
-    let counts_str = if parts.is_empty() {
-        "no changes".to_string()
-    } else {
-        parts.join(" ")
-    };
+fn print_json(report: &PassReport<'_>) {
+    let json_out = serde_json::json!({
+        "ok": !report.incomplete(),
+        "uploaded": report.uploaded,
+        "downloaded": report.downloaded,
+        "failed": report.failed,
+        "conflicts": report.conflicts,
+        "deleted": report.deletes,
+        "held_back": report.held_back,
+        "read_only_kept": report.read_only_kept,
+        "skipped": report.skipped,
+        "index_written": report.index_report.written,
+        "index_deferred": report.index_report.deferred,
+        "index_partial": report.index_report.partial,
+        "bytes": report.total_bytes,
+        "elapsed_secs": report.elapsed.as_secs_f64(),
+    });
+    println!("{}", serde_json::to_string_pretty(&json_out).unwrap_or_default());
+}
 
-    let mut meta_parts: Vec<String> = Vec::new();
-    if total_bytes > 0 {
-        meta_parts.push(ui::human_size(total_bytes));
-    }
-    if avg_speed > 0.0 && total_bytes > 0 {
-        meta_parts.push(format!("avg {}", ui::human_speed(avg_speed)));
-    }
-    meta_parts.push(format!("{:.1}s", elapsed_secs));
+fn print_quiet(report: &PassReport<'_>) {
+    println!(
+        "{} up {} down {} conflict{}{}",
+        report.uploaded,
+        report.downloaded,
+        report.conflicts,
+        if report.failed > 0 {
+            format!(" {} failed", report.failed)
+        } else {
+            String::new()
+        },
+        if report.deletes > 0 {
+            format!(" {} del", report.deletes)
+        } else {
+            String::new()
+        },
+    );
+}
 
+fn print_rich(report: &PassReport<'_>, incomplete: bool) {
     let (mark, verdict) = if incomplete {
         (
             "!".custom_color(crate::colors::AMBER),
@@ -176,13 +139,79 @@ pub(super) fn report_pass(
         mark,
         verdict,
         "\u{00b7}".custom_color(crate::colors::INK_DIM),
-        counts_str,
+        counts_line(report),
         "\u{00b7}".custom_color(crate::colors::INK_DIM),
-        meta_parts.join(" \u{00b7} ").custom_color(crate::colors::INK_DIM),
+        meta_line(report).custom_color(crate::colors::INK_DIM),
     );
+}
 
-    if fail_one_shot {
-        return Err(incomplete_err());
+fn counts_line(report: &PassReport<'_>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if report.uploaded > 0 {
+        parts.push(format!(
+            "{}",
+            format!("{} \u{2191}", report.uploaded).custom_color(crate::colors::GREEN_OK)
+        ));
     }
-    Ok(())
+    if report.downloaded > 0 {
+        parts.push(format!(
+            "{}",
+            format!("{} \u{2193}", report.downloaded).custom_color(crate::colors::CYAN)
+        ));
+    }
+    if report.conflicts > 0 {
+        parts.push(format!(
+            "{}",
+            format!("{} \u{26A1}", report.conflicts).custom_color(crate::colors::AMBER)
+        ));
+    }
+    if report.failed > 0 {
+        parts.push(format!(
+            "{}",
+            format!("{} failed", report.failed).custom_color(crate::colors::RED_ERR)
+        ));
+    }
+    if report.held_back > 0 {
+        parts.push(format!(
+            "{}",
+            format!("{} held back", report.held_back).custom_color(crate::colors::AMBER)
+        ));
+    }
+    if report.read_only_kept > 0 {
+        parts.push(format!(
+            "{}",
+            format!("{} read-only", report.read_only_kept).custom_color(crate::colors::AMBER)
+        ));
+    }
+    if report.deletes > 0 {
+        parts.push(format!(
+            "{}",
+            format!("{} \u{2717}", report.deletes).custom_color(crate::colors::RED_ERR)
+        ));
+    }
+
+    if parts.is_empty() {
+        "no changes".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn meta_line(report: &PassReport<'_>) -> String {
+    let elapsed_secs = report.elapsed.as_secs_f64();
+    let avg_speed = if elapsed_secs > 0.0 {
+        report.total_bytes as f64 / elapsed_secs
+    } else {
+        0.0
+    };
+
+    let mut meta_parts: Vec<String> = Vec::new();
+    if report.total_bytes > 0 {
+        meta_parts.push(ui::human_size(report.total_bytes));
+    }
+    if avg_speed > 0.0 && report.total_bytes > 0 {
+        meta_parts.push(format!("avg {}", ui::human_speed(avg_speed)));
+    }
+    meta_parts.push(format!("{:.1}s", elapsed_secs));
+    meta_parts.join(" \u{00b7} ")
 }
