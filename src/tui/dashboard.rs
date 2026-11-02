@@ -16,7 +16,6 @@ const RED_ERR: Color = Color::Rgb(224, 122, 106);
 const INK: Color = Color::Rgb(233, 230, 221);
 const INK_DIM: Color = Color::Rgb(106, 101, 91);
 
-/// Render the full-screen dashboard view.
 pub fn render(f: &mut Frame, state: &TuiState) {
     let area = f.area();
 

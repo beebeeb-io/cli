@@ -16,7 +16,6 @@ pub async fn run() -> Result<(), String> {
     let w = 58;
     println!("{}", ui::box_header("SPEEDTEST", w));
 
-    // Get user's preferred region
     let region_info = api.get_my_region().await.ok();
     // Task 2050: the country the API's own list names, never a raw id or city.
     let region = region_info

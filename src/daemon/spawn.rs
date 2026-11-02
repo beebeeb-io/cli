@@ -43,7 +43,6 @@ pub(super) fn daemon_args(local_dir: &Path, remote_path: &str, mode: DaemonMode)
 ///
 /// Stdout/stderr are redirected to log files. Returns the child PID.
 pub fn spawn_daemon(local_dir: &Path, remote_path: &str, slug: &str) -> Result<u32, DaemonError> {
-    // Check if already running
     if let Some(pid) = is_daemon_running(slug)? {
         return Err(DaemonError::Other(format!(
             "daemon already running for this session (PID {pid}). \

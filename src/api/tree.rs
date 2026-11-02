@@ -121,7 +121,6 @@ impl ApiClient {
         parse_response(resp).await
     }
 
-    /// Get file metadata by ID.
     pub async fn get_file(&self, file_id: impl Into<FileId>) -> Result<Value, ApiError> {
         let file_id = file_id.into();
         let token = self.require_auth()?;

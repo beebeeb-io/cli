@@ -31,7 +31,6 @@ impl ApiClient {
         Err("thumbnail upload rate limited after 3 retries".to_string().into())
     }
 
-    /// Upload an encrypted large thumbnail for a file.
     pub async fn upload_thumbnail_large(
         &self,
         file_id: impl Into<FileId>,

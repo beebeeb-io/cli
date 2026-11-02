@@ -558,7 +558,6 @@ fn run_picker(entries: &[ShareEntry]) -> Result<usize, String> {
     }
 }
 
-/// Render the share list to the terminal.
 fn draw_picker(stdout: &mut io::Stdout, entries: &[ShareEntry], selected: usize) -> Result<(), String> {
     use std::io::Write;
 

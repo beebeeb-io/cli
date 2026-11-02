@@ -105,7 +105,6 @@ async fn run_recursive(
             continue;
         }
 
-        // Create it.
         let parent_uuid_typed: Option<Uuid> = parent_id.as_deref().and_then(|s| s.parse().ok());
         // L13 (SF-0001): the folder's id is minted by the client and echoed unchanged.
         let new_id = crate::item_id::create_owned_folder(api, master_key, segment, parent_uuid_typed)

@@ -17,7 +17,6 @@ const INK: Color = Color::Rgb(233, 230, 221);
 const INK_DIM: Color = Color::Rgb(106, 101, 91);
 const CYAN: Color = Color::Rgb(127, 184, 209);
 
-/// Render the compact view into the given frame.
 pub fn render(f: &mut Frame, state: &TuiState) {
     let area = f.area();
 

@@ -52,7 +52,6 @@ pub fn poll_key(timeout: Duration) -> Option<KeyEvent> {
     None
 }
 
-/// Check if a key event is Ctrl+C.
 pub fn is_ctrl_c(key: &KeyEvent) -> bool {
     key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
 }

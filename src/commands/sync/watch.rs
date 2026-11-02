@@ -355,7 +355,6 @@ pub(super) async fn run_tui_watch(
         });
     }
 
-    // Set up the file watcher.
     use notify::RecursiveMode;
     use notify_debouncer_full::new_debouncer;
 
@@ -402,7 +401,6 @@ pub(super) async fn run_tui_watch(
             // Notify TUI that sync started.
             let _ = sync_tx.send(TuiEvent::SyncStarted(changed.len() as u32));
 
-            // Send an event per changed file.
             for path in &changed {
                 let name = path
                     .file_name()
@@ -714,7 +712,6 @@ pub(super) fn spawn_sync_daemon(local_dir: &Path, remote_path: Option<&str>) -> 
     );
     let slug = crate::daemon::slugify(&session_name);
 
-    // Check if already running
     if let Some(pid) = crate::daemon::is_daemon_running(&slug)? {
         println!(
             "  {} daemon already running (PID {})",

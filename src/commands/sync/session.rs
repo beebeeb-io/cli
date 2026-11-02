@@ -312,7 +312,6 @@ pub(super) async fn stop_session_by_name(api: &ApiClient, master: &MasterKey, na
     for (session, session_name) in matching {
         let id = session.get("id").and_then(|v| v.as_str()).ok_or("session missing id")?;
 
-        // Stop the server-side session
         api.stop_client_session(id).await?;
 
         // Kill the local daemon process + remove auto-start
@@ -366,7 +365,6 @@ pub(super) async fn stop_all_sessions(api: &ApiClient, master: &MasterKey) -> Re
     for (session, name) in &device_sessions {
         let id = session.get("id").and_then(|v| v.as_str()).ok_or("session missing id")?;
 
-        // Stop server-side session
         api.stop_client_session(id).await?;
 
         // Kill local daemon + remove auto-start

@@ -207,7 +207,6 @@ pub(super) async fn run_zip(
 
     let total_elapsed = dl_elapsed + zip_elapsed;
 
-    // Get final file size
     let zip_size = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
 
     if crate::ui::is_rich() {

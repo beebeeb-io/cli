@@ -195,7 +195,6 @@ fn render_quiet(passkeys: &[PasskeyRow]) -> Vec<String> {
     passkeys.iter().map(|p| p.id.clone()).collect()
 }
 
-/// Render the full human-mode table.
 fn render_table(passkeys: &[PasskeyRow]) -> String {
     use crate::{colors, ui};
     use colored::Colorize;

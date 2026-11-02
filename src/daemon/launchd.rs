@@ -85,7 +85,6 @@ pub(super) fn env_xml_with_transport(transport: &str) -> String {
     format!("{MARKER_ENV_XML}\n        <key>BB_TRANSPORT</key>\n        <string>{transport}</string>")
 }
 
-/// Render the sync LaunchAgent plist.
 pub fn render_plist(label: &str, args_xml: &str, stdout_log: &str, stderr_log: &str) -> String {
     render_plist_with_env(label, args_xml, stdout_log, stderr_log, MARKER_ENV_XML)
 }

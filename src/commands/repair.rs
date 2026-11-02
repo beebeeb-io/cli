@@ -88,7 +88,6 @@ fn unwrap_metadata_json(decrypted: &str) -> String {
 }
 
 /// Try decrypting chunks with the binary-UUID key specifically.
-/// Returns the plaintext on success.
 fn decrypt_chunks_with_binary_key(
     master_key: &beebeeb_core::kdf::MasterKey,
     file_id_str: &str,

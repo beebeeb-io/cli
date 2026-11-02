@@ -10,7 +10,6 @@
 
 use super::*;
 
-/// Render the sync systemd user unit.
 pub fn render_systemd_unit(slug: &str, exe: &str, local: &str, remote: &str) -> String {
     render_systemd_unit_with(slug, exe, local, remote, None)
 }

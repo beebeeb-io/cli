@@ -949,7 +949,6 @@ impl ApiClient {
         Ok(resp)
     }
 
-    /// Upload a raw blob to the speedtest endpoint.
     pub async fn speedtest_upload(&self, data: &[u8]) -> Result<(), ApiError> {
         let token = self.require_auth()?;
         let resp = self
@@ -968,7 +967,6 @@ impl ApiClient {
         Ok(())
     }
 
-    /// Download `size` random bytes from the speedtest endpoint.
     pub async fn speedtest_download(&self, size: usize) -> Result<Vec<u8>, ApiError> {
         let token = self.require_auth()?;
         let resp = self
@@ -1104,7 +1102,6 @@ impl ApiClient {
         parse_response(resp).await
     }
 
-    /// List all client sessions for the authenticated user.
     pub async fn list_client_sessions(&self) -> Result<Value, ApiError> {
         let token = self.require_auth()?;
         let resp = self

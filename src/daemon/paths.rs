@@ -69,13 +69,11 @@ pub fn pid_path(slug: &str) -> Result<PathBuf, DaemonError> {
     Ok(daemon_dir()?.join(format!("{slug}.pid")))
 }
 
-/// Write a PID to the PID file for the given slug.
 pub fn write_pid(slug: &str, pid: u32) -> Result<(), DaemonError> {
     let path = pid_path(slug)?;
     fs::write(&path, pid.to_string()).map_err(|e| DaemonError::Other(format!("write PID file: {e}")))
 }
 
-/// Read the PID from a PID file, if it exists.
 pub fn read_pid(slug: &str) -> Result<Option<u32>, DaemonError> {
     let path = pid_path(slug)?;
     if !path.exists() {
@@ -92,7 +90,6 @@ pub fn read_pid(slug: &str) -> Result<Option<u32>, DaemonError> {
     }
 }
 
-/// Remove the PID file for the given slug.
 pub fn remove_pid(slug: &str) -> Result<(), DaemonError> {
     let path = pid_path(slug)?;
     if path.exists() {
@@ -101,7 +98,6 @@ pub fn remove_pid(slug: &str) -> Result<(), DaemonError> {
     Ok(())
 }
 
-/// Check whether a process with the given PID is still running.
 pub(super) fn process_exists(pid: u32) -> bool {
     #[cfg(unix)]
     {

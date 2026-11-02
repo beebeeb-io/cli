@@ -18,7 +18,6 @@ fn b64() -> base64::engine::GeneralPurpose {
     base64::engine::general_purpose::STANDARD
 }
 
-/// Load the master key from config, returning a beebeeb_core MasterKey.
 pub(crate) fn load_master_key() -> Result<beebeeb_core::kdf::MasterKey, String> {
     let config = load_config();
     let mk_b64 = config.master_key.ok_or("No master key found. Run `bb login` first.")?;
@@ -114,7 +113,6 @@ fn is_unfinished_first_upload(row: &serde_json::Value) -> bool {
 }
 
 /// Prompt the user interactively for conflict resolution.
-/// Returns Ok(resolution) or Err if stdin is not interactive.
 fn prompt_conflict(filename: &str) -> ConflictResolution {
     eprint!(
         "  {} {} [R]eplace / [K]eep both / [S]kip: ",

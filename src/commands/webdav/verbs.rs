@@ -101,7 +101,6 @@ pub(super) async fn get_response(state: &Arc<DavState>, path: &str, req_headers:
         None => return (StatusCode::NOT_FOUND, "no file id").into_response(),
     };
 
-    // Build ETag and conditional-request headers
     let etag = make_etag(&file_id, resolved.modified.as_deref());
 
     // If-None-Match (for GET caching by client)

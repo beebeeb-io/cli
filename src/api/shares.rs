@@ -54,7 +54,6 @@ impl ApiClient {
         }
     }
 
-    /// List the current user's shares.
     pub async fn list_shares(&self) -> Result<Value, ApiError> {
         let token = self.require_auth()?;
         let resp = self

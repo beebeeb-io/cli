@@ -529,7 +529,6 @@ impl BeebeebFsState {
 
     // ─── Directory write operations ───────────────────────────────────────
 
-    /// Create an encrypted folder.
     pub(super) fn mkdir(
         &mut self,
         _req: &Request,

@@ -17,7 +17,7 @@ pub fn stop_daemon(slug: &str) -> Result<bool, DaemonError> {
     Ok(killed || la_removed || sd_removed)
 }
 
-/// Stop all daemons: iterate all PID files and stop each one.
+/// Returns how many daemons were stopped.
 pub fn stop_all_daemons() -> Result<u32, DaemonError> {
     let slugs = list_daemon_slugs()?;
     let mut count = 0u32;
