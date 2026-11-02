@@ -25,6 +25,78 @@ const STATE_FILE: &str = ".bb-sync.json";
 // Chunk size is now computed dynamically via beebeeb_types::plan_chunks().
 // See the adaptive chunk-size ladder in beebeeb-types/src/chunk.rs.
 
+/// What `bb sync` should do this invocation. The control modes return before
+/// any tree work; `Run` is the one-shot or watch sync.
+#[derive(Clone, Debug)]
+pub enum SyncCommand {
+    Run,
+    Status,
+    StopSession(String),
+    StopAll,
+    StopLegacy,
+    Daemon,
+}
+
+/// The knobs that shape a sync pass, grouped so a call site names the policy
+/// instead of a row of bare booleans.
+#[derive(Clone, Debug)]
+pub struct SyncOptions {
+    pub dry_run: bool,
+    pub force: bool,
+    pub delete_remote: bool,
+    pub once: bool,
+    pub rehash: bool,
+    pub allow_mass_delete: bool,
+    pub rebind: bool,
+    pub concurrency: usize,
+}
+
+impl SyncOptions {
+    /// The `bb watch` redirect: a continuous pass with no flags.
+    pub fn watch() -> Self {
+        Self {
+            dry_run: false,
+            force: false,
+            delete_remote: false,
+            once: false,
+            rehash: false,
+            allow_mass_delete: false,
+            rebind: false,
+            concurrency: 4,
+        }
+    }
+}
+
+/// Which side a changed file moves to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Direction {
+    Skip,
+    Upload,
+    Download,
+    Conflict,
+}
+
+/// What to do when both sides changed since the manifest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ConflictPolicy {
+    Skip,
+    Force,
+}
+
+/// The one conflict rule: a file changed on one side moves that way; changed
+/// on both is a conflict unless the policy forces the local copy.
+pub(super) fn decide(local_changed: bool, remote_changed: bool, policy: ConflictPolicy) -> Direction {
+    match (local_changed, remote_changed) {
+        (false, false) => Direction::Skip,
+        (true, false) => Direction::Upload,
+        (false, true) => Direction::Download,
+        (true, true) => match policy {
+            ConflictPolicy::Force => Direction::Upload,
+            ConflictPolicy::Skip => Direction::Conflict,
+        },
+    }
+}
+
 
 
 
@@ -56,34 +128,40 @@ const STATE_FILE: &str = ".bb-sync.json";
 pub async fn run(
     local_dir: Option<PathBuf>,
     remote_path_arg: Option<String>,
-    dry_run: bool,
-    force: bool,
-    delete_remote: bool,
-    once: bool,
-    daemon: bool,
-    stop_legacy: bool,
-    status: bool,
-    stop_session: Option<String>,
-    stop_all: bool,
-    concurrency: usize,
-    rehash: bool,
-    allow_mass_delete: bool,
-    rebind: bool,
+    command: SyncCommand,
+    options: SyncOptions,
 ) -> Result<(), String> {
-    // ── --status: show all active sync sessions ────────────────────────────
-    if status || stop_session.is_some() || stop_all {
-        let api = ApiClient::from_config();
-        api.require_auth()?;
-        let master_key = load_master_key()?;
-
-        if let Some(ref name) = stop_session {
+    let SyncOptions {
+        dry_run,
+        force,
+        delete_remote,
+        once,
+        rehash,
+        allow_mass_delete,
+        rebind,
+        concurrency,
+    } = options;
+    // ── --status / --stop-session / --stop-all: session control ────────────
+    match &command {
+        SyncCommand::StopSession(name) => {
+            let api = ApiClient::from_config();
+            api.require_auth()?;
+            let master_key = load_master_key()?;
             return stop_session_by_name(&api, &master_key, name).await;
         }
-        if stop_all {
+        SyncCommand::StopAll => {
+            let api = ApiClient::from_config();
+            api.require_auth()?;
+            let master_key = load_master_key()?;
             return stop_all_sessions(&api, &master_key).await;
         }
-        // --status
-        return print_session_status(&api, &master_key).await;
+        SyncCommand::Status => {
+            let api = ApiClient::from_config();
+            api.require_auth()?;
+            let master_key = load_master_key()?;
+            return print_session_status(&api, &master_key).await;
+        }
+        _ => {}
     }
 
     // If no local_dir and no control flags, show status + hint (Task 4)
@@ -104,24 +182,25 @@ pub async fn run(
         }
     };
 
-    if stop_legacy {
-        // Legacy --stop: try to uninstall any old single-plist LaunchAgent
-        return crate::daemon::uninstall_launchagent("sync").map(|removed| {
-            if removed {
-                println!(
-                    "  {} sync daemon removed",
-                    "\u{2713}".custom_color(crate::colors::GREEN_OK),
-                );
-            } else {
-                println!(
-                    "  {} no legacy sync daemon installed",
-                    "\u{00b7}".custom_color(crate::colors::INK_DIM),
-                );
-            }
-        });
-    }
-    if daemon {
-        return spawn_sync_daemon(&local_dir, remote_path_arg.as_deref());
+    match command {
+        SyncCommand::StopLegacy => {
+            // Legacy --stop: try to uninstall any old single-plist LaunchAgent
+            return crate::daemon::uninstall_launchagent("sync").map(|removed| {
+                if removed {
+                    println!(
+                        "  {} sync daemon removed",
+                        "\u{2713}".custom_color(crate::colors::GREEN_OK),
+                    );
+                } else {
+                    println!(
+                        "  {} no legacy sync daemon installed",
+                        "\u{00b7}".custom_color(crate::colors::INK_DIM),
+                    );
+                }
+            });
+        }
+        SyncCommand::Daemon => return spawn_sync_daemon(&local_dir, remote_path_arg.as_deref()),
+        _ => {}
     }
 
     let api = ApiClient::from_config();
@@ -527,6 +606,7 @@ pub async fn run(
     }
 
     let mut actions: Vec<SyncAction> = Vec::with_capacity(sorted_files.len());
+    let policy = if force { ConflictPolicy::Force } else { ConflictPolicy::Skip };
 
     for rel in &sorted_files {
         if moved_conflicts.contains(rel) {
@@ -543,40 +623,24 @@ pub async fn run(
             (Some(l), Some(r), Some(p)) => {
                 let local_changed = local_changed_vs_manifest(&l, &p);
                 let remote_changed = remote_changed(&r, &p);
-                match (local_changed, remote_changed) {
-                    (false, false) => {
-                        actions.push(SyncAction::Skip);
-                    }
-                    (true, false) => {
-                        actions.push(SyncAction::Upload {
-                            rel: rel.clone(),
-                            local: l,
-                            replace_id: Some(r.id),
-                        });
-                    }
-                    (false, true) => {
-                        actions.push(SyncAction::Download {
-                            rel: rel.clone(),
-                            remote: r,
-                        });
-                    }
-                    (true, true) => {
-                        if force {
-                            actions.push(SyncAction::Upload {
-                                rel: rel.clone(),
-                                local: l,
-                                replace_id: Some(r.id),
-                            });
-                        } else {
-                            actions.push(SyncAction::Conflict {
-                                msg: format!("{rel} (skipped \u{2014} use --force to overwrite)"),
-                            });
-                        }
-                    }
+                match decide(local_changed, remote_changed, policy) {
+                    Direction::Skip => actions.push(SyncAction::Skip),
+                    Direction::Upload => actions.push(SyncAction::Upload {
+                        rel: rel.clone(),
+                        local: l,
+                        replace_id: Some(r.id),
+                    }),
+                    Direction::Download => actions.push(SyncAction::Download {
+                        rel: rel.clone(),
+                        remote: r,
+                    }),
+                    Direction::Conflict => actions.push(SyncAction::Conflict {
+                        msg: format!("{rel} (skipped \u{2014} use --force to overwrite)"),
+                    }),
                 }
             }
             (Some(l), Some(r), None) => {
-                if force {
+                if policy == ConflictPolicy::Force {
                     actions.push(SyncAction::Upload {
                         rel: rel.clone(),
                         local: l,
@@ -2246,3 +2310,32 @@ use scan::*;
 
 mod transfer;
 use transfer::*;
+
+#[cfg(test)]
+mod conflict_policy_tests {
+    use super::{ConflictPolicy, Direction, SyncOptions, decide};
+
+    /// The conflict table: one side changed moves that way; both changed is a
+    /// conflict unless the policy forces the local copy.
+    #[test]
+    fn the_conflict_table() {
+        let skip = ConflictPolicy::Skip;
+        let force = ConflictPolicy::Force;
+        assert_eq!(decide(false, false, skip), Direction::Skip);
+        assert_eq!(decide(true, false, skip), Direction::Upload);
+        assert_eq!(decide(false, true, skip), Direction::Download);
+        assert_eq!(decide(true, true, skip), Direction::Conflict);
+        assert_eq!(decide(true, true, force), Direction::Upload);
+        // Force does not change the one-sided cases.
+        assert_eq!(decide(true, false, force), Direction::Upload);
+        assert_eq!(decide(false, true, force), Direction::Download);
+    }
+
+    #[test]
+    fn watch_options_are_the_plain_continuous_pass() {
+        let o = SyncOptions::watch();
+        assert!(!o.dry_run && !o.force && !o.delete_remote && !o.once);
+        assert!(!o.rehash && !o.allow_mass_delete && !o.rebind);
+        assert_eq!(o.concurrency, 4);
+    }
+}

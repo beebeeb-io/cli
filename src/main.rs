@@ -679,19 +679,8 @@ async fn main() {
             commands::sync::run(
                 Some(path),
                 parent,
-                false,
-                false,
-                false,
-                false,
-                false,
-                false,
-                false,
-                None,
-                false,
-                4,
-                false,
-                false,
-                false,
+                commands::sync::SyncCommand::Run,
+                commands::sync::SyncOptions::watch(),
             )
             .await
         }
@@ -717,25 +706,32 @@ async fn main() {
             // ~chunk_size worth of buffers). (1, 8) is the supported range.
             let concurrency = concurrency.clamp(1, 8);
             daemon::migrate_sync_services();
-            commands::sync::run(
-                local_dir,
-                remote_path,
+            let command = if let Some(name) = stop_session {
+                commands::sync::SyncCommand::StopSession(name)
+            } else if stop_all {
+                commands::sync::SyncCommand::StopAll
+            } else if status {
+                commands::sync::SyncCommand::Status
+            } else if stop {
+                commands::sync::SyncCommand::StopLegacy
+            } else if daemon {
+                commands::sync::SyncCommand::Daemon
+            } else {
+                commands::sync::SyncCommand::Run
+            };
+            let options = commands::sync::SyncOptions {
                 dry_run,
                 force,
-                delete,
+                delete_remote: delete,
                 once,
-                daemon,
-                stop,
-                status,
-                stop_session,
-                stop_all,
-                concurrency,
                 rehash,
                 allow_mass_delete,
                 rebind,
-            )
-            .await
-            .map_err(exit::sync_error)
+                concurrency,
+            };
+            commands::sync::run(local_dir, remote_path, command, options)
+                .await
+                .map_err(exit::sync_error)
         }
         Commands::Mount {
             mountpoint,
