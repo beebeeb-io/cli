@@ -146,12 +146,15 @@ fn is_transient_transport_error(err: &reqwest::Error) -> bool {
     false
 }
 
-/// Exponential backoff with a 5s cap: ~200ms, 400, 800, 1600, 3200, 5000…
-async fn backoff(attempt: u32) {
-    let shift = attempt.saturating_sub(1).min(5);
-    let ms = (200u64 << shift).min(5_000);
-    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
-}
+/// The chunk-upload retry policy (spec move 6): core owns the ladder, the CLI
+/// keeps the numbers it has always shipped — 200 ms base doubling per attempt
+/// under a 5 s cap, five attempts total.
+const CHUNK_RETRY: beebeeb_core::retry::RetryPolicy = beebeeb_core::retry::RetryPolicy {
+    max_attempts: 5,
+    base_ms: 200,
+    cap_ms: 5_000,
+    jitter: beebeeb_core::retry::Jitter::None,
+};
 
 pub struct ApiClient {
     client: Client,
@@ -959,9 +962,8 @@ impl ApiClient {
     ) -> Result<Value, ApiError> {
         let token = self.require_auth()?;
         let url = self.url(&format!("/api/v1/uploads/{upload_session_id}/chunks/{index}"));
-        const MAX_ATTEMPTS: u32 = 5;
         let mut last_err = String::new();
-        for attempt in 1..=MAX_ATTEMPTS {
+        for attempt in 1..=CHUNK_RETRY.max_attempts {
             pace_if_needed().await;
             let send = self
                 .client
@@ -983,14 +985,15 @@ impl ApiClient {
                 },
                 Err(err) if is_transient_transport_error(&err) => {
                     last_err = format_request_error(err);
-                    backoff(attempt).await;
+                    let wait = CHUNK_RETRY.delay_ms(attempt);
+                    tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
                     continue;
                 }
                 // Permanent transport error (TLS/builder/etc.) — fail fast.
                 Err(err) => return Err(format_request_error(err).into()),
             }
         }
-        Err(format!("chunk {index} failed after {MAX_ATTEMPTS} attempts: {last_err}").into())
+        Err(format!("chunk {index} failed after {} attempts: {last_err}", CHUNK_RETRY.max_attempts).into())
     }
 
     /// Finalise a v2 upload session: `POST /api/v1/uploads/{session}/complete`.
@@ -3745,5 +3748,20 @@ mod move_request_tests {
     #[should_panic(expected = "a test must point the client at a local server")]
     fn a_test_client_cannot_be_pointed_at_a_public_server() {
         let _ = ApiClient::new_for_test("https://api.beebeeb.io".to_string());
+    }
+}
+
+#[cfg(test)]
+mod retry_policy_tests {
+    use super::CHUNK_RETRY;
+
+    /// The retry vector: the ladder the CLI has always slept, now read from
+    /// core's policy. 200, 400, 800, 1600, 3200 ms for attempts 1..=5, and no
+    /// wait at all before the first attempt.
+    #[test]
+    fn chunk_retry_ladder_matches_the_shipped_one() {
+        let ladder: Vec<u64> = (0..=CHUNK_RETRY.max_attempts).map(|retry| CHUNK_RETRY.delay_ms(retry)).collect();
+        assert_eq!(ladder, vec![0, 200, 400, 800, 1_600, 3_200]);
+        assert_eq!(CHUNK_RETRY.max_attempts, 5);
     }
 }
