@@ -29,6 +29,9 @@ pub async fn announce_owner_only(api: &ApiClient, master: &MasterKey, folder_id:
 #[derive(Clone)]
 pub struct ResolvedCliKey {
     pub key: Arc<FileKey>,
+    /// L12: the key the row's NAME authenticates under, when it differs from
+    /// `key` (a request row: derived-first name key, content under C).
+    pub name_key: Option<Arc<FileKey>>,
     pub origin: KeyOrigin,
     pub canonical: Value,
     pub pending_owner_wrap: Option<Vec<u8>>,
@@ -279,8 +282,10 @@ impl OwnedKeyResolver {
                 .as_mut()
                 .and_then(|r| r.row_keys(master, &canonical))
                 .ok_or("can't open request upload")?;
+            let name_key = FileKey::from_bytes(*keys.name_key.as_bytes());
             return Ok(ResolvedCliKey {
                 key: Arc::new(keys.content_key),
+                name_key: Some(Arc::new(name_key)),
                 origin: KeyOrigin::RequestContent,
                 canonical,
                 pending_owner_wrap: None,
@@ -295,6 +300,7 @@ impl OwnedKeyResolver {
         let read_only = resolved.write_target.is_none();
         Ok(ResolvedCliKey {
             key: Arc::new(resolved.key),
+            name_key: None,
             origin: resolved.origin,
             canonical,
             pending_owner_wrap: None,
@@ -325,6 +331,7 @@ impl OwnedKeyResolver {
                 let read_only = resolved.write_target.is_none();
                 return Ok(ResolvedCliKey {
                     key: Arc::new(resolved.key),
+                    name_key: None,
                     origin: resolved.origin,
                     canonical,
                     // A pending envelope is never confirmation that adoption
@@ -363,6 +370,7 @@ impl OwnedKeyResolver {
                     self.pending.insert(id.to_string(), pending.clone());
                     return Ok(ResolvedCliKey {
                         key: Arc::new(key),
+                        name_key: None,
                         origin: KeyOrigin::FolderWrap,
                         canonical,
                         pending_owner_wrap: Some(pending),
@@ -386,6 +394,7 @@ impl OwnedKeyResolver {
                 let read_only = resolved.write_target.is_none();
                 return Ok(ResolvedCliKey {
                     key: Arc::new(resolved.key),
+                    name_key: None,
                     origin: resolved.origin,
                     canonical,
                     pending_owner_wrap: Some(pending),

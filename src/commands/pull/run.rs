@@ -106,7 +106,10 @@ pub(super) async fn run_once(
 
     // The chunk format comes from the file's authenticated metadata, never a
     // server field (task 1943): core's reader opens a v2-pinned file only as v2.
-    let pin = crate::crypto::content_pin_with_key(&resolved.key, &file_id, name_encrypted_str)?;
+    // L12: a request row's NAME key is derived-first (core's resolver), while its
+    // content stays under C. The chunk format lives in the name's metadata.
+    let pin_key = resolved.name_key.as_deref().unwrap_or(&resolved.key);
+    let pin = crate::crypto::content_pin_with_key(pin_key, &file_id, name_encrypted_str)?;
 
     // File-request uploads are sealed under a per-file content key C, not the
     // master-derived key the streaming path assumes. Decrypt them via the

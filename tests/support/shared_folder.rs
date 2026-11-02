@@ -19,7 +19,14 @@ use std::{
 };
 pub const ROOT: &str = "22222222-2222-4222-8222-222222222222";
 pub const SUB: &str = "33333333-3333-4333-8333-333333333333";
-pub const FILE: &str = "11111111-1111-4111-8111-111111111111";
+/// L12: the guest file is a FOREIGN item, so its id is RFC9562 v8 (variant 10).
+pub const FILE: &str = "11111111-1111-8111-9111-111111111111";
+/// L12: an OWNER file id (any canonical UUID that is not v8) for the owner-row fixtures.
+pub const O_FILE: &str = "11111111-1111-4111-8111-111111111111";
+/// L12: a foreign FOLDER id (v8), for a shared folder that arrived through a share.
+pub const F_SUB: &str = "33333333-3333-8333-9333-333333333333";
+/// L12: a foreign id whose name does not authenticate, for skip/refusal rows.
+pub const F_BAD: &str = "44444444-4444-8444-9444-444444444444";
 /// SF-0002: an id whose uppercase spelling differs, as the iOS File Provider wrote.
 pub const UPPER_FILE: &str = "5f0c2a9e-3b1d-4c7e-9a2f-6d8e1b4c7a30";
 pub const BAD: &str = "44444444-4444-4444-8444-444444444444";
@@ -212,11 +219,11 @@ impl Fixture {
     pub fn owner_file() -> Self {
         use beebeeb_core::chunk_stream::ExpectedChunkFormat;
         let mut f = Self::basic();
-        let key = beebeeb_core::kdf::derive_file_key(&master(), FILE.as_bytes());
+        let key = beebeeb_core::kdf::derive_file_key(&master(), O_FILE.as_bytes());
         f.plaintext = b"an ordinary owner file".to_vec();
         f.stride = f.plaintext.len() as u64;
         f.frames = vec![beebeeb_core::encrypt::encrypt_chunk_raw(&key, &f.plaintext).unwrap()];
-        let mut r = row(FILE, Some(ROOT), "owned.txt", RowFacts { ..Default::default() });
+        let mut r = row(O_FILE, Some(ROOT), "owned.txt", RowFacts { ..Default::default() });
         r["name_encrypted"] = json!(
             beebeeb_core::encrypt::encrypt_name_for(
                 &key,
@@ -231,19 +238,19 @@ impl Fixture {
         f.rows[1] = r;
         f
     }
-    /// SF-0002 round 3 (K1): an old-CLI owner row (id `FILE`): name and its single
+    /// SF-0002 round 3 (K1): an old-CLI owner row (id `O_FILE`): name and its single
     /// content chunk sealed under the legacy binary-id key, the chunk stored as
     /// a JSON `EncryptedBlob` (what the CLI wrote before raw frames).
     pub fn owner_file_json_blob() -> Self {
         use beebeeb_core::chunk_stream::ExpectedChunkFormat;
         let mut f = Self::basic();
-        let uuid = uuid::Uuid::parse_str(FILE).unwrap();
+        let uuid = uuid::Uuid::parse_str(O_FILE).unwrap();
         let key = beebeeb_core::kdf::derive_file_key(&master(), uuid.as_bytes());
         f.plaintext = b"an old CLI upload, stored as a JSON blob".to_vec();
         f.stride = f.plaintext.len() as u64;
         f.frames =
             vec![serde_json::to_vec(&beebeeb_core::encrypt::encrypt_chunk(&key, &f.plaintext).unwrap()).unwrap()];
-        let mut r = row(FILE, Some(ROOT), "legacy.txt", RowFacts { ..Default::default() });
+        let mut r = row(O_FILE, Some(ROOT), "legacy.txt", RowFacts { ..Default::default() });
         r["name_encrypted"] = json!(
             beebeeb_core::encrypt::encrypt_name_for(
                 &key,

@@ -31,6 +31,7 @@ async fn upload_over(mut mock: Mock, s: &Scratch, old: Uuid) -> (Result<(), Stri
     let remote = RemoteFile {
         id: old,
         resolved: Some(ResolvedCliKey {
+            name_key: None,
             key: Arc::new(old_key()),
             origin: KeyOrigin::Derived,
             canonical: serde_json::json!({
