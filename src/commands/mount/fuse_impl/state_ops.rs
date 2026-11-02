@@ -932,33 +932,22 @@ impl BeebeebFsState {
             return Err(Errno::EIO);
         }
 
-        // L13: the new name is sealed through core, under the key and chunk
-        // format the row itself authenticated — never a bare derive.
+        // N6: resolve the row exactly as push and every listing do. A foreign
+        // row opens through its L8 owner envelope or the child wrap of its
+        // proven custody root; the old call passed neither wrap, so every
+        // foreign item was refused with EPERM no matter how well it opened.
+        // L13: the new name is then sealed through core, under the key and
+        // chunk format the row itself authenticated — never a bare derive.
         let new_name_enc: Option<String> = if name_changed {
             let is_dir = self.inodes.get(&ino).is_some_and(|e| e.is_dir);
-            let kind = if is_dir {
-                beebeeb_core::owned_keys::ItemKind::Folder
-            } else {
-                beebeeb_core::owned_keys::ItemKind::File
-            };
-            let name_enc = row["name_encrypted"].as_str().ok_or_else(|| {
-                eprintln!("[mount] rename: {file_id} has no encrypted name");
-                Errno::EPERM
-            })?;
-            let resolved = beebeeb_core::owned_keys::resolve_owned_key(
-                &self.master_key,
-                file_id,
-                kind,
-                None,
-                None,
-                name_enc,
-                None,
-            )
-            .map_err(|_| {
-                eprintln!("[mount] rename refused for {file_id}: its name does not authenticate");
-                Errno::EPERM
-            })?;
-            let target = resolved.write_target.ok_or_else(|| {
+            let resolved = self
+                .rt
+                .block_on(resolver.resolve(&self.api, &self.master_key, &row))
+                .map_err(|e| {
+                    eprintln!("[mount] rename refused for {file_id}: {e}");
+                    Errno::EPERM
+                })?;
+            let target = resolved.write_target.clone().ok_or_else(|| {
                 eprintln!("[mount] rename refused for {file_id}: the row is read-only");
                 Errno::EPERM
             })?;

@@ -94,6 +94,9 @@ pub struct Mock {
     /// SF-0002 r3: a move/rename (`PATCH /files/{id}`) answers this status
     /// instead of succeeding.
     pub move_status: Option<u16>,
+    /// (file_id, body) of every move/rename PATCH, in order (N6: the sealed
+    /// name a rename sends).
+    pub move_bodies: Vec<(String, serde_json::Value)>,
     /// Every request that changes state, in order: `init:<id>`,
     /// `chunk:<session>:<index>`, `complete:<session>`, `abandon:<id>`,
     /// `trash:<id>`, `folder:<id>`, `move:<id>` (a successful PATCH).
@@ -271,14 +274,17 @@ fn router(state: Shared) -> Router {
                 m.events.push(format!("trash:{fid}"));
                 Json(json!({ "id": fid, "is_trashed": true })).into_response()
             })
-            .patch(|State(st): State<Shared>, Path(fid): Path<String>| async move {
-                let mut m = st.lock().unwrap();
-                if let Some(status) = m.move_status {
-                    return StatusCode::from_u16(status).unwrap().into_response();
-                }
-                m.events.push(format!("move:{fid}"));
-                Json(json!({ "id": fid })).into_response()
-            }),
+            .patch(
+                |State(st): State<Shared>, Path(fid): Path<String>, Json(body): Json<serde_json::Value>| async move {
+                    let mut m = st.lock().unwrap();
+                    if let Some(status) = m.move_status {
+                        return StatusCode::from_u16(status).unwrap().into_response();
+                    }
+                    m.move_bodies.push((fid.clone(), body));
+                    m.events.push(format!("move:{fid}"));
+                    Json(json!({ "id": fid })).into_response()
+                },
+            ),
         )
         .route(
             "/api/v1/files/:id/download",

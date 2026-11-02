@@ -1005,6 +1005,16 @@ mod replace_tests {
             mock.lock().unwrap().events,
             vec![format!("move:{SRC_ID}"), format!("trash:{OK_ID}")]
         );
+        // N6: an owner row still re-seals through core, under the key its own
+        // name authenticated.
+        let src_key = beebeeb_core::kdf::derive_file_key(&master(), SRC_ID.as_bytes());
+        let sent = {
+            let m = mock.lock().unwrap();
+            m.move_bodies[0].1["name_encrypted"].as_str().expect("sealed name").to_string()
+        };
+        let name = beebeeb_core::encrypt::decrypt_name_metadata_with_key(&src_key, &sent)
+            .expect("core opens the owner name the rename sent");
+        assert_eq!(name.name, "ok.txt");
     }
 
     /// L13 (P2-5): the new name is sealed through core, under the key and chunk
@@ -1046,6 +1056,71 @@ mod replace_tests {
             mock.lock().unwrap().events.is_empty(),
             "a row with no authenticated name sent a move"
         );
+    }
+
+    /// N6: a foreign row that opens through its L8 owner envelope is renamed
+    /// like an owner row — its name is re-sealed through core under that key
+    /// and the move is sent. The old resolve passed no wrap, so every foreign
+    /// rename was EPERM however well the row opened.
+    #[test]
+    fn a_foreign_row_with_its_owner_envelope_is_renamed_through_core() {
+        const FOREIGN_ID: &str = "22222222-2222-8222-8222-222222222222";
+        const FOREIGN_INO: u64 = 22;
+        let item_key = beebeeb_core::kdf::FileKey::from_bytes([42u8; 32]);
+        let sealed = beebeeb_core::encrypt::encrypt_name_for(
+            &item_key,
+            "member.txt",
+            Some("text/plain"),
+            ExpectedChunkFormat::Unrecorded,
+        )
+        .expect("member name");
+        let envelope = beebeeb_core::kdf::wrap_owner_file_key(&master(), FOREIGN_ID.as_bytes(), &item_key)
+            .expect("owner envelope");
+        let mut frame = envelope.nonce.clone();
+        frame.extend_from_slice(&envelope.ciphertext);
+        assert_eq!(frame.len(), 60, "the served envelope is nonce || ciphertext");
+        let wrapped = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(&frame)
+        };
+        let mut base = Mock::default();
+        base.files.insert(
+            FOREIGN_ID.to_string(),
+            serde_json::json!({
+                "id": FOREIGN_ID,
+                "parent_id": null,
+                "name_encrypted": sealed,
+                "is_folder": false,
+                "owner_wrapped_file_key": wrapped,
+            }),
+        );
+        let (mut fs, mock) = setup(base);
+        fs.inodes.insert(FOREIGN_INO, entry(Some(FOREIGN_ID), "member.txt", false));
+        fs.id_to_ino.insert(FOREIGN_ID.to_string(), FOREIGN_INO);
+        // The write check is not what this test asks: the wrap is.
+        fs.minted.insert(FOREIGN_ID.to_string());
+
+        fs.rename_stored(
+            FOREIGN_INO,
+            FOREIGN_ID,
+            FOREIGN_ID.parse().ok(),
+            "member.txt",
+            ROOT_INO,
+            ROOT_INO,
+            "renamed.txt",
+            None,
+        )
+        .expect("a foreign row with an opening envelope is renamed");
+
+        let m = mock.lock().unwrap();
+        assert_eq!(m.events, vec![format!("move:{FOREIGN_ID}")]);
+        assert!(m.trashed.is_empty(), "a rename trashed a row");
+        let sent = m.move_bodies[0].1["name_encrypted"]
+            .as_str()
+            .expect("the move carries a sealed name");
+        let name = beebeeb_core::encrypt::decrypt_name_metadata_with_key(&item_key, sent)
+            .expect("core opens the name the rename sent");
+        assert_eq!(name.name, "renamed.txt");
     }
 
     /// K5: a file this mount uploaded (under a key it minted) is decided
