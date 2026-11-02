@@ -21,8 +21,7 @@ pub enum FileEventStatus {
     Downloading,
     Done,
     Error,
-    /// Rendered in `compact.rs` but `sync.rs` never constructs it.
-    #[allow(dead_code)]
+    /// A file sync left alone this pass (an SF-0002 read-only row's edit).
     Skipped,
 }
 

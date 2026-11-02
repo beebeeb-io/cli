@@ -164,11 +164,7 @@ pub(crate) async fn try_download_with_file_key(
     progress: &dyn ChunkProgress,
     display_name: &str,
 ) -> Result<DirectResult, DownloadError> {
-    let decryptor = ChunkDecryptor::for_push_with_file_key(
-        beebeeb_core::kdf::FileKey::from_bytes(*file_key.as_bytes()),
-        file_id,
-        pin,
-    );
+    let decryptor = ChunkDecryptor::for_push_with_file_key(crate::crypto::key_copy(&file_key), file_id, pin);
     try_download_inner(
         api,
         decryptor,
