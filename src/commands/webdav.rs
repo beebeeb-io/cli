@@ -378,7 +378,7 @@ mod sf_0002_write_check_tests {
         let upper = beebeeb_core::kdf::derive_file_key(&master(), UPPER.to_ascii_uppercase().as_bytes());
         let plaintext = b"SF-0002 read-only repair content";
         let mut row = file_row(UPPER, "uppercase-repair.pdf", &upper, plaintext);
-        let wrap = crate::owned_keys::wrap_owner_envelope(&master(), UPPER, &upper).unwrap();
+        let wrap = beebeeb_core::owned_keys::wrap_owner_file_key(&master(), UPPER, &upper).unwrap();
         row["owner_wrapped_file_key"] = json!(base64::engine::general_purpose::STANDARD.encode(wrap));
         let frame = beebeeb_core::encrypt::encrypt_chunk_raw(&upper, plaintext).unwrap();
         let m = mock(vec![row], frame).await;

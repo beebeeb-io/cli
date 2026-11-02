@@ -287,7 +287,6 @@ dependencies = [
  "dirs",
  "fuser",
  "futures-util",
- "hkdf",
  "hostname",
  "image",
  "indicatif",

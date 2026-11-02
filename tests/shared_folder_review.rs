@@ -43,7 +43,8 @@ async fn changed_identity_conflicts_before_comparing_versions() {
             next["id"] = json!(SUB);
             next["version_number"] = json!(version);
             next["updated_at"] = json!("2030-01-01T00:00:00Z");
-            next["owner_wrapped_file_key"] = json!(B64.encode(wrap_owner(SUB, &item_key())));
+            next["owner_wrapped_file_key"] =
+                json!(B64.encode(beebeeb_core::owned_keys::wrap_owner_file_key(&master(), SUB, &item_key()).unwrap()));
             f.rows[1]["is_trashed"] = json!(true);
             f.rows.push(next);
         }

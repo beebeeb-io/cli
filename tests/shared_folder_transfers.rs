@@ -147,7 +147,7 @@ async fn replace_keeps_key_and_history_id() {
     f.rows[1]["parent_id"] = json!(null);
     f.rows[1]["owner_wrapped_file_key"] = json!(base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
-        wrap_owner(FILE, &item_key())
+        beebeeb_core::owned_keys::wrap_owner_file_key(&master(), FILE, &item_key()).unwrap()
     ));
     let h = Harness::new(f).await;
     let path = h.home.join("guest.txt");

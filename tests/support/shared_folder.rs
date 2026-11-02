@@ -75,31 +75,6 @@ pub fn proof_row() -> Value {
 pub fn wrap(id: &str, folder: bool) -> String {
     B64.encode(owned_keys::wrap_child_key(&folder_key(), ROOT, id, if folder { 2 } else { 1 }, &item_key()).unwrap())
 }
-/// The historical L8 owner wrap for an owner-class id: core refuses to seal one
-/// now, so a fixture builds the envelope an older client wrote (the CLI keeps
-/// the same construction for legacy rows).
-pub fn wrap_owner(id: &str, key: &FileKey) -> Vec<u8> {
-    use aes_gcm::aead::{Aead, Payload};
-    use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
-    let context = [beebeeb_core::kdf::OWNER_FILE_KEY_LABEL, id.as_bytes()].concat();
-    let mut purpose = [0u8; 32];
-    let ikm = master().to_bytes();
-    hkdf::Hkdf::<sha2::Sha256>::new(None, &ikm)
-        .expand(&context, &mut purpose)
-        .unwrap();
-    let cipher = Aes256Gcm::new_from_slice(&purpose).unwrap();
-    let nonce = [0x42u8; 12];
-    let ciphertext = cipher
-        .encrypt(
-            Nonce::from_slice(&nonce),
-            Payload {
-                msg: key.as_bytes(),
-                aad: &context,
-            },
-        )
-        .unwrap();
-    [nonce.as_slice(), ciphertext.as_slice()].concat()
-}
 #[derive(Default)]
 pub struct Fixture {
     pub rows: Vec<Value>,
@@ -227,7 +202,7 @@ impl Fixture {
     pub fn upper_repair_owner_wrap() -> Self {
         let mut f = Self::upper_repair();
         let upper = beebeeb_core::kdf::derive_file_key(&master(), UPPER_FILE.to_uppercase().as_bytes());
-        let wrap = wrap_owner(UPPER_FILE, &upper);
+        let wrap = owned_keys::wrap_owner_file_key(&master(), UPPER_FILE, &upper).unwrap();
         f.rows[1]["owner_wrapped_file_key"] = json!(B64.encode(wrap));
         f
     }
