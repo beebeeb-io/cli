@@ -265,7 +265,8 @@ impl ApiClient {
     /// to the previous version, a never-completed first upload is deleted. Core's
     /// resume rule (task 1908) needs it before it re-inits a file whose old
     /// session it may not continue. A 404 means there is nothing to abandon.
-    pub async fn upload_abandon(&self, file_id: &str) -> Result<Value, ApiError> {
+    pub async fn upload_abandon(&self, file_id: impl Into<FileId>) -> Result<Value, ApiError> {
+        let file_id = file_id.into();
         let token = self.require_auth()?;
         for _ in 0..3 {
             pace_if_needed().await;

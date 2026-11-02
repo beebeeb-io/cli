@@ -276,10 +276,13 @@ fn build_client(timeout: std::time::Duration) -> Client {
 }
 
 mod client;
+mod id;
 mod shares;
 mod tree;
 mod upload;
 mod versions;
+
+pub(crate) use id::{FileId, FolderId, ShareId};
 
 
 /// A parsed API error: the server's stable machine `error` code (when

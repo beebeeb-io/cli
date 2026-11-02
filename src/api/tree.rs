@@ -61,8 +61,9 @@ impl ApiClient {
             .await
     }
 
-    pub async fn list_files_bounded(&self, parent_id: &str, cap: usize) -> Result<Value, ApiError> {
-        self.list_all_files_bounded(Some(parent_id), false, cap.min(FILE_LIST_HARD_CAP))
+    pub async fn list_files_bounded(&self, parent_id: impl Into<FolderId>, cap: usize) -> Result<Value, ApiError> {
+        let parent_id = parent_id.into();
+        self.list_all_files_bounded(Some(parent_id.as_str()), false, cap.min(FILE_LIST_HARD_CAP))
             .await
     }
 
@@ -121,7 +122,8 @@ impl ApiClient {
     }
 
     /// Get file metadata by ID.
-    pub async fn get_file(&self, file_id: &str) -> Result<Value, ApiError> {
+    pub async fn get_file(&self, file_id: impl Into<FileId>) -> Result<Value, ApiError> {
+        let file_id = file_id.into();
         let token = self.require_auth()?;
         let resp = self
             .client
@@ -135,7 +137,8 @@ impl ApiClient {
     }
 
     /// Missing custody is explicit; network/auth/malformed responses never mean absent.
-    pub async fn get_shared_folder(&self, id: &str) -> Result<Value, ApiError> {
+    pub async fn get_shared_folder(&self, id: impl Into<FolderId>) -> Result<Value, ApiError> {
+        let id = id.into();
         let resp = self
             .client
             .get(self.url(&format!("/api/v1/shared-folders/{id}")))
@@ -149,7 +152,8 @@ impl ApiClient {
         parse_response(resp).await
     }
 
-    pub async fn get_shared_folder_keys(&self, id: &str, cursor: Option<&str>) -> Result<Value, ApiError> {
+    pub async fn get_shared_folder_keys(&self, id: impl Into<FolderId>, cursor: Option<&str>) -> Result<Value, ApiError> {
+        let id = id.into();
         let mut request = self
             .client
             .get(self.url(&format!("/api/v1/shared-folders/{id}/keys")))
@@ -161,7 +165,8 @@ impl ApiClient {
         parse_response(request.send().await.map_err(format_request_error)?).await
     }
 
-    pub async fn adopt_owner_key(&self, id: &str, wrap: &str) -> Result<bool, ApiError> {
+    pub async fn adopt_owner_key(&self, id: impl Into<FileId>, wrap: &str) -> Result<bool, ApiError> {
+        let id = id.into();
         let response = self
             .client
             .post(self.url(&format!("/api/v1/files/{id}/owner-key")))
@@ -269,7 +274,8 @@ impl ApiClient {
     }
 
     /// Soft-delete (trash) a file by ID.
-    pub async fn trash_file(&self, file_id: &str) -> Result<Value, ApiError> {
+    pub async fn trash_file(&self, file_id: impl Into<FileId>) -> Result<Value, ApiError> {
+        let file_id = file_id.into();
         let token = self.require_auth()?;
         let resp = self
             .client
@@ -325,7 +331,8 @@ impl ApiClient {
     /// `ConfirmedTrashAction` extractor refuses the call without it.
     /// Not called by any current command — reserved API surface.
     #[allow(dead_code)]
-    pub async fn permanent_delete(&self, file_id: &str, confirm_token: &str) -> Result<Value, ApiError> {
+    pub async fn permanent_delete(&self, file_id: impl Into<FileId>, confirm_token: &str) -> Result<Value, ApiError> {
+        let file_id = file_id.into();
         let token = self.require_auth()?;
         let resp = self
             .client
@@ -340,7 +347,8 @@ impl ApiClient {
     }
 
     /// Restore a trashed file/folder via `POST /api/v1/files/{id}/restore`.
-    pub async fn restore_file(&self, file_id: &str) -> Result<Value, ApiError> {
+    pub async fn restore_file(&self, file_id: impl Into<FileId>) -> Result<Value, ApiError> {
+        let file_id = file_id.into();
         let token = self.require_auth()?;
         let resp = self
             .client

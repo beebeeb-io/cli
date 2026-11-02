@@ -69,7 +69,8 @@ impl ApiClient {
     }
 
     /// Revoke a share by ID.
-    pub async fn delete_share(&self, share_id: &str) -> Result<Value, ApiError> {
+    pub async fn delete_share(&self, share_id: impl Into<ShareId>) -> Result<Value, ApiError> {
+        let share_id = share_id.into();
         let token = self.require_auth()?;
         let resp = self
             .client
@@ -148,7 +149,8 @@ impl ApiClient {
     }
 
     /// Close a file request (stop accepting uploads). Idempotent.
-    pub async fn close_file_request(&self, id: &str) -> Result<Value, ApiError> {
+    pub async fn close_file_request(&self, id: impl Into<ShareId>) -> Result<Value, ApiError> {
+        let id = id.into();
         let token = self.require_auth()?;
         let resp = self
             .client
@@ -163,7 +165,8 @@ impl ApiClient {
     /// Hard-delete a file request row. NOTE: the server does not yet expose a
     /// DELETE route for file requests (only `/close`); this is wired for
     /// forward-compatibility and will surface a clear error until it lands.
-    pub async fn delete_file_request(&self, id: &str) -> Result<Value, ApiError> {
+    pub async fn delete_file_request(&self, id: impl Into<ShareId>) -> Result<Value, ApiError> {
+        let id = id.into();
         let token = self.require_auth()?;
         let resp = self
             .client

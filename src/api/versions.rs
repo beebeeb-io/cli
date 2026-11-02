@@ -8,7 +8,8 @@ impl ApiClient {
     /// `PUT /api/v1/files/{file_id}/thumbnail` with the encrypted blob as the
     /// request body. The server stores it as a reserved chunk index and sets
     /// `has_thumbnail = true` on the file row.
-    pub async fn upload_thumbnail(&self, file_id: &str, encrypted_data: Vec<u8>) -> Result<(), ApiError> {
+    pub async fn upload_thumbnail(&self, file_id: impl Into<FileId>, encrypted_data: Vec<u8>) -> Result<(), ApiError> {
+        let file_id = file_id.into();
         let token = self.require_auth()?;
         for _ in 0..3 {
             pace_if_needed().await;
@@ -31,7 +32,8 @@ impl ApiClient {
     }
 
     /// Upload an encrypted large thumbnail for a file.
-    pub async fn upload_thumbnail_large(&self, file_id: &str, encrypted_data: Vec<u8>) -> Result<(), ApiError> {
+    pub async fn upload_thumbnail_large(&self, file_id: impl Into<FileId>, encrypted_data: Vec<u8>) -> Result<(), ApiError> {
+        let file_id = file_id.into();
         let token = self.require_auth()?;
         for _ in 0..3 {
             pace_if_needed().await;
@@ -59,7 +61,8 @@ impl ApiClient {
     /// read the body incrementally with `Response::chunk()` instead of
     /// buffering the whole payload. A 600s timeout overrides the client default
     /// (large files), matching `beebeeb-upload`.
-    pub async fn download_stream(&self, file_id: &str) -> Result<reqwest::Response, ApiError> {
+    pub async fn download_stream(&self, file_id: impl Into<FileId>) -> Result<reqwest::Response, ApiError> {
+        let file_id = file_id.into();
         let token = self.require_auth()?;
         let resp = self
             .client
@@ -78,7 +81,8 @@ impl ApiClient {
     }
 
     /// Download the raw encrypted bytes for a file.
-    pub async fn download_file(&self, file_id: &str) -> Result<Vec<u8>, ApiError> {
+    pub async fn download_file(&self, file_id: impl Into<FileId>) -> Result<Vec<u8>, ApiError> {
+        let file_id = file_id.into();
         let token = self.require_auth()?;
         let resp = self
             .client
