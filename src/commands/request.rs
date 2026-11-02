@@ -702,7 +702,6 @@ fn seal_file_for_request(
         }
     }
 
-    // Seal the content key C to the request public key.
     let sealed = file_request::seal_to_request(r_pub, REQUEST_SEAL_CONTEXT, &content_key)
         .map_err(|e| format!("seal content key: {e}"))?;
 

@@ -228,7 +228,6 @@ pub async fn run() -> Result<(), String> {
 }
 
 async fn run_json(api: &ApiClient) -> Result<(), String> {
-    // Region
     let region_info = api.get_my_region().await.ok();
     // Task 2050: the country the API's own list names, never a raw id or city.
     let region = region_info

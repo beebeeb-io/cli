@@ -64,7 +64,6 @@ pub(super) fn decode_file_entry(
     let chunk_count = file.get("chunk_count").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
     let modified = file.get("updated_at").and_then(|v| v.as_str()).map(|s| s.to_string());
 
-    // Decrypt name
     let name_encrypted = file.get("name_encrypted").and_then(|v| v.as_str())?;
     let (display_name, read_only) =
         match crate::crypto::decrypt_name_with_convention(master_key, &file_id, name_encrypted) {
@@ -199,7 +198,6 @@ pub(super) fn prop_entry(href: &str, entry: &ResolvedEntry) -> String {
         })
         .unwrap_or_default();
 
-    // Content-Type for non-folders
     let content_type = if !entry.is_collection {
         let mime = resolve_mime(&entry.display_name);
         format!("<D:getcontenttype>{mime}</D:getcontenttype>")

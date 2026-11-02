@@ -41,7 +41,6 @@ pub async fn run(path_arg: String, parents: bool) -> Result<(), String> {
         None => None,
     };
 
-    // Reject if the leaf already exists in the parent.
     if let Some(existing) = path::find_child_by_name(&api, &master_key, parent_uuid.as_deref(), &leaf).await? {
         if existing.is_folder {
             return Err(format!("{path_arg} already exists. use --parents to ignore."));
@@ -94,7 +93,6 @@ async fn run_recursive(
         cumulative.push('/');
         cumulative.push_str(segment);
 
-        // Does this segment already exist?
         if let Some(existing) = path::find_child_by_name(api, master_key, parent_id.as_deref(), segment).await? {
             if !existing.is_folder {
                 return Err(format!(

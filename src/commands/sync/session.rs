@@ -177,7 +177,6 @@ pub(super) async fn print_session_status(api: &ApiClient, master: &MasterKey) ->
                 }
             });
 
-        // Status indicator and color
         let (indicator, status_text, status_color) = match session_status {
             "watching" | "idle" => ("\u{25CF}", "watching", crate::colors::GREEN_OK),
             "syncing" | "uploading" | "downloading" => ("\u{25C6}", session_status, crate::colors::AMBER),

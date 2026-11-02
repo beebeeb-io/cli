@@ -61,7 +61,6 @@ pub(super) async fn run_once(
         .and_then(|v| v.as_str())
         .ok_or("server response missing name_encrypted")?;
 
-    // Load master key
     let master_key = load_master_key()?;
 
     let mut keys = crate::owned_keys::OwnedKeyResolver::new();

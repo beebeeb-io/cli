@@ -331,7 +331,6 @@ pub(super) fn decrypt_raw_chunks(
 
     for i in 0..count {
         let remaining = total - offset;
-        // Last chunk takes whatever is left; earlier chunks take the frame size.
         let this_chunk_size = if i == count - 1 { remaining } else { frame_size };
 
         if this_chunk_size < min_chunk_overhead || this_chunk_size > remaining {

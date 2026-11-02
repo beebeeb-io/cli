@@ -263,7 +263,6 @@ pub(super) async fn run_plain_watch(
                         root_unreconciled(state, remote_folder_id),
                     )
                     .await;
-                    // Save state
                     state.last_sync = Some(Utc::now());
                     let data = serde_json::to_vec_pretty(&state).map_err(|e| format!("serialize state: {e}"))?;
                     std::fs::write(state_path, data).map_err(|e| format!("write state file: {e}"))?;
@@ -398,7 +397,7 @@ pub(super) async fn run_tui_watch(
 
             let now = chrono::Local::now().format("%H:%M:%S").to_string();
 
-            // Notify TUI that sync started.
+            // Without this the TUI's spinner would stay idle during a long sync.
             let _ = sync_tx.send(TuiEvent::SyncStarted(changed.len() as u32));
 
             for path in &changed {
@@ -415,7 +414,6 @@ pub(super) async fn run_tui_watch(
                 }));
             }
 
-            // Re-run the sync logic.
             let resync_api = ApiClient::from_config();
             let binding_state = sync_shared_state.lock().await.clone();
             if let Err(e) = check_sync_account(&resync_api, &binding_state).await {
@@ -634,7 +632,6 @@ pub(super) async fn run_tui_watch(
                 }
             }
 
-            // Save state.
             let root_changed = root_unreconciled(&sync_state, remote_folder_id);
             finish_owned_sync(
                 &resync_api,
@@ -722,7 +719,6 @@ pub(super) fn spawn_sync_daemon(local_dir: &Path, remote_path: Option<&str>) -> 
         return Ok(());
     }
 
-    // Spawn the daemon process
     let pid = crate::daemon::spawn_daemon(&local_dir, &remote_normalized, &slug)?;
 
     // Install platform auto-start (best-effort, non-fatal)

@@ -72,7 +72,6 @@ pub(super) async fn lock_response(state: &Arc<DavState>, path: &str, body: &[u8]
     {
         let mut locks = state.locks.lock().await;
         locks.retain(|_, v| v.expires_at > Instant::now());
-        // Check for conflict: existing exclusive lock on same path
         if let Some(existing) = locks.get(path) {
             if existing.expires_at > Instant::now() && existing.exclusive {
                 return (StatusCode::LOCKED, "resource is already exclusively locked").into_response();

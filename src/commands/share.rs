@@ -326,7 +326,6 @@ pub async fn list() -> Result<(), String> {
             .unwrap_or(0);
         let max_opens = share.get("max_opens").and_then(|v| v.as_u64());
 
-        // Status indicator: active, expired, or revoked
         let (status_icon, name_color) = if is_revoked {
             ("\u{2717}".custom_color(crate::colors::RED_ERR), crate::colors::INK_DIM)
         } else {
@@ -518,7 +517,7 @@ fn run_picker(entries: &[ShareEntry]) -> Result<usize, String> {
     let mut selected: usize = 0;
     let mut stdout = io::stdout();
 
-    // Hide cursor while picking.
+    // The picker redraws in place; a visible cursor would flicker over it.
     crossterm::execute!(stdout, cursor::Hide).map_err(|e| e.to_string())?;
 
     // Draw the initial list.
@@ -585,7 +584,6 @@ fn draw_picker(stdout: &mut io::Stdout, entries: &[ShareEntry], selected: usize)
     for (i, entry) in entries.iter().enumerate() {
         let pointer = if i == selected { ">" } else { " " };
 
-        // Status indicator
         let status = if entry.is_revoked {
             "\u{2717}".custom_color(crate::colors::RED_ERR) // ✗
         } else if entry.is_expired {

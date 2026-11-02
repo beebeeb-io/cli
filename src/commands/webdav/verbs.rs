@@ -18,7 +18,6 @@ pub(super) fn options_response(state: &DavState) -> Response {
 }
 
 pub(super) async fn propfind_response(state: &Arc<DavState>, path: &str, depth: &str) -> Response {
-    // Resolve path to a vault entry
     let resolved = match resolve_path(state, path).await {
         Ok(r) => r,
         Err(e) => {
@@ -32,12 +31,11 @@ pub(super) async fn propfind_response(state: &Arc<DavState>, path: &str, depth: 
     // Always include the resource itself
     xml_entries.push(prop_entry(path, &resolved));
 
-    // For Depth: 1 on a collection, also list children
     if depth == "1" && resolved.is_collection {
         let parent_id = resolved.file_id.as_deref();
         let cache_key = normalise_cache_key(path);
 
-        // Try to serve from cache
+        // A cache hit skips the server round-trip; a miss falls through.
         let cached_children = get_from_cache(state, &cache_key).await;
 
         let children = if let Some(entries) = cached_children {
@@ -103,7 +101,6 @@ pub(super) async fn get_response(state: &Arc<DavState>, path: &str, req_headers:
 
     let etag = make_etag(&file_id, resolved.modified.as_deref());
 
-    // If-None-Match (for GET caching by client)
     if let Some(inm) = req_headers.get("if-none-match").and_then(|v| v.to_str().ok()) {
         if inm == etag || inm == "*" {
             let mut h = HeaderMap::new();
@@ -136,7 +133,6 @@ pub(super) async fn get_response(state: &Arc<DavState>, path: &str, req_headers:
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.clone()).into_response(),
     };
 
-    // Download encrypted bytes
     let encrypted_bytes = match state.api.download_file(&file_id).await {
         Ok(b) => b,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.message).into_response(),
@@ -226,7 +222,6 @@ pub(super) async fn head_response(state: &Arc<DavState>, path: &str) -> Response
 }
 
 pub(super) async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match: Option<&str>) -> Response {
-    // Derive filename from the last path segment
     let filename = path
         .trim_end_matches('/')
         .rsplit('/')
@@ -314,7 +309,6 @@ pub(super) async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8
         }
     };
 
-    // Encrypt body in chunks using adaptive chunk sizing
     let plan = beebeeb_types::plan_chunks(body.len() as u64, beebeeb_types::ChunkProfile::Cli);
     let chunk_size = plan.chunk_size_bytes as usize;
 
@@ -420,7 +414,6 @@ pub(super) async fn mkcol_response(state: &Arc<DavState>, path: &str) -> Respons
         return (StatusCode::METHOD_NOT_ALLOWED, "cannot MKCOL root").into_response();
     }
 
-    // Resolve parent
     let parent_path = {
         let trimmed = path.trim_end_matches('/');
         match trimmed.rfind('/') {
@@ -451,7 +444,6 @@ pub(super) async fn mkcol_response(state: &Arc<DavState>, path: &str) -> Respons
     // or written into.
     match crate::item_id::create_owned_folder(&state.api, &state.master_key, &folder_name, parent_id).await {
         Ok(_) => {
-            // Invalidate parent directory cache
             invalidate_cache(state, &normalise_cache_key(parent_path)).await;
             let mut headers = HeaderMap::new();
             headers.insert("Location", path.parse().unwrap_or_else(|_| "/".parse().unwrap()));
@@ -544,7 +536,6 @@ pub(super) async fn move_response(state: &Arc<DavState>, src_path: &str, destina
         }
     }
 
-    // Compute new_name_encrypted if the name changed
     let new_name_encrypted = if new_name != src.display_name {
         let mime_for_rename = if src.is_collection {
             None

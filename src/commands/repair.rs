@@ -177,7 +177,6 @@ pub async fn run(dry_run: bool) -> Result<(), String> {
         );
     }
 
-    // Collect all files recursively
     let all_items = collect_all_files(&api, None).await?;
 
     if all_items.is_empty() {
@@ -270,7 +269,6 @@ pub async fn run(dry_run: bool) -> Result<(), String> {
         }
     }
 
-    // JSON output
     if ui::is_json() {
         let json_out = serde_json::json!({
             "files_repaired": stats.files_repaired,
@@ -457,13 +455,10 @@ async fn repair_file(
         return Err("its metadata records chunk format v2; a v2 file is never rewritten by repair".to_string());
     }
 
-    // Step 1: Download encrypted content
     let encrypted_bytes = api.download_file(file_id).await?;
 
-    // Step 2: Decrypt with binary-UUID key
     let plaintext = decrypt_chunks_with_binary_key(master_key, file_id, &encrypted_bytes, chunk_count)?;
 
-    // Step 3: Re-encrypt name + chunks with string-UUID key
     let new_name_encrypted = encrypt_name_with_string_key(master_key, file_id, decrypted_name, None)?;
     let new_chunks = encrypt_chunks_with_string_key(master_key, file_id, &plaintext)?;
 

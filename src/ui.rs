@@ -339,7 +339,6 @@ pub fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
     }
 
     let mut out = String::new();
-    // Header
     for (i, h) in headers.iter().enumerate() {
         let visible = strip_ansi(h).chars().count();
         out.push_str(h);

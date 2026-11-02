@@ -40,7 +40,6 @@ pub(super) async fn run_zip(
 ) -> Result<(), String> {
     let master_key = load_master_key()?;
 
-    // Resolve the path argument to a folder.
     let resolved = crate::path::resolve_path(api, &master_key, path_arg).await?;
 
     if !resolved.is_folder {

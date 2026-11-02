@@ -915,7 +915,6 @@ impl BeebeebFsState {
             None
         };
 
-        // The row a rename onto an existing name replaces.
         let replaced = match self.find_child(newparent, newname) {
             Some(conflict_ino) if conflict_ino != ino => {
                 self.check_stored_row(conflict_ino, "replace")?;

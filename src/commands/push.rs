@@ -365,7 +365,6 @@ async fn push_single_file(
                 (existing_id, file_name.clone(), None)
             }
             Some(existing_id) => {
-                // Determine resolution
                 let resolution = match strategy {
                     ConflictStrategy::Replace => ConflictResolution::Replace { existing_id },
                     ConflictStrategy::KeepBoth => {

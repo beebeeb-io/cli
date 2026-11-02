@@ -131,7 +131,6 @@ pub async fn run() -> Result<(), String> {
         "session token \u{00b7} e2ee"
     };
 
-    // Session expiry
     let current_session = sessions.get("sessions").and_then(|v| v.as_array()).and_then(|arr| {
         arr.iter()
             .find(|s| s.get("is_current").and_then(|c| c.as_bool()).unwrap_or(false))
@@ -226,7 +225,6 @@ pub async fn run() -> Result<(), String> {
         percentage * 100.0,
     );
 
-    // Upload limit
     if upload_blocked {
         println!(
             "  {} {}",
@@ -246,10 +244,8 @@ pub async fn run() -> Result<(), String> {
         );
     }
 
-    // File count
     println!("  {} {}", dim("files   "), val(&format_number(file_count)));
 
-    // Session indicator
     let session_display = if session_active {
         format!(
             "{} {}",
@@ -265,7 +261,6 @@ pub async fn run() -> Result<(), String> {
     };
     println!("  {} {}", dim("session "), session_display);
 
-    // Auth + e2ee badge
     println!("  {} {}", dim("auth    "), val(auth_label));
 
     if let Some(notice) = &state_notice {

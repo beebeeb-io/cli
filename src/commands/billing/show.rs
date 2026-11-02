@@ -167,7 +167,6 @@ pub async fn show(json: bool) -> Result<(), String> {
     }
     println!();
 
-    // STORAGE
     println!("  {}", "STORAGE".custom_color(crate::colors::AMBER));
     let pct = if quota_bytes > 0 {
         used_bytes as f64 / quota_bytes as f64
@@ -220,7 +219,6 @@ pub async fn show(json: bool) -> Result<(), String> {
     }
     println!();
 
-    // REGION
     println!("  {}", "REGION".custom_color(crate::colors::AMBER));
     println!("    {}", region_human(region_slug).custom_color(crate::colors::INK));
     println!();

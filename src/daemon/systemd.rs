@@ -67,7 +67,6 @@ pub fn install_systemd_unit(local_dir: &Path, remote_path: &str, slug: &str) -> 
 
     fs::write(&unit_path, &unit_content).map_err(|e| DaemonError::Other(format!("write systemd unit: {e}")))?;
 
-    // Reload and enable
     let _ = service_manager("systemctl", &["--user", "daemon-reload"]);
 
     let status = service_manager("systemctl", &["--user", "enable", "--now", &unit_name])?;

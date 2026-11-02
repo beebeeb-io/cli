@@ -35,7 +35,7 @@ async fn fetch_quota() -> Result<QuotaView, String> {
     let api = ApiClient::from_config();
     api.require_auth()?;
 
-    // Fetch usage, file count, and subscription in parallel
+    // One round-trip's worth of latency rather than three.
     let (usage_res, count_res, sub_res) = tokio::join!(api.get_usage(), api.get_file_count(), api.get_subscription());
 
     let usage = usage_res?;
@@ -70,7 +70,6 @@ async fn fetch_quota() -> Result<QuotaView, String> {
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
 
-    // Build the plan label: "Pro — 8.0 TB (5 TB base + 3 TB extra)"
     let plan_label = build_plan_label(plan, extra_tb, quota_bytes);
 
     // Task 1037: `needs_plan` / `lapsed` ⇒ quota 0 and uploads refused.

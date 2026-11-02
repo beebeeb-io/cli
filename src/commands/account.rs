@@ -174,7 +174,6 @@ pub async fn show() -> Result<(), String> {
     println!("{}", ui::box_footer(w));
     println!();
 
-    // PLAN
     println!("  {}", "PLAN".custom_color(colors::AMBER));
     let plan_id = payload["plan"]["id"].as_str().unwrap_or("free");
     let cycle = payload["plan"]["billing_cycle"].as_str().unwrap_or("monthly");
@@ -215,7 +214,6 @@ pub async fn show() -> Result<(), String> {
     }
     println!();
 
-    // STORAGE
     println!("  {}", "STORAGE".custom_color(colors::AMBER));
     let used = payload["storage"]["used_bytes"].as_i64().unwrap_or(0);
     let quota = payload["storage"]["quota_bytes"].as_i64().unwrap_or(0);

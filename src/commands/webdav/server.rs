@@ -272,7 +272,6 @@ pub(super) async fn handle_webdav(State(state): State<Arc<DavState>>, req: Reque
                 .get("if-match")
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string());
-            // Verify lock if the path is locked and client provides a token
             if let Err(r) = check_lock(&state, &path, if_token.as_deref()).await {
                 return r;
             }
