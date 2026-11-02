@@ -64,3 +64,7 @@ mod l13_trash_after_upload_tests;
 #[cfg(test)]
 #[path = "sync/tests/conflict_policy_tests.rs"]
 mod conflict_policy_tests;
+
+#[cfg(test)]
+#[path = "sync/tests/a9b_request_edit_tests.rs"]
+mod a9b_request_edit_tests;

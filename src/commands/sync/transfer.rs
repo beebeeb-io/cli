@@ -349,12 +349,16 @@ pub(super) fn read_only_notice(rel: &str) -> String {
 /// would replace. One decision for the pass's upload phase and the watch-mode
 /// resync, from the one write check ([`write_check`] in `owned_keys`).
 pub(super) enum Replace<'a> {
-    /// Version-replace the row in place under its own key (a shared-folder,
-    /// owner-wrap or file-request row).
+    /// Version-replace the row in place under its own key (a shared-folder or
+    /// owner-wrap row, never a request row).
     InPlace(&'a ResolvedCliKey),
     /// Trash the old row and upload the edit under a fresh id: an ordinary owner
     /// row, as sync always did, or a path with no remote row at all.
     NewFile,
+    /// Task 2275 L13/A9b: a request row's content is read-only. The edit is
+    /// saved as a NEW owner item under a core-minted id and the request row is
+    /// left exactly as it is — never versioned under `C`, never trashed.
+    SaveAsNew,
     /// Leave the remote row untouched (never trashed) and upload nothing this
     /// pass: it is read-only, or the check could not read it. The text says
     /// which; the next pass asks again.
@@ -384,6 +388,9 @@ pub(super) async fn replace_decision<'a>(
         chunk_count: r.canonical["chunk_count"].as_u64().unwrap_or(1) as u32,
     };
     match crate::owned_keys::write_check(api, master_key, &target).await {
+        // L13/A9b: a request row's content key `C` is read-only for the owner,
+        // so an edit must never be sealed under it as a new version.
+        WriteCheck::Writable if r.origin == beebeeb_core::owned_keys::KeyOrigin::RequestContent => Replace::SaveAsNew,
         WriteCheck::Writable if !crate::owned_keys::is_derived_origin(r.origin) => Replace::InPlace(r),
         WriteCheck::Writable => Replace::NewFile,
         WriteCheck::UpperRepair => Replace::Skip(crate::crypto::OWNER_REPAIR_READ_ONLY),
@@ -421,14 +428,18 @@ pub(super) async fn do_upload(
     // SF-0002: the same write check as the pass above (one helper). A skipped
     // file is the bare refusal text, so the callers can tell it from a failure.
     let candidate = remote.as_ref().and_then(|r| r.resolved.as_ref());
-    let replacement = match replace_decision(api, &master_key, candidate, remote.is_some()).await {
+    // `trash_old` says whether the upload supersedes the remote row (L5: only
+    // then, and only after the upload returned). A request row's edit is saved
+    // as a new owner item and the request row is not touched at all.
+    let (replacement, trash_old) = match replace_decision(api, &master_key, candidate, remote.is_some()).await {
         Replace::Skip(why) => return Err(why.to_string()),
-        Replace::InPlace(r) => Some(r),
-        Replace::NewFile => None,
+        Replace::InPlace(r) => (Some(r), false),
+        Replace::NewFile => (None, true),
+        Replace::SaveAsNew => (None, false),
     };
     // Not a version of the old remote: uploaded as a new file, and the old one
     // trashed only AFTER that (L5).
-    let replaced = remote.as_ref().filter(|_| replacement.is_none()).map(|r| r.id);
+    let replaced = remote.as_ref().filter(|_| trash_old).map(|r| r.id);
 
     let parent_id = match rel.rsplit_once('/') {
         Some((parent_rel, _)) => remote_folders.get(parent_rel).copied(),
@@ -450,7 +461,7 @@ pub(super) async fn do_upload(
             concurrency: 1,
             shutdown: Arc::new(AtomicBool::new(false)),
         },
-        None => new_file_spec(&local_path, file_name, parent_id),
+        None => new_file_spec(&master_key, &local_path, file_name, parent_id)?,
     };
     let new_id = upload_then_trash_replaced(api, master_key, spec, &crate::upload::NoopProgress, replaced)
         .await?
@@ -630,16 +641,21 @@ pub(super) async fn do_download(
     Ok(DownloadOutcome::Downloaded)
 }
 
-/// The upload of a local file as a NEW remote file: a fresh id of its own, no
-/// version replace. Used by the watch loops (`do_upload`); the main sync path
-/// builds its spec inline so it can attach progress bars. Uploads here are not
-/// tied to the main Ctrl-C flag (watch-mode Ctrl-C hard-exits), so a fresh,
-/// never-tripped shutdown flag is used.
-pub(super) fn new_file_spec(file_path: &Path, file_name: &str, parent_id: Option<Uuid>) -> crate::upload::UploadSpec {
-    crate::upload::UploadSpec {
+/// The upload of a local file as a NEW remote file: a fresh owner id of its own
+/// (task 2275 L13: minted by core), no version replace. Used by the watch loops
+/// (`do_upload`); the main sync path builds its spec inline so it can attach
+/// progress bars. Uploads here are not tied to the main Ctrl-C flag (watch-mode
+/// Ctrl-C hard-exits), so a fresh, never-tripped shutdown flag is used.
+pub(super) fn new_file_spec(
+    master_key: &beebeeb_core::kdf::MasterKey,
+    file_path: &Path,
+    file_name: &str,
+    parent_id: Option<Uuid>,
+) -> Result<crate::upload::UploadSpec, String> {
+    Ok(crate::upload::UploadSpec {
         path: file_path.to_path_buf(),
         file_name: file_name.to_string(),
-        file_id: crate::item_id::mint(),
+        file_id: crate::item_id::mint_owner(master_key)?,
         // Watch-loop uploads are always new files (fresh id) → no replace.
         base_version_number: None,
         replace_pin: None,
@@ -648,7 +664,7 @@ pub(super) fn new_file_spec(file_path: &Path, file_name: &str, parent_id: Option
         // Single in-flight file in this watch-loop wrapper → full Cli cap.
         concurrency: 1,
         shutdown: Arc::new(AtomicBool::new(false)),
-    }
+    })
 }
 
 /// Upload `spec`, then trash `replaced` (the old remote this upload replaces as

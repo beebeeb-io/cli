@@ -39,6 +39,19 @@ pub fn mint() -> Uuid {
     Uuid::new_v4()
 }
 
+/// Mint an owner (`O`) item id through core (task 2275, L12/L13).
+///
+/// A create that must land as an owner item — a request row's content edit
+/// saved as a new item, or any new owner upload — takes its id from core
+/// [`beebeeb_core::item_id::NewItemId::owner`] and not from a local random
+/// number: core picks the canonical lowercase v4 form the owner key derives
+/// from, and the same mint carries the resume tag.
+pub fn mint_owner(master_key: &beebeeb_core::kdf::MasterKey) -> Result<Uuid, String> {
+    let new_item =
+        beebeeb_core::item_id::NewItemId::owner(master_key).map_err(|e| format!("failed to mint item id: {e}"))?;
+    Uuid::parse_str(new_item.as_str()).map_err(|e| format!("invalid minted item id: {e}"))
+}
+
 /// Compare the id an init, create or completion answer echoed with the id this
 /// write proposed (minted here for a create, the listed row's id for a
 /// replace). The echo is compared byte for byte with the canonical lowercase

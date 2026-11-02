@@ -759,18 +759,22 @@ pub async fn run(
                     // row. A read-only row or one the check could not read is
                     // left alone (never trashed) and this edit is not uploaded
                     // this pass; the next pass asks again.
-                    let replacement =
+                    let (replacement, trash_old) =
                         match replace_decision(api, &master_key, resolved.as_ref(), replace_id.is_some()).await {
                             Replace::Skip(why) if why == crate::crypto::OWNER_REPAIR_READ_ONLY => {
                                 return Err(format!("{READ_ONLY_KEPT}{rel}"));
                             }
                             Replace::Skip(why) => return Err(format!("{rel}: {why}")),
-                            Replace::InPlace(r) => Some(r.clone()),
-                            Replace::NewFile => None,
+                            Replace::InPlace(r) => (Some(r.clone()), false),
+                            Replace::NewFile => (None, true),
+                            // L13/A9b: a request row's edit becomes a new owner
+                            // item; the request row is neither versioned nor
+                            // trashed.
+                            Replace::SaveAsNew => (None, false),
                         };
                     // Not a version of the old remote: it is uploaded as a new
                     // file and the old one trashed only AFTER that (L5).
-                    let replaced = replace_id.filter(|_| replacement.is_none());
+                    let replaced = replace_id.filter(|_| trash_old);
 
                     let parent_id = match rel.rsplit_once('/') {
                         Some((parent_rel, _)) => remote_folders.get(parent_rel).copied(),
@@ -782,10 +786,10 @@ pub async fn run(
                     let spec = crate::upload::UploadSpec {
                         path: local_dir.join(&rel),
                         file_name,
-                        file_id: if replacement.is_some() {
-                            replace_id.ok_or("missing replacement id")?
-                        } else {
-                            Uuid::new_v4()
+                        file_id: match replacement.as_ref() {
+                            Some(_) => replace_id.ok_or("missing replacement id")?,
+                            // L13: a new owner item's id is minted by core.
+                            None => crate::item_id::mint_owner(&master_key)?,
                         },
                         // A version replace only when the old remote's key is
                         // owned; otherwise a new file under a fresh id (the old

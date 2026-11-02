@@ -214,6 +214,43 @@ async fn a9b_request_row_content_edit_becomes_new_item() {
     h.close().await;
 }
 
+/// A9b (sync): a content edit of a request row is saved as a NEW O item by the
+/// sync path too — never sealed under C as a version of the request row, and the
+/// request row is left untouched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a9b_sync_request_row_edit_becomes_new_item() {
+    let mut f = Fixture::basic();
+    f.plaintext = b"request body".to_vec();
+    f.add_request();
+    f.rows.last_mut().unwrap()["parent_id"] = json!(ROOT);
+    f.review_complete_requested_id = true;
+    let h = Harness::new(f).await;
+    let d = dir(&h);
+    ok(sync(&h, &d).await);
+    let local = d.join("request.txt");
+    assert_eq!(std::fs::read(&local).unwrap(), b"request body");
+    std::fs::write(&local, b"edited body").unwrap();
+    ok(sync(&h, &d).await);
+
+    let (uploaded, chunks) = {
+        let state = h.state.lock().unwrap();
+        let body = state.upload_request.clone();
+        (body["file_id"].as_str().unwrap().to_string(), state.uploaded_chunks.clone())
+    };
+    assert_ne!(uploaded, SUB, "a content edit is a new item, not a version of the request row");
+    assert_eq!(h.count("PATCH", &format!("/api/v1/files/{SUB}")), 0, "the request row is not renamed");
+    assert_eq!(h.count("DELETE", &format!("/api/v1/files/{SUB}")), 0, "the request row is not trashed");
+    assert_eq!(pull_bytes(&h, SUB).await, b"request body", "the request row's content is untouched");
+    // The edit was sealed under the new owner id, never under C.
+    let new_key = beebeeb_core::kdf::derive_file_key(&master(), uploaded.as_bytes());
+    assert_eq!(
+        beebeeb_core::encrypt::decrypt_chunk_raw(&new_key, &chunks[0]).unwrap(),
+        b"edited body"
+    );
+    assert_eq!(owner_key_posts(&h, SUB), 0);
+    h.close().await;
+}
+
 /// A9c: an old client renamed a request row under the derived key; the content
 /// still opens under C.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
