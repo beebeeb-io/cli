@@ -73,6 +73,7 @@ The rules whose breakage costs data, a key, a credential or a user. One line eac
 
 ## How we work
 
+Task recipes — add a subcommand, an API client method, a progress report: `docs/agents/recipes.md`; `make recipes-check` keeps them true.
 Workspace `CLAUDE.md` → "How we work" is the rule set (evidence, design before code, done, parallel agents). Here: the truth lines above;
 terminal mockups are `../../design/hifi/hifi-cli.jsx` (design wins over code).
 
