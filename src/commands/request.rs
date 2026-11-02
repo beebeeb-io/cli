@@ -580,6 +580,18 @@ impl RequestKeyResolver {
     /// the row's request is unknown to this owner.
     pub fn content_key(&mut self, master_key: &MasterKey, file: &serde_json::Value) -> Option<FileKey> {
         let fields = request_upload_fields(file)?;
+        // P2-8 (review-2): the pull folder walk and `pull --zip` consume this
+        // key, so it carries the same two checks as the resolver: a request row
+        // is an owner-class item (core's L12, never a foreign id) and its name
+        // must be an encrypted envelope (a plaintext name authenticates nothing).
+        let id = file.get("id").and_then(|v| v.as_str())?;
+        if beebeeb_core::item_id::item_class(id).ok()? != beebeeb_core::item_id::ItemClass::Owner {
+            return None;
+        }
+        let enc = file.get("name_encrypted").and_then(|v| v.as_str())?;
+        if !enc.starts_with('{') {
+            return None;
+        }
         let r_priv = self.request_priv(master_key, fields.request_id)?;
         let c = file_request::open_request_upload(
             &r_priv,
@@ -1040,6 +1052,49 @@ mod tests {
         assert!(
             resolver.row_keys(&mk, &file_row).is_none(),
             "a foreign-id request row is refused by core and must not fall back"
+        );
+    }
+    /// P2-8 (review-2): `content_key` feeds the pull folder walk and
+    /// `pull --zip`, so it refuses a plaintext-named owner row and a foreign
+    /// id just as the resolver does. bcc7320 returned the content key for both.
+    #[test]
+    fn content_key_refuses_a_plaintext_name_and_a_foreign_id() {
+        let mk = test_master_key();
+        let request_id = "11111111-2222-3333-4444-555555555555".parse::<uuid::Uuid>().unwrap();
+        let (r_priv, r_pub) = generate_request_keypair();
+        let (wrapped, nonce) = file_request::wrap_request_private(&mk, REQUEST_WRAP_CONTEXT, &r_priv).unwrap();
+        let (metadata, _chunks) =
+            seal_file_for_request(&r_pub, "received.bin", None, b"content", 16).unwrap();
+        let meta: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+        let request_fields = serde_json::json!({
+            "file_request_id": request_id.to_string(),
+            "sender_ephemeral_pubkey": meta["sender_ephemeral_pubkey"].as_str().unwrap(),
+            "wrapped_content_key": meta["wrapped_key"].as_str().unwrap(),
+        });
+        let mut resolver = RequestKeyResolver {
+            wrapped: std::collections::HashMap::from([(
+                request_id,
+                (b64std().encode(&wrapped), b64std().encode(&nonce)),
+            )]),
+            privs: std::collections::HashMap::new(),
+        };
+
+        // An owner-class row with a plaintext name: nothing to authenticate it.
+        let mut plaintext_row = request_fields.clone();
+        plaintext_row["id"] = serde_json::json!("55555555-5555-4555-8555-555555555555");
+        plaintext_row["name_encrypted"] = serde_json::json!("received.bin");
+        assert!(
+            resolver.content_key(&mk, &plaintext_row).is_none(),
+            "a plaintext-named row gets no content key"
+        );
+
+        // A foreign id is never a request row, even with a sealed name.
+        let mut foreign_row = request_fields;
+        foreign_row["id"] = serde_json::json!("33333333-3333-8333-8333-333333333333");
+        foreign_row["name_encrypted"] = meta["name_encrypted"].clone();
+        assert!(
+            resolver.content_key(&mk, &foreign_row).is_none(),
+            "a foreign-id row gets no content key"
         );
     }
 }
