@@ -606,6 +606,17 @@ impl RequestKeyResolver {
         if !enc.starts_with('{') {
             return None;
         }
+        // R4-A (review-4 P2), applied here too (review-5 F3): the R5 envelope
+        // binds no ids, so a server can graft its three fields onto a
+        // binary-convention owner file whose name (and body) belong to the
+        // owner. Refuse the binary/upper-repair conventions, exactly as
+        // `row_keys` does; only a string-convention (or unreadable) name may
+        // fall through to the legacy content key.
+        use beebeeb_core::kdf::OwnerKeyConvention;
+        match beebeeb_core::kdf::owner_file_key_for_name(master_key, id, enc) {
+            Ok((_, OwnerKeyConvention::Binary | OwnerKeyConvention::UpperRepair)) => return None,
+            Ok((_, OwnerKeyConvention::String)) | Err(_) => {}
+        }
         let r_priv = self.request_priv(master_key, fields.request_id)?;
         let c = file_request::open_request_upload(
             &r_priv,

@@ -53,6 +53,31 @@ fn folder_pull_skips_a_file_without_authenticated_metadata() {
     );
 }
 
+/// Review-5 F3: a binary-convention owner row with a donated pre-2236 request
+/// envelope used to get the donor's content key from the request reader, which
+/// then failed on the owner's body and aborted the whole folder pull. R4-A's
+/// convention gate refuses that row, so it pulls as the owner file it is and
+/// the rest completes.
+#[test]
+fn folder_pull_completes_past_a_grafted_binary_request_row() {
+    let mut fx = Fixture::new();
+    fx.add_grafted_binary_request_row(ROOT_ID, "owner.bin", b"owner content\n");
+    fx.add_plain_file(ROOT_ID, "ok.txt", BENIGN);
+    let url = fx.serve();
+    let s = Scratch::new("grafted-binary", &url);
+
+    let out = s.bb(&["pull", ROOT_ID, "-o", "out"]);
+
+    assert!(out.status.success(), "{}", describe(&out));
+    assert_eq!(
+        std::fs::read(s.out_dir().join("owner.bin")).unwrap(),
+        b"owner content\n",
+        "{}",
+        describe(&out)
+    );
+    assert_eq!(std::fs::read(s.out_dir().join("ok.txt")).unwrap(), BENIGN);
+}
+
 /// Malicious FILE names, from a request upload (attacker-chosen content key)
 /// and from a plaintext-name row. Each case: the hostile entry sits first, a
 /// benign sibling second. Required: nothing appears outside `out/`, nothing

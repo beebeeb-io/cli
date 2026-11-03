@@ -282,6 +282,33 @@ impl Fixture {
         self.add_file_row(parent, name_encrypted, body)
     }
 
+    /// An ordinary owner file whose name is sealed under the BINARY id
+    /// convention (the pre-repair legacy shape), with a donor request's three
+    /// fields grafted on. Review-5 F3: the request reader must not hand the
+    /// pull the donor's content key; the row is still a normal owner file and
+    /// pulls through the master-key path.
+    fn add_grafted_binary_request_row(&mut self, parent: &str, name: &str, body: &[u8]) -> String {
+        use rand::RngCore;
+        let id = self.next_id();
+        let binary_key = beebeeb_core::kdf::derive_file_key(&self.mk, uuid::Uuid::parse_str(&id).unwrap().as_bytes());
+        let name_encrypted = beebeeb_core::encrypt::encrypt_name_for(
+            &binary_key,
+            name,
+            None,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+        )
+        .unwrap();
+        let mut donor_c = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut donor_c);
+        let sealed = beebeeb_core::file_request::seal_to_request(&self.r_pub, b"", &donor_c).unwrap();
+        let id = self.add_file_row(parent, name_encrypted, body);
+        let row = self.served.rows.get_mut(&id).expect("row just added");
+        row["file_request_id"] = json!(REQUEST_ID);
+        row["sender_ephemeral_pubkey"] = json!(b64().encode(sealed.e_pub));
+        row["wrapped_content_key"] = json!(b64().encode(&sealed.wrapped_key));
+        id
+    }
+
     /// A file whose `name_encrypted` is a bare PLAINTEXT string: there is no
     /// authenticated metadata, so no read pin, and its content is never read
     /// (task 1943, core round 3 P1-B).
