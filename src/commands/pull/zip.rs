@@ -546,7 +546,8 @@ impl ZipWalk<'_> {
                 Box::pin(self.collect(item_id, &path)).await?;
             } else {
                 // Read pin from the file's authenticated metadata (task 1943).
-                let chunk_format = match crate::crypto::content_pin_with_key(&resolved.key, item_id, name_enc) {
+                let pin_key = resolved.name_key.as_deref().unwrap_or(&resolved.key);
+                let chunk_format = match crate::crypto::content_pin_with_key(pin_key, item_id, name_enc) {
                     Ok(pin) => pin,
                     Err(e) => {
                         warn_skipped(&format!("{path:?}: {e}"));

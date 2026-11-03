@@ -306,7 +306,10 @@ pub(super) async fn walk_remote(
                 health.unreadable += 1;
                 continue;
             }
-            let pin = if resolved.origin == KeyOrigin::Derived {
+            // R4-A: a request row's name can be under a different key than
+            // its content; the pin lives in the name's metadata.
+            let pin_key = resolved.name_key.as_deref().unwrap_or(&resolved.key);
+            let pin = if resolved.name_key.is_none() && resolved.origin == KeyOrigin::Derived {
                 crate::crypto::content_pin(
                     master_key,
                     id_str,
@@ -314,7 +317,7 @@ pub(super) async fn walk_remote(
                 )
             } else {
                 crate::crypto::content_pin_with_key(
-                    &resolved.key,
+                    pin_key,
                     id_str,
                     resolved.canonical["name_encrypted"].as_str().unwrap_or(""),
                 )

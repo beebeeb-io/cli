@@ -114,7 +114,8 @@ pub(super) async fn pull_folder_inner(
             }
             // No read pin (task 1943: plaintext or unreadable metadata), no
             // read: skipped like an unsafe name, and the rest still pulls.
-            if let Err(e) = crate::crypto::content_pin_with_key(&resolved.key, item_id, name_enc) {
+            let pin_key = resolved.name_key.as_deref().unwrap_or(&resolved.key);
+            if let Err(e) = crate::crypto::content_pin_with_key(pin_key, item_id, name_enc) {
                 warn_skipped(&format!("{}: {e}", target.display()));
                 skipped += 1;
                 continue;
@@ -122,7 +123,16 @@ pub(super) async fn pull_folder_inner(
             // A new version published while this file downloaded: nothing was written, so read
             // THIS file again from fresh metadata, once, and carry on with the rest of the folder.
             // (This used to abort the whole folder pull.)
-            match pull_single_file(api, item_id, &target, content_key.as_ref(), explicit_key.clone()).await {
+            match pull_single_file(
+                api,
+                item_id,
+                &target,
+                content_key.as_ref(),
+                resolved.name_key.as_deref(),
+                explicit_key.clone(),
+            )
+            .await
+            {
                 Ok(()) => {}
                 Err(PullError::Changed(_)) => {
                     eprintln!(
@@ -130,8 +140,15 @@ pub(super) async fn pull_folder_inner(
                         "!".custom_color(crate::colors::AMBER),
                         target.display()
                     );
-                    pull_single_file(api, item_id, &target, content_key.as_ref(), explicit_key.clone())
-                        .await
+                    pull_single_file(
+                        api,
+                        item_id,
+                        &target,
+                        content_key.as_ref(),
+                        resolved.name_key.as_deref(),
+                        explicit_key.clone(),
+                    )
+                    .await
                         .map_err(|e| format!("{}: {}", target.display(), String::from(e)))?;
                 }
                 // Every other failure (an expired session, a server error, a full disk, a file that does
@@ -150,6 +167,7 @@ pub(super) async fn pull_single_file(
     file_id: &str,
     out_path: &std::path::Path,
     request_content_key: Option<&beebeeb_core::kdf::FileKey>,
+    name_key: Option<&beebeeb_core::kdf::FileKey>,
     explicit_key: Option<std::sync::Arc<beebeeb_core::kdf::FileKey>>,
 ) -> Result<(), PullError> {
     let master_key = load_master_key()?;
@@ -161,9 +179,10 @@ pub(super) async fn pull_single_file(
         .and_then(|v| v.as_str())
         .ok_or("server response missing name_encrypted")?;
     // Read pin from the file's authenticated metadata (task 1943).
-    let pin = match &explicit_key {
-        Some(key) => crate::crypto::content_pin_with_key(key, file_id, name_encrypted)?,
-        None => crate::crypto::file_row_pin(&master_key, file_id, name_encrypted, request_content_key)?,
+    let pin = match (&explicit_key, name_key) {
+        (_, Some(key)) => crate::crypto::content_pin_with_key(key, file_id, name_encrypted)?,
+        (Some(key), None) => crate::crypto::content_pin_with_key(key, file_id, name_encrypted)?,
+        (None, None) => crate::crypto::file_row_pin(&master_key, file_id, name_encrypted, request_content_key)?,
     };
 
     let name = out_path
