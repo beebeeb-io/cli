@@ -357,10 +357,7 @@ pub(super) async fn stream_raw(
         // 2b76195, refuses the same case).
         let average = total / count as u64;
         if average > MAX_FRAME_SIZE as u64 {
-            return Err(format!(
-                "average frame size {average} exceeds the maximum {MAX_FRAME_SIZE}"
-            )
-            .into());
+            return Err(format!("average frame size {average} exceeds the maximum {MAX_FRAME_SIZE}").into());
         }
         usize::try_from(average).unwrap_or(usize::MAX)
     };

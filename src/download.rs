@@ -546,14 +546,9 @@ mod tests {
     async fn a_no_header_frame_above_the_max_frame_size_is_refused_before_allocating() {
         let m = mk();
         let total = ((beebeeb_core::download::MAX_FRAME_SIZE as u64) + 1) * 2;
-        let err = try_download_chunked(
-            vec![0x5au8; 4096],
-            vec![("x-original-size", total.to_string())],
-            2,
-            &m,
-        )
-        .await
-        .expect_err("a frame above MAX_FRAME_SIZE must be refused");
+        let err = try_download_chunked(vec![0x5au8; 4096], vec![("x-original-size", total.to_string())], 2, &m)
+            .await
+            .expect_err("a frame above MAX_FRAME_SIZE must be refused");
         assert!(
             err.contains("exceeds the maximum"),
             "clear frame-size error, got: {err}"
