@@ -778,6 +778,12 @@ fn parse_request_link(url: &str) -> Result<ParsedLink, String> {
         .filter(|t| !t.is_empty())
         .ok_or("could not find the request token in the link (expected …/r/<token>)")?
         .to_string();
+    // Review-5 F5: the token must be one path segment. Core's link rules
+    // cover /s/ and /f/ links, not this /r/ one; refuse traversal and
+    // separators before the token is ever used as an id.
+    if token.is_empty() || token.contains("..") || token.contains('/') || token.contains('\\') {
+        return Err("the request token in the link is not a valid request id".to_string());
+    }
 
     let pub_bytes = b64url()
         .decode(fragment.trim())

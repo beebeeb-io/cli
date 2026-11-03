@@ -45,6 +45,19 @@ fn parse_link_rejects_missing_fragment() {
     assert!(parse_request_link("https://app.beebeeb.io/r/tok#").is_err());
 }
 
+/// Review-5 F5: core's new link rules cover /s/ and /f/ links only, so this
+/// /r/ token must validate its own shape. A token is one path segment: no
+/// traversal, no separators, and not empty.
+#[test]
+fn parse_link_refuses_a_request_token_that_is_not_a_single_path_segment() {
+    let (_priv, r_pub) = generate_request_keypair();
+    let frag = b64url().encode(r_pub);
+    for token in ["..", "a/b", "a\\b", ""] {
+        let url = format!("https://app.beebeeb.io/r/{token}#{frag}");
+        assert!(parse_request_link(&url).is_err(), "token {token:?} must be refused");
+    }
+}
+
 #[test]
 fn keypair_wrap_unwrap_roundtrip_matches_create_then_list() {
     // Mirrors the create → list flow: wrap R_priv at create, then unwrap it
