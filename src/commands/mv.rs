@@ -215,19 +215,31 @@ async fn move_single(
     let new_name_encrypted = match new_name {
         Some(name) if name != src.name => {
             name_changed = true;
-            // L13: a rename seals the new name through the resolver's write
-            // target (key + chunk-format pin). A request row has no target: its
-            // content stays under `C`, so its name uses the string convention.
+            // L13: a rename seals a new name through the resolver's write
+            // target (key + chunk-format pin). A resolved request row has no
+            // target: A9 keeps a request row on the string convention, re-sealed
+            // with the pin its name actually records (never a guessed
+            // Unrecorded).
+            // P2-9: an owner file the server marked with request fields keeps
+            // its write target and recorded pin; a row with neither is refused
+            // instead of sealed under a guess.
             let target = src_keys.write_target_for(&src_id);
             let (file_key, pin) = match &target {
                 Some(target) => (crate::crypto::key_copy(target.key()), target.pin()),
-                // Only a request row falls back: its content stays under `C`, so
-                // its name uses the string convention. Anything else without a
-                // target would seal the new name under a key that opens nothing.
-                None if src_keys.origin_for(&src_id) == Some(beebeeb_core::owned_keys::KeyOrigin::RequestContent) => (
-                    beebeeb_core::kdf::derive_file_key(master_key, src_id.as_bytes()),
-                    beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
-                ),
+                None
+                    if src_keys.origin_for(&src_id)
+                        == Some(beebeeb_core::owned_keys::KeyOrigin::RequestContent) =>
+                {
+                    // A9: a request row's rename keeps the string convention, but
+                    // with the pin its name actually records, never a guess.
+                    let pin = src_keys.name_pin_for(&src_id).unwrap_or(
+                        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+                    );
+                    (
+                        beebeeb_core::kdf::derive_file_key(master_key, src_id.as_bytes()),
+                        pin,
+                    )
+                }
                 None => return Err(crate::owned_keys::RENAME_UNKNOWN_KEY.to_string()),
             };
             Some(

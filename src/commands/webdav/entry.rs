@@ -59,6 +59,8 @@ pub(super) struct ResolvedEntry {
     /// means this client cannot open the row (or it is not a row), so a write
     /// must never guess one.
     pub(super) key: Option<std::sync::Arc<beebeeb_core::kdf::FileKey>>,
+    /// L12 (P2-9): the pin recorded in a request row's resolved name.
+    pub(super) name_pin: Option<beebeeb_core::chunk_stream::ExpectedChunkFormat>,
     /// L13: the seal target core issued for this row, if it is writable.
     pub(super) write_target: Option<std::sync::Arc<beebeeb_core::owned_keys::WriteTarget>>,
     /// L12: where the key came from (a request row's content is read-only).
@@ -71,10 +73,16 @@ pub(super) fn no_content() -> Result<beebeeb_core::chunk_stream::ExpectedChunkFo
 }
 
 /// Decode a single API file object into a `ResolvedEntry`.
+///
+/// `requests` is the owner's request-key resolver when the caller loaded one.
+/// A row is a request row only when that resolver opens it (core's bound
+/// reader, or the R5 reader behind its class+name gates); the request fields
+/// on the row are never proof on their own (P2-9).
 pub(super) fn decode_file_entry(
     file: &serde_json::Value,
     master_key: &beebeeb_core::kdf::MasterKey,
     _parent_href: &str,
+    mut requests: Option<&mut crate::commands::request::RequestKeyResolver>,
 ) -> Option<ResolvedEntry> {
     use beebeeb_core::owned_keys::{ItemKind, KeyOrigin, ResolvedName};
 
@@ -85,19 +93,36 @@ pub(super) fn decode_file_entry(
     let modified = file.get("updated_at").and_then(|v| v.as_str()).map(|s| s.to_string());
     let name_encrypted = file.get("name_encrypted").and_then(|v| v.as_str())?;
     let kind = if is_folder { ItemKind::Folder } else { ItemKind::File };
+    let parent_id = file.get("parent_id").and_then(|v| v.as_str()).map(str::to_string);
+
+    // L12 (P2-9): a request row's content stays under `C` and an edit becomes a
+    // NEW owner item (A9b). It is one only when the resolver opens it; a server
+    // that adds `file_request_id` to a v2-pinned owner file changes nothing.
+    if let Some(keys) = requests.as_deref_mut().and_then(|r| r.row_keys(master_key, file)) {
+        let name = keys.name;
+        return Some(ResolvedEntry {
+            file_id: Some(file_id),
+            parent_id,
+            plaintext_name: !name_encrypted.starts_with('{'),
+            display_name: name.name,
+            is_collection: is_folder,
+            size_bytes,
+            chunk_count,
+            modified,
+            pin: Err("a request row's content opens only under its request key".to_string()),
+            read_only: false,
+            key: Some(std::sync::Arc::new(keys.content_key)),
+            name_pin: Some(name.chunk_format),
+            write_target: None,
+            origin: KeyOrigin::RequestContent,
+        });
+    }
 
     // L12: the id class decides the key path, and core resolves it. WebDAV has
     // no shared-folder ancestry here, so a foreign row stays unresolved (and
     // unwritable) rather than being guessed at.
     let resolved =
         beebeeb_core::owned_keys::resolve_owned_key(master_key, &file_id, kind, None, None, name_encrypted, None).ok();
-    // L12: a request row is identified by its request fields, not by its id.
-    // Its content stays under `C` (read-only here: this request's private key is
-    // not in a listing), and an edit becomes a NEW owner item, never a version
-    // of the request row (A9b).
-    let is_request_row = ["file_request_id", "sender_ephemeral_pubkey", "wrapped_content_key"]
-        .iter()
-        .any(|f| file.get(f).is_some_and(|v| !v.is_null()));
     // L12: a plaintext name proves nothing; core identifies such a file by its
     // first content chunk, which a listing does not carry. Keep the name the
     // server sent, but mark the row read-only and give it no seal target.
@@ -129,24 +154,6 @@ pub(super) fn decode_file_entry(
                     format!("file {file_id} carries no content pin under its plaintext name; refusing to guess")
                 })),
         ),
-        Some(r) if is_request_row => {
-            // N3: use the key core resolved for this row - the one that actually
-            // authenticated the name (A27: a legacy row may be sealed under the
-            // binary convention). Re-deriving the string convention here would
-            // lose a renamed request row's real name.
-            let name = match &r.name {
-                ResolvedName::Encrypted(meta) => meta.name.clone(),
-                ResolvedName::Plaintext(text) => text.clone(),
-            };
-            (
-                name,
-                false,
-                Some(std::sync::Arc::new(r.key)),
-                None,
-                KeyOrigin::RequestContent,
-                Err("a request row's content opens only under its request key".to_string()),
-            )
-        }
         Some(r) => {
             let name = match &r.name {
                 ResolvedName::Encrypted(meta) => meta.name.clone(),
@@ -179,7 +186,7 @@ pub(super) fn decode_file_entry(
 
     Some(ResolvedEntry {
         file_id: Some(file_id),
-        parent_id: file.get("parent_id").and_then(|v| v.as_str()).map(str::to_string),
+        parent_id,
         plaintext_name: !name_encrypted.starts_with('{'),
         display_name,
         is_collection: is_folder,
@@ -189,6 +196,7 @@ pub(super) fn decode_file_entry(
         pin,
         read_only,
         key,
+        name_pin: None,
         write_target,
         origin,
     })
@@ -216,6 +224,7 @@ pub(super) async fn resolve_path(state: &Arc<DavState>, path: &str) -> Result<Re
             pin: no_content(),
             read_only: false,
             key: None,
+            name_pin: None,
             write_target: None,
             origin: beebeeb_core::owned_keys::KeyOrigin::Derived,
         });
@@ -223,6 +232,9 @@ pub(super) async fn resolve_path(state: &Arc<DavState>, path: &str) -> Result<Re
 
     let segments: Vec<&str> = trimmed.split('/').collect();
     let mut current_parent: Option<String> = None; // None = root
+    // One owner-side request list per walk; a row the resolver opens is a
+    // request row (P2-9), and one it cannot open stays an owner row.
+    let mut requests = crate::commands::request::RequestKeyResolver::load(&state.api).await.ok();
 
     for (i, segment) in segments.iter().enumerate() {
         let is_last = i == segments.len() - 1;
@@ -242,7 +254,7 @@ pub(super) async fn resolve_path(state: &Arc<DavState>, path: &str) -> Result<Re
         // Find the child whose decrypted name matches the path segment
         let mut matched: Option<ResolvedEntry> = None;
         for file in files {
-            if let Some(entry) = decode_file_entry(file, &state.master_key, "") {
+            if let Some(entry) = decode_file_entry(file, &state.master_key, "", requests.as_mut()) {
                 let decoded_segment = crate::path::percent_decode(segment);
                 if entry.display_name.to_lowercase() == decoded_segment.to_lowercase() {
                     matched = Some(entry);

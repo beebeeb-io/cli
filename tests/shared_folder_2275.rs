@@ -279,6 +279,64 @@ async fn a9_request_row_rename_seals_name_under_string_convention() {
     h.close().await;
 }
 
+/// P2-9 (R3-N2): a server that adds the request fields to a v2-pinned owner
+/// file must not turn it into a request row. The fields do not resolve (the id
+/// names no request this device holds), so the rename keeps the owner path:
+/// owner key, recorded v2 pin, write target. The old field-based branch refused
+/// the rename outright ("can't open request upload").
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn n2_request_fields_that_do_not_resolve_keep_the_owners_pin() {
+    use beebeeb_core::chunk_stream::ExpectedChunkFormat;
+    const MARKED: &str = "66666666-6666-4666-8666-666666666666";
+    const REQ: &str = "88888888-8888-4888-8888-888888888888";
+    let mut f = Fixture::basic();
+    f.requests_doc = json!({"file_requests":[]});
+    let owner_key = beebeeb_core::kdf::derive_file_key(&master(), MARKED.as_bytes());
+    // The rename's write check reads chunk 0, so the row needs real content.
+    let body = b"pinned body";
+    f.plaintext = body.to_vec();
+    f.frames = vec![beebeeb_core::encrypt::encrypt_chunk_raw(&owner_key, body).unwrap()];
+    f.stride = body.len() as u64;
+    let mut r = row(MARKED, None, "pinned.bin", RowFacts { ..Default::default() });
+    r["size_bytes"] = json!(body.len());
+    r["chunk_count"] = json!(1);
+    r["name_encrypted"] = json!(beebeeb_core::encrypt::encrypt_name_for(
+        &owner_key,
+        "pinned.bin",
+        None,
+        ExpectedChunkFormat::V2
+    )
+    .unwrap());
+    // The server also sends the three request fields, as if it were one.
+    r["file_request_id"] = json!(REQ);
+    r["sender_ephemeral_pubkey"] = json!("AA");
+    r["wrapped_content_key"] = json!("AA");
+    f.rows.push(r);
+    let h = Harness::new(shared_folder(f)).await;
+    ok(h.run(&["mv", "pinned.bin", "renamed.bin"]).await);
+    let patch = {
+        let state = h.state.lock().unwrap();
+        state
+            .requests
+            .iter()
+            .find(|(m, p, _)| m == "PATCH" && p.contains(MARKED))
+            .map(|(_, _, b)| serde_json::from_slice::<Value>(b).unwrap())
+            .expect("the rename is a PATCH of the owner row")
+    };
+    let meta = beebeeb_core::encrypt::decrypt_name_metadata_with_key(
+        &owner_key,
+        patch["name_encrypted"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(meta.name, "renamed.bin");
+    assert_eq!(
+        meta.chunk_format,
+        ExpectedChunkFormat::V2,
+        "the owner file keeps the pin its name recorded"
+    );
+    h.close().await;
+}
+
 /// A9b: a content edit of a request row is saved as a new O item - never sealed
 /// under C, and never published.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

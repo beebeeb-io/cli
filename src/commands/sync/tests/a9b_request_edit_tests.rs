@@ -33,6 +33,7 @@ async fn watch_upload_of_request_edit(mut mock: Mock, s: &Scratch) -> (Result<()
         id: REQUEST_ROW.parse().unwrap(),
         resolved: Some(ResolvedCliKey {
             name_key: None,
+        name_pin: None,
             key: Arc::new(content_key),
             origin: KeyOrigin::RequestContent,
             canonical: serde_json::json!({
@@ -114,6 +115,7 @@ async fn a_plaintext_name_is_skipped_with_its_own_reason() {
     let resolved = ResolvedCliKey {
         key: Arc::new(beebeeb_core::kdf::derive_file_key(&master, id.as_bytes())),
         name_key: None,
+        name_pin: None,
         origin: beebeeb_core::owned_keys::KeyOrigin::Derived,
         canonical: serde_json::json!({
             "id": id, "name_encrypted": "plain.txt", "size_bytes": 5, "chunk_count": 1

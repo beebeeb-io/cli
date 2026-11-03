@@ -108,6 +108,7 @@ mod parent_target_tests {
             pin: no_content(),
             read_only: false,
             key: None,
+            name_pin: None,
             write_target: None,
             origin: beebeeb_core::owned_keys::KeyOrigin::Derived,
         }
@@ -410,7 +411,7 @@ mod sf_0002_write_check_tests {
         let row = json!({"id": REQUEST, "parent_id": null, "name_encrypted": sealed, "is_folder": false,
                "size_bytes": 12, "chunk_count": 1, "updated_at": "2026-10-31T10:00:00Z",
                "file_request_id": REQUEST, "sender_ephemeral_pubkey": "AA", "wrapped_content_key": "AA"});
-        let entry = decode_file_entry(&row, &master(), "").expect("the row decodes");
+        let entry = decode_file_entry(&row, &master(), "", None).expect("the row decodes");
         assert_eq!(entry.display_name, "renamed.txt");
         let key = entry.key.expect("core resolved the name key");
         assert_eq!(

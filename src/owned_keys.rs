@@ -28,10 +28,9 @@ pub const CUSTODY_UNAVAILABLE: &str = "This folder's keys are unavailable";
 /// It stays readable, but every surface refuses to change it with this sentence
 /// (not the SF-0002 iOS-repair one, which is about a different convention).
 pub const PLAINTEXT_NAME_READ_ONLY: &str = "This file's name isn't encrypted, so this device can't verify or change it. You can still open and download it; to change it, save a copy with the web or mobile app.";
-/// A request row whose name is not an encrypted envelope: nothing can
-/// authenticate it, so it is refused rather than guessed (2275 review P2-8).
-pub const REQUEST_NAME_NOT_ENCRYPTED: &str =
-    "can't open this request upload: its name is not encrypted, so it can't be authenticated";
+/// A request row whose name is not an encrypted envelope cannot resolve as a
+/// request row; it falls back to the plaintext-owner path and a rename refuses
+/// with [`RENAME_UNKNOWN_KEY`] (2275 review-3 P2-9).
 pub const RENAME_UNKNOWN_KEY: &str = "can't rename this item: this device doesn't hold the key its name uses";
 pub const OWNER_ONLY_NOTICE: &str = "Only you can open this. Share it from the web or the app.";
 
@@ -53,6 +52,9 @@ pub struct ResolvedCliKey {
     /// L12: the key the row's NAME authenticates under, when it differs from
     /// `key` (a request row: derived-first name key, content under C).
     pub name_key: Option<Arc<FileKey>>,
+    /// P2-9: the pin the resolved name carries, so a rename re-seals under the
+    /// same convention the row's name authenticated with.
+    pub name_pin: Option<beebeeb_core::chunk_stream::ExpectedChunkFormat>,
     pub origin: KeyOrigin,
     pub canonical: Value,
     pub pending_owner_wrap: Option<Vec<u8>>,
@@ -155,6 +157,11 @@ impl OwnedKeyResolver {
     /// the row for writing.
     pub fn write_target_for(&self, id: &str) -> Option<Arc<owned_keys::WriteTarget>> {
         self.resolved.get(id).and_then(|r| r.write_target.clone())
+    }
+    /// L12 (P2-9): the chunk-format pin recorded in a request row's resolved
+    /// name. A rename re-seals under it instead of assuming `Unrecorded`.
+    pub fn name_pin_for(&self, id: &str) -> Option<beebeeb_core::chunk_stream::ExpectedChunkFormat> {
+        self.resolved.get(id).and_then(|r| r.name_pin)
     }
     /// Load (and cache) a shared root's custody and inventory, so the L14 check
     /// has the wrap even when the row itself resolves through an owner envelope.
@@ -304,43 +311,35 @@ impl OwnedKeyResolver {
     ) -> Result<ResolvedCliKey, String> {
         let enc = text(&canonical, "name_encrypted")?.to_string();
         // L12 §4 (2236): a request row is content-under-`C`, name derived first.
-        // It is never adopted, wrapped at share time or published, and its
-        // content is read-only.
+        // P2-9: the request fields only say where to look. The row IS a request
+        // row only when core's bound reader (or the class+name-gated R5 reader)
+        // resolves it; a server that adds those fields to a v2-pinned owner file
+        // must not turn it into one, so a refusal falls through to the owner path
+        // below, which keeps the recorded pin and its write target.
         if crate::commands::request::is_request_upload(&canonical) {
-            // L12 (P2-8): a request row's name authenticates under a derived key
-            // or under `C`. A plaintext name proves neither, and no path here may
-            // accept it: refuse before any envelope is opened.
-            if !enc.starts_with('{') {
-                return Err(REQUEST_NAME_NOT_ENCRYPTED.into());
-            }
-
             if self.requests.is_none() {
-                self.requests = Some(RequestKeyResolver::load(api).await?);
+                self.requests = RequestKeyResolver::load(api).await.ok();
             }
-            let keys = self
-                .requests
-                .as_mut()
-                .and_then(|r| r.row_keys(master, &canonical))
-                .ok_or("can't open request upload")?;
-            // Move core's keys into the resolution: no by-value byte copy.
-            // Move core's keys into the resolution: no by-value byte copy.
-            let beebeeb_core::owned_keys::RequestRowKeys {
-                content_key,
-                name_key,
-                name,
-                ..
-            } = keys;
-            return Ok(ResolvedCliKey {
-                key: Arc::new(content_key),
-                name_key: Some(Arc::new(name_key)),
-                origin: KeyOrigin::RequestContent,
-                canonical,
-                pending_owner_wrap: None,
-                shared_root_id: None,
-                name: name.name,
-                read_only: false,
-                write_target: None,
-            });
+            if let Some(keys) = self.requests.as_mut().and_then(|r| r.row_keys(master, &canonical)) {
+                let beebeeb_core::owned_keys::RequestRowKeys {
+                    content_key,
+                    name_key,
+                    name,
+                    ..
+                } = keys;
+                return Ok(ResolvedCliKey {
+                    key: Arc::new(content_key),
+                    name_key: Some(Arc::new(name_key)),
+                    name_pin: Some(name.chunk_format),
+                    origin: KeyOrigin::RequestContent,
+                    canonical,
+                    pending_owner_wrap: None,
+                    shared_root_id: None,
+                    name: name.name,
+                    read_only: false,
+                    write_target: None,
+                });
+            }
         }
         // L12: a plaintext name authenticates nothing, so core identifies such
         // a file by its first content chunk, which a listing does not carry.
@@ -350,6 +349,7 @@ impl OwnedKeyResolver {
             return Ok(ResolvedCliKey {
                 key: Arc::new(beebeeb_core::kdf::derive_file_key(master, id.as_bytes())),
                 name_key: None,
+                name_pin: None,
                 origin: KeyOrigin::Derived,
                 canonical,
                 pending_owner_wrap: None,
@@ -362,9 +362,14 @@ impl OwnedKeyResolver {
         let resolved = owned_keys::resolve_owned_key(master, id, kind, None, None, &enc, None)
             .map_err(|_| "can't decrypt item name".to_string())?;
         let read_only = resolved.write_target.is_none();
+        let name_pin = match &resolved.name {
+            beebeeb_core::owned_keys::ResolvedName::Encrypted(meta) => Some(meta.chunk_format),
+            beebeeb_core::owned_keys::ResolvedName::Plaintext(_) => None,
+        };
         Ok(ResolvedCliKey {
             key: Arc::new(resolved.key),
             name_key: None,
+            name_pin,
             origin: resolved.origin,
             canonical,
             pending_owner_wrap: None,
@@ -396,6 +401,7 @@ impl OwnedKeyResolver {
                 return Ok(ResolvedCliKey {
                     key: Arc::new(resolved.key),
                     name_key: None,
+                name_pin: None,
                     origin: resolved.origin,
                     canonical,
                     // A pending envelope is never confirmation that adoption
@@ -435,6 +441,7 @@ impl OwnedKeyResolver {
                     return Ok(ResolvedCliKey {
                         key: Arc::new(key),
                         name_key: None,
+                name_pin: None,
                         origin: KeyOrigin::FolderWrap,
                         canonical,
                         pending_owner_wrap: Some(pending),
@@ -459,6 +466,7 @@ impl OwnedKeyResolver {
                 return Ok(ResolvedCliKey {
                     key: Arc::new(resolved.key),
                     name_key: None,
+                name_pin: None,
                     origin: resolved.origin,
                     canonical,
                     pending_owner_wrap: Some(pending),

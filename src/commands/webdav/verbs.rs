@@ -49,9 +49,11 @@ pub(super) async fn propfind_response(state: &Arc<DavState>, path: &str, depth: 
                         .and_then(|f| f.as_array())
                         .cloned()
                         .unwrap_or_default();
+                    let mut requests =
+                        crate::commands::request::RequestKeyResolver::load(&state.api).await.ok();
                     files
                         .iter()
-                        .filter_map(|f| decode_file_entry(f, &state.master_key, path))
+                        .filter_map(|f| decode_file_entry(f, &state.master_key, path, requests.as_mut()))
                         .collect::<Vec<_>>()
                 }
                 Err(e) => {
@@ -573,15 +575,18 @@ pub(super) async fn move_response(state: &Arc<DavState>, src_path: &str, destina
         } else {
             beebeeb_core::media::guess_mime_type(&new_name)
         };
-        // L13: the rename seals through the resolver's write target. A request
-        // row's content stays under `C`, so only it may fall back to the string
-        // convention; any other row without a target would seal its new name
-        // under a key that opens nothing (P2-6).
+        // L13: the rename seals through the resolver's write target. A resolved
+        // request row has no target: A9 keeps it on the string convention, with
+        // the pin its resolved name records (P2-9). Any other row without a
+        // target is refused (P2-6).
         let (file_key, rename_pin) = match &src.write_target {
             Some(target) => (crate::crypto::key_copy(target.key()), target.pin()),
             None if src.origin == beebeeb_core::owned_keys::KeyOrigin::RequestContent => (
+                // A9: a request row keeps the string convention, with the pin
+                // its resolved name records (P2-9), never a guessed Unrecorded.
                 beebeeb_core::kdf::derive_file_key(&state.master_key, file_id.as_bytes()),
-                beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+                src.name_pin
+                    .unwrap_or(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded),
             ),
             None => {
                 return (StatusCode::CONFLICT, crate::owned_keys::RENAME_UNKNOWN_KEY).into_response();
