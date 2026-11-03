@@ -825,20 +825,30 @@ mod a9b_webdav_tests {
             beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
         )
         .unwrap();
-        let request_key = beebeeb_core::kdf::derive_file_key(&master, REQUEST.as_bytes());
+        // P2-9: the row must RESOLVE as a request row, not merely carry the
+        // fields. Build the unbound (pre-2236) envelope the R5 reader opens.
+        let content = crate::crypto::key_from_bytes(&[160u8; 32]);
+        let r_priv = [31u8; 32];
+        let r_pub = beebeeb_core::opaque::derive_x25519_public(&r_priv);
+        let (wrapped, nonce) = beebeeb_core::file_request::wrap_request_private(&master, b"", &r_priv).unwrap();
+        let sealed = beebeeb_core::file_request::seal_to_request(&r_pub, b"", content.as_bytes()).unwrap();
         let request_name = beebeeb_core::encrypt::encrypt_name_for(
-            &request_key,
+            &content,
             "request.txt",
             None,
             beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
         )
         .unwrap();
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let (wrapped_b64, nonce_b64) = (b64(&wrapped), b64(&nonce));
+        let (e_pub_b64, wrapped_key_b64) = (b64(&sealed.e_pub), b64(&sealed.wrapped_key));
         let rows = Arc::new((
             json!({"id": ROOT, "parent_id": null, "name_encrypted": root_name, "is_folder": true}),
             json!({
                 "id": REQUEST, "parent_id": ROOT, "name_encrypted": request_name, "is_folder": false,
                 "size_bytes": 12, "chunk_count": 1,
-                "file_request_id": "req-1", "sender_ephemeral_pubkey": "pub", "wrapped_content_key": "wrap"
+                "file_request_id": REQUEST, "sender_ephemeral_pubkey": e_pub_b64,
+                "wrapped_content_key": wrapped_key_b64
             }),
         ));
         let inits: Arc<StdMutex<Vec<serde_json::Value>>> = Arc::new(StdMutex::new(Vec::new()));
@@ -899,6 +909,19 @@ mod a9b_webdav_tests {
             .route(
                 "/api/v1/shares/invites/sent",
                 get(|| async { Json(json!({"invites": []})) }),
+            )
+            .route(
+                "/api/v1/file-requests",
+                get(move || {
+                    let (wrapped, nonce) = (wrapped_b64.clone(), nonce_b64.clone());
+                    async move {
+                        Json(json!({"file_requests": [{
+                            "id": REQUEST,
+                            "wrapped_private_key": wrapped,
+                            "wrap_nonce": nonce,
+                        }]}))
+                    }
+                }),
             )
             .route(
                 "/api/v1/files/:id",
