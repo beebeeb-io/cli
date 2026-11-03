@@ -5,14 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.15.0] - 2026-11-03
 
 ### Added
+- Shared folders: `bb sync` and the mount adopt guest changes. Owner writes into shared folders stay owner-only. Foreign descendants are adopted before a move out of a shared root. A shared folder is indexed only for rows whose key proves the row. A shared subtree is adopted before every move surface.
+- File requests: `bb push` and `bb sync` support uploads to file requests. A request-row rename seals under the string key, never the content key. `bb repair` skips request uploads instead of re-sealing their names. The CLI refuses a content write to a request-class row.
 - Direct uploads (task 2173): when the server offers `object-upload-v1`, `bb push` and `bb sync` send each chunk straight to object storage through a short-lived link the server grants and then commit it, instead of proxying the bytes through the API. Nothing changes for a server that does not offer it, and `--transport api` / `BB_TRANSPORT=api` force the API. A file whose direct upload cannot finish is sent again through the API, and no further direct upload is started by that process for ten minutes. An interrupted direct upload is continued on the next run; if the server cannot be asked at that moment, or the login is no longer valid, the upload and its progress are kept and the file fails for that run (it is given up only when the server says it offers no direct upload, or with `--transport api`). A chunk the server holds for minutes after a failed copy is waited out, not given up on.
 - `bb push --json` reports `transport` (`direct` or `api`) for every file, like `bb pull --json`.
+- Mount (FUSE): ported to fuser 0.18. Owner-only session ACL and 0o700/0o600 modes. Writes are marked dirty, content is loaded before a resize, and a file's content is kept when it is truncated. The mount refuses a rename of a read-only repair row. It never trashes a row it has not checked or replaced.
 
 ### Changed
 - What the server said about direct transfer is now remembered per API base for the life of the process, for ten minutes: `bb sync --daemon` used to ask the capabilities route again on every resync (it built a new client each time), and a server that said it has no direct transport is asked again after ten minutes.
+- The codebase was split into smaller modules. No behaviour change is intended beyond the items listed.
+
+### Fixed
+- A folder rename is never probed. `bb sync` never trashes a row it cannot prove writable. A kept read-only edit is a sync notice with guidance. The mount never trashes a row it has not checked or replaced. A rename of a file added by someone else seals under the string key, never the content key. The mount's source row is resolved before the write check. The keyed write check is the rename source check.
+- A request row's pin is read under its resolved name key. The CLI fails closed when the request list cannot load. A request-row rename over the mount takes core's `RenameTarget`.
+- The CLI refuses corrupt move destination metadata. An explicit replacement resume is bound to the intended file. Sync identity is compared before remote versions. A legacy invite owner copy is opened only with a possession proof. One owner-only notice is printed per command on every write surface. The CLI says why a plaintext-named row cannot be changed. A rename the device has no key for is refused.
+- Replace and rename are refused when the current version content is repair-sealed. An explicit key never falls back to owner keys. An explicit-key download fails at frame 0 again and wipes key copies. `bb repair` writes a verified new version, never trashing first. A repair row is skipped on `file_request_id` alone. The upper-repair request row's resolution is pinned, not just its refusal.
+- The FUSE-only name helpers are gated to the fuse feature. The mount's ACL comment is corrected. The mount's owner-only session ACL and 0o700/0o600 modes are added. The mount's owner-only tests are added.
+
+### Security
+- Wipes key copies and refuses writes to request-class rows. A request-row rename seals under the string key, never the content key. A plaintext-named v2 file is refused on WebDAV read instead of guessing its pin.
 
 
 ## [0.14.2] - 2026-10-24
