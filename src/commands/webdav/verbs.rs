@@ -576,35 +576,24 @@ pub(super) async fn move_response(state: &Arc<DavState>, src_path: &str, destina
         } else {
             beebeeb_core::media::guess_mime_type(&new_name)
         };
-        // L13: the rename seals through the resolver's write target. A resolved
-        // request row has no target: its new name is sealed under the
-        // string-convention key derived from the row id, with the pin its
-        // resolved name records (A9/P2-9). Any other row without a target is
-        // refused (P2-6).
-        let (file_key, rename_pin) = match &src.write_target {
-            Some(target) => (crate::crypto::key_copy(target.key()), target.pin()),
-            None if src.origin == beebeeb_core::owned_keys::KeyOrigin::RequestContent => {
-                // A9 (2275 L13): never seal under the content key `C` the
-                // current name resolved with — a pre-2236 upload's `C` also
-                // opens to the anonymous uploader. An upper-repair current
-                // name is read-only and refuses.
-                if src.name_origin == Some(beebeeb_core::owned_keys::KeyOrigin::DerivedUpperRepair) {
-                    return (StatusCode::CONFLICT, crate::owned_keys::RENAME_UNKNOWN_KEY).into_response();
-                }
-                let Ok(name_key) = crate::owned_keys::string_name_key(&state.master_key, &file_id) else {
-                    return (StatusCode::CONFLICT, crate::owned_keys::RENAME_UNKNOWN_KEY).into_response();
-                };
-                (
-                    crate::crypto::key_copy(&name_key),
-                    src.name_pin
-                        .unwrap_or(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded),
-                )
-            }
-            None => {
-                return (StatusCode::CONFLICT, crate::owned_keys::RENAME_UNKNOWN_KEY).into_response();
-            }
+        // L13/A9 (§15): the rename seals through the resolver's seal target. An
+        // owner row uses its write target; a request row uses core's
+        // RenameTarget (string-derived key + the pin the current name records),
+        // never the content key `C`. An upper-repair request name has no target
+        // (read-only) and any other row without one is refused (P2-6).
+        let sealed = if let Some(target) = &src.write_target {
+            beebeeb_core::encrypt::encrypt_name_for(
+                &crate::crypto::key_copy(target.key()),
+                &new_name,
+                mime_for_rename,
+                target.pin(),
+            )
+        } else if let Some(target) = &src.rename_target {
+            beebeeb_core::rename::encrypt_name_for_rename_target(target, &new_name, mime_for_rename)
+        } else {
+            return (StatusCode::CONFLICT, crate::owned_keys::RENAME_UNKNOWN_KEY).into_response();
         };
-        match beebeeb_core::encrypt::encrypt_name_for(&file_key, &new_name, mime_for_rename, rename_pin) {
+        match sealed {
             Ok(s) => Some(s),
             Err(e) => {
                 return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();

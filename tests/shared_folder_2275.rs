@@ -331,6 +331,67 @@ async fn a9_request_row_whose_name_is_under_the_content_key_renames_under_the_st
     h.close().await;
 }
 
+/// §15/A9: a BOUND request row whose current name is sealed under the
+/// read-only upper-repair convention resolves as a request row with NO rename
+/// target. A rename must refuse with the read-only reason and send no PATCH.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a9_an_upper_repair_request_row_refuses_a_rename() {
+    const REQ: &str = "11111111-2222-4333-8444-555555555555";
+    // A separate id whose uppercase form is a different derivation.
+    const UPPER: &str = "5f0c2a9e-3b1d-4c7e-9a2f-6d8e1b4c7a30";
+    let mut f = Fixture::basic();
+    f.plaintext = b"request body".to_vec();
+    let private = [31u8; 32];
+    let public = beebeeb_core::opaque::derive_x25519_public(&private);
+    let (wrapped, nonce) = beebeeb_core::file_request::wrap_request_private(&master(), b"", &private).unwrap();
+    f.requests_doc = json!({"file_requests":[{
+        "id": REQ,
+        "wrapped_private_key": B64.encode(wrapped),
+        "wrap_nonce": B64.encode(nonce),
+    }]});
+    let seal = beebeeb_core::file_request::seal_to_request(&public, UPPER.as_bytes(), item_key().as_bytes()).unwrap();
+    let upper_key = beebeeb_core::kdf::derive_file_key(&master(), UPPER.to_uppercase().as_bytes());
+    let mut r = row(
+        UPPER,
+        None,
+        "request.txt",
+        RowFacts {
+            foreign: true,
+            ..Default::default()
+        },
+    );
+    r["name_encrypted"] = json!(name(&upper_key, "request.txt"));
+    r["acted_via_share_id"] = Value::Null;
+    r["file_request_id"] = json!(REQ);
+    r["sender_ephemeral_pubkey"] = json!(B64.encode(seal.e_pub));
+    r["wrapped_content_key"] = json!(B64.encode(seal.wrapped_key));
+    r["size_bytes"] = json!(f.plaintext.len());
+    r["chunk_count"] = json!(1);
+    f.frames = vec![beebeeb_core::encrypt::encrypt_chunk_raw(&item_key(), &f.plaintext).unwrap()];
+    f.stride = f.plaintext.len() as u64;
+    f.rows.push(r);
+
+    let h = Harness::new(f).await;
+    let out = h.run(&["mv", "request.txt", "renamed.txt"]).await;
+    assert!(
+        !out.status.success(),
+        "an upper-repair request row was renamed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("saved by an older version of the iOS app"),
+        "the refusal must be the read-only reason: {stderr}"
+    );
+    assert_eq!(
+        h.count("PATCH", &format!("/api/v1/files/{UPPER}")),
+        0,
+        "no PATCH renames it"
+    );
+    h.close().await;
+}
+
 /// R4-B (review-4 P3): a 5xx on `GET /file-requests` must not turn a row that
 /// carries request fields into a writable owner row. It stays read-only with
 /// its own reason.

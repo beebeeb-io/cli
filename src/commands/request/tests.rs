@@ -168,13 +168,10 @@ fn receive_decrypts_request_uploaded_file_row() {
 
     // Owner side: build a resolver seeded with the wrapped private key (as the
     // list endpoint would return it) and recover the content key.
-    let mut resolver = RequestKeyResolver {
+    let resolver = RequestKeyResolver {
         wrapped: std::collections::HashMap::from([(request_id, (b64std().encode(&wrapped), b64std().encode(&nonce)))]),
-        privs: std::collections::HashMap::new(),
     };
-    let content_key = resolver
-        .legacy_content_key(&mk, &file_row)
-        .expect("recovers content key");
+    let content_key = resolver.content_key(&mk, &file_row).expect("recovers content key");
 
     // Name decrypts via the request content key.
     let name =
@@ -196,29 +193,29 @@ fn receive_decrypts_request_uploaded_file_row() {
     .unwrap();
     assert_eq!(plaintext, body);
 
-    // R_priv is cached after the first resolve.
-    assert!(resolver.privs.contains_key(&request_id));
-
     // An unknown request id yields no key (graceful, not a panic).
     let orphan_row = serde_json::json!({
         "file_request_id": "deadbeef-0000-0000-0000-000000000000",
         "sender_ephemeral_pubkey": meta["sender_ephemeral_pubkey"].as_str().unwrap(),
         "wrapped_content_key": meta["wrapped_key"].as_str().unwrap(),
     });
-    assert!(resolver.legacy_content_key(&mk, &orphan_row).is_none());
+    assert!(resolver.content_key(&mk, &orphan_row).is_none());
 }
 
-/// P2-9 (R3-P3): the local reader is the R5 unbound shape only. A 2236 bound
-/// envelope (request id on the wrap, row id on the content seal) cannot open
-/// here; core's bound reader is the only reader for it.
+/// §15/T4.1: a bound request row — content sealed under the row id, the
+/// request private key wrapped under the EMPTY context (the server mints the
+/// ids after the wraps) — downloads through core's `resolve_request_row`.
+/// The CLI must pass the empty wrap context: a real request id here refuses
+/// every shipped row.
 #[test]
-fn legacy_content_key_refuses_a_bound_envelope_core_resolves() {
+fn a_bound_request_row_downloads() {
+    use beebeeb_core::owned_keys::RequestSeal;
     let mk = test_master_key();
     let request_id = "11111111-2222-3333-4444-555555555555".parse::<uuid::Uuid>().unwrap();
     let item_id = "99999999-8888-7777-6666-555555555555";
     let (r_priv, r_pub) = generate_request_keypair();
     let content = [42u8; 32];
-    let (wrapped, nonce) = file_request::wrap_request_private(&mk, request_id.as_bytes(), &r_priv).unwrap();
+    let (wrapped, nonce) = file_request::wrap_request_private(&mk, REQUEST_WRAP_CONTEXT, &r_priv).unwrap();
     let sealed = file_request::seal_to_request(&r_pub, item_id.as_bytes(), &content).unwrap();
     let content_key = crate::crypto::key_from_bytes(&content);
     let name = beebeeb_core::encrypt::encrypt_name_for(
@@ -235,17 +232,16 @@ fn legacy_content_key_refuses_a_bound_envelope_core_resolves() {
         "sender_ephemeral_pubkey": b64std().encode(sealed.e_pub),
         "wrapped_content_key": b64std().encode(&sealed.wrapped_key),
     });
-    let mut resolver = RequestKeyResolver {
+    let resolver = RequestKeyResolver {
         wrapped: std::collections::HashMap::from([(request_id, (b64std().encode(&wrapped), b64std().encode(&nonce)))]),
-        privs: std::collections::HashMap::new(),
     };
-    assert!(
-        resolver.legacy_content_key(&mk, &row).is_none(),
-        "a bound envelope is not the R5 shape"
-    );
-    let keys = resolver.row_keys(&mk, &row).expect("core opens the bound row");
+    let keys = resolver
+        .row_keys(&mk, &row)
+        .expect("a bound request row downloads through core");
+    assert!(matches!(keys.seal, RequestSeal::Bound));
     assert_eq!(keys.name.name, "bound.bin");
     assert_eq!(keys.content_key.as_bytes(), &content);
+    assert!(resolver.content_key(&mk, &row).is_some());
 }
 /// P2-8 (review-2): a row core refuses as a foreign id is refused. bcc7320
 /// fell back to the local legacy reader on ANY core error, so this row
@@ -271,9 +267,8 @@ fn a_foreign_id_request_row_is_refused_not_resolved_locally() {
         "sender_ephemeral_pubkey": meta["sender_ephemeral_pubkey"].as_str().unwrap(),
         "wrapped_content_key": meta["wrapped_key"].as_str().unwrap(),
     });
-    let mut resolver = RequestKeyResolver {
+    let resolver = RequestKeyResolver {
         wrapped: std::collections::HashMap::from([(request_id, (b64std().encode(&wrapped), b64std().encode(&nonce)))]),
-        privs: std::collections::HashMap::new(),
     };
     assert!(
         resolver.row_keys(&mk, &file_row).is_none(),
@@ -309,9 +304,8 @@ fn r4a_a_donated_r5_envelope_on_a_binary_owner_row_is_refused() {
         "sender_ephemeral_pubkey": meta["sender_ephemeral_pubkey"].as_str().unwrap(),
         "wrapped_content_key": meta["wrapped_key"].as_str().unwrap(),
     });
-    let mut resolver = RequestKeyResolver {
+    let resolver = RequestKeyResolver {
         wrapped: std::collections::HashMap::from([(request_id, (b64std().encode(&wrapped), b64std().encode(&nonce)))]),
-        privs: std::collections::HashMap::new(),
     };
     assert!(
         resolver.row_keys(&mk, &row).is_none(),
@@ -319,12 +313,12 @@ fn r4a_a_donated_r5_envelope_on_a_binary_owner_row_is_refused() {
     );
 }
 
-/// Review-5 F3 (P3): `legacy_content_key` is the other R5 reader — it feeds
-/// the folder walk and `pull --zip` — and must apply R4-A's convention gate
-/// too. A binary-convention owner name with a donated request envelope must
-/// be refused, not hand the pull a content key its owner body will not open.
+/// Review-5 F3 (P3): `content_key` feeds the folder walk and `pull --zip`; it
+/// reads only through core's `resolve_request_row`, so a binary-convention
+/// owner name with a donated request envelope is refused, not handed to pull
+/// as a content key its owner body will not open.
 #[test]
-fn legacy_content_key_refuses_a_binary_convention_owner_row() {
+fn content_key_refuses_a_binary_convention_owner_row() {
     let mk = test_master_key();
     let request_id = "11111111-2222-3333-4444-555555555555".parse::<uuid::Uuid>().unwrap();
     let (r_priv, r_pub) = generate_request_keypair();
@@ -348,22 +342,21 @@ fn legacy_content_key_refuses_a_binary_convention_owner_row() {
         "sender_ephemeral_pubkey": meta["sender_ephemeral_pubkey"].as_str().unwrap(),
         "wrapped_content_key": meta["wrapped_key"].as_str().unwrap(),
     });
-    let mut resolver = RequestKeyResolver {
+    let resolver = RequestKeyResolver {
         wrapped: std::collections::HashMap::from([(request_id, (b64std().encode(&wrapped), b64std().encode(&nonce)))]),
-        privs: std::collections::HashMap::new(),
     };
     assert!(
-        resolver.legacy_content_key(&mk, &row).is_none(),
+        resolver.content_key(&mk, &row).is_none(),
         "a binary-convention owner name must not get the donor's content key"
     );
 }
 
 /// R5 (run 14): the pre-2236 request upload every shipped CLI and web client
 /// wrote — empty seal and wrap contexts, owner-class id — must still open.
-/// Core's bound-envelope reader refuses that shape, so the legacy reader
-/// behind the class and name checks is what resolves it.
+/// Core now tries the shipped empty-id seal itself, so this is the regression
+/// pin for that path.
 #[test]
-fn a_pre_2236_request_upload_opens_through_the_legacy_reader() {
+fn a_pre_2236_request_upload_opens_through_core() {
     let mk = test_master_key();
     let request_id = "11111111-2222-3333-4444-555555555555".parse::<uuid::Uuid>().unwrap();
     let (r_priv, r_pub) = generate_request_keypair();
@@ -378,9 +371,8 @@ fn a_pre_2236_request_upload_opens_through_the_legacy_reader() {
         "sender_ephemeral_pubkey": meta["sender_ephemeral_pubkey"].as_str().unwrap(),
         "wrapped_content_key": meta["wrapped_key"].as_str().unwrap(),
     });
-    let mut resolver = RequestKeyResolver {
+    let resolver = RequestKeyResolver {
         wrapped: std::collections::HashMap::from([(request_id, (b64std().encode(&wrapped), b64std().encode(&nonce)))]),
-        privs: std::collections::HashMap::new(),
     };
     let keys = resolver
         .row_keys(&mk, &file_row)
@@ -406,9 +398,8 @@ fn a_plaintext_named_request_row_is_refused_not_resolved_locally() {
         "sender_ephemeral_pubkey": meta["sender_ephemeral_pubkey"].as_str().unwrap(),
         "wrapped_content_key": meta["wrapped_key"].as_str().unwrap(),
     });
-    let mut resolver = RequestKeyResolver {
+    let resolver = RequestKeyResolver {
         wrapped: std::collections::HashMap::from([(request_id, (b64std().encode(&wrapped), b64std().encode(&nonce)))]),
-        privs: std::collections::HashMap::new(),
     };
     assert!(
         resolver.row_keys(&mk, &file_row).is_none(),
@@ -431,9 +422,8 @@ fn content_key_refuses_a_plaintext_name_and_a_foreign_id() {
         "sender_ephemeral_pubkey": meta["sender_ephemeral_pubkey"].as_str().unwrap(),
         "wrapped_content_key": meta["wrapped_key"].as_str().unwrap(),
     });
-    let mut resolver = RequestKeyResolver {
+    let resolver = RequestKeyResolver {
         wrapped: std::collections::HashMap::from([(request_id, (b64std().encode(&wrapped), b64std().encode(&nonce)))]),
-        privs: std::collections::HashMap::new(),
     };
 
     // An owner-class row with a plaintext name: nothing to authenticate it.
@@ -441,7 +431,7 @@ fn content_key_refuses_a_plaintext_name_and_a_foreign_id() {
     plaintext_row["id"] = serde_json::json!("55555555-5555-4555-8555-555555555555");
     plaintext_row["name_encrypted"] = serde_json::json!("received.bin");
     assert!(
-        resolver.legacy_content_key(&mk, &plaintext_row).is_none(),
+        resolver.content_key(&mk, &plaintext_row).is_none(),
         "a plaintext-named row gets no content key"
     );
 
@@ -450,7 +440,7 @@ fn content_key_refuses_a_plaintext_name_and_a_foreign_id() {
     foreign_row["id"] = serde_json::json!("33333333-3333-8333-8333-333333333333");
     foreign_row["name_encrypted"] = meta["name_encrypted"].clone();
     assert!(
-        resolver.legacy_content_key(&mk, &foreign_row).is_none(),
+        resolver.content_key(&mk, &foreign_row).is_none(),
         "a foreign-id row gets no content key"
     );
 }

@@ -64,16 +64,15 @@ pub(super) struct ResolvedEntry {
     /// means this client cannot open the row (or it is not a row), so a write
     /// must never guess one.
     pub(super) key: Option<std::sync::Arc<beebeeb_core::kdf::FileKey>>,
-    /// L12 (P2-9): the pin recorded in a request row's resolved name.
-    pub(super) name_pin: Option<beebeeb_core::chunk_stream::ExpectedChunkFormat>,
-    /// R4-A: which convention the request row's current name resolved under.
-    /// A9: a rename seals under the string key, never the resolved name key.
-    pub(super) name_origin: Option<beebeeb_core::owned_keys::KeyOrigin>,
     /// R4-B: a request-field row whose request list could not load stays
     /// read-only, with this one-line reason.
     pub(super) read_only_reason: Option<&'static str>,
     /// L13: the seal target core issued for this row, if it is writable.
     pub(super) write_target: Option<std::sync::Arc<beebeeb_core::owned_keys::WriteTarget>>,
+    /// A9/§15: the target core issued for a request-row rename (string-derived
+    /// key + the current name's pin). Never the content key `C`; `None` for a
+    /// read-only upper-repair name.
+    pub(super) rename_target: Option<std::sync::Arc<beebeeb_core::owned_keys::RenameTarget>>,
     /// L12: where the key came from (a request row's content is read-only).
     pub(super) origin: beebeeb_core::owned_keys::KeyOrigin,
 }
@@ -130,10 +129,9 @@ pub(super) fn decode_file_entry(
             pin: Err("a request row's content opens only under its request key".to_string()),
             read_only: keys.name_origin == KeyOrigin::DerivedUpperRepair,
             key: Some(std::sync::Arc::new(keys.content_key)),
-            name_pin: Some(name.chunk_format),
-            name_origin: Some(keys.name_origin),
             read_only_reason: None,
             write_target: None,
+            rename_target: keys.rename_target.map(std::sync::Arc::new),
             origin: KeyOrigin::RequestContent,
         });
     }
@@ -225,10 +223,9 @@ pub(super) fn decode_file_entry(
         pin,
         read_only,
         key,
-        name_pin: None,
-        name_origin: None,
         read_only_reason,
         write_target,
+        rename_target: None,
         origin,
     })
 }
@@ -255,10 +252,9 @@ pub(super) async fn resolve_path(state: &Arc<DavState>, path: &str) -> Result<Re
             pin: no_content(),
             read_only: false,
             key: None,
-            name_pin: None,
-            name_origin: None,
             read_only_reason: None,
             write_target: None,
+            rename_target: None,
             origin: beebeeb_core::owned_keys::KeyOrigin::Derived,
         });
     }

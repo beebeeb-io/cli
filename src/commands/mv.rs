@@ -220,41 +220,26 @@ async fn move_single(
     let new_name_encrypted = match new_name {
         Some(name) if name != src.name => {
             name_changed = true;
-            // L13: a rename seals a new name through the resolver's write
-            // target (key + chunk-format pin). A resolved request row has no
-            // target: it re-seals under the string-convention key derived from
-            // the row id, with the pin its name actually records (never a
-            // guessed Unrecorded).
-            // P2-9: an owner file the server marked with request fields keeps
-            // its write target and recorded pin; a row with neither is refused
-            // instead of sealed under a guess.
-            let target = src_keys.write_target_for(&src_id);
-            let (file_key, pin) = match &target {
-                Some(target) => (crate::crypto::key_copy(target.key()), target.pin()),
-                None if src_keys.origin_for(&src_id) == Some(beebeeb_core::owned_keys::KeyOrigin::RequestContent) => {
-                    // A9 (2275 L13): a request row's NEW name is always sealed
-                    // under the string-convention key derived from its id,
-                    // never under the content key `C` it resolved with — a
-                    // pre-2236 upload's `C` also opens to the anonymous
-                    // uploader, so sealing there would leak the new name. An
-                    // upper-repair current name is read-only and refuses.
-                    if src_keys.name_origin_for(&src_id)
-                        == Some(beebeeb_core::owned_keys::KeyOrigin::DerivedUpperRepair)
-                    {
-                        return Err(crate::owned_keys::RENAME_UNKNOWN_KEY.to_string());
-                    }
-                    let name_key = crate::owned_keys::string_name_key(master_key, &src_id)?;
-                    let pin = src_keys
-                        .name_pin_for(&src_id)
-                        .unwrap_or(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded);
-                    (crate::crypto::key_copy(&name_key), pin)
-                }
-                None => return Err(crate::owned_keys::RENAME_UNKNOWN_KEY.to_string()),
+            // L13/A9 (§15): the resolver hands out the seal target. An owner
+            // row re-seals through its write target (key + chunk-format pin); a
+            // request row re-seals through core's RenameTarget — the
+            // string-convention key derived from the row id and the pin the
+            // current name records, NEVER the content key `C`. An upper-repair
+            // request name has no target (read-only) and a row with neither is
+            // refused instead of sealed under a guess.
+            let sealed = if let Some(target) = src_keys.write_target_for(&src_id) {
+                beebeeb_core::encrypt::encrypt_name_for(
+                    &crate::crypto::key_copy(target.key()),
+                    &name,
+                    None,
+                    target.pin(),
+                )
+            } else if let Some(target) = src_keys.rename_target_for(&src_id) {
+                beebeeb_core::rename::encrypt_name_for_rename_target(&target, &name, None)
+            } else {
+                return Err(crate::owned_keys::RENAME_UNKNOWN_KEY.to_string());
             };
-            Some(
-                beebeeb_core::encrypt::encrypt_name_for(&file_key, &name, None, pin)
-                    .map_err(|e| format!("failed to encrypt new name: {e}"))?,
-            )
+            Some(sealed.map_err(|e| format!("failed to encrypt new name: {e}"))?)
         }
         _ => None,
     };

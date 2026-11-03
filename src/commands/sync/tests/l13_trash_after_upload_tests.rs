@@ -32,8 +32,6 @@ async fn upload_over(mut mock: Mock, s: &Scratch, old: Uuid) -> (Result<(), Stri
         id: old,
         resolved: Some(ResolvedCliKey {
             name_key: None,
-            name_pin: None,
-            name_origin: None,
             key: Arc::new(old_key()),
             origin: KeyOrigin::Derived,
             canonical: serde_json::json!({
@@ -47,6 +45,7 @@ async fn upload_over(mut mock: Mock, s: &Scratch, old: Uuid) -> (Result<(), Stri
             read_only: false,
             read_only_reason: None,
             write_target: None,
+            rename_target: None,
         }),
         chunk_count: 1,
         updated_at: Utc::now(),

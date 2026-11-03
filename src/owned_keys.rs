@@ -39,25 +39,6 @@ pub const REQUEST_KEYS_UNAVAILABLE: &str =
     "can't change this item: this device couldn't load your file-request keys. Try again when it can.";
 pub const OWNER_ONLY_NOTICE: &str = "Only you can open this. Share it from the web or the app.";
 
-/// L13/A9 (2275): the string-convention owner key for `id` — the key a request
-/// row's NEW name is sealed under on a rename, whatever key its CURRENT name
-/// resolved under.
-///
-/// A pre-2236 request row's name is sealed under its content key `C`, which the
-/// anonymous uploader holds; re-sealing under it would hand the owner's new name
-/// to the uploader and the server. Core's [`OwnerKeyConvention::String`] is
-/// exactly `derive_file_key(master, id.as_bytes())`, and `item_class` enforces
-/// the canonical lowercase hyphenated id that derivation requires.
-///
-/// [`OwnerKeyConvention::String`]: beebeeb_core::kdf::OwnerKeyConvention::String
-pub fn string_name_key(master: &MasterKey, id: &str) -> Result<Arc<FileKey>, String> {
-    match beebeeb_core::item_id::item_class(id) {
-        Ok(beebeeb_core::item_id::ItemClass::Owner) => {}
-        _ => return Err(RENAME_UNKNOWN_KEY.to_string()),
-    }
-    Ok(Arc::new(beebeeb_core::kdf::derive_file_key(master, id.as_bytes())))
-}
-
 /// Print [`OWNER_ONLY_NOTICE`] when `folder_id` sits in a shared folder.
 pub async fn announce_owner_only(api: &ApiClient, master: &MasterKey, folder_id: Option<&str>) {
     let Some(folder_id) = folder_id else {
@@ -77,9 +58,6 @@ pub struct ResolvedCliKey {
     /// L12: the key the row's NAME authenticates under, when it differs from
     /// `key` (a request row: derived-first name key, content under C).
     pub name_key: Option<Arc<FileKey>>,
-    /// P2-9: the pin the resolved name carries, so a rename re-seals under the
-    /// same convention the row's name authenticated with.
-    pub name_pin: Option<beebeeb_core::chunk_stream::ExpectedChunkFormat>,
     pub origin: KeyOrigin,
     pub canonical: Value,
     pub pending_owner_wrap: Option<Vec<u8>>,
@@ -89,8 +67,6 @@ pub struct ResolvedCliKey {
     /// SF-0002: the name resolved under the read-only uppercase repair
     /// convention. No rename, no new version; an edit becomes a new file.
     pub read_only: bool,
-    /// R4-A: where `name_key` came from (a request row's rename convention).
-    pub name_origin: Option<KeyOrigin>,
     /// R4-B: why a row is read-only when the reason is not the SF-0002 or
     /// plaintext one (the request key list could not be loaded).
     pub read_only_reason: Option<&'static str>,
@@ -98,6 +74,10 @@ pub struct ResolvedCliKey {
     /// resolver could authenticate the row for writing; a write must take its
     /// key and chunk-format pin from here, never re-derive them.
     pub write_target: Option<Arc<owned_keys::WriteTarget>>,
+    /// A9/§15: the target core issued for a request-row rename (string-derived
+    /// key + the pin the current name records). Never the content key `C`, and
+    /// `None` for a read-only upper-repair name.
+    pub rename_target: Option<Arc<owned_keys::RenameTarget>>,
 }
 
 /// The authenticated name from a core resolution (L12).
@@ -182,28 +162,20 @@ impl OwnedKeyResolver {
             .get(id)
             .is_some_and(|r| crate::crypto::name_is_plaintext(&r.canonical))
     }
-    /// The key origin `id` resolved to in this resolver, if it was resolved here.
-    pub fn origin_for(&self, id: &str) -> Option<KeyOrigin> {
-        self.resolved.get(id).map(|r| r.origin)
-    }
     /// L13: the seal target core issued for `id`, if the resolver authenticated
     /// the row for writing.
     pub fn write_target_for(&self, id: &str) -> Option<Arc<owned_keys::WriteTarget>> {
         self.resolved.get(id).and_then(|r| r.write_target.clone())
     }
-    /// L12 (P2-9): the chunk-format pin recorded in a request row's resolved
-    /// name. A rename re-seals under it instead of assuming `Unrecorded`.
-    pub fn name_pin_for(&self, id: &str) -> Option<beebeeb_core::chunk_stream::ExpectedChunkFormat> {
-        self.resolved.get(id).and_then(|r| r.name_pin)
-    }
-    /// R4-A: which convention `name_key` came from (a request row only).
-    pub fn name_origin_for(&self, id: &str) -> Option<KeyOrigin> {
-        self.resolved.get(id).and_then(|r| r.name_origin)
-    }
     /// R4-B: the one-line reason a row is read-only when it is not the
     /// SF-0002 or plaintext-name reason.
     pub fn read_only_reason_for(&self, id: &str) -> Option<&'static str> {
         self.resolved.get(id).and_then(|r| r.read_only_reason)
+    }
+    /// A9/§15: the target a request-row rename must use. `None` for every other
+    /// row and for a read-only upper-repair request name.
+    pub fn rename_target_for(&self, id: &str) -> Option<Arc<owned_keys::RenameTarget>> {
+        self.resolved.get(id).and_then(|r| r.rename_target.clone())
     }
     /// Load (and cache) a shared root's custody and inventory, so the L14 check
     /// has the wrap even when the row itself resolves through an owner envelope.
@@ -377,13 +349,12 @@ impl OwnedKeyResolver {
                     name_key,
                     name_origin,
                     name,
+                    rename_target,
                     ..
                 } = keys;
                 return Ok(ResolvedCliKey {
                     key: Arc::new(content_key),
                     name_key: Some(Arc::new(name_key)),
-                    name_pin: Some(name.chunk_format),
-                    name_origin: Some(name_origin),
                     origin: KeyOrigin::RequestContent,
                     canonical,
                     pending_owner_wrap: None,
@@ -392,6 +363,7 @@ impl OwnedKeyResolver {
                     read_only: name_origin == KeyOrigin::DerivedUpperRepair,
                     read_only_reason: None,
                     write_target: None,
+                    rename_target: rename_target.map(Arc::new),
                 });
             }
         }
@@ -403,8 +375,6 @@ impl OwnedKeyResolver {
             return Ok(ResolvedCliKey {
                 key: Arc::new(beebeeb_core::kdf::derive_file_key(master, id.as_bytes())),
                 name_key: None,
-                name_pin: None,
-                name_origin: None,
                 origin: KeyOrigin::Derived,
                 canonical,
                 pending_owner_wrap: None,
@@ -413,20 +383,15 @@ impl OwnedKeyResolver {
                 read_only: true,
                 read_only_reason: unverified_request.then_some(REQUEST_KEYS_UNAVAILABLE),
                 write_target: None,
+                rename_target: None,
             });
         }
         let resolved = owned_keys::resolve_owned_key(master, id, kind, None, None, &enc, None)
             .map_err(|_| "can't decrypt item name".to_string())?;
         let read_only = resolved.write_target.is_none() || unverified_request;
-        let name_pin = match &resolved.name {
-            beebeeb_core::owned_keys::ResolvedName::Encrypted(meta) => Some(meta.chunk_format),
-            beebeeb_core::owned_keys::ResolvedName::Plaintext(_) => None,
-        };
         Ok(ResolvedCliKey {
             key: Arc::new(resolved.key),
             name_key: None,
-            name_pin,
-            name_origin: None,
             origin: resolved.origin,
             canonical,
             pending_owner_wrap: None,
@@ -439,6 +404,7 @@ impl OwnedKeyResolver {
             } else {
                 resolved.write_target.map(Arc::new)
             },
+            rename_target: None,
         })
     }
     /// L12: a foreign id is never derived. Its key is an L8 owner envelope that
@@ -463,8 +429,6 @@ impl OwnedKeyResolver {
                 return Ok(ResolvedCliKey {
                     key: Arc::new(resolved.key),
                     name_key: None,
-                    name_pin: None,
-                    name_origin: None,
                     origin: resolved.origin,
                     canonical,
                     // A pending envelope is never confirmation that adoption
@@ -475,6 +439,7 @@ impl OwnedKeyResolver {
                     read_only,
                     read_only_reason: None,
                     write_target: resolved.write_target.map(Arc::new),
+                    rename_target: None,
                 });
             }
         }
@@ -505,8 +470,6 @@ impl OwnedKeyResolver {
                     return Ok(ResolvedCliKey {
                         key: Arc::new(key),
                         name_key: None,
-                        name_pin: None,
-                        name_origin: None,
                         origin: KeyOrigin::FolderWrap,
                         canonical,
                         pending_owner_wrap: Some(pending),
@@ -515,6 +478,7 @@ impl OwnedKeyResolver {
                         read_only: false,
                         read_only_reason: None,
                         write_target: None,
+                        rename_target: None,
                     });
                 }
                 let folder_wrap = owned_keys::FolderWrap {
@@ -532,8 +496,6 @@ impl OwnedKeyResolver {
                 return Ok(ResolvedCliKey {
                     key: Arc::new(resolved.key),
                     name_key: None,
-                    name_pin: None,
-                    name_origin: None,
                     origin: resolved.origin,
                     canonical,
                     pending_owner_wrap: Some(pending),
@@ -542,6 +504,7 @@ impl OwnedKeyResolver {
                     read_only,
                     read_only_reason: None,
                     write_target: resolved.write_target.map(Arc::new),
+                    rename_target: None,
                 });
             }
             let ancestor = self.ancestor_row(api, &root_id).await?;
