@@ -411,8 +411,24 @@ fn a_pre_2236_request_upload_opens_through_core() {
     };
     let keys = resolver
         .row_keys(&mk, &file_row)
-        .expect("a pre-2236 request upload opens through the legacy reader");
+        .expect("a pre-2236 request upload opens through core");
     assert_eq!(keys.name.name, "legacy.bin");
+    assert_eq!(
+        keys.seal,
+        beebeeb_core::owned_keys::RequestSeal::Unbound,
+        "a pre-2236 row seals under the empty info, not the row id"
+    );
+    assert_eq!(
+        keys.content_key.as_bytes(),
+        keys.name_key.as_bytes(),
+        "the pre-2236 name is sealed under the content key C"
+    );
+    let opened = beebeeb_core::encrypt::decrypt_name_metadata_with_key(
+        &keys.content_key,
+        file_row["name_encrypted"].as_str().unwrap(),
+    )
+    .expect("C is the key the pre-2236 name was sealed under");
+    assert_eq!(opened.name, "legacy.bin");
 }
 /// R5 (run 14): the fallback is gated, not "any core error". An owner-class
 /// row with a plaintext name proves nothing core could have accepted, so it
