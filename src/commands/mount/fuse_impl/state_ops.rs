@@ -737,26 +737,36 @@ impl BeebeebFsState {
         reply.ok();
     }
 
-    /// SF-0002: may the stored row behind `ino` be renamed, overwritten or
-    /// replaced (`what`, for the log)? The one write check: `EPERM` for a
-    /// read-only row, `EAGAIN` when the check could not decide (retryable;
-    /// the row is not marked read-only).
+    /// SF-0002: may the stored row behind `ino` be overwritten or replaced
+    /// (`what`, for the log)? The content-write check passes NO row key: only
+    /// the owner conventions may prove a version writable, so a request row's
+    /// content (sealed under `C`) comes back `EAGAIN`. `EPERM` for a read-only
+    /// row; the row is never marked read-only on an undecided check.
     pub(super) fn check_stored_row(&self, ino: u64, what: &str) -> Result<(), Errno> {
-        self.check_stored_row_keyed(ino, what, None)
+        self.check_write(ino, what, None)
     }
 
-    /// [`check_stored_row`](Self::check_stored_row) with the key the row
-    /// resolved to. A surface that already resolved the row (the mount's
-    /// rename) passes it, exactly as `bb mv` does: a request row's content is
-    /// sealed under `C`, which no owner derivation produces, so without the
-    /// resolved key the probe would come back `Unknown`/`EAGAIN` before the
-    /// rename ladder is ever reached.
-    pub(super) fn check_stored_row_keyed(
+    /// The write check for a `rename`'s SOURCE row only. The rename ladder
+    /// resolves the row before the check, and a request row's content is sealed
+    /// under `C`, which no owner derivation produces: without the resolved key
+    /// the probe would come back `Unknown`/`EAGAIN` before the ladder is ever
+    /// reached (P2-1).
+    ///
+    /// `row_key` is a PROBE, never a seal key. For a request row it is `C`,
+    /// which must never seal anything: the new name is sealed through core's
+    /// `RenameTarget` (A9/§15), not through this key. No content-write path
+    /// (overwrite, replace) may call this; those use
+    /// [`check_stored_row`](Self::check_stored_row).
+    pub(super) fn check_rename_source(
         &self,
         ino: u64,
         what: &str,
         row_key: Option<&beebeeb_core::kdf::FileKey>,
     ) -> Result<(), Errno> {
+        self.check_write(ino, what, row_key)
+    }
+
+    fn check_write(&self, ino: u64, what: &str, row_key: Option<&beebeeb_core::kdf::FileKey>) -> Result<(), Errno> {
         let Some(entry) = self.inodes.get(&ino) else {
             return Err(Errno::ENOENT);
         };
@@ -930,9 +940,10 @@ impl BeebeebFsState {
         // row opens through its L8 owner envelope or the child wrap of its
         // proven custody root; the old call passed neither wrap, so every
         // foreign item was refused with EPERM no matter how well it opened.
-        // The resolution comes BEFORE the write check, and its key is what the
-        // check probes: a request row's content is sealed under `C`, which the
-        // owner conventions never derive (`bb mv` passes the same key).
+        // The resolution comes BEFORE the rename-source check, and its key is
+        // what the probe uses: a request row's content is sealed under `C`,
+        // which the owner conventions never derive (`bb mv` passes the same
+        // key). The key never seals: the new name goes through the ladder below.
         let resolved = if name_changed {
             Some(
                 self.rt
@@ -947,7 +958,7 @@ impl BeebeebFsState {
         };
 
         if name_changed {
-            self.check_stored_row_keyed(ino, "rename", resolved.as_ref().map(|r| r.key.as_ref()))?;
+            self.check_rename_source(ino, "rename", resolved.as_ref().map(|r| r.key.as_ref()))?;
         }
 
         // L12/A19: a rename that takes the row out of a shared root adopts its
