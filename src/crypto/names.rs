@@ -84,6 +84,10 @@ pub fn decrypt_name_with_convention(
 /// uppercase repair convention? The one name verdict for every surface (the
 /// resolver, `bb mv`/`push` paths, WebDAV, the mount), whichever key the row
 /// was reached by; `owned_keys::write_check` then checks the content as well.
+///
+/// Only the mount reads this verdict (the read-only flag a FUSE entry carries),
+/// so it is compiled with the `fuse` feature.
+#[cfg(feature = "fuse")]
 pub fn name_is_upper_repair(
     master_key: &beebeeb_core::kdf::MasterKey,
     file_id_str: &str,

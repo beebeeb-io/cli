@@ -828,8 +828,16 @@ mod tests {
             beebeeb_core::encrypt::encrypt_name_for(&upper, "x.pdf", None, ExpectedChunkFormat::Unrecorded).unwrap();
         let ordinary =
             beebeeb_core::encrypt::encrypt_name_for(&normal, "x.pdf", None, ExpectedChunkFormat::Unrecorded).unwrap();
-        assert!(name_is_upper_repair(&m, id, &sealed));
-        assert!(!name_is_upper_repair(&m, id, &ordinary));
+        // The helper the mount reads only exists in a `fuse` build; assert the
+        // convention it delegates to, which is what the flag is derived from.
+        assert_eq!(
+            decrypt_name_with_convention(&m, id, &sealed),
+            Some(("x.pdf".to_string(), OwnerKeyConvention::UpperRepair))
+        );
+        assert_eq!(
+            decrypt_name_with_convention(&m, id, &ordinary),
+            Some(("x.pdf".to_string(), OwnerKeyConvention::String))
+        );
     }
 }
 
@@ -856,6 +864,7 @@ pub use names::decrypt_name_with_key;
 #[cfg(test)]
 use names::decrypt_names;
 pub use names::name_is_plaintext;
+#[cfg(feature = "fuse")]
 pub use names::name_is_upper_repair;
 use pins::NONCE_LEN;
 use pins::TAG_LEN;

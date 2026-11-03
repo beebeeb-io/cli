@@ -41,8 +41,8 @@ impl std::error::Error for ServerChangedItemId {}
 /// number: core picks the canonical lowercase v4 form the owner key derives
 /// from, and the same mint carries the resume tag. This type keeps the whole
 /// [`beebeeb_core::item_id::NewItemId`] instead of only its id text, so the tag
-/// survives the call (see [`tag`](Self::tag)) and the name can be sealed through
-/// core's new-item writer (see [`seal_name`](Self::seal_name)).
+/// survives the call (see [`tag`](Self::tag)) and, in a `fuse` build, the name
+/// can be sealed through core's new-item writer (`seal_name`).
 pub struct MintedOwner {
     new_item: beebeeb_core::item_id::NewItemId,
     id: Uuid,
@@ -67,7 +67,10 @@ impl MintedOwner {
 
     /// Seal a new row's name through core's new-item writer, the only writer a
     /// create may use (`{"name":..,"mime_type":..}` under the key derived from
-    /// this core-minted id).
+    /// this core-minted id). Only the mount creates rows through it today, so it
+    /// is compiled with the `fuse` feature (and for the tests that drive that
+    /// path without a mount).
+    #[cfg(any(feature = "fuse", test))]
     pub fn seal_name(
         &self,
         master_key: &beebeeb_core::kdf::MasterKey,
