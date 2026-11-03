@@ -249,6 +249,9 @@ pub fn record(
 /// [`record`] for the write `proposed` names (a create's minted id, or the row a
 /// replace lists: L13 marks only the first as self-minted), saying whether the
 /// session is a direct upload (task 2173).
+// The sidecar record has this many independent facts; grouping them would only
+// move the same fields into a struct at every call site.
+#[allow(clippy::too_many_arguments)]
 pub fn record_with_transport(
     path: &Path,
     proposed: crate::item_id::Proposed,

@@ -82,7 +82,7 @@ pub(super) fn decode_file_entry(
     file: &serde_json::Value,
     master_key: &beebeeb_core::kdf::MasterKey,
     _parent_href: &str,
-    mut requests: Option<&mut crate::commands::request::RequestKeyResolver>,
+    requests: Option<&mut crate::commands::request::RequestKeyResolver>,
 ) -> Option<ResolvedEntry> {
     use beebeeb_core::owned_keys::{ItemKind, KeyOrigin, ResolvedName};
 
@@ -98,7 +98,7 @@ pub(super) fn decode_file_entry(
     // L12 (P2-9): a request row's content stays under `C` and an edit becomes a
     // NEW owner item (A9b). It is one only when the resolver opens it; a server
     // that adds `file_request_id` to a v2-pinned owner file changes nothing.
-    if let Some(keys) = requests.as_deref_mut().and_then(|r| r.row_keys(master_key, file)) {
+    if let Some(keys) = requests.and_then(|r| r.row_keys(master_key, file)) {
         let name = keys.name;
         return Some(ResolvedEntry {
             file_id: Some(file_id),
