@@ -137,39 +137,39 @@ pub async fn stream_encrypt_upload(
                 SessionResume::RestartWithFreshSession
             };
             match resume {
-            SessionResume::ContinueSession => SessionPlan::Resume {
-                file_id: pending.file_id,
-                session_id: pending.session_id,
-                direct: pending.direct,
-            },
-            SessionResume::RestartWithFreshSession => {
-                crate::resume::clear(&spec.path);
-                if let Err(e) = api.upload_abandon(&pending.file_id.to_string()).await
-                    && e.status != 404
-                    && !crate::ui::is_quiet()
-                {
-                    // The init below then meets the live lease (409) and fails:
-                    // a later run retries. Never falls back to the old session.
-                    eprintln!(
-                        "  {}: could not abandon the interrupted upload ({})",
-                        display_name(&spec.file_name),
-                        e.message
-                    );
-                }
-                if !crate::ui::is_quiet() {
-                    eprintln!(
-                        "  {}: the interrupted upload cannot be continued in this chunk format; starting it again",
-                        display_name(&spec.file_name)
-                    );
-                }
-                SessionPlan::Init {
+                SessionResume::ContinueSession => SessionPlan::Resume {
                     file_id: pending.file_id,
-                    fallback_file_id: (pending.file_id != spec.file_id).then_some(spec.file_id),
-                    is_recovery: true,
+                    session_id: pending.session_id,
+                    direct: pending.direct,
+                },
+                SessionResume::RestartWithFreshSession => {
+                    crate::resume::clear(&spec.path);
+                    if let Err(e) = api.upload_abandon(&pending.file_id.to_string()).await
+                        && e.status != 404
+                        && !crate::ui::is_quiet()
+                    {
+                        // The init below then meets the live lease (409) and fails:
+                        // a later run retries. Never falls back to the old session.
+                        eprintln!(
+                            "  {}: could not abandon the interrupted upload ({})",
+                            display_name(&spec.file_name),
+                            e.message
+                        );
+                    }
+                    if !crate::ui::is_quiet() {
+                        eprintln!(
+                            "  {}: the interrupted upload cannot be continued in this chunk format; starting it again",
+                            display_name(&spec.file_name)
+                        );
+                    }
+                    SessionPlan::Init {
+                        file_id: pending.file_id,
+                        fallback_file_id: (pending.file_id != spec.file_id).then_some(spec.file_id),
+                        is_recovery: true,
+                    }
                 }
             }
-            }
-        },
+        }
         None => SessionPlan::Init {
             file_id: spec.file_id,
             fallback_file_id: None,

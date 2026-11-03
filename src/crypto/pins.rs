@@ -233,7 +233,10 @@ mod key_copy_tests {
     #[test]
     fn no_shipping_site_spells_its_own_by_value_key_copy() {
         let mut files = Vec::new();
-        rust_files(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+        rust_files(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
         assert!(files.len() > 40, "scanned the whole crate: {}", files.len());
         let test_mods = cfg_test_modules(&files);
         for (name, src) in &files {

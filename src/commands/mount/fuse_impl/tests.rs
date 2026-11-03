@@ -1050,7 +1050,10 @@ mod replace_tests {
         let src_key = beebeeb_core::kdf::derive_file_key(&master(), SRC_ID.as_bytes());
         let sent = {
             let m = mock.lock().unwrap();
-            m.move_bodies[0].1["name_encrypted"].as_str().expect("sealed name").to_string()
+            m.move_bodies[0].1["name_encrypted"]
+                .as_str()
+                .expect("sealed name")
+                .to_string()
         };
         let name = beebeeb_core::encrypt::decrypt_name_metadata_with_key(&src_key, &sent)
             .expect("core opens the owner name the rename sent");
@@ -1135,7 +1138,8 @@ mod replace_tests {
             }),
         );
         let (mut fs, mock) = setup(base);
-        fs.inodes.insert(FOREIGN_INO, entry(Some(FOREIGN_ID), "member.txt", false));
+        fs.inodes
+            .insert(FOREIGN_INO, entry(Some(FOREIGN_ID), "member.txt", false));
         fs.id_to_ino.insert(FOREIGN_ID.to_string(), FOREIGN_INO);
         // The write check is not what this test asks: the wrap is.
         fs.minted.insert(FOREIGN_ID.to_string());

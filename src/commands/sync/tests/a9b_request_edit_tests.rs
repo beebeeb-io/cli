@@ -33,7 +33,7 @@ async fn watch_upload_of_request_edit(mut mock: Mock, s: &Scratch) -> (Result<()
         id: REQUEST_ROW.parse().unwrap(),
         resolved: Some(ResolvedCliKey {
             name_key: None,
-        name_pin: None,
+            name_pin: None,
             key: Arc::new(content_key),
             origin: KeyOrigin::RequestContent,
             canonical: serde_json::json!({

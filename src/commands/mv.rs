@@ -226,19 +226,13 @@ async fn move_single(
             let target = src_keys.write_target_for(&src_id);
             let (file_key, pin) = match &target {
                 Some(target) => (crate::crypto::key_copy(target.key()), target.pin()),
-                None
-                    if src_keys.origin_for(&src_id)
-                        == Some(beebeeb_core::owned_keys::KeyOrigin::RequestContent) =>
-                {
+                None if src_keys.origin_for(&src_id) == Some(beebeeb_core::owned_keys::KeyOrigin::RequestContent) => {
                     // A9: a request row's rename keeps the string convention, but
                     // with the pin its name actually records, never a guess.
-                    let pin = src_keys.name_pin_for(&src_id).unwrap_or(
-                        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
-                    );
-                    (
-                        beebeeb_core::kdf::derive_file_key(master_key, src_id.as_bytes()),
-                        pin,
-                    )
+                    let pin = src_keys
+                        .name_pin_for(&src_id)
+                        .unwrap_or(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded);
+                    (beebeeb_core::kdf::derive_file_key(master_key, src_id.as_bytes()), pin)
                 }
                 None => return Err(crate::owned_keys::RENAME_UNKNOWN_KEY.to_string()),
             };

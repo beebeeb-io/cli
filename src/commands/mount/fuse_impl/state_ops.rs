@@ -583,8 +583,8 @@ impl BeebeebFsState {
         // the folder name, the same new-item pair push uses. The old path took
         // a bare local v4 and sealed raw metadata under the derived key, a
         // shape core's name reader refuses.
-        let minted = crate::item_id::mint_owner(&self.master_key)
-            .map_err(|e| (Errno::EIO, format!("mkdir mint: {e}")))?;
+        let minted =
+            crate::item_id::mint_owner(&self.master_key).map_err(|e| (Errno::EIO, format!("mkdir mint: {e}")))?;
         let resume_tag = *minted.tag();
         let folder_uuid = minted.id();
         let name_enc = minted
@@ -616,8 +616,8 @@ impl BeebeebFsState {
 
         // L13 (SF-0001): only the id this client minted; a different echo
         // aborts before the folder is listed or used as a parent.
-        let server_id = super::super::folder_create_reply(&resp, folder_uuid)
-            .map_err(|e| (Errno::EIO, format!("mkdir: {e}")))?;
+        let server_id =
+            super::super::folder_create_reply(&resp, folder_uuid).map_err(|e| (Errno::EIO, format!("mkdir: {e}")))?;
 
         let ino = self.alloc_ino();
         let now = SystemTime::now();

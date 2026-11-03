@@ -415,7 +415,9 @@ mod sf_0002_write_check_tests {
         assert_eq!(entry.display_name, "renamed.txt");
         let key = entry.key.expect("core resolved the name key");
         assert_eq!(
-            beebeeb_core::encrypt::decrypt_name_metadata_with_key(&key, &sealed).unwrap().name,
+            beebeeb_core::encrypt::decrypt_name_metadata_with_key(&key, &sealed)
+                .unwrap()
+                .name,
             "renamed.txt"
         );
     }

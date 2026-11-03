@@ -49,8 +49,9 @@ pub(super) async fn propfind_response(state: &Arc<DavState>, path: &str, depth: 
                         .and_then(|f| f.as_array())
                         .cloned()
                         .unwrap_or_default();
-                    let mut requests =
-                        crate::commands::request::RequestKeyResolver::load(&state.api).await.ok();
+                    let mut requests = crate::commands::request::RequestKeyResolver::load(&state.api)
+                        .await
+                        .ok();
                     files
                         .iter()
                         .filter_map(|f| decode_file_entry(f, &state.master_key, path, requests.as_mut()))

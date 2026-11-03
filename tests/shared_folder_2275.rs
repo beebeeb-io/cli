@@ -300,13 +300,9 @@ async fn n2_request_fields_that_do_not_resolve_keep_the_owners_pin() {
     let mut r = row(MARKED, None, "pinned.bin", RowFacts { ..Default::default() });
     r["size_bytes"] = json!(body.len());
     r["chunk_count"] = json!(1);
-    r["name_encrypted"] = json!(beebeeb_core::encrypt::encrypt_name_for(
-        &owner_key,
-        "pinned.bin",
-        None,
-        ExpectedChunkFormat::V2
-    )
-    .unwrap());
+    r["name_encrypted"] = json!(
+        beebeeb_core::encrypt::encrypt_name_for(&owner_key, "pinned.bin", None, ExpectedChunkFormat::V2).unwrap()
+    );
     // The server also sends the three request fields, as if it were one.
     r["file_request_id"] = json!(REQ);
     r["sender_ephemeral_pubkey"] = json!("AA");
@@ -323,11 +319,9 @@ async fn n2_request_fields_that_do_not_resolve_keep_the_owners_pin() {
             .map(|(_, _, b)| serde_json::from_slice::<Value>(b).unwrap())
             .expect("the rename is a PATCH of the owner row")
     };
-    let meta = beebeeb_core::encrypt::decrypt_name_metadata_with_key(
-        &owner_key,
-        patch["name_encrypted"].as_str().unwrap(),
-    )
-    .unwrap();
+    let meta =
+        beebeeb_core::encrypt::decrypt_name_metadata_with_key(&owner_key, patch["name_encrypted"].as_str().unwrap())
+            .unwrap();
     assert_eq!(meta.name, "renamed.bin");
     assert_eq!(
         meta.chunk_format,
@@ -1004,6 +998,10 @@ async fn w_request_created_here_sends_uploads_our_pull_can_open() {
 
     let out = h.home.join("received.bin");
     ok(h.run(&["pull", "sent.bin", "-o", out.to_str().unwrap()]).await);
-    assert_eq!(std::fs::read(out).unwrap(), content, "the owner opens what the request accepted");
+    assert_eq!(
+        std::fs::read(out).unwrap(),
+        content,
+        "the owner opens what the request accepted"
+    );
     h.close().await;
 }

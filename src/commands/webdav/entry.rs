@@ -234,7 +234,9 @@ pub(super) async fn resolve_path(state: &Arc<DavState>, path: &str) -> Result<Re
     let mut current_parent: Option<String> = None; // None = root
     // One owner-side request list per walk; a row the resolver opens is a
     // request row (P2-9), and one it cannot open stays an owner row.
-    let mut requests = crate::commands::request::RequestKeyResolver::load(&state.api).await.ok();
+    let mut requests = crate::commands::request::RequestKeyResolver::load(&state.api)
+        .await
+        .ok();
 
     for (i, segment) in segments.iter().enumerate() {
         let is_last = i == segments.len() - 1;

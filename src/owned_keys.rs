@@ -401,7 +401,7 @@ impl OwnedKeyResolver {
                 return Ok(ResolvedCliKey {
                     key: Arc::new(resolved.key),
                     name_key: None,
-                name_pin: None,
+                    name_pin: None,
                     origin: resolved.origin,
                     canonical,
                     // A pending envelope is never confirmation that adoption
@@ -441,7 +441,7 @@ impl OwnedKeyResolver {
                     return Ok(ResolvedCliKey {
                         key: Arc::new(key),
                         name_key: None,
-                name_pin: None,
+                        name_pin: None,
                         origin: KeyOrigin::FolderWrap,
                         canonical,
                         pending_owner_wrap: Some(pending),
@@ -466,7 +466,7 @@ impl OwnedKeyResolver {
                 return Ok(ResolvedCliKey {
                     key: Arc::new(resolved.key),
                     name_key: None,
-                name_pin: None,
+                    name_pin: None,
                     origin: resolved.origin,
                     canonical,
                     pending_owner_wrap: Some(pending),

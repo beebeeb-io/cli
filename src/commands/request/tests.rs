@@ -156,13 +156,12 @@ fn receive_decrypts_request_uploaded_file_row() {
     // Owner side: build a resolver seeded with the wrapped private key (as the
     // list endpoint would return it) and recover the content key.
     let mut resolver = RequestKeyResolver {
-        wrapped: std::collections::HashMap::from([(
-            request_id,
-            (b64std().encode(&wrapped), b64std().encode(&nonce)),
-        )]),
+        wrapped: std::collections::HashMap::from([(request_id, (b64std().encode(&wrapped), b64std().encode(&nonce)))]),
         privs: std::collections::HashMap::new(),
     };
-    let content_key = resolver.legacy_content_key(&mk, &file_row).expect("recovers content key");
+    let content_key = resolver
+        .legacy_content_key(&mk, &file_row)
+        .expect("recovers content key");
 
     // Name decrypts via the request content key.
     let name =
@@ -224,10 +223,7 @@ fn legacy_content_key_refuses_a_bound_envelope_core_resolves() {
         "wrapped_content_key": b64std().encode(&sealed.wrapped_key),
     });
     let mut resolver = RequestKeyResolver {
-        wrapped: std::collections::HashMap::from([(
-            request_id,
-            (b64std().encode(&wrapped), b64std().encode(&nonce)),
-        )]),
+        wrapped: std::collections::HashMap::from([(request_id, (b64std().encode(&wrapped), b64std().encode(&nonce)))]),
         privs: std::collections::HashMap::new(),
     };
     assert!(
@@ -263,10 +259,7 @@ fn a_foreign_id_request_row_is_refused_not_resolved_locally() {
         "wrapped_content_key": meta["wrapped_key"].as_str().unwrap(),
     });
     let mut resolver = RequestKeyResolver {
-        wrapped: std::collections::HashMap::from([(
-            request_id,
-            (b64std().encode(&wrapped), b64std().encode(&nonce)),
-        )]),
+        wrapped: std::collections::HashMap::from([(request_id, (b64std().encode(&wrapped), b64std().encode(&nonce)))]),
         privs: std::collections::HashMap::new(),
     };
     assert!(
@@ -295,10 +288,7 @@ fn a_pre_2236_request_upload_opens_through_the_legacy_reader() {
         "wrapped_content_key": meta["wrapped_key"].as_str().unwrap(),
     });
     let mut resolver = RequestKeyResolver {
-        wrapped: std::collections::HashMap::from([(
-            request_id,
-            (b64std().encode(&wrapped), b64std().encode(&nonce)),
-        )]),
+        wrapped: std::collections::HashMap::from([(request_id, (b64std().encode(&wrapped), b64std().encode(&nonce)))]),
         privs: std::collections::HashMap::new(),
     };
     let keys = resolver
@@ -326,10 +316,7 @@ fn a_plaintext_named_request_row_is_refused_not_resolved_locally() {
         "wrapped_content_key": meta["wrapped_key"].as_str().unwrap(),
     });
     let mut resolver = RequestKeyResolver {
-        wrapped: std::collections::HashMap::from([(
-            request_id,
-            (b64std().encode(&wrapped), b64std().encode(&nonce)),
-        )]),
+        wrapped: std::collections::HashMap::from([(request_id, (b64std().encode(&wrapped), b64std().encode(&nonce)))]),
         privs: std::collections::HashMap::new(),
     };
     assert!(
@@ -346,8 +333,7 @@ fn content_key_refuses_a_plaintext_name_and_a_foreign_id() {
     let request_id = "11111111-2222-3333-4444-555555555555".parse::<uuid::Uuid>().unwrap();
     let (r_priv, r_pub) = generate_request_keypair();
     let (wrapped, nonce) = file_request::wrap_request_private(&mk, REQUEST_WRAP_CONTEXT, &r_priv).unwrap();
-    let (metadata, _chunks) =
-        seal_file_for_request(&r_pub, "received.bin", None, b"content", 16).unwrap();
+    let (metadata, _chunks) = seal_file_for_request(&r_pub, "received.bin", None, b"content", 16).unwrap();
     let meta: serde_json::Value = serde_json::from_str(&metadata).unwrap();
     let request_fields = serde_json::json!({
         "file_request_id": request_id.to_string(),
@@ -355,10 +341,7 @@ fn content_key_refuses_a_plaintext_name_and_a_foreign_id() {
         "wrapped_content_key": meta["wrapped_key"].as_str().unwrap(),
     });
     let mut resolver = RequestKeyResolver {
-        wrapped: std::collections::HashMap::from([(
-            request_id,
-            (b64std().encode(&wrapped), b64std().encode(&nonce)),
-        )]),
+        wrapped: std::collections::HashMap::from([(request_id, (b64std().encode(&wrapped), b64std().encode(&nonce)))]),
         privs: std::collections::HashMap::new(),
     };
 

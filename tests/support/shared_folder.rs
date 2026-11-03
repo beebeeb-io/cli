@@ -594,8 +594,7 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
     } else if method == "POST" && path == "/api/v1/r/tok-r15/upload" {
         let body = f.requests.last().unwrap().2.clone();
         let parts = multipart_parts(&content_type, &body);
-        let meta: Value =
-            serde_json::from_slice(parts.get("metadata").expect("request upload metadata")).unwrap();
+        let meta: Value = serde_json::from_slice(parts.get("metadata").expect("request upload metadata")).unwrap();
         let chunk = parts.get("chunk_0").cloned().expect("request upload chunk_0");
         f.frames = vec![chunk];
         f.stride = meta["size_bytes"].as_u64().unwrap_or(0);
@@ -740,11 +739,7 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
 /// Split a `multipart/form-data` body into its named parts. The mock only
 /// needs the two parts `bb request send` writes: the metadata JSON and chunk_0.
 fn multipart_parts(content_type: &str, body: &[u8]) -> HashMap<String, Vec<u8>> {
-    let boundary = content_type
-        .split("boundary=")
-        .nth(1)
-        .unwrap_or("")
-        .trim_matches('"');
+    let boundary = content_type.split("boundary=").nth(1).unwrap_or("").trim_matches('"');
     let delimiter = format!("--{boundary}").into_bytes();
     let mut parts = HashMap::new();
     let mut rest = body;
