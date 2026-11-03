@@ -36,10 +36,12 @@ fn entry(file_id: &str, name: &str, read_only: bool) -> InodeEntry {
         key_uuid: file_id.parse().ok(),
         name: name.to_string(),
         is_dir: false,
+        // A real upload's geometry: one chunk, sealed under the request's
+        // content key `C`. The mount's write check probes it exactly as in
+        // production; a listing without geometry would skip the probe and
+        // prove only the seal branch.
         size: 0,
-        // The write check is not what these tests ask: a listing without
-        // geometry is never probed.
-        chunk_count: 0,
+        chunk_count: 1,
         modified: SystemTime::UNIX_EPOCH,
         parent_ino: ROOT_INO,
         pin: Ok(ExpectedChunkFormat::Unrecorded),
@@ -81,10 +83,19 @@ fn request_row_mock(id: &str, name: &str, name_key: &beebeeb_core::kdf::FileKey)
             "parent_id": null,
             "name_encrypted": sealed_name,
             "is_folder": false,
+            "size_bytes": 0,
+            "chunk_count": 1,
             "file_request_id": REQ,
             "sender_ephemeral_pubkey": b64(&seal.e_pub),
             "wrapped_content_key": b64(&seal.wrapped_key),
         }),
+    );
+    // Chunk 0 of the version, sealed under the request's content key `C` — the
+    // key the uploader holds and the owner only reaches through the request.
+    mock.downloads.insert(
+        id.to_string(),
+        beebeeb_core::encrypt::encrypt_chunk_raw(&beebeeb_core::kdf::FileKey::from_bytes(content), b"")
+            .expect("chunk 0 under C"),
     );
     mock
 }

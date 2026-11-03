@@ -742,6 +742,21 @@ impl BeebeebFsState {
     /// read-only row, `EAGAIN` when the check could not decide (retryable;
     /// the row is not marked read-only).
     pub(super) fn check_stored_row(&self, ino: u64, what: &str) -> Result<(), Errno> {
+        self.check_stored_row_keyed(ino, what, None)
+    }
+
+    /// [`check_stored_row`](Self::check_stored_row) with the key the row
+    /// resolved to. A surface that already resolved the row (the mount's
+    /// rename) passes it, exactly as `bb mv` does: a request row's content is
+    /// sealed under `C`, which no owner derivation produces, so without the
+    /// resolved key the probe would come back `Unknown`/`EAGAIN` before the
+    /// rename ladder is ever reached.
+    pub(super) fn check_stored_row_keyed(
+        &self,
+        ino: u64,
+        what: &str,
+        row_key: Option<&beebeeb_core::kdf::FileKey>,
+    ) -> Result<(), Errno> {
         let Some(entry) = self.inodes.get(&ino) else {
             return Err(Errno::ENOENT);
         };
@@ -757,8 +772,7 @@ impl BeebeebFsState {
             file_id,
             is_folder: entry.is_dir,
             name_read_only: entry.read_only,
-            // Rows here open under the owner's own conventions (the master key).
-            row_key: None,
+            row_key,
             size_bytes: Some(entry.size),
             chunk_count: entry.chunk_count,
         };
@@ -902,13 +916,7 @@ impl BeebeebFsState {
     ) -> Result<(), Errno> {
         let name_changed = old_name != newname;
         let parent_changed = parent != newparent;
-        if name_changed {
-            self.check_stored_row(ino, "rename")?;
-        }
 
-        // L12/A19: a rename that takes the row out of a shared root adopts its
-        // foreign subtree first, confirmed by a readback. An ancestry the server
-        // will not answer for refuses the rename (fail closed).
         let row = match self.rt.block_on(self.api.get_file(file_id)) {
             Ok(row) => row,
             Err(e) => {
@@ -917,6 +925,34 @@ impl BeebeebFsState {
             }
         };
         let mut resolver = crate::owned_keys::OwnedKeyResolver::new();
+
+        // N6: resolve the row exactly as push and every listing do. A foreign
+        // row opens through its L8 owner envelope or the child wrap of its
+        // proven custody root; the old call passed neither wrap, so every
+        // foreign item was refused with EPERM no matter how well it opened.
+        // The resolution comes BEFORE the write check, and its key is what the
+        // check probes: a request row's content is sealed under `C`, which the
+        // owner conventions never derive (`bb mv` passes the same key).
+        let resolved = if name_changed {
+            Some(
+                self.rt
+                    .block_on(resolver.resolve(&self.api, &self.master_key, &row))
+                    .map_err(|e| {
+                        eprintln!("[mount] rename refused for {file_id}: {e}");
+                        Errno::EPERM
+                    })?,
+            )
+        } else {
+            None
+        };
+
+        if name_changed {
+            self.check_stored_row_keyed(ino, "rename", resolved.as_ref().map(|r| r.key.as_ref()))?;
+        }
+
+        // L12/A19: a rename that takes the row out of a shared root adopts its
+        // foreign subtree first, confirmed by a readback. An ancestry the server
+        // will not answer for refuses the rename (fail closed).
         if let Err(e) = self.rt.block_on(resolver.adopt_before_move(
             &self.api,
             &self.master_key,
@@ -928,21 +964,10 @@ impl BeebeebFsState {
             return Err(Errno::EIO);
         }
 
-        // N6: resolve the row exactly as push and every listing do. A foreign
-        // row opens through its L8 owner envelope or the child wrap of its
-        // proven custody root; the old call passed neither wrap, so every
-        // foreign item was refused with EPERM no matter how well it opened.
         // L13: the new name is then sealed through core, under the key and
         // chunk format the row itself authenticated — never a bare derive.
-        let new_name_enc: Option<String> = if name_changed {
+        let new_name_enc: Option<String> = if let Some(resolved) = resolved {
             let is_dir = self.inodes.get(&ino).is_some_and(|e| e.is_dir);
-            let resolved = self
-                .rt
-                .block_on(resolver.resolve(&self.api, &self.master_key, &row))
-                .map_err(|e| {
-                    eprintln!("[mount] rename refused for {file_id}: {e}");
-                    Errno::EPERM
-                })?;
             // L13/A9 (§15): the seal target ladder is the one `bb mv` and
             // WebDAV MOVE take. An owner row re-seals through its write target;
             // a request row re-seals through core's RenameTarget — the
