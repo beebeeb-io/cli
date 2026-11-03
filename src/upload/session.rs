@@ -37,6 +37,10 @@ pub(super) enum SessionPlan {
         /// still get the retry: gating the retry on `fallback_file_id.is_some()`
         /// silently skipped it for every `--replace` upload.
         is_recovery: bool,
+        /// R4-C: the core resume tag that belongs to `file_id`. A sidecar
+        /// record must always pair an id with ITS tag, never the current
+        /// spec's tag next to another id.
+        resume_tag: Option<[u8; 32]>,
     },
 }
 

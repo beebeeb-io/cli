@@ -123,6 +123,19 @@ pub async fn stream_encrypt_upload(
         }
         crate::resume::clear(&spec.path);
     }
+    // R4-C: a sidecar record pairs an id with the tag core minted for THAT id.
+    // `spec.resume_tag` belongs to `spec.file_id`; a pending id keeps the tag
+    // it was recorded with, or (on a mismatch) is abandoned and the current
+    // spec id is used instead.
+    let pending_id = pending.as_ref().map(|p| p.file_id);
+    let pending_tag = pending.as_ref().and_then(|p| p.resume_tag);
+    let tag_for = |file_id: uuid::Uuid| {
+        if Some(file_id) == pending_id {
+            pending_tag
+        } else {
+            spec.resume_tag
+        }
+    };
     let mut plan = match pending {
         Some(pending) => {
             // L13/N4: a create's record carries the core resume tag. Continue
@@ -162,10 +175,14 @@ pub async fn stream_encrypt_upload(
                             display_name(&spec.file_name)
                         );
                     }
+                    // R4-C: a mismatched tag proves nothing about the pending
+                    // id, so start from the id this run minted, with its own tag.
+                    let restart_id = if tag_resumes { pending.file_id } else { spec.file_id };
                     SessionPlan::Init {
-                        file_id: pending.file_id,
-                        fallback_file_id: (pending.file_id != spec.file_id).then_some(spec.file_id),
+                        file_id: restart_id,
+                        fallback_file_id: (tag_resumes && pending.file_id != spec.file_id).then_some(spec.file_id),
                         is_recovery: true,
+                        resume_tag: tag_for(restart_id),
                     }
                 }
             }
@@ -174,6 +191,7 @@ pub async fn stream_encrypt_upload(
             file_id: spec.file_id,
             fallback_file_id: None,
             is_recovery: false,
+            resume_tag: spec.resume_tag,
         },
     };
     // This file's direct upload was given up in this run: its re-init (and nothing after it) asks for the API.
@@ -216,6 +234,7 @@ pub async fn stream_encrypt_upload(
                     file_id,
                     fallback_file_id: (file_id != spec.file_id).then_some(spec.file_id),
                     is_recovery: true,
+                    resume_tag: tag_for(file_id),
                 };
             }
             Err(AttemptErr::DirectUnavailable { bytes_confirmed }) => {
@@ -250,6 +269,7 @@ pub async fn stream_encrypt_upload(
                     file_id,
                     fallback_file_id: (file_id != spec.file_id).then_some(spec.file_id),
                     is_recovery: true,
+                    resume_tag: tag_for(file_id),
                 };
             }
             Err(AttemptErr::InitRefused { fresh_file_id, .. }) => {
@@ -257,6 +277,7 @@ pub async fn stream_encrypt_upload(
                     file_id: fresh_file_id,
                     fallback_file_id: None,
                     is_recovery: false,
+                    resume_tag: spec.resume_tag,
                 };
             }
             Err(e) => return Err(e.into_message().into()),
@@ -280,13 +301,13 @@ pub(super) async fn upload_attempt(
     direct_given_up: bool,
     progress: &dyn ChunkProgress,
 ) -> Result<UploadOutcome, AttemptErr> {
-    let (file_id, resumed_session, resumed_direct) = match plan {
+    let (file_id, resumed_session, resumed_direct, record_resume_tag) = match plan {
         SessionPlan::Resume {
             file_id,
             session_id,
             direct,
-        } => (file_id, Some(session_id), direct),
-        SessionPlan::Init { file_id, .. } => (file_id, None, false),
+        } => (file_id, Some(session_id), direct, None),
+        SessionPlan::Init { file_id, resume_tag, .. } => (file_id, None, false, resume_tag),
     };
     let file_id_str = file_id.to_string();
 
@@ -506,7 +527,7 @@ pub(super) async fn upload_attempt(
             crate::resume::record_with_transport(
                 &spec.path,
                 proposed(spec, file_id),
-                spec.resume_tag,
+                record_resume_tag,
                 sid,
                 format,
                 size,
