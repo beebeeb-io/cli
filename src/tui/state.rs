@@ -1,3 +1,5 @@
+//! The dashboard's state: the view, the sync status and the file events.
+
 use std::collections::VecDeque;
 
 /// Maximum number of file events to keep in the scrollback buffer.
@@ -21,8 +23,7 @@ pub enum FileEventStatus {
     Downloading,
     Done,
     Error,
-    /// Rendered in `compact.rs` but `sync.rs` never constructs it.
-    #[allow(dead_code)]
+    /// A file sync left alone this pass (an SF-0002 read-only row's edit).
     Skipped,
 }
 
@@ -36,6 +37,9 @@ pub struct SyncFileEvent {
 }
 
 /// Status of a remote sync session (fetched from server).
+///
+/// Task 1922: the server returns no free text beyond these fields. `name`,
+/// `device_name` and `remote_path` are decrypted locally (or "(name hidden)").
 #[derive(Debug, Clone)]
 pub struct SessionInfo {
     pub name: String,
@@ -45,7 +49,6 @@ pub struct SessionInfo {
     pub files_synced: u64,
     pub bytes_synced: u64,
     pub last_heartbeat: Option<String>,
-    pub current_file: Option<String>,
     pub speed_bps: Option<u64>,
 }
 

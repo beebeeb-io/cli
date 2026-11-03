@@ -33,21 +33,62 @@ use std::time::{Duration, Instant};
 /// remote update from another device will arrive after this window.
 pub const SUPPRESS_TTL: Duration = Duration::from_secs(60);
 
-static REGISTRY: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+/// A file id as the loopback registry keys it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct LoopbackId(String);
 
-fn registry() -> &'static Mutex<HashMap<String, Instant>> {
+#[allow(dead_code)] // parse/as_str are the checked API; today only the From impls are called
+impl LoopbackId {
+    /// Parse a file id, refusing an empty or whitespace-only value.
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        (!value.is_empty()).then(|| Self(value.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for LoopbackId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<&str> for LoopbackId {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
+impl From<String> for LoopbackId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&String> for LoopbackId {
+    fn from(value: &String) -> Self {
+        Self(value.clone())
+    }
+}
+
+static REGISTRY: OnceLock<Mutex<HashMap<LoopbackId, Instant>>> = OnceLock::new();
+
+fn registry() -> &'static Mutex<HashMap<LoopbackId, Instant>> {
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Record that we just uploaded `file_id` from this process. Future remote
 /// events for the same ID arriving within [`SUPPRESS_TTL`] will be ignored
 /// by the watch downloader.
-pub fn mark_uploaded(file_id: &str) {
+pub fn mark_uploaded(file_id: impl Into<LoopbackId>) {
     let mut guard = match registry().lock() {
         Ok(g) => g,
         Err(_) => return, // poisoned lock — silently skip rather than panic
     };
-    guard.insert(file_id.to_string(), Instant::now());
+    guard.insert(file_id.into(), Instant::now());
 
     // Opportunistic GC: drop expired entries while we hold the lock.
     let now = Instant::now();
@@ -59,7 +100,7 @@ pub fn mark_uploaded(file_id: &str) {
 ///
 /// Not currently called anywhere — see the module doc for why.
 #[allow(dead_code)]
-pub fn was_recently_uploaded(file_id: &str) -> bool {
+pub fn was_recently_uploaded(file_id: &LoopbackId) -> bool {
     let mut guard = match registry().lock() {
         Ok(g) => g,
         Err(_) => return false,
@@ -73,5 +114,22 @@ pub fn was_recently_uploaded(file_id: &str) -> bool {
             false
         }
         None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_refuses_an_empty_id() {
+        assert!(LoopbackId::parse("").is_none());
+        assert!(LoopbackId::parse("   ").is_none());
+    }
+
+    #[test]
+    fn parse_keeps_a_real_id() {
+        assert_eq!(LoopbackId::parse(" file-1 ").unwrap().as_str(), "file-1");
+        assert_eq!(LoopbackId::from("file-2").to_string(), "file-2");
     }
 }

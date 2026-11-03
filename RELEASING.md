@@ -28,6 +28,7 @@ vim Cargo.toml
 # 2. Update Cargo.lock
 cargo check
 
+
 # 3. Author RELEASE_NOTES.md at the repo root for the exact version being cut
 #    (intro → What's New → Bug Fixes/Hardening → Verification → Install/Update →
 #    changelog link — see the workspace CLAUDE.md "Release notes" section for the

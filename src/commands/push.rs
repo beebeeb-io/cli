@@ -1,3 +1,5 @@
+//! `bb push`: upload files, encrypting on the fly, with the conflict policy.
+
 use base64::Engine;
 use beebeeb_types::quota::{Plan, effective_quota, format_storage_si};
 use colored::Colorize;
@@ -16,7 +18,6 @@ fn b64() -> base64::engine::GeneralPurpose {
     base64::engine::general_purpose::STANDARD
 }
 
-/// Load the master key from config, returning a beebeeb_core MasterKey.
 pub(crate) fn load_master_key() -> Result<beebeeb_core::kdf::MasterKey, String> {
     let config = load_config();
     let mk_b64 = config.master_key.ok_or("No master key found. Run `bb login` first.")?;
@@ -28,9 +29,7 @@ pub(crate) fn load_master_key() -> Result<beebeeb_core::kdf::MasterKey, String> 
     if mk_bytes.len() != 32 {
         return Err(format!("master key must be 32 bytes, got {}", mk_bytes.len()));
     }
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&mk_bytes);
-    Ok(beebeeb_core::kdf::MasterKey::from_bytes(arr))
+    crate::crypto::master_key_from_bytes(&mk_bytes)
 }
 
 /// How to handle a filename conflict when uploading.
@@ -112,7 +111,6 @@ fn is_unfinished_first_upload(row: &serde_json::Value) -> bool {
 }
 
 /// Prompt the user interactively for conflict resolution.
-/// Returns Ok(resolution) or Err if stdin is not interactive.
 fn prompt_conflict(filename: &str) -> ConflictResolution {
     eprint!(
         "  {} {} [R]eplace / [K]eep both / [S]kip: ",
@@ -140,17 +138,8 @@ pub async fn run(
     path: PathBuf,
     parent_id: Option<String>,
     folder: Option<String>,
-    replace: bool,
-    keep_both: bool,
+    strategy: ConflictStrategy,
 ) -> Result<(), String> {
-    let strategy = if replace {
-        ConflictStrategy::Replace
-    } else if keep_both {
-        ConflictStrategy::KeepBoth
-    } else {
-        ConflictStrategy::Prompt
-    };
-
     if !path.exists() {
         return Err(format!("file not found: {}", path.display()));
     }
@@ -350,6 +339,7 @@ async fn push_single_file(
     // ── Conflict detection ────────────────────────────────────────────────────
     // Decrypt existing filenames in the folder and check for a match.
     // If found, ask the user (or apply the strategy flag) how to proceed.
+    let mut mint_tag: Option<[u8; 32]> = None;
     let (file_id, upload_name, replace_file_id) = {
         let existing = find_conflict(api, &master_key, &file_name, parent_uuid).await;
         // Task 1950: with no explicit --replace / --keep-both, our own
@@ -360,7 +350,13 @@ async fn push_single_file(
         };
 
         match existing {
-            None => (uuid::Uuid::new_v4(), file_name.clone(), None),
+            None => {
+                // L13/N4: a new item's id comes from core's mint (it carries
+                // the resume tag), never from a local random number.
+                let minted = crate::item_id::mint_owner(&master_key)?;
+                mint_tag = Some(*minted.tag());
+                (minted.id(), file_name.clone(), None)
+            }
             Some(existing_id) if resumes => {
                 if !suppress_output && !ui::is_quiet() && !ui::is_json() {
                     println!(
@@ -374,7 +370,6 @@ async fn push_single_file(
                 (existing_id, file_name.clone(), None)
             }
             Some(existing_id) => {
-                // Determine resolution
                 let resolution = match strategy {
                     ConflictStrategy::Replace => ConflictResolution::Replace { existing_id },
                     ConflictStrategy::KeepBoth => {
@@ -432,7 +427,12 @@ async fn push_single_file(
                         // file was first uploaded).
                         (existing_id, file_name.clone(), Some(existing_id))
                     }
-                    ConflictResolution::Upload { filename } => (uuid::Uuid::new_v4(), filename, None),
+                    // L13: a fresh item's id comes from core's minting type.
+                    ConflictResolution::Upload { filename } => {
+                        let minted = crate::item_id::mint_owner(&master_key)?;
+                        mint_tag = Some(*minted.tag());
+                        (minted.id(), filename, None)
+                    }
                     ConflictResolution::Skip => return Ok(None),
                 }
             }
@@ -451,7 +451,7 @@ async fn push_single_file(
     // A replace also carries the existing file's read pin (task 1943), so a
     // v2-pinned file is written as v2 again: the server keeps its v2 metadata,
     // and a v1 replace would complete and never open.
-    let (base_version_number, replace_pin, replace_file_key) = match replace_file_id {
+    let (base_version_number, replace_pin, replace_file_key, fresh_id) = match replace_file_id {
         Some(existing_id) => {
             let existing = existing_id.to_string();
             let meta = api.get_file(&existing).await?;
@@ -466,11 +466,52 @@ async fn push_single_file(
             let resolved = crate::owned_keys::OwnedKeyResolver::new()
                 .resolve(api, &master_key, &meta)
                 .await?;
-            let pin = crate::crypto::content_pin_with_key(&resolved.key, &existing, name_encrypted)?;
-            (Some(version), Some(pin), Some(resolved.key))
+            // L13: a request row's content is read-only. An edit is saved as a
+            // new owner item — never sealed under `C`, never published.
+            if resolved.origin == beebeeb_core::owned_keys::KeyOrigin::RequestContent {
+                // L13: the edit is a NEW owner item, minted by core.
+                let minted = crate::item_id::mint_owner(&master_key)?;
+                mint_tag = Some(*minted.tag());
+                (None, None, None, Some(minted.id()))
+            } else {
+                // R4-B: request fields whose request list could not load stay
+                // read-only with their own reason.
+                if let Some(reason) = resolved.read_only_reason {
+                    return Err(reason.to_string());
+                }
+                // P2-10: a plaintext name proves nothing; say so, not "older iOS app".
+                if resolved.read_only && crate::crypto::name_is_plaintext(&resolved.canonical) {
+                    return Err(crate::owned_keys::PLAINTEXT_NAME_READ_ONLY.to_string());
+                }
+                // SF-0002: a row sealed by the old iOS app (its name or its CURRENT
+                // version) is read-only, and a check that could not decide refuses
+                // too: only a proven-writable row gets a new version.
+                crate::owned_keys::write_check(
+                    api,
+                    &master_key,
+                    &crate::owned_keys::WriteTarget {
+                        file_id: &existing,
+                        is_folder: false,
+                        name_read_only: resolved.read_only,
+                        row_key: Some(resolved.key.as_ref()),
+                        size_bytes: meta.get("size_bytes").and_then(|v| v.as_u64()),
+                        chunk_count: meta.get("chunk_count").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
+                    },
+                )
+                .await
+                .ensure()?;
+                // L13: the replacement takes its chunk-format pin from the
+                // resolver's write target, not from a local re-read.
+                let pin = match &resolved.write_target {
+                    Some(target) => target.pin(),
+                    None => crate::crypto::content_pin_with_key(&resolved.key, &existing, name_encrypted)?,
+                };
+                (Some(version), Some(pin), Some(resolved.key), None)
+            }
         }
-        None => (None, None, None),
+        None => (None, None, None, None),
     };
+    let file_id = fresh_id.unwrap_or(file_id);
     let master_key = std::sync::Arc::new(master_key);
     let display_name = upload_name.clone();
 
@@ -484,6 +525,7 @@ async fn push_single_file(
         path: path.to_path_buf(),
         file_name: upload_name,
         file_id,
+        resume_tag: mint_tag,
         base_version_number,
         replace_pin,
         replace_file_key,
@@ -535,6 +577,12 @@ async fn push_single_file(
     } else if ui::is_quiet() {
         // Even in directory mode, quiet still prints IDs
         println!("{}", server_id);
+    }
+
+    // L15 = A: the CLI never publishes an owner key. A write into a shared
+    // folder stays owner-only until the owner shares it from web or mobile.
+    if !suppress_output && !ui::is_json() {
+        crate::owned_keys::announce_owner_only(api, &master_key, parent_uuid.map(|p| p.to_string()).as_deref()).await;
     }
 
     Ok(Some(upload_result))
@@ -718,6 +766,16 @@ async fn push_directory(
         );
     }
 
+    // L15 = A (P2-11): a directory push into a shared folder says the owner-only
+    // sentence ONCE for the command (the per-file line is suppressed here).
+    if uploaded_count > 0 && !ui::is_json() {
+        // The folder the batch landed IN decides; when the push is the folder
+        // itself, its parent is the shared one.
+        let target = parent_uuid
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| root_id.to_string());
+        crate::owned_keys::announce_owner_only(api, &master_key, Some(&target)).await;
+    }
     if !failures.is_empty() {
         let names: Vec<&str> = failures.iter().map(|(path, _)| path.as_str()).collect();
         return Err(format!(

@@ -41,8 +41,17 @@ enum UpdateOutcome {
     Updated { version: String, executable: PathBuf },
 }
 
-fn should_check(mode: UpdateMode, disabled: bool, development: bool, elapsed: bool) -> bool {
-    mode == UpdateMode::Manual || (!disabled && !development && elapsed)
+/// The three independent facts the startup check gates on. Callers name them
+/// once, so the call site says *why* the check may be skipped.
+#[derive(Clone, Copy)]
+struct UpdateGate {
+    disabled: bool,
+    development: bool,
+    cooldown_elapsed: bool,
+}
+
+fn should_check(mode: UpdateMode, gate: UpdateGate) -> bool {
+    mode == UpdateMode::Manual || (!gate.disabled && !gate.development && gate.cooldown_elapsed)
 }
 
 /// Best-effort startup check. Only automatic updates restart the original command.
@@ -50,9 +59,11 @@ pub async fn check_and_update() {
     let state = state_file();
     if !should_check(
         UpdateMode::Automatic,
-        std::env::var("BB_NO_UPDATE").unwrap_or_default() == "1",
-        is_dev_build(),
-        cooldown_elapsed(&state),
+        UpdateGate {
+            disabled: std::env::var("BB_NO_UPDATE").unwrap_or_default() == "1",
+            development: is_dev_build(),
+            cooldown_elapsed: cooldown_elapsed(&state),
+        },
     ) {
         return;
     }
@@ -76,9 +87,11 @@ pub async fn run_manual() -> Result<(), String> {
     let state = state_file();
     if !should_check(
         UpdateMode::Manual,
-        std::env::var("BB_NO_UPDATE").unwrap_or_default() == "1",
-        is_dev_build(),
-        cooldown_elapsed(&state),
+        UpdateGate {
+            disabled: std::env::var("BB_NO_UPDATE").unwrap_or_default() == "1",
+            development: is_dev_build(),
+            cooldown_elapsed: cooldown_elapsed(&state),
+        },
     ) {
         return Ok(());
     }
@@ -440,7 +453,6 @@ fn is_dev_build() -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Cooldown / state file
 // ---------------------------------------------------------------------------
 
 fn state_file() -> PathBuf {
@@ -540,7 +552,6 @@ fn ct_eq_ignore_case(a: &str, b: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -552,9 +563,14 @@ mod tests {
         for disabled in [false, true] {
             for development in [false, true] {
                 for elapsed in [false, true] {
-                    assert!(should_check(UpdateMode::Manual, disabled, development, elapsed));
+                    let gate = UpdateGate {
+                        disabled,
+                        development,
+                        cooldown_elapsed: elapsed,
+                    };
+                    assert!(should_check(UpdateMode::Manual, gate));
                     assert_eq!(
-                        should_check(UpdateMode::Automatic, disabled, development, elapsed),
+                        should_check(UpdateMode::Automatic, gate),
                         !disabled && !development && elapsed
                     );
                 }

@@ -164,11 +164,7 @@ pub(crate) async fn try_download_with_file_key(
     progress: &dyn ChunkProgress,
     display_name: &str,
 ) -> Result<DirectResult, DownloadError> {
-    let decryptor = ChunkDecryptor::for_push_with_file_key(
-        beebeeb_core::kdf::FileKey::from_bytes(*file_key.as_bytes()),
-        file_id,
-        pin,
-    );
+    let decryptor = ChunkDecryptor::for_push_with_file_key(crate::crypto::key_copy(&file_key), file_id, pin);
     try_download_inner(
         api,
         decryptor,
@@ -390,7 +386,7 @@ async fn try_download_inner(
                     if let Some(o) = out.as_mut() {
                         if let Err(e) = o.writer.write_all(&chunk.data) {
                             discard(out, progress);
-                            return Err(e.into());
+                            return Err(e);
                         }
                         o.plaintext_bytes += chunk.data.len() as u64;
                         o.encrypted_bytes += frame.len() as u64;
@@ -453,7 +449,7 @@ fn finish(
     } = out;
     if let Err(e) = writer.commit() {
         progress.finish(false);
-        return Err(e.into());
+        return Err(e);
     }
     progress.finish(true);
     Ok(DirectResult::Done(DownloadStats {

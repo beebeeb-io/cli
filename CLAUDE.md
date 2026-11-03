@@ -13,12 +13,15 @@ cargo test 2>&1 | tee /tmp/bb-cli-test.log
 cargo clippy -- -D warnings; echo exit=$?
 cargo fmt -- --check; echo exit=$?
 make check-onboarding-contract         # from the workspace root; drift guard: contracts/onboarding/ vs repos/server/contracts/onboarding/
+make test-quiet REPO=cli               # cargo test --locked: one PASS line per binary + log path; check-quiet (clippy -D warnings) and build-quiet (release) likewise
 ```
 
 Truth lines: per test binary `test result: ok. N passed; 0 failed`; clippy and fmt assert the exit code. A CLI task is verified by running
 the command and pasting its output, not by compiling. The CLI gate needs Linux (Legion; workspace `docs/runbook/legion-lane-host.md`).
 
 ## Module map
+
+`MAP.md` is the generated index, one `MAP.md` per directory; `make map` writes them and `make map-check` fails on drift — never hand-edit.
 
 ```
 src/main.rs               clap commands; commands/*.rs = one file per command (push, pull, sync, share, request, region, twofa, ...)
@@ -71,6 +74,7 @@ The rules whose breakage costs data, a key, a credential or a user. One line eac
 
 ## How we work
 
+Task recipes — add a subcommand, an API client method, a progress report: `docs/agents/recipes.md`; `make recipes-check` keeps them true.
 Workspace `CLAUDE.md` → "How we work" is the rule set (evidence, design before code, done, parallel agents). Here: the truth lines above;
 terminal mockups are `../../design/hifi/hifi-cli.jsx` (design wins over code).
 

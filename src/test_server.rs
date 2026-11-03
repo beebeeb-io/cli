@@ -85,15 +85,26 @@ pub struct Mock {
     pub folder_echo: Option<String>,
     /// `folder_id` sent on every folder create, in order (empty = none sent).
     pub folder_requests: Vec<String>,
+    /// The body of every folder create, in order (the sealed name it carried).
+    pub folder_bodies: Vec<serde_json::Value>,
     /// id of every `DELETE /files/{id}` (trash), in order.
     pub trashed: Vec<String>,
     /// `GET /files/{id}` answers: id -> metadata. Absent = 404.
     pub files: HashMap<String, serde_json::Value>,
     /// `GET /files/{id}/download` answers: id -> body. Absent = 404.
     pub downloads: HashMap<String, Vec<u8>>,
+    /// SF-0002 r3: a move/rename (`PATCH /files/{id}`) answers this status
+    /// instead of succeeding.
+    pub move_status: Option<u16>,
+    /// (file_id, body) of every move/rename PATCH, in order (N6: the sealed
+    /// name a rename sends).
+    pub move_bodies: Vec<(String, serde_json::Value)>,
+    /// `GET /file-requests` answers this document. Unset = no requests, so a
+    /// request row resolves as "keys not held" rather than the list failing.
+    pub requests_doc: serde_json::Value,
     /// Every request that changes state, in order: `init:<id>`,
     /// `chunk:<session>:<index>`, `complete:<session>`, `abandon:<id>`,
-    /// `trash:<id>`, `folder:<id>`.
+    /// `trash:<id>`, `folder:<id>`, `move:<id>` (a successful PATCH).
     pub events: Vec<String>,
 }
 
@@ -246,6 +257,7 @@ fn router(state: Shared) -> Router {
                         .to_string();
                     let mut m = st.lock().unwrap();
                     m.folder_requests.push(requested.clone());
+                    m.folder_bodies.push(body.clone());
                     m.events.push(format!("folder:{requested}"));
                     let echoed = m.folder_echo.clone().unwrap_or(requested);
                     Json(json!({ "id": echoed })).into_response()
@@ -254,6 +266,17 @@ fn router(state: Shared) -> Router {
         )
         // The listing: nothing is listed (a WebDAV path resolves as new).
         .route("/api/v1/files", get(|| async { not_found() }))
+        .route(
+            "/api/v1/file-requests",
+            get(|State(st): State<Shared>| async move {
+                let doc = st.lock().unwrap().requests_doc.clone();
+                if doc.is_null() {
+                    Json(json!({ "file_requests": [] })).into_response()
+                } else {
+                    Json(doc).into_response()
+                }
+            }),
+        )
         .route(
             "/api/v1/files/:id",
             get(|State(st): State<Shared>, Path(fid): Path<String>| async move {
@@ -267,7 +290,18 @@ fn router(state: Shared) -> Router {
                 m.trashed.push(fid.clone());
                 m.events.push(format!("trash:{fid}"));
                 Json(json!({ "id": fid, "is_trashed": true })).into_response()
-            }),
+            })
+            .patch(
+                |State(st): State<Shared>, Path(fid): Path<String>, Json(body): Json<serde_json::Value>| async move {
+                    let mut m = st.lock().unwrap();
+                    if let Some(status) = m.move_status {
+                        return StatusCode::from_u16(status).unwrap().into_response();
+                    }
+                    m.move_bodies.push((fid.clone(), body));
+                    m.events.push(format!("move:{fid}"));
+                    Json(json!({ "id": fid })).into_response()
+                },
+            ),
         )
         .route(
             "/api/v1/files/:id/download",

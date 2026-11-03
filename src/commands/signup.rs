@@ -56,12 +56,22 @@ enum SignupAction {
     Open,
 }
 
-fn plan_signup(is_json: bool, is_quiet: bool, headless: bool) -> SignupAction {
-    if is_json {
+#[derive(Default)]
+struct SignupPlan {
+    /// `--json` output mode.
+    json: bool,
+    /// `--quiet` output mode.
+    quiet: bool,
+    /// No display is reachable.
+    headless: bool,
+}
+
+fn plan_signup(plan: SignupPlan) -> SignupAction {
+    if plan.json {
         SignupAction::Json
-    } else if is_quiet {
+    } else if plan.quiet {
         SignupAction::PrintUrl
-    } else if headless {
+    } else if plan.headless {
         SignupAction::Headless
     } else {
         SignupAction::Open
@@ -79,7 +89,11 @@ pub async fn run() -> Result<(), String> {
         .is_some_and(OnboardingDoc::update_required)
         .then_some("This version of bb is too old for the server. Update bb, then run `bb login`.");
 
-    match plan_signup(ui::is_json(), ui::is_quiet(), env_detect::is_headless()) {
+    match plan_signup(SignupPlan {
+        json: ui::is_json(),
+        quiet: ui::is_quiet(),
+        headless: env_detect::is_headless(),
+    }) {
         SignupAction::Json => {
             println!(
                 "{}",
@@ -153,23 +167,56 @@ mod tests {
 
     #[test]
     fn plan_signup_json_wins_and_never_opens_a_browser() {
-        assert_eq!(plan_signup(true, true, false), SignupAction::Json);
-        assert_eq!(plan_signup(true, false, true), SignupAction::Json);
+        assert_eq!(
+            plan_signup(SignupPlan {
+                json: true,
+                quiet: true,
+                ..Default::default()
+            }),
+            SignupAction::Json
+        );
+        assert_eq!(
+            plan_signup(SignupPlan {
+                json: true,
+                headless: true,
+                ..Default::default()
+            }),
+            SignupAction::Json
+        );
     }
 
     #[test]
     fn plan_signup_quiet_prints_just_the_url() {
-        assert_eq!(plan_signup(false, true, false), SignupAction::PrintUrl);
-        assert_eq!(plan_signup(false, true, true), SignupAction::PrintUrl);
+        assert_eq!(
+            plan_signup(SignupPlan {
+                quiet: true,
+                ..Default::default()
+            }),
+            SignupAction::PrintUrl
+        );
+        assert_eq!(
+            plan_signup(SignupPlan {
+                quiet: true,
+                headless: true,
+                ..Default::default()
+            }),
+            SignupAction::PrintUrl
+        );
     }
 
     #[test]
     fn plan_signup_headless_does_not_open() {
-        assert_eq!(plan_signup(false, false, true), SignupAction::Headless);
+        assert_eq!(
+            plan_signup(SignupPlan {
+                headless: true,
+                ..Default::default()
+            }),
+            SignupAction::Headless
+        );
     }
 
     #[test]
     fn plan_signup_interactive_opens_the_browser() {
-        assert_eq!(plan_signup(false, false, false), SignupAction::Open);
+        assert_eq!(plan_signup(SignupPlan { ..Default::default() }), SignupAction::Open);
     }
 }

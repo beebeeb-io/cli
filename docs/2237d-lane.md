@@ -80,8 +80,8 @@ The task requires persisting adoption envelopes in the "existing account/root-bo
 sync state" (plan D Task 9 Interfaces). At CLI baseline eb97a5c and this head:
 - src/commands/sync.rs:100-110 SyncState has remote_path, remote_folder_id,
   last_sync, session_id and files, with no account or API-origin binding.
-- src/commands/sync.rs:223-225 root_unreconciled checks only the root UUID.
-- src/commands/sync.rs:605-611 loads .bb-sync.json directly from the local
+- src/commands/sync/reconcile.rs:181-183 root_unreconciled checks only the root UUID.
+- src/commands/sync/reconcile.rs:13-19 loads .bb-sync.json directly from the local
   directory, without comparing an account identity or API origin.
 The opaque envelope's crypto domain is account-specific, but that does not make
 the surrounding manifest account-bound or define its account-switch lifecycle.

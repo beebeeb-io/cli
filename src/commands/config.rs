@@ -1,3 +1,5 @@
+//! `bb config`: show the stored config, with the session token truncated.
+
 use colored::Colorize;
 
 use crate::config::load_config;

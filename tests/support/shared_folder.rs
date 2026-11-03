@@ -19,10 +19,19 @@ use std::{
 };
 pub const ROOT: &str = "22222222-2222-4222-8222-222222222222";
 pub const SUB: &str = "33333333-3333-4333-8333-333333333333";
-pub const FILE: &str = "11111111-1111-4111-8111-111111111111";
+/// L12: the guest file is a FOREIGN item, so its id is RFC9562 v8 (variant 10).
+pub const FILE: &str = "11111111-1111-8111-9111-111111111111";
+/// L12: an OWNER file id (any canonical UUID that is not v8) for the owner-row fixtures.
+pub const O_FILE: &str = "11111111-1111-4111-8111-111111111111";
+/// L12: a foreign FOLDER id (v8), for a shared folder that arrived through a share.
+pub const F_SUB: &str = "33333333-3333-8333-9333-333333333333";
+/// L12: a foreign id whose name does not authenticate, for skip/refusal rows.
+pub const F_BAD: &str = "44444444-4444-8444-9444-444444444444";
+/// SF-0002: an id whose uppercase spelling differs, as the iOS File Provider wrote.
+pub const UPPER_FILE: &str = "5f0c2a9e-3b1d-4c7e-9a2f-6d8e1b4c7a30";
 pub const BAD: &str = "44444444-4444-4444-8444-444444444444";
 pub const ACCOUNT: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-/// The approved legacy invite of SUB, used when `Fixture::nested_legacy` puts SUB inside ROOT.
+/// The approved legacy invite of F_SUB, used when `Fixture::nested_legacy` puts that folder inside ROOT.
 pub const SUB_INVITE: &str = "55555555-5555-4555-8555-555555555555";
 /// A child the owner wrote into the folder: its wrap in the legacy inventory opens to the owner-derived key of
 /// this id, which is what proves the owner copy is the folder's key.
@@ -40,7 +49,17 @@ pub fn item_key() -> FileKey {
 pub fn name(key: &FileKey, text: &str) -> String {
     serde_json::to_string(&beebeeb_core::encrypt::encrypt_metadata(key, text).unwrap()).unwrap()
 }
-pub fn row(id: &str, parent: Option<&str>, text: &str, folder: bool, foreign: bool) -> Value {
+/// The two independent columns a mock shared-folder row can vary.
+#[derive(Default)]
+pub struct RowFacts {
+    /// The row is a folder.
+    pub folder: bool,
+    /// The row came through a share, so its key is not locally derivable.
+    pub foreign: bool,
+}
+
+pub fn row(id: &str, parent: Option<&str>, text: &str, facts: RowFacts) -> Value {
+    let RowFacts { folder, foreign } = facts;
     let key = if foreign {
         item_key()
     } else {
@@ -60,6 +79,13 @@ pub fn proof_row() -> Value {
         ),
     })
 }
+/// A historical (pre-L12) L8 owner envelope for `id`, wrapping `key` under the
+/// key the id derives. TEST-ONLY: a test needs an envelope that really opens to
+/// prove an O item ignores it.
+pub fn l8_envelope(id: &str, key: &FileKey) -> String {
+    let derived = beebeeb_core::kdf::derive_file_key(&master(), id.as_bytes());
+    B64.encode(beebeeb_core::encrypt::encrypt_chunk_raw(&derived, key.as_bytes()).unwrap())
+}
 pub fn wrap(id: &str, folder: bool) -> String {
     B64.encode(owned_keys::wrap_child_key(&folder_key(), ROOT, id, if folder { 2 } else { 1 }, &item_key()).unwrap())
 }
@@ -71,6 +97,9 @@ pub struct Fixture {
     pub requests: Vec<(String, String, Vec<u8>)>,
     pub cycle: bool,
     pub requests_doc: Value,
+    /// R4-B: when set, `GET /api/v1/file-requests` answers this status instead
+    /// of the document (a 500 proves the fail-closed path).
+    pub requests_status: Option<u16>,
     pub legacy_invite: bool,
     pub frames: Vec<Vec<u8>>,
     pub stride: u64,
@@ -98,6 +127,13 @@ pub struct Fixture {
     pub owner_index: HashMap<(u32, u32), (u64, Vec<u8>)>,
     pub upload_request: Value,
     pub uploaded_chunks: Vec<Vec<u8>>,
+    /// SF-0002 round 2: when set, `GET /files/{id}/download` answers this status
+    /// (the read-only check's probe cannot read the version).
+    pub download_status: Option<u16>,
+    /// L14 two-root tests: further shared roots this account owns, with their
+    /// proven custody key and their own inventory. ROOT keeps `folder_key()`.
+    pub extra_root_keys: HashMap<String, [u8; 32]>,
+    pub extra_root_inventories: HashMap<String, Vec<Value>>,
 }
 impl Fixture {
     pub fn transfer(v2: bool) -> Self {
@@ -143,8 +179,20 @@ impl Fixture {
         let (wrapped, nonce) = beebeeb_core::file_request::wrap_request_private(&master(), b"", &private).unwrap();
         self.requests_doc = json!({"file_requests":[{"id":SUB,"wrapped_private_key":B64.encode(wrapped),"wrap_nonce":B64.encode(nonce)}]});
         let seal = beebeeb_core::file_request::seal_to_request(&public, b"", item_key().as_bytes()).unwrap();
-        let mut r = row(SUB, None, "request.txt", false, true);
+        let mut r = row(
+            SUB,
+            None,
+            "request.txt",
+            RowFacts {
+                foreign: true,
+                ..Default::default()
+            },
+        );
         r["acted_via_share_id"] = Value::Null;
+        // R4-A: a real pre-2236 request row's name is an owner
+        // string-convention envelope; its CONTENT stays under C.
+        let string_key = beebeeb_core::kdf::derive_file_key(&master(), SUB.as_bytes());
+        r["name_encrypted"] = json!(name(&string_key, "request.txt"));
         r["file_request_id"] = json!(SUB);
         r["sender_ephemeral_pubkey"] = json!(B64.encode(seal.e_pub));
         r["wrapped_content_key"] = json!(B64.encode(seal.wrapped_key));
@@ -156,11 +204,149 @@ impl Fixture {
         }
         self.rows.push(r);
     }
+    /// SF-0002: an owner row the old iOS File Provider sealed under the
+    /// uppercase id — name and its single legacy content frame both use the
+    /// uppercase owner key. Ordinary reads work; every write must refuse.
+    pub fn upper_repair() -> Self {
+        use beebeeb_core::chunk_stream::ExpectedChunkFormat;
+        let mut f = Self::basic();
+        let key = beebeeb_core::kdf::derive_file_key(&master(), UPPER_FILE.to_uppercase().as_bytes());
+        f.plaintext = b"SF-0002 read-only repair content".to_vec();
+        f.stride = f.plaintext.len() as u64;
+        f.frames = vec![beebeeb_core::encrypt::encrypt_chunk_raw(&key, &f.plaintext).unwrap()];
+        let mut r = row(
+            UPPER_FILE,
+            Some(ROOT),
+            "uppercase-repair.pdf",
+            RowFacts { ..Default::default() },
+        );
+        r["name_encrypted"] = json!(
+            beebeeb_core::encrypt::encrypt_name_for(
+                &key,
+                "uppercase-repair.pdf",
+                Some("application/pdf"),
+                ExpectedChunkFormat::Unrecorded
+            )
+            .unwrap()
+        );
+        r["size_bytes"] = json!(f.plaintext.len());
+        r["chunk_count"] = json!(1);
+        f.rows[1] = r;
+        f
+    }
+    /// SF-0002 round 2 (C5): [`Fixture::upper_repair`] whose row also serves an
+    /// L8 owner envelope. 2275 L12: an owner-class id can never carry an
+    /// envelope (core refuses to mint one, and a served one is ignored), so the
+    /// bytes are deliberately unopenable: the row must still resolve by its
+    /// name convention.
+    pub fn upper_repair_served_envelope() -> Self {
+        let mut f = Self::upper_repair();
+        f.rows[1]["owner_wrapped_file_key"] = json!(B64.encode([9u8; 60]));
+        f
+    }
+    /// SF-0002 round 2: an ordinary owner row (id `FILE`, under ROOT): its name
+    /// and its single legacy content frame use the canonical string key, so it
+    /// is writable once the check can read it.
+    pub fn owner_file() -> Self {
+        use beebeeb_core::chunk_stream::ExpectedChunkFormat;
+        let mut f = Self::basic();
+        let key = beebeeb_core::kdf::derive_file_key(&master(), O_FILE.as_bytes());
+        f.plaintext = b"an ordinary owner file".to_vec();
+        f.stride = f.plaintext.len() as u64;
+        f.frames = vec![beebeeb_core::encrypt::encrypt_chunk_raw(&key, &f.plaintext).unwrap()];
+        let mut r = row(O_FILE, Some(ROOT), "owned.txt", RowFacts { ..Default::default() });
+        r["name_encrypted"] = json!(
+            beebeeb_core::encrypt::encrypt_name_for(
+                &key,
+                "owned.txt",
+                Some("text/plain"),
+                ExpectedChunkFormat::Unrecorded
+            )
+            .unwrap()
+        );
+        r["size_bytes"] = json!(f.plaintext.len());
+        r["chunk_count"] = json!(1);
+        f.rows[1] = r;
+        f
+    }
+    /// SF-0002 round 3 (K1): an old-CLI owner row (id `O_FILE`): name and its single
+    /// content chunk sealed under the legacy binary-id key, the chunk stored as
+    /// a JSON `EncryptedBlob` (what the CLI wrote before raw frames).
+    pub fn owner_file_json_blob() -> Self {
+        use beebeeb_core::chunk_stream::ExpectedChunkFormat;
+        let mut f = Self::basic();
+        let uuid = uuid::Uuid::parse_str(O_FILE).unwrap();
+        let key = beebeeb_core::kdf::derive_file_key(&master(), uuid.as_bytes());
+        f.plaintext = b"an old CLI upload, stored as a JSON blob".to_vec();
+        f.stride = f.plaintext.len() as u64;
+        f.frames =
+            vec![serde_json::to_vec(&beebeeb_core::encrypt::encrypt_chunk(&key, &f.plaintext).unwrap()).unwrap()];
+        let mut r = row(O_FILE, Some(ROOT), "legacy.txt", RowFacts { ..Default::default() });
+        r["name_encrypted"] = json!(
+            beebeeb_core::encrypt::encrypt_name_for(
+                &key,
+                "legacy.txt",
+                Some("text/plain"),
+                ExpectedChunkFormat::Unrecorded
+            )
+            .unwrap()
+        );
+        r["size_bytes"] = json!(f.plaintext.len());
+        r["chunk_count"] = json!(1);
+        f.rows[1] = r;
+        f
+    }
+    /// SF-0002 review: the name was re-sealed under the normal convention but
+    /// the single content frame is still sealed under the uppercase id.
+    pub fn upper_repair_content_only() -> Self {
+        use beebeeb_core::chunk_stream::ExpectedChunkFormat;
+        let mut f = Self::basic();
+        let normal = beebeeb_core::kdf::derive_file_key(&master(), UPPER_FILE.as_bytes());
+        let upper = beebeeb_core::kdf::derive_file_key(&master(), UPPER_FILE.to_uppercase().as_bytes());
+        f.plaintext = b"SF-0002 content-only repair payload".to_vec();
+        f.stride = f.plaintext.len() as u64;
+        f.frames = vec![beebeeb_core::encrypt::encrypt_chunk_raw(&upper, &f.plaintext).unwrap()];
+        let mut r = row(
+            UPPER_FILE,
+            Some(ROOT),
+            "uppercase-repair.pdf",
+            RowFacts { ..Default::default() },
+        );
+        r["name_encrypted"] = json!(
+            beebeeb_core::encrypt::encrypt_name_for(
+                &normal,
+                "uppercase-repair.pdf",
+                Some("application/pdf"),
+                ExpectedChunkFormat::Unrecorded
+            )
+            .unwrap()
+        );
+        r["size_bytes"] = json!(f.plaintext.len());
+        r["chunk_count"] = json!(1);
+        f.rows[1] = r;
+        f
+    }
     pub fn basic() -> Self {
         Self {
             rows: vec![
-                row(ROOT, None, "Shared", true, false),
-                row(FILE, Some(ROOT), "guest.txt", false, true),
+                row(
+                    ROOT,
+                    None,
+                    "Shared",
+                    RowFacts {
+                        folder: true,
+                        ..Default::default()
+                    },
+                ),
+                row(
+                    FILE,
+                    Some(ROOT),
+                    "guest.txt",
+                    RowFacts {
+                        foreign: true,
+                        ..Default::default()
+                    },
+                ),
             ],
             inventory: vec![json!({"file_id":FILE,"encrypted_file_key":wrap(FILE,false)})],
             ..Self::default()
@@ -247,6 +433,11 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
     let method = req.method().to_string();
     let uri = req.uri().clone();
     let path = uri.path();
+    let content_type = req
+        .headers()
+        .get("content-type")
+        .map(|v| v.to_str().unwrap_or("").to_string())
+        .unwrap_or_default();
     let query: HashMap<String, String> = reqwest::Url::parse(&format!("http://localhost{uri}"))
         .unwrap()
         .query_pairs()
@@ -349,6 +540,9 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
         let i = path.rsplit('/').next().unwrap().parse::<usize>().unwrap();
         return f.frames[i].clone().into_response();
     } else if method == "GET" && path.ends_with("/download") {
+        if let Some(status) = f.download_status {
+            return StatusCode::from_u16(status).unwrap().into_response();
+        }
         return (
             [
                 ("X-Chunk-Size", f.stride.to_string()),
@@ -395,7 +589,44 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
             FILE
         };
         json!({"file_id":completed_id,"id":completed_id})
+    } else if method == "POST" && path == "/api/v1/file-requests" {
+        let body = f.requests.last().unwrap().2.clone();
+        let doc: Value = serde_json::from_slice(&body).unwrap();
+        f.requests_doc = json!({"file_requests":[{
+            "id": SUB,
+            "wrapped_private_key": doc["wrapped_private_key"].clone(),
+            "wrap_nonce": doc["wrap_nonce"].clone(),
+        }]});
+        json!({"id": SUB, "token": "tok-r15", "request_url": format!("http://{host}/r/tok-r15")})
+    } else if method == "POST" && path == "/api/v1/r/tok-r15/upload" {
+        let body = f.requests.last().unwrap().2.clone();
+        let parts = multipart_parts(&content_type, &body);
+        let meta: Value = serde_json::from_slice(parts.get("metadata").expect("request upload metadata")).unwrap();
+        let chunk = parts.get("chunk_0").cloned().expect("request upload chunk_0");
+        f.frames = vec![chunk];
+        f.stride = meta["size_bytes"].as_u64().unwrap_or(0);
+        f.rows.push(json!({
+            "id": "99999999-9999-4999-8999-999999999999",
+            "parent_id": null,
+            "name_encrypted": meta["name_encrypted"].clone(),
+            "is_folder": false,
+            "size_bytes": meta["size_bytes"].clone(),
+            "chunk_count": 1,
+            "version_number": 1,
+            "created_at": "2026-10-28T10:00:00Z",
+            "updated_at": "2026-10-28T10:00:00Z",
+            "acted_via_share_id": null,
+            "uploaded_by": null,
+            "owner_wrapped_file_key": null,
+            "file_request_id": SUB,
+            "sender_ephemeral_pubkey": meta["sender_ephemeral_pubkey"].clone(),
+            "wrapped_content_key": meta["wrapped_key"].clone(),
+        }));
+        json!({"files_received": 1})
     } else if method == "GET" && path == "/api/v1/file-requests" {
+        if let Some(status) = f.requests_status {
+            return StatusCode::from_u16(status).unwrap().into_response();
+        }
         f.requests_doc.clone()
     } else if method == "GET" && path == "/api/v1/shares/invites/sent" {
         let seed = |id: &str| {
@@ -413,7 +644,8 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
             invites.push(json!({"id":BAD,"file_id":ROOT,"is_folder_share":true,"status":"approved","encrypted_owner_folder_key":copy}));
         }
         if f.nested_legacy {
-            invites.push(json!({"id":SUB_INVITE,"file_id":SUB,"is_folder_share":true,"status":"approved","encrypted_owner_folder_key":seed(SUB)}));
+            // 2275 L12: a folder that arrived through a share carries an F (v8) id.
+            invites.push(json!({"id":SUB_INVITE,"file_id":F_SUB,"is_folder_share":true,"status":"approved","encrypted_owner_folder_key":seed(F_SUB)}));
         }
         json!({ "invites": invites })
     } else if method == "GET" && path == format!("/api/v1/shares/invites/{BAD}/folder-keys") {
@@ -453,9 +685,15 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
         if (f.index_partial || f.review_partial_repair_only && root_listings >= 2)
             && query.get("parent_id").map(String::as_str) == Some(ROOT)
         {
-            let mut bad = row(BAD, Some(ROOT), "unreadable", false, true);
-            bad["name_encrypted"] = json!("corrupt");
-            rows.push(bad);
+            // 2275 L14: an unprovable row is skipped, not partial. The partial
+            // case is a page that lists the same id twice (a listing race).
+            if let Some(again) = rows
+                .iter()
+                .find(|r| r["parent_id"] == json!(ROOT) && r["is_folder"] != json!(true))
+                .cloned()
+            {
+                rows.push(again);
+            }
         }
         json!({"files":rows})
     } else if method == "GET" && path == "/api/v1/files/index" {
@@ -466,6 +704,35 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
         let second = query.contains_key("cursor");
         let cut = f.inventory.len().min(500);
         json!({"keys": if second {&f.inventory[cut..]} else {&f.inventory[..cut]},"next_cursor":if f.cycle || (!second && cut<f.inventory.len()) {Some("opaque+cursor/=")} else {None}})
+    } else if method == "GET" && path.starts_with("/api/v1/shared-folders/") {
+        // L14 two-root: any further root this account owns serves its own
+        // custody and its own inventory, never ROOT's.
+        let rest = path.trim_start_matches("/api/v1/shared-folders/");
+        let (id, wants_keys) = match rest.strip_suffix("/keys") {
+            Some(id) => (id, true),
+            None => (rest, false),
+        };
+        match f.extra_root_keys.get(id) {
+            Some(key) if !wants_keys => {
+                json!({"folder_id":id,"role":"owner","access_level":"edit","key_version":1,"owner_wrapped_folder_key":B64.encode(owned_keys::wrap_folder_custody(&master(),id,&FileKey::from_bytes(*key)).unwrap())})
+            }
+            Some(_) => {
+                let rows = f.extra_root_inventories.get(id).cloned().unwrap_or_default();
+                json!({"keys":rows,"next_cursor":null})
+            }
+            None => return (StatusCode::NOT_FOUND, Body::empty()).into_response(),
+        }
+    } else if method == "POST" && path == "/api/v1/shares" {
+        let req: Value = serde_json::from_slice(&f.requests.last().unwrap().2).unwrap();
+        json!({"id":BAD,"token":req["token"],"expires_at":"never"})
+    } else if method == "POST" && path == "/api/v1/files/folder" {
+        // A create echoes the id this client minted (L13).
+        let req: Value = serde_json::from_slice(&f.requests.last().unwrap().2).unwrap();
+        json!({"id": req["folder_id"].as_str().unwrap_or_default()})
+    } else if method == "PATCH" && path.starts_with("/api/v1/files/") {
+        // A rename/move: answered so a write the client is allowed to make succeeds.
+        let id = path.trim_start_matches("/api/v1/files/").to_string();
+        json!({ "id": id })
     } else if method == "GET" && path.starts_with("/api/v1/files/") {
         let id = path.trim_start_matches("/api/v1/files/");
         if let Some(row) = f.canonical.get(id).or_else(|| f.rows.iter().find(|r| r["id"] == id)) {
@@ -477,4 +744,47 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
         return (StatusCode::NOT_FOUND, Body::empty()).into_response();
     };
     axum::Json(value).into_response()
+}
+
+/// Split a `multipart/form-data` body into its named parts. The mock only
+/// needs the two parts `bb request send` writes: the metadata JSON and chunk_0.
+fn multipart_parts(content_type: &str, body: &[u8]) -> HashMap<String, Vec<u8>> {
+    let boundary = content_type.split("boundary=").nth(1).unwrap_or("").trim_matches('"');
+    let delimiter = format!("--{boundary}").into_bytes();
+    let mut parts = HashMap::new();
+    let mut rest = body;
+    while let Some(at) = find_bytes(rest, &delimiter) {
+        rest = &rest[at + delimiter.len()..];
+        if rest.starts_with(b"--") {
+            break;
+        }
+        if rest.starts_with(b"\r\n") {
+            rest = &rest[2..];
+        }
+        let Some(headers_end) = find_bytes(rest, b"\r\n\r\n") else {
+            break;
+        };
+        let headers = String::from_utf8_lossy(&rest[..headers_end]).to_string();
+        rest = &rest[headers_end + 4..];
+        let Some(next) = find_bytes(rest, &delimiter) else {
+            break;
+        };
+        let mut content = &rest[..next];
+        if content.ends_with(b"\r\n") {
+            content = &content[..content.len() - 2];
+        }
+        let name = headers
+            .split("name=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap_or("")
+            .to_string();
+        parts.insert(name, content.to_vec());
+        rest = &rest[next..];
+    }
+    parts
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
 }

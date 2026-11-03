@@ -13,8 +13,9 @@ fn replay(f: &mut Fixture, status: u16) {
     f.inventory[0]["encrypted_file_key"] =
         json!(B64.encode(beebeeb_core::encrypt::encrypt_chunk_raw(&folder_key(), item_key().as_bytes()).unwrap()));
     f.rows[1]["owner_wrapped_file_key"] = Value::Null;
-    f.rows[1]["id"] = json!(SUB);
-    f.inventory[0]["file_id"] = json!(SUB);
+    // 2275 L12: a foreign row carries an F (v8) id
+    f.rows[1]["id"] = json!(F_SUB);
+    f.inventory[0]["file_id"] = json!(F_SUB);
     f.requests.clear();
 }
 fn ok(out: &std::process::Output) {
@@ -65,7 +66,7 @@ async fn reviewed_ls_observation_must_protect_later_pull() {
     assert_eq!(h.count("GET", &format!("/api/v1/shared-folders/{ROOT}/keys")), 1);
     replay(&mut h.state.lock().unwrap(), 404);
     let output = h.home.join("replayed.txt");
-    let out = h.run(&["pull", SUB, "-o", output.to_str().unwrap()]).await;
+    let out = h.run(&["pull", F_SUB, "-o", output.to_str().unwrap()]).await;
     require_refusal(&out, &h, &output);
     h.close().await;
 }

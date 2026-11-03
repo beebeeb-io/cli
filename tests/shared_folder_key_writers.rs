@@ -39,9 +39,9 @@ const SANCTIONED: &[(&str, &str)] = &[
         "owned_keys.rs",
         r#".get_json(&format!("/api/v1/shares/invites/{invite_id}/folder-keys"))"#,
     ),
-    ("api.rs", r#".get(self.url(&format!("/api/v1/shared-folders/{id}")))"#),
+    ("tree.rs", r#".get(self.url(&format!("/api/v1/shared-folders/{id}")))"#),
     (
-        "api.rs",
+        "tree.rs",
         r#".get(self.url(&format!("/api/v1/shared-folders/{id}/keys")))"#,
     ),
 ];
@@ -58,13 +58,22 @@ fn sanctioned() -> impl Iterator<Item = &'static (&'static str, &'static str)> {
     SANCTIONED.iter().chain(SANCTIONED_INDEX_WRITES)
 }
 
+/// Source files that ship: `#[cfg(test)]` modules and test-only files are
+/// fixtures, not client requests, so the walk skips them. Everything else is
+/// scanned in full.
 fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
+        let file_name = path.file_name().unwrap().to_string_lossy().into_owned();
         if path.is_dir() {
-            sources(&path, out);
+            if file_name != "tests" {
+                sources(&path, out);
+            }
         } else if path.extension().is_some_and(|e| e == "rs") {
-            out.push(path);
+            let stem = path.file_stem().unwrap().to_string_lossy();
+            if stem != "tests" && !stem.ends_with("_tests") {
+                out.push(path);
+            }
         }
     }
 }
@@ -88,8 +97,30 @@ fn mentions(root: &Path) -> Vec<(String, usize, String)> {
     let mut found = Vec::new();
     for file in files {
         let name = file.file_name().unwrap().to_string_lossy().into_owned();
+        // Skip the body of each `#[cfg(test)] mod … { … }`: its mock routers
+        // name routes as fixtures. rustfmt puts a top-level module's closing
+        // brace at column 0, which ends the body.
+        let mut in_test_mod = false;
+        let mut pending_test_attr = false;
         for (n, line) in std::fs::read_to_string(&file).unwrap().lines().enumerate() {
+            if in_test_mod {
+                if line == "}" {
+                    in_test_mod = false;
+                }
+                continue;
+            }
             let code = line.trim();
+            if pending_test_attr {
+                pending_test_attr = false;
+                if code.starts_with("mod ") {
+                    in_test_mod = code.contains('{');
+                    continue;
+                }
+            }
+            if code.starts_with("#[cfg(test)]") {
+                pending_test_attr = true;
+                continue;
+            }
             if code.starts_with("//") {
                 continue;
             }
@@ -156,13 +187,9 @@ fn a_write_to_a_key_route_is_not_sanctioned() {
     assert!(mentions_family(r#"json!({"folder_keys": keys})"#).is_some());
 }
 
-/// Match write helpers by their shape, not by a route string: an `ApiClient` method that takes the route as a
-/// parameter and sends a non-GET request can reach any key-writer route with a computed URL. There must be
-/// exactly one, and it must only be called from the search-index code.
-#[test]
-fn only_the_index_page_writer_takes_a_path() {
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let api = std::fs::read_to_string(src.join("api.rs")).unwrap();
+/// Write helpers of one api source: an `ApiClient` method that takes the route as a parameter and sends a non-GET
+/// request can reach any key-writer route with a computed URL.
+fn write_helpers(api: &str) -> Vec<String> {
     let mut writers = Vec::new();
     for item in api.split("pub async fn ").skip(1) {
         let (signature, rest) = item.split_once('{').unwrap();
@@ -177,6 +204,20 @@ fn only_the_index_page_writer_takes_a_path() {
             writers.push(signature.split('(').next().unwrap().trim().to_string());
         }
     }
+    writers
+}
+
+/// Match write helpers by their shape, not by a route string. There must be exactly one across the api module (the
+/// split moved it out of `api.rs`), and it must only be called from the search-index code.
+#[test]
+fn only_the_index_page_writer_takes_a_path() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut api_files = Vec::new();
+    sources(&src.join("api"), &mut api_files);
+    let writers: Vec<_> = api_files
+        .iter()
+        .flat_map(|f| write_helpers(&std::fs::read_to_string(f).unwrap()))
+        .collect();
     assert_eq!(
         writers,
         ["write_index_page"],

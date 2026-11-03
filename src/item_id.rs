@@ -33,10 +33,62 @@ impl std::fmt::Display for ServerChangedItemId {
 
 impl std::error::Error for ServerChangedItemId {}
 
-/// Mint the id a create proposes: a random (v4) id, the only kind
-/// [`verify_minted_echo`] accepts.
-pub fn mint() -> Uuid {
-    Uuid::new_v4()
+/// An owner (`O`) item id minted by core, with the mint core made for it.
+///
+/// A create that must land as an owner item — a request row's content edit
+/// saved as a new item, any new owner upload, a FUSE mkdir — takes its id from
+/// core [`beebeeb_core::item_id::NewItemId::owner`] and not from a local random
+/// number: core picks the canonical lowercase v4 form the owner key derives
+/// from, and the same mint carries the resume tag. This type keeps the whole
+/// [`beebeeb_core::item_id::NewItemId`] instead of only its id text, so the tag
+/// survives the call (see [`tag`](Self::tag)) and, in a `fuse` build, the name
+/// can be sealed through core's new-item writer (`seal_name`).
+pub struct MintedOwner {
+    new_item: beebeeb_core::item_id::NewItemId,
+    id: Uuid,
+}
+
+impl MintedOwner {
+    /// The canonical lowercase id core minted.
+    pub fn id(&self) -> Uuid {
+        self.id
+    }
+
+    /// The resume tag minted with this id (core
+    /// [`NewItemId::tag`](beebeeb_core::item_id::NewItemId::tag)): persist it
+    /// with an upload session and pass it back to
+    /// [`NewItemId::resume`](beebeeb_core::item_id::NewItemId::resume) after a
+    /// restart, so only the id core minted can be resumed. No CLI session
+    /// persists one yet, so nothing reads it outside the tests.
+    #[allow(dead_code)]
+    pub fn tag(&self) -> &[u8; 32] {
+        self.new_item.tag()
+    }
+
+    /// Seal a new row's name through core's new-item writer, the only writer a
+    /// create may use (`{"name":..,"mime_type":..}` under the key derived from
+    /// this core-minted id). Only the mount creates rows through it today, so it
+    /// is compiled with the `fuse` feature (and for the tests that drive that
+    /// path without a mount).
+    #[cfg(any(feature = "fuse", test))]
+    pub fn seal_name(
+        &self,
+        master_key: &beebeeb_core::kdf::MasterKey,
+        name: &str,
+        mime: Option<&str>,
+        pin: beebeeb_core::chunk_stream::ExpectedChunkFormat,
+    ) -> Result<String, String> {
+        beebeeb_core::encrypt::encrypt_name_for_new_item(master_key, &self.new_item, name, mime, pin)
+            .map_err(|e| format!("failed to encrypt name: {e}"))
+    }
+}
+
+/// Mint an owner (`O`) item id through core (task 2275, L12/L13).
+pub fn mint_owner(master_key: &beebeeb_core::kdf::MasterKey) -> Result<MintedOwner, String> {
+    let new_item =
+        beebeeb_core::item_id::NewItemId::owner(master_key).map_err(|e| format!("failed to mint item id: {e}"))?;
+    let id = Uuid::parse_str(new_item.as_str()).map_err(|e| format!("invalid minted item id: {e}"))?;
+    Ok(MintedOwner { new_item, id })
 }
 
 /// Compare the id an init, create or completion answer echoed with the id this
@@ -58,7 +110,8 @@ pub fn verify_echoed_id(expected: Uuid, echoed: Option<&str>) -> Result<Uuid, Se
 }
 
 /// [`verify_echoed_id`] for an id this client MINTED for a create: it must also
-/// be a random (v4, RFC 4122 variant) id, the only kind [`mint`] makes. Anything
+/// be a random (v4, RFC 4122 variant) id, the only kind core mints for an owner
+/// item. Anything
 /// else is refused even when echoed verbatim (fail closed: a caller passed an id
 /// it did not mint). A replace proposes an id it listed, not one it minted, and
 /// uses [`verify_echoed_id`].
@@ -114,9 +167,17 @@ pub async fn create_owned_folder(
     name: &str,
     parent: Option<Uuid>,
 ) -> Result<Uuid, String> {
-    let new_id = mint();
-    let name_encrypted = beebeeb_core::encrypt::encrypt_name(master_key, &new_id.to_string(), name, None)
-        .map_err(|e| format!("failed to encrypt folder name: {e}"))?;
+    let new_item =
+        beebeeb_core::item_id::NewItemId::owner(master_key).map_err(|e| format!("failed to mint folder id: {e}"))?;
+    let new_id = Uuid::parse_str(new_item.as_str()).map_err(|e| format!("invalid minted folder id: {e}"))?;
+    let name_encrypted = beebeeb_core::encrypt::encrypt_name_for_new_item(
+        master_key,
+        &new_item,
+        name,
+        None,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .map_err(|e| format!("failed to encrypt folder name: {e}"))?;
     let answer = api.create_folder(&name_encrypted, parent, Some(new_id)).await?;
     verify_minted_echo(new_id, echoed_id(&answer)).map_err(|e| e.to_string())
 }
@@ -206,14 +267,6 @@ mod tests {
         assert_eq!(Proposed::Listed(v1).verify(Some(&echoed)), Ok(v1));
         assert_eq!(Proposed::Minted(mine()).verify(Some(MINE)), Ok(mine()));
         assert!(Proposed::Listed(mine()).verify(Some(&MINE.to_uppercase())).is_err());
-    }
-
-    #[test]
-    fn mint_makes_ids_the_minted_check_accepts() {
-        for _ in 0..32 {
-            let id = mint();
-            assert_eq!(verify_minted_echo(id, Some(&id.to_string())), Ok(id));
-        }
     }
 
     #[test]

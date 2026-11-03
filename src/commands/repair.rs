@@ -1,3 +1,6 @@
+//! `bb repair`: find names encrypted with another key derivation and re-encrypt
+//! them.
+
 use colored::Colorize;
 
 use crate::api::ApiClient;
@@ -85,7 +88,6 @@ fn unwrap_metadata_json(decrypted: &str) -> String {
 }
 
 /// Try decrypting chunks with the binary-UUID key specifically.
-/// Returns the plaintext on success.
 fn decrypt_chunks_with_binary_key(
     master_key: &beebeeb_core::kdf::MasterKey,
     file_id_str: &str,
@@ -102,6 +104,7 @@ fn decrypt_chunks_with_binary_key(
         encrypted_bytes,
         chunk_count,
     )
+    .map_err(String::from)
 }
 
 /// Encrypt all chunks with the string-UUID key, returning serialized blobs.
@@ -139,8 +142,45 @@ fn encrypt_name_with_string_key(
     name: &str,
     mime_type: Option<&str>,
 ) -> Result<String, String> {
-    beebeeb_core::encrypt::encrypt_name(master_key, file_id_str, name, mime_type)
-        .map_err(|e| format!("failed to encrypt name: {e}"))
+    let file_key = beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes());
+    beebeeb_core::encrypt::encrypt_name_for(
+        &file_key,
+        name,
+        mime_type,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .map_err(|e| format!("failed to encrypt name: {e}"))
+}
+
+/// What `bb repair` does with one row, decided before any write.
+enum RepairPlan {
+    AlreadyCorrect,
+    Repair { name: String, is_folder: bool },
+    Skip,
+}
+
+/// Decide a row's repair plan. `None` means the row is not a file this command
+/// can look at (no id or name) and is passed over silently.
+///
+/// A request upload is skipped FIRST (2326 review P3-3): its name belongs to
+/// the request's `RenameTarget` (string-derived key + recorded pin), so repair
+/// must never re-seal it under its own string key, even in the cases where the
+/// name happens to open under the binary-id key. The skip is keyed on
+/// `file_request_id` ALONE: a listing may serve that field without the sender's
+/// ephemeral key or the wrapped content key, and the row is still a request
+/// row (2326 review2 P3-3).
+fn plan_repair(master_key: &beebeeb_core::kdf::MasterKey, item: &serde_json::Value) -> Option<RepairPlan> {
+    if item.get("file_request_id").and_then(|v| v.as_str()).is_some() {
+        return Some(RepairPlan::Skip);
+    }
+    let file_id = item.get("id").and_then(|v| v.as_str())?;
+    let name_encrypted = item.get("name_encrypted").and_then(|v| v.as_str())?;
+    let is_folder = item.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
+    Some(match detect_key_derivation(master_key, file_id, name_encrypted) {
+        Some((KeyDerivation::StringUuid, _)) | Some((KeyDerivation::Plaintext, _)) => RepairPlan::AlreadyCorrect,
+        Some((KeyDerivation::BinaryUuid, name)) => RepairPlan::Repair { name, is_folder },
+        None => RepairPlan::Skip,
+    })
 }
 
 /// Counters for the summary line.
@@ -168,7 +208,6 @@ pub async fn run(dry_run: bool) -> Result<(), String> {
         );
     }
 
-    // Collect all files recursively
     let all_items = collect_all_files(&api, None).await?;
 
     if all_items.is_empty() {
@@ -187,27 +226,24 @@ pub async fn run(dry_run: bool) -> Result<(), String> {
     };
 
     for item in &all_items {
-        let file_id = match item.get("id").and_then(|v| v.as_str()) {
-            Some(id) => id,
+        let plan = match plan_repair(&master_key, item) {
+            Some(plan) => plan,
             None => continue,
         };
-        let name_encrypted = match item.get("name_encrypted").and_then(|v| v.as_str()) {
-            Some(n) => n,
-            None => continue,
-        };
-        let is_folder = item.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
+        let file_id = item["id"].as_str().unwrap_or_default();
         let chunk_count = item.get("chunk_count").and_then(|v| v.as_i64()).unwrap_or(1) as u32;
 
-        let detection = detect_key_derivation(&master_key, file_id, name_encrypted);
-
-        match detection {
-            Some((KeyDerivation::StringUuid, ref name)) | Some((KeyDerivation::Plaintext, ref name)) => {
-                // Optionally show skipped files in verbose mode (not quiet/json)
-                // For now just count them silently to reduce noise.
-                let _ = name;
+        match plan {
+            RepairPlan::AlreadyCorrect => {
                 stats.already_correct += 1;
             }
-            Some((KeyDerivation::BinaryUuid, decrypted_name)) => {
+            RepairPlan::Skip => {
+                stats.skipped += 1;
+            }
+            RepairPlan::Repair {
+                name: decrypted_name,
+                is_folder,
+            } => {
                 if dry_run {
                     let kind = if is_folder { "folder" } else { "file" };
                     if !ui::is_json() && !ui::is_quiet() {
@@ -255,13 +291,9 @@ pub async fn run(dry_run: bool) -> Result<(), String> {
                     }
                 }
             }
-            None => {
-                stats.skipped += 1;
-            }
         }
     }
 
-    // JSON output
     if ui::is_json() {
         let json_out = serde_json::json!({
             "files_repaired": stats.files_repaired,
@@ -448,13 +480,10 @@ async fn repair_file(
         return Err("its metadata records chunk format v2; a v2 file is never rewritten by repair".to_string());
     }
 
-    // Step 1: Download encrypted content
     let encrypted_bytes = api.download_file(file_id).await?;
 
-    // Step 2: Decrypt with binary-UUID key
     let plaintext = decrypt_chunks_with_binary_key(master_key, file_id, &encrypted_bytes, chunk_count)?;
 
-    // Step 3: Re-encrypt name + chunks with string-UUID key
     let new_name_encrypted = encrypt_name_with_string_key(master_key, file_id, decrypted_name, None)?;
     let new_chunks = encrypt_chunks_with_string_key(master_key, file_id, &plaintext)?;
 
@@ -638,5 +667,63 @@ mod l13_repair_tests {
         )
         .expect("the new content decrypts under the string-UUID key");
         assert_eq!(plain, PLAINTEXT);
+    }
+
+    /// 2326 review P3-3: a request upload's name belongs to its `RenameTarget`
+    /// (string-derived key + recorded pin). Repair must never re-seal it, so
+    /// the row is skipped even when its name opens under the binary-id key —
+    /// the shape repair exists to rewrite. The skip runs before detection, so
+    /// the same row without request fields is still repaired.
+    #[test]
+    fn a_request_upload_row_is_never_planned_for_repair() {
+        let id = Uuid::new_v4();
+        let key = beebeeb_core::kdf::derive_file_key(&master(), id.as_bytes());
+        let name = beebeeb_core::encrypt::encrypt_name_for(&key, "notes.txt", None, ExpectedChunkFormat::Unrecorded)
+            .expect("legacy name");
+        let mut row = json!({
+            "id": id,
+            "name_encrypted": name,
+            "is_folder": false,
+        });
+        assert!(
+            matches!(
+                plan_repair(&master(), &row),
+                Some(RepairPlan::Repair { ref name, is_folder: false }) if name == "notes.txt"
+            ),
+            "without request fields this is exactly what repair is for"
+        );
+        row["file_request_id"] = json!("11111111-2222-4333-8444-555555555555");
+        row["sender_ephemeral_pubkey"] = json!("pub");
+        row["wrapped_content_key"] = json!("wrap");
+        assert!(
+            matches!(plan_repair(&master(), &row), Some(RepairPlan::Skip)),
+            "a request upload's name is RenameTarget's to seal, never repair's"
+        );
+
+        // P3-3 (2326 review2): the skip is keyed on `file_request_id` alone.
+        // A listing may serve that field without the other two, and the row is
+        // still a request row: repair must not re-seal it.
+        let mut only_id = json!({
+            "id": id,
+            "name_encrypted": name,
+            "is_folder": false,
+            "file_request_id": "11111111-2222-4333-8444-555555555555",
+        });
+        assert!(
+            matches!(plan_repair(&master(), &only_id), Some(RepairPlan::Skip)),
+            "a row served with only file_request_id is still skipped"
+        );
+        // And the field alone is what makes it a request row: the sender fields
+        // without it describe something repair may still rewrite.
+        only_id.as_object_mut().unwrap().remove("file_request_id");
+        only_id["sender_ephemeral_pubkey"] = json!("pub");
+        only_id["wrapped_content_key"] = json!("wrap");
+        assert!(
+            matches!(
+                plan_repair(&master(), &only_id),
+                Some(RepairPlan::Repair { ref name, is_folder: false }) if name == "notes.txt"
+            ),
+            "without file_request_id the row is not a request row"
+        );
     }
 }

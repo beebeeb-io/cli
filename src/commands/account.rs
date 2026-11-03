@@ -131,6 +131,10 @@ pub async fn show() -> Result<(), String> {
     // stable code elsewhere; see `commands::sessions`/`commands::passkey`).
     // This display-only payload wants the same plain string every other arm
     // here already carries.
+    let me = me.map_err(String::from);
+    let sub = sub.map_err(String::from);
+    let region = region.map_err(String::from);
+    let score = score.map_err(String::from);
     let sessions = sessions.map_err(String::from);
     let passkeys = passkeys.map_err(String::from);
 
@@ -170,7 +174,6 @@ pub async fn show() -> Result<(), String> {
     println!("{}", ui::box_footer(w));
     println!();
 
-    // PLAN
     println!("  {}", "PLAN".custom_color(colors::AMBER));
     let plan_id = payload["plan"]["id"].as_str().unwrap_or("free");
     let cycle = payload["plan"]["billing_cycle"].as_str().unwrap_or("monthly");
@@ -211,7 +214,6 @@ pub async fn show() -> Result<(), String> {
     }
     println!();
 
-    // STORAGE
     println!("  {}", "STORAGE".custom_color(colors::AMBER));
     let used = payload["storage"]["used_bytes"].as_i64().unwrap_or(0);
     let quota = payload["storage"]["quota_bytes"].as_i64().unwrap_or(0);
@@ -313,7 +315,7 @@ pub async fn update_email(new_email: String) -> Result<(), String> {
                 .await
             {
                 Ok(_) => print_email_change_success("legacy", &new_email),
-                Err(e) => Err(map_email_change_error(e)),
+                Err(e) => Err(map_email_change_error(e.to_string())),
             }
         }
     }

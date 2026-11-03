@@ -1,5 +1,6 @@
-// Brand colors — synced with repos/web + repos/mobile + repos/site
-//
+//! The brand palette, synced with repos/web, repos/mobile and repos/site, so a
+//! colour change happens in one place.
+
 // All terminal output should use these constants rather than raw `truecolor()`
 // calls so color changes propagate everywhere from one place.
 //

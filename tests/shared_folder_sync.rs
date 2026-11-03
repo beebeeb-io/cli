@@ -105,7 +105,15 @@ async fn restart_revoke_and_move_out() {
     const VAULT: &str = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
     let mut f = Fixture::transfer(false);
     f.rows[0]["parent_id"] = json!(VAULT);
-    f.rows.push(row(VAULT, None, "Vault", true, false));
+    f.rows.push(row(
+        VAULT,
+        None,
+        "Vault",
+        RowFacts {
+            folder: true,
+            ..Default::default()
+        },
+    ));
     let h = Harness::new(f).await;
     let d = dir(&h);
     let args = ["sync", d.to_str().unwrap(), "/Vault", "--once", "--rehash"];
@@ -116,7 +124,15 @@ async fn restart_revoke_and_move_out() {
         let mut f = h.state.lock().unwrap();
         f.custody_revoked = true;
         f.inventory.clear();
-        f.rows.push(row(SUB, Some(VAULT), "Moved", true, false));
+        f.rows.push(row(
+            SUB,
+            Some(VAULT),
+            "Moved",
+            RowFacts {
+                folder: true,
+                ..Default::default()
+            },
+        ));
         f.rows[1]["parent_id"] = json!(SUB);
         f.rows[1]["acted_via_share_id"] = Value::Null;
     }
@@ -143,7 +159,15 @@ async fn rename_move_overwrite_converge() {
     bytes(&h, &d, "guest.txt");
     {
         let mut f = h.state.lock().unwrap();
-        f.rows.push(row(SUB, Some(ROOT), "Nested", true, false));
+        f.rows.push(row(
+            SUB,
+            Some(ROOT),
+            "Nested",
+            RowFacts {
+                folder: true,
+                ..Default::default()
+            },
+        ));
         f.rows[1]["parent_id"] = json!(SUB);
         f.rows[1]["name_encrypted"] = json!(
             beebeeb_core::encrypt::encrypt_name_for(
@@ -214,7 +238,15 @@ async fn rename_move_overwrite_converge() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn trash_restore_preserves_local_dirty() {
     let mut f = Fixture::transfer(false);
-    f.rows.push(row(SUB, Some(ROOT), "keep", true, false));
+    f.rows.push(row(
+        SUB,
+        Some(ROOT),
+        "keep",
+        RowFacts {
+            folder: true,
+            ..Default::default()
+        },
+    ));
     let h = Harness::new(f).await;
     let d = dir(&h);
     ok(sync(&h, &d).await);
@@ -232,11 +264,12 @@ async fn trash_restore_preserves_local_dirty() {
     h.close().await;
     let mut f = Fixture::transfer(false);
     let mut keep = f.rows[1].clone();
-    keep["id"] = json!(SUB);
+    // 2275 L12: a foreign row carries an F (v8) id
+    keep["id"] = json!(F_SUB);
     keep["name_encrypted"] = json!(name(&item_key(), "keep.txt"));
     f.rows.push(keep);
     f.inventory
-        .push(json!({"file_id":SUB,"encrypted_file_key":wrap(SUB,false)}));
+        .push(json!({"file_id":F_SUB,"encrypted_file_key":wrap(F_SUB,false)}));
     let h = Harness::new(f).await;
     let d = dir(&h);
     ok(sync(&h, &d).await);
@@ -270,7 +303,15 @@ async fn bad_key_keeps_listing_unhealthy() {
         let mut f = h.state.lock().unwrap();
         f.rows[1]["owner_wrapped_file_key"] = json!(B64.encode([1; 60]));
         f.inventory[0]["encrypted_file_key"] = json!(B64.encode([2; 60]));
-        f.rows.push(row(SUB, Some(ROOT), "healthy", true, false));
+        f.rows.push(row(
+            SUB,
+            Some(ROOT),
+            "healthy",
+            RowFacts {
+                folder: true,
+                ..Default::default()
+            },
+        ));
     }
     let r = sync(&h, &d).await;
     assert_eq!(r.status.code(), Some(3));
@@ -282,16 +323,26 @@ async fn bad_key_keeps_listing_unhealthy() {
     h.close().await;
     let mut f = Fixture::transfer(false);
     f.frames[0][0] ^= 1;
-    f.rows.push(row(SUB, Some(ROOT), "readable-folder", true, true));
+    // 2275 L12: a foreign row carries an F (v8) id
+    f.rows.push(row(
+        F_SUB,
+        Some(ROOT),
+        "readable-folder",
+        RowFacts {
+            folder: true,
+            foreign: true,
+        },
+    ));
     f.inventory
-        .push(json!({"file_id":SUB,"encrypted_file_key":wrap(SUB,true)}));
+        .push(json!({"file_id":F_SUB,"encrypted_file_key":wrap(F_SUB,true)}));
     let h = Harness::new(f).await;
     let d = dir(&h);
     let r = sync(&h, &d).await;
     assert_eq!(r.status.code(), Some(3));
     assert!(state(&d)["account_id"].is_null());
     assert_eq!(state(&d)["owned_keys"], json!({}));
-    assert_eq!(h.count("POST", &format!("/api/v1/files/{SUB}/owner-key")), 0);
+    // 2275 L12: a foreign row carries an F (v8) id
+    assert_eq!(h.count("POST", &format!("/api/v1/files/{F_SUB}/owner-key")), 0);
     h.close().await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

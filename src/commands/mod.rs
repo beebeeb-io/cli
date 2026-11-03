@@ -1,3 +1,5 @@
+//! One module per `bb` subcommand, plus the shared confirm and move helpers.
+
 pub mod account;
 pub mod billing;
 pub mod config;

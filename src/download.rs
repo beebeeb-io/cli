@@ -15,7 +15,8 @@
 //! format is never guessed from the first byte (a random raw nonce starts with
 //! `{` 1 time in 256, task 1759): raw streaming is always tried first, and the
 //! frame-0 AEAD tag is the arbiter. If the first frame fails to authenticate,
-//! the whole payload is buffered and handed to [`crate::crypto::decrypt_file_chunks_with_chunk_size`],
+//! the whole payload is buffered and handed to [`decrypt_file_chunks_with_chunk_size`] in
+//! `crypto::chunks`,
 //! which covers both legacy shapes:
 //!
 //! - **JSON-blob chunks** (old CLI uploads) — buffered + decrypted as before.
@@ -41,597 +42,6 @@ use beebeeb_core::kdf::MasterKey;
 
 use crate::api::ApiClient;
 use crate::upload::ChunkProgress;
-
-/// Per-chunk AEAD overhead: `nonce(12) + tag(16)`.
-const CHUNK_OVERHEAD: u64 = 28;
-
-/// Hard ceiling (4 GiB) on the buffered-fallback payload. The fallback exists
-/// for legacy JSON-blob / binary-UUID / unknown-frame-size files, which are
-/// small by construction; a body past this is refused whatever the headers say.
-const FALLBACK_HARD_CEILING: u64 = 4 * 1024 * 1024 * 1024;
-
-/// Worst-case JSON expansion of a legacy `EncryptedBlob` chunk: `nonce` and
-/// `ciphertext` are serialised as arrays of decimal numbers, so every byte costs
-/// at most 4 bytes on the wire (`255,`). Verified against real serialisation by
-/// the `json_bound_covers_serialised_blobs` test.
-const JSON_BYTES_PER_BYTE: u64 = 4;
-
-/// Worst-case per-chunk JSON envelope on top of the 4x-expanded
-/// `nonce(12) + ciphertext(plaintext + 16)`: `{"cipher_suite":"...","nonce":[],
-/// "ciphertext":[]}` measured at 55 bytes, rounded up to 128 for headroom.
-const JSON_CHUNK_ENVELOPE: u64 = 128;
-
-/// Upper bound on the legacy JSON-blob wire size for `original_size` plaintext
-/// bytes in `count` chunks.
-fn json_wire_bound(original_size: u64, count: u32) -> u64 {
-    let per_chunk = JSON_BYTES_PER_BYTE
-        .saturating_mul(CHUNK_OVERHEAD)
-        .saturating_add(JSON_CHUNK_ENVELOPE);
-    original_size
-        .saturating_mul(JSON_BYTES_PER_BYTE)
-        .saturating_add(per_chunk.saturating_mul(count as u64))
-}
-
-/// Max bytes the buffered fallback may hold, and whether that bound is a
-/// guess (`chunked`) or the server's declared `Content-Length`.
-///
-/// - With a `Content-Length` the cap IS that length, with no ceiling: memory is
-///   bounded by bytes the server actually sends, exactly like any download, so
-///   a legacy file larger than the ceiling still downloads (lead ruling, task
-///   1759 round 5; `main` buffered unbounded).
-/// - Without one (chunked transfer) the format is unknown, so the cap is the
-///   worst-case legacy JSON-blob size ([`json_wire_bound`]) clamped to
-///   `ceiling`, and an overrun gets the "legacy file / chunked limit" message.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FallbackCap {
-    cap: u64,
-    chunked: bool,
-}
-
-fn fallback_cap(ceiling: u64, content_len: Option<u64>, original_size: Option<u64>, count: u32) -> FallbackCap {
-    match content_len {
-        Some(cl) => FallbackCap {
-            cap: cl,
-            chunked: false,
-        },
-        None => FallbackCap {
-            cap: original_size
-                .map_or(ceiling, |os| json_wire_bound(os, count))
-                .min(ceiling),
-            chunked: true,
-        },
-    }
-}
-
-/// `Err` when `len` bytes exceed the cap, with a message that says why.
-fn check_cap(c: FallbackCap, len: u64) -> Result<(), String> {
-    if len <= c.cap {
-        return Ok(());
-    }
-    if c.chunked {
-        Err(format!(
-            "this is a legacy-format file larger than the chunked-download limit ({} bytes; {len} bytes read); \
-             retry the download, or the server must send Content-Length for it",
-            c.cap
-        ))
-    } else {
-        Err(format!(
-            "download body exceeds its declared Content-Length of {} bytes ({len} bytes read); aborting",
-            c.cap
-        ))
-    }
-}
-
-/// Why a streaming download did not produce a file. Nearly every failure is just a message; the two
-/// that callers must tell apart are typed, because a daemon that matched message text once
-/// crash-looped on a message nobody had listed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DownloadError {
-    /// The bytes could not be authenticated: this client cannot read the file right now. The
-    /// remote copy is untouched, and a later pass may read it (task 1916).
-    Unreadable(String),
-    /// The file's version changed while it was downloading; nothing was written. Only fresh
-    /// metadata (chunk count, read pin) can say what the file is now.
-    Changed(String),
-    /// Anything else (network, server, disk, an authorization answer).
-    Other(String),
-}
-
-impl std::fmt::Display for DownloadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (Self::Unreadable(m) | Self::Changed(m) | Self::Other(m)) = self;
-        f.write_str(m)
-    }
-}
-
-impl From<String> for DownloadError {
-    fn from(message: String) -> Self {
-        Self::Other(message)
-    }
-}
-
-impl From<DownloadError> for String {
-    fn from(e: DownloadError) -> String {
-        e.to_string()
-    }
-}
-
-/// Outcome of a streaming download.
-pub struct DownloadStats {
-    pub plaintext_bytes: u64,
-    pub encrypted_bytes: u64,
-    /// `"api"` (the file came through the API), `"direct"` (every chunk straight
-    /// from object storage through presigned links, task 2173) or `"mixed"`
-    /// (direct, with some chunks through the pinned per-chunk API route).
-    pub transport: &'static str,
-}
-
-/// Download a file's raw encrypted body into memory together with the server's
-/// `X-Chunk-Size` (the uniform plaintext chunk size, V2 files), for callers that
-/// must decrypt with a key the streaming path does not know (file-request
-/// uploads, `bb pull --zip`). The chunk size is what lets the decrypt path split
-/// a multi-chunk body exactly: every frame but the last is `chunk_size + 28`
-/// bytes and the last one is usually shorter. Like the streaming path it treats
-/// the header as untrusted (zero, or past core's `MAX_CHUNK_SIZE`, is "absent").
-pub async fn download_buffered(api: &ApiClient, file_id: &str) -> Result<(Vec<u8>, Option<u64>), String> {
-    let resp = api.download_stream(file_id).await?;
-    let chunk_size = header_u64(&resp, "X-Chunk-Size").filter(|&v| v > 0 && v <= MAX_CHUNK_SIZE);
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| format!("failed to read response: {e}"))?;
-    Ok((bytes.to_vec(), chunk_size))
-}
-
-/// Stream-download `file_id`, decrypt to `out_path` with constant memory, and
-/// report progress. Falls back to the buffered legacy decrypt for JSON-blob /
-/// binary-UUID / unknown-frame-size files (see module docs).
-///
-/// `pin` is the file's read pin from its authenticated metadata
-/// ([`crate::crypto::content_pin`], task 1943): core's reader opens a
-/// v2-pinned file only as v2, and rejects one that ends before its last chunk.
-#[allow(clippy::too_many_arguments)]
-pub async fn stream_download_decrypt(
-    api: &ApiClient,
-    master_key: &MasterKey,
-    file_id: &str,
-    pin: ExpectedChunkFormat,
-    chunk_count: u32,
-    out_path: &Path,
-    progress: &dyn ChunkProgress,
-    display_name: &str,
-) -> Result<DownloadStats, DownloadError> {
-    stream_download_decrypt_with(
-        api,
-        master_key,
-        file_id,
-        pin,
-        chunk_count,
-        out_path,
-        progress,
-        display_name,
-        FALLBACK_HARD_CEILING,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn stream_download_decrypt_with_file_key(
-    api: &ApiClient,
-    file_key: std::sync::Arc<beebeeb_core::kdf::FileKey>,
-    file_id: &str,
-    pin: ExpectedChunkFormat,
-    chunk_count: u32,
-    out_path: &Path,
-    progress: &dyn ChunkProgress,
-    display_name: &str,
-) -> Result<DownloadStats, DownloadError> {
-    stream_download_key(
-        api,
-        DownloadKey::Explicit(file_key),
-        file_id,
-        pin,
-        chunk_count,
-        out_path,
-        progress,
-        display_name,
-        FALLBACK_HARD_CEILING,
-    )
-    .await
-}
-
-enum DownloadKey<'a> {
-    Legacy(&'a MasterKey),
-    Explicit(std::sync::Arc<beebeeb_core::kdf::FileKey>),
-}
-impl DownloadKey<'_> {
-    fn decryptor(&self, id: &str, pin: ExpectedChunkFormat) -> ChunkDecryptor {
-        match self {
-            Self::Legacy(master) => ChunkDecryptor::for_push(master, id, pin),
-            Self::Explicit(key) => {
-                ChunkDecryptor::for_push_with_file_key(beebeeb_core::kdf::FileKey::from_bytes(*key.as_bytes()), id, pin)
-            }
-        }
-    }
-    fn legacy(&self) -> Result<&MasterKey, DownloadError> {
-        match self {
-            Self::Legacy(m) => Ok(m),
-            Self::Explicit(_) => Err(DownloadError::Unreadable(
-                "explicit-key content failed authentication".into(),
-            )),
-        }
-    }
-}
-
-/// [`stream_download_decrypt`] with an explicit chunked-fallback ceiling
-/// (production passes [`FALLBACK_HARD_CEILING`]; tests lower it).
-#[allow(clippy::too_many_arguments)]
-async fn stream_download_decrypt_with(
-    api: &ApiClient,
-    master_key: &MasterKey,
-    file_id: &str,
-    pin: ExpectedChunkFormat,
-    chunk_count: u32,
-    out_path: &Path,
-    progress: &dyn ChunkProgress,
-    display_name: &str,
-    ceiling: u64,
-) -> Result<DownloadStats, DownloadError> {
-    stream_download_key(
-        api,
-        DownloadKey::Legacy(master_key),
-        file_id,
-        pin,
-        chunk_count,
-        out_path,
-        progress,
-        display_name,
-        ceiling,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn stream_download_key(
-    api: &ApiClient,
-    key: DownloadKey<'_>,
-    file_id: &str,
-    pin: ExpectedChunkFormat,
-    chunk_count: u32,
-    out_path: &Path,
-    progress: &dyn ChunkProgress,
-    display_name: &str,
-    ceiling: u64,
-) -> Result<DownloadStats, DownloadError> {
-    let count = chunk_count.max(1);
-
-    // Task 2173: straight from object storage when the server offers it and the
-    // handshake succeeds. `UseApi` means nothing was published (and nothing is
-    // left on disk): this file goes through the API below, as it always did.
-    let direct = match &key {
-        DownloadKey::Legacy(master) => {
-            crate::direct_download::try_download(
-                api,
-                master,
-                file_id,
-                pin,
-                chunk_count,
-                out_path,
-                progress,
-                display_name,
-            )
-            .await?
-        }
-        DownloadKey::Explicit(file_key) => {
-            crate::direct_download::try_download_with_file_key(
-                api,
-                file_key.clone(),
-                file_id,
-                pin,
-                chunk_count,
-                out_path,
-                progress,
-                display_name,
-            )
-            .await?
-        }
-    };
-    match direct {
-        crate::direct_download::DirectResult::Done(stats) => return Ok(stats),
-        crate::direct_download::DirectResult::UseApi => {}
-    }
-
-    let mut resp = api.download_stream(file_id).await?;
-    let content_len = resp.content_length();
-    let original_size = header_u64(&resp, "X-Original-Size");
-    // Uniform plaintext chunk size for this file's version (V2 files only). When
-    // present it is authoritative for frame sizing; absent → legacy V1 fallback.
-    // The header is untrusted: a value past core's MAX_CHUNK_SIZE (256 MiB, the
-    // cap core's own ChunkEncryptor/Decryptor enforce) is treated as absent so a
-    // hostile server cannot make us buffer (or overflow on) a huge "frame".
-    let chunk_size = header_u64(&resp, "X-Chunk-Size").filter(|&v| v > 0 && v <= MAX_CHUNK_SIZE);
-    let fb_cap = fallback_cap(ceiling, content_len, original_size, count);
-
-    // Best estimate of the total encrypted length, used only to size the first
-    // N-1 frames; the last frame always drains the remainder, so a small
-    // mis-estimate self-corrects (and a wrong size fails the GCM tag → error).
-    let total: u64 = content_len
-        .or_else(|| original_size.map(|os| os + CHUNK_OVERHEAD * count as u64))
-        .unwrap_or(0);
-
-    // Read until the first body bytes arrive (an empty body is an error). The
-    // bytes are NOT inspected: the format is decided by frame-0 authentication.
-    let mut carry: Vec<u8> = Vec::new();
-    while carry.is_empty() {
-        match resp.chunk().await.map_err(|e| format!("download read: {e}"))? {
-            Some(b) => carry.extend_from_slice(&b),
-            None => break,
-        }
-    }
-    if carry.is_empty() {
-        return Err("download returned an empty body".to_string().into());
-    }
-
-    let prog = progress.begin_file(display_name, total);
-
-    let result = stream_raw(
-        &mut resp,
-        &key,
-        file_id,
-        pin,
-        count,
-        total,
-        chunk_size,
-        fb_cap,
-        out_path,
-        carry,
-        prog.as_ref(),
-    )
-    .await;
-
-    match &result {
-        Ok(_) => prog.finish(true),
-        Err(_) => prog.finish(false),
-    }
-    result
-}
-
-/// Stream the modern raw format. On a first-frame key failure (binary-UUID
-/// legacy), buffer the whole payload and hand it to the buffered path.
-#[allow(clippy::too_many_arguments)]
-async fn stream_raw(
-    resp: &mut reqwest::Response,
-    key: &DownloadKey<'_>,
-    file_id: &str,
-    pin: ExpectedChunkFormat,
-    count: u32,
-    total: u64,
-    chunk_size: Option<u64>,
-    fb_cap: FallbackCap,
-    out_path: &Path,
-    mut carry: Vec<u8>,
-    prog: &dyn crate::upload::FileProgress,
-) -> Result<DownloadStats, DownloadError> {
-    let n = count as usize;
-    // Frame size for the first n-1 frames; the last frame takes the remainder.
-    // When the server sends `X-Chunk-Size` (V2 files), each wire frame is the
-    // uniform plaintext chunk size + CHUNK_OVERHEAD (nonce + tag) — this is
-    // exact even when the file size is not a multiple of the chunk size. Only
-    // legacy V1 responses (no header) start from the `total / count` average;
-    // if that mis-sizes frame 0 the first-frame fallback below hands the payload
-    // to the buffered path, which recovers the real frame size by AEAD-validated
-    // probing. For a single chunk the whole payload is the frame.
-    let frame_size = if n <= 1 {
-        usize::MAX // sentinel: the single frame is "everything"
-    } else if let Some(cs) = chunk_size {
-        cs.checked_add(CHUNK_OVERHEAD)
-            .and_then(|v| usize::try_from(v).ok())
-            .ok_or_else(|| format!("chunk size {cs} is not addressable"))?
-    } else {
-        (total / count as u64) as usize
-    };
-
-    let mut writer = AtomicFile::create(out_path)?;
-    let mut decryptor = key.decryptor(file_id, pin);
-    let mut plaintext_bytes: u64 = 0;
-    let mut encrypted_bytes: u64 = 0;
-
-    for i in 0..n {
-        let is_last = i == n - 1;
-        let frame: Vec<u8> = if is_last || frame_size == usize::MAX {
-            drain_rest(resp, &mut carry, fb_cap).await?;
-            std::mem::take(&mut carry)
-        } else {
-            fill_to(resp, &mut carry, frame_size).await?;
-            if carry.len() < frame_size && i == 0 {
-                // Frame 0 is shorter than the header claims: a JSON-blob /
-                // legacy file served with a V2 header. Not a truncation —
-                // hand everything to the buffered path (capped).
-                writer.abort();
-                let master_key = key.legacy()?;
-                let mut full = std::mem::take(&mut carry);
-                drain_rest(resp, &mut full, fb_cap).await?;
-                return buffered_fallback(master_key, file_id, pin, &full, count, chunk_size, out_path, prog)
-                    .map_err(DownloadError::from);
-            }
-            if carry.len() < frame_size {
-                return Err(format!(
-                    "download truncated: chunk {i}/{n} wanted {frame_size} bytes, got {}",
-                    carry.len()
-                )
-                .into());
-            }
-            carry.drain(..frame_size).collect()
-        };
-
-        match decryptor.push_frame(&frame) {
-            Ok(dec) => {
-                writer.write_all(&dec.data)?;
-                plaintext_bytes += dec.data.len() as u64;
-                encrypted_bytes += frame.len() as u64;
-                prog.chunk_confirmed(frame.len() as u64);
-            }
-            Err(_) if i == 0 => {
-                // First frame failed to authenticate: a JSON-blob file, a
-                // pre-`bb repair` binary-UUID file, or a frame-size guess that
-                // was wrong. Reassemble the full payload and let the buffered
-                // path try both parsers, both keys and the frame-size probe.
-                writer.abort();
-                let master_key = key.legacy()?;
-                let mut full = frame; // the first frame we already read
-                // `carry` holds the bytes read past frame 0; append it once,
-                // then drain the remainder under the fallback cap.
-                full.append(&mut carry);
-                drain_rest(resp, &mut full, fb_cap).await?;
-                return buffered_fallback(master_key, file_id, pin, &full, count, chunk_size, out_path, prog)
-                    .map_err(DownloadError::from);
-            }
-            Err(e) => {
-                writer.abort();
-                // Frame i > 0 failed to authenticate: this client cannot read the file now.
-                return Err(DownloadError::Unreadable(format!("decrypt chunk {i}: {e}")));
-            }
-        }
-    }
-
-    // v2: the stream must have ended with the frame that authenticated as last
-    // (truncation detection, task 1908). v1 has no last marker.
-    if let Err(e) = decryptor.finish() {
-        writer.abort();
-        // The stream ended before the frame marked last: cut short or tampered with.
-        return Err(DownloadError::Unreadable(format!("download incomplete: {e}")));
-    }
-    writer.commit()?;
-    Ok(DownloadStats {
-        plaintext_bytes,
-        encrypted_bytes,
-        transport: "api",
-    })
-}
-
-/// Buffered legacy decrypt via `crypto::decrypt_file_chunks_with_chunk_size`
-/// (handles JSON-blob, binary/string dual-key and unknown frame sizes). Writes
-/// atomically.
-#[allow(clippy::too_many_arguments)]
-fn buffered_fallback(
-    master_key: &MasterKey,
-    file_id: &str,
-    pin: ExpectedChunkFormat,
-    encrypted: &[u8],
-    count: u32,
-    chunk_size: Option<u64>,
-    out_path: &Path,
-    prog: &dyn crate::upload::FileProgress,
-) -> Result<DownloadStats, String> {
-    let plaintext =
-        crate::crypto::decrypt_file_chunks_with_chunk_size(master_key, file_id, pin, encrypted, count, chunk_size)?;
-    let mut writer = AtomicFile::create(out_path)?;
-    writer.write_all(&plaintext)?;
-    writer.commit()?;
-    prog.chunk_confirmed(encrypted.len() as u64);
-    Ok(DownloadStats {
-        plaintext_bytes: plaintext.len() as u64,
-        encrypted_bytes: encrypted.len() as u64,
-        transport: "api",
-    })
-}
-
-/// Read more body chunks until `buf.len() >= want` or EOF.
-async fn fill_to(resp: &mut reqwest::Response, buf: &mut Vec<u8>, want: usize) -> Result<(), String> {
-    while buf.len() < want {
-        match resp.chunk().await.map_err(|e| format!("download read: {e}"))? {
-            Some(b) => buf.extend_from_slice(&b),
-            None => break,
-        }
-    }
-    Ok(())
-}
-
-/// Drain the rest of the response body into `buf`, refusing to hold more than
-/// the cap (see [`fallback_cap`]).
-async fn drain_rest(resp: &mut reqwest::Response, buf: &mut Vec<u8>, cap: FallbackCap) -> Result<(), String> {
-    check_cap(cap, buf.len() as u64)?;
-    while let Some(b) = resp.chunk().await.map_err(|e| format!("download read: {e}"))? {
-        check_cap(cap, (buf.len() as u64).saturating_add(b.len() as u64))?;
-        buf.extend_from_slice(&b);
-    }
-    Ok(())
-}
-
-fn header_u64(resp: &reqwest::Response, name: &str) -> Option<u64> {
-    resp.headers()
-        .get(name)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse().ok())
-}
-
-/// Write-to-`.tmp`-then-atomic-rename helper so an interrupted/failed download
-/// never leaves a corrupt file at `out_path`.
-pub(crate) struct AtomicFile {
-    writer: Option<std::io::BufWriter<std::fs::File>>,
-    tmp: std::path::PathBuf,
-    final_path: std::path::PathBuf,
-    committed: bool,
-}
-
-impl AtomicFile {
-    pub(crate) fn create(out_path: &Path) -> Result<Self, String> {
-        if let Some(parent) = out_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
-            }
-        }
-        let tmp = out_path.with_extension(format!(
-            "{}bbtmp",
-            out_path
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| format!("{e}."))
-                .unwrap_or_default()
-        ));
-        let file = std::fs::File::create(&tmp).map_err(|e| format!("create {}: {e}", tmp.display()))?;
-        Ok(Self {
-            writer: Some(std::io::BufWriter::new(file)),
-            tmp,
-            final_path: out_path.to_path_buf(),
-            committed: false,
-        })
-    }
-
-    pub(crate) fn write_all(&mut self, data: &[u8]) -> Result<(), String> {
-        self.writer
-            .as_mut()
-            .expect("writer present until commit/abort")
-            .write_all(data)
-            .map_err(|e| format!("write {}: {e}", self.final_path.display()))
-    }
-
-    pub(crate) fn commit(mut self) -> Result<(), String> {
-        let mut w = self.writer.take().expect("writer present");
-        w.flush().map_err(|e| format!("flush: {e}"))?;
-        drop(w);
-        std::fs::rename(&self.tmp, &self.final_path)
-            .map_err(|e| format!("rename {}: {e}", self.final_path.display()))?;
-        self.committed = true;
-        Ok(())
-    }
-
-    /// Explicitly abort before falling back to another writer for the same path.
-    pub(crate) fn abort(&mut self) {
-        self.writer.take();
-        let _ = std::fs::remove_file(&self.tmp);
-        self.committed = true; // suppress Drop cleanup (already handled)
-    }
-}
-
-impl Drop for AtomicFile {
-    fn drop(&mut self) {
-        if !self.committed {
-            self.writer.take();
-            let _ = std::fs::remove_file(&self.tmp);
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -1128,6 +538,23 @@ mod tests {
         }
     }
 
+    /// Review-5 F2 (P2): a legacy stream with no `X-Chunk-Size` sized each
+    /// frame as `total / count` with no bound, so a hostile `X-Original-Size`
+    /// could ask the reader to buffer gigabytes. Core's downloader refuses
+    /// such a frame; this path must too, before writing anything.
+    #[tokio::test]
+    async fn a_no_header_frame_above_the_max_frame_size_is_refused_before_allocating() {
+        let m = mk();
+        let total = ((beebeeb_core::download::MAX_FRAME_SIZE as u64) + 1) * 2;
+        let err = try_download_chunked(vec![0x5au8; 4096], vec![("x-original-size", total.to_string())], 2, &m)
+            .await
+            .expect_err("a frame above MAX_FRAME_SIZE must be refused");
+        assert!(
+            err.contains("exceeds the maximum"),
+            "clear frame-size error, got: {err}"
+        );
+    }
+
     /// Round 3 P2-3: V2 header present but frame 0 is short (a JSON-blob file
     /// served with the header) takes the buffered fallback, not "truncated".
     #[tokio::test]
@@ -1207,14 +634,18 @@ mod tests {
         };
         assert!(check_cap(cl, 10).is_ok());
         let e = check_cap(cl, 11).unwrap_err();
-        assert!(e.contains("declared Content-Length of 10"), "{e}");
+        assert!(e.to_string().contains("declared Content-Length of 10"), "{e}");
         let ch = FallbackCap { cap: 10, chunked: true };
         let e = check_cap(ch, 11).unwrap_err();
         assert!(
-            e.contains("legacy-format file larger than the chunked-download limit"),
+            e.to_string()
+                .contains("legacy-format file larger than the chunked-download limit"),
             "{e}"
         );
-        assert!(e.contains("retry") && e.contains("Content-Length"), "{e}");
+        assert!(
+            e.to_string().contains("retry") && e.to_string().contains("Content-Length"),
+            "{e}"
+        );
     }
 
     /// Round 5 P1: legacy JSON-blob body WITH Content-Length above the (test
@@ -1325,4 +756,108 @@ mod tests {
         eprintln!("measured JSON envelope overhead = {envelope} bytes; max wire/plaintext ratio = {max_ratio:.2}");
         assert!(envelope as u64 <= JSON_CHUNK_ENVELOPE);
     }
+
+    /// SF-0002 round 3 (K1): the probe reads at least a whole legacy JSON blob 0
+    /// for the geometry the listing gives (single chunk, uniform chunks with a
+    /// shorter last one, a last chunk of one byte).
+    #[test]
+    fn json_chunk0_probe_len_covers_blob_zero() {
+        let fk = derive_file_key(&mk(), FID.as_bytes());
+        for (size, count, chunk0) in [
+            (0u64, 1u32, 0usize),
+            (500, 1, 500),
+            (605, 3, 300),
+            (3 * 4096 + 77, 4, 4096),
+            (10, 2, 9),
+        ] {
+            let blob0 = serde_json::to_vec(&encrypt_chunk(&fk, &payload(chunk0)).unwrap()).unwrap();
+            let want = json_chunk0_probe_len(Some(size), count);
+            assert!(
+                blob0.len() <= want,
+                "size={size} count={count}: blob 0 is {} bytes, the probe reads {want}",
+                blob0.len()
+            );
+        }
+    }
+
+    /// SF-0002 round 2 (C6): a download opened with an explicit key (shared
+    /// folder, owner wrap, file request) whose frame 0 does not authenticate
+    /// fails at once. The body after frame 0 never ends here, so a download that
+    /// buffers the rest before failing hangs, and the timeout turns that into a
+    /// failure of this test.
+    #[tokio::test]
+    async fn an_explicit_key_frame0_failure_fails_before_reading_the_rest() {
+        use futures_util::StreamExt as _;
+        let sealed_under = derive_file_key(&mk(), FID.as_bytes());
+        let pt = payload(3 * 4096 + 77);
+        let wire: Vec<u8> = pt
+            .chunks(4096)
+            .flat_map(|c| encrypt_chunk_raw(&sealed_under, c).unwrap())
+            .collect();
+        // Frame 0 and a little of frame 1, then a body that never ends.
+        let head = bytes::Bytes::from(wire[..4096 + 28 + 100].to_vec());
+        let app = Router::new().route(
+            "/api/v1/files/:id/download",
+            get(move || {
+                let head = head.clone();
+                async move {
+                    let mut h = axum::http::HeaderMap::new();
+                    h.insert("x-chunk-size", "4096".parse().unwrap());
+                    h.insert("x-chunk-count", "4".parse().unwrap());
+                    let body = futures_util::stream::once(async move { Ok::<_, std::convert::Infallible>(head) })
+                        .chain(futures_util::stream::pending());
+                    (h, axum::body::Body::from_stream(body))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let api = ApiClient::new_for_test(format!("http://{addr}"));
+        let dir = std::env::temp_dir().join(format!("bb-dl-c6-{}-{}", std::process::id(), rand::random::<u32>()));
+        let out = dir.join("out.bin");
+        let not_this_rows_key = Arc::new(beebeeb_core::kdf::FileKey::from_bytes([9u8; 32]));
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            stream_download_decrypt_with_file_key(
+                &api,
+                not_this_rows_key,
+                FID,
+                ExpectedChunkFormat::Unrecorded,
+                4,
+                &out,
+                &Counting(Arc::new(AtomicUsize::new(0))),
+                "out.bin",
+            ),
+        )
+        .await;
+        let exists = out.exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        let result = result.expect("an explicit-key frame-0 failure must not wait for the rest of the body");
+        match result {
+            Err(DownloadError::Unreadable(_)) => {}
+            Err(other) => panic!("an explicit key that does not open frame 0 is unreadable, got {other:?}"),
+            Ok(_) => panic!("a key that does not open frame 0 downloaded the file"),
+        }
+        assert!(!exists, "nothing is published for a failed download");
+    }
 }
+
+mod cap;
+use cap::*;
+
+mod error;
+pub use error::{DownloadError, DownloadStats};
+
+mod stream;
+pub use stream::download_buffered;
+pub use stream::download_frame_prefix;
+pub use stream::stream_download_decrypt;
+pub use stream::stream_download_decrypt_with_file_key;
+#[cfg(test)]
+use stream::{json_chunk0_probe_len, stream_download_decrypt_with};
+
+mod atomic;
+pub(crate) use atomic::AtomicFile;
