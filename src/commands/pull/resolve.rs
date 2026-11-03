@@ -156,7 +156,7 @@ pub(super) async fn resolve_request_key(
             }
         });
     }
-    request_keys.as_mut().and_then(|rk| rk.content_key(master_key, file))
+    request_keys.as_mut().and_then(|rk| rk.legacy_content_key(master_key, file))
 }
 #[cfg(test)]
 mod failure_tests {

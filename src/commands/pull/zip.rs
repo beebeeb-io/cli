@@ -493,9 +493,6 @@ impl ZipWalk<'_> {
             let size_bytes = item.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
             let chunk_count = item.get("chunk_count").and_then(|v| v.as_i64()).unwrap_or(1) as u32;
 
-            // Request-uploaded files decrypt their name (and later their chunks)
-            // with the per-file content key, like the non-zip folder pull.
-            let content_key = resolve_request_key(self.api, self.master_key, item, &mut self.request_keys).await;
             let resolved = match self.keys.resolve(self.api, self.master_key, item).await {
                 Ok(r) => r,
                 Err(e) => {
@@ -505,6 +502,9 @@ impl ZipWalk<'_> {
                 }
             };
             let decrypted_name = resolved.name;
+            // R3-P3: core's resolution runs first; the R5 legacy content-key
+            // reader is consulted only after it had the row.
+            let content_key = resolve_request_key(self.api, self.master_key, item, &mut self.request_keys).await;
             let explicit_key = if !crate::owned_keys::is_derived_origin(resolved.origin) && content_key.is_none() {
                 Some(resolved.key.clone())
             } else {
