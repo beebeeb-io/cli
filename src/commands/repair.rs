@@ -165,9 +165,12 @@ enum RepairPlan {
 /// A request upload is skipped FIRST (2326 review P3-3): its name belongs to
 /// the request's `RenameTarget` (string-derived key + recorded pin), so repair
 /// must never re-seal it under its own string key, even in the cases where the
-/// name happens to open under the binary-id key.
+/// name happens to open under the binary-id key. The skip is keyed on
+/// `file_request_id` ALONE: a listing may serve that field without the sender's
+/// ephemeral key or the wrapped content key, and the row is still a request
+/// row (2326 review2 P3-3).
 fn plan_repair(master_key: &beebeeb_core::kdf::MasterKey, item: &serde_json::Value) -> Option<RepairPlan> {
-    if crate::commands::request::is_request_upload(item) {
+    if item.get("file_request_id").and_then(|v| v.as_str()).is_some() {
         return Some(RepairPlan::Skip);
     }
     let file_id = item.get("id").and_then(|v| v.as_str())?;
@@ -695,6 +698,32 @@ mod l13_repair_tests {
         assert!(
             matches!(plan_repair(&master(), &row), Some(RepairPlan::Skip)),
             "a request upload's name is RenameTarget's to seal, never repair's"
+        );
+
+        // P3-3 (2326 review2): the skip is keyed on `file_request_id` alone.
+        // A listing may serve that field without the other two, and the row is
+        // still a request row: repair must not re-seal it.
+        let mut only_id = json!({
+            "id": id,
+            "name_encrypted": name,
+            "is_folder": false,
+            "file_request_id": "11111111-2222-4333-8444-555555555555",
+        });
+        assert!(
+            matches!(plan_repair(&master(), &only_id), Some(RepairPlan::Skip)),
+            "a row served with only file_request_id is still skipped"
+        );
+        // And the field alone is what makes it a request row: the sender fields
+        // without it describe something repair may still rewrite.
+        only_id.as_object_mut().unwrap().remove("file_request_id");
+        only_id["sender_ephemeral_pubkey"] = json!("pub");
+        only_id["wrapped_content_key"] = json!("wrap");
+        assert!(
+            matches!(
+                plan_repair(&master(), &only_id),
+                Some(RepairPlan::Repair { ref name, is_folder: false }) if name == "notes.txt"
+            ),
+            "without file_request_id the row is not a request row"
         );
     }
 }
