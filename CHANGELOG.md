@@ -5,15 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.15.0] - 2026-11-03
 
 ### Added
-- Direct uploads (task 2173): when the server offers `object-upload-v1`, `bb push` and `bb sync` send each chunk straight to object storage through a short-lived link the server grants and then commit it, instead of proxying the bytes through the API. Nothing changes for a server that does not offer it, and `--transport api` / `BB_TRANSPORT=api` force the API. A file whose direct upload cannot finish is sent again through the API, and no further direct upload is started by that process for ten minutes. An interrupted direct upload is continued on the next run; if the server cannot be asked at that moment, or the login is no longer valid, the upload and its progress are kept and the file fails for that run (it is given up only when the server says it offers no direct upload, or with `--transport api`). A chunk the server holds for minutes after a failed copy is waited out, not given up on.
-- `bb push --json` reports `transport` (`direct` or `api`) for every file, like `bb pull --json`.
+- `bb push` and `bb sync` upload a file's encrypted chunks directly to object storage when the server offers it (`object-upload-v1`). Otherwise they upload through the API, as before.
+- Files other people add to a folder you share now sync. They open with the key the folder gives them. A file you add to a shared folder from the CLI stays readable only to you, and the CLI says so.
+- Moving a file someone else added out of a shared folder first takes it over under your account. If that cannot be done, the move is refused.
 
 ### Changed
-- What the server said about direct transfer is now remembered per API base for the life of the process, for ten minutes: `bb sync --daemon` used to ask the capabilities route again on every resync (it built a new client each time), and a server that said it has no direct transport is asked again after ten minutes.
+- Files received through a file request open through the shared core code. They can be renamed: the new name is encrypted under a key derived for that file, never the sender's key. Their content is read-only. `bb sync` saves an edit as a new file, the mount refuses to overwrite one, and `bb repair` skips them.
+- The mount (FUSE) moves to fuser 0.18 and is accessible only to your own user (directories 0700, files 0600, owner-only session ACL).
+- The code was split into smaller modules. Behaviour changes are only the ones listed here.
 
+### Fixed
+- `bb sync` only trashes a replaced server file after its new copy is written and checked. It never trashes a file it cannot prove it may change.
+- A local edit of a read-only file is kept and reported with guidance, instead of failing the sync pass.
+- Files the CLI can read but not safely change, such as some saved from the iOS Files app, are read-only, and the CLI says why. A rename the device has no key for is refused with a reason.
+- Sync state is tied to the signed-in account.
+- An oversized downloaded chunk is refused. A file request link whose token is not a single path segment is refused.
+
+### Security
+- Key material the CLI copies while working is wiped after use.
 
 ## [0.14.2] - 2026-10-24
 

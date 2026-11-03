@@ -1,45 +1,50 @@
-# bb 0.14.4: downloads straight from storage
+# bb 0.15.0: direct uploads, and safer handling of shared folders and file requests
 
-`bb pull` and `bb sync` can now fetch a file's encrypted chunks directly from Beebeeb's object storage instead of streaming every byte through the API. The server hands out short-lived links for one file at a time. The CLI authenticates and decrypts every chunk on your machine exactly as before: the links carry ciphertext only, and your keys never leave the device. When the server does not offer direct downloads, or refuses a link, the file comes through the API as it did in 0.14.3.
+`bb push` and `bb sync` can now upload a file's encrypted chunks straight to Beebeeb's object storage, the same way 0.14.4 started doing for downloads. This release also changes how the CLI treats files you did not create yourself: files other people add to a folder you share, and files someone sends you through a file request. The CLI opens them with the keys meant for them, keeps your own writes private where it has to, and refuses a change it cannot make safely instead of guessing. The code was also split into smaller modules; that split is not meant to change behaviour beyond what is listed here.
 
 ### What's New
 
-- **Direct downloads.** The CLI uses time-limited storage links when the server advertises direct downloads (`GET /api/v1/transfer/capabilities`). Chunks are decrypted in order, and the file only appears once it is complete and authenticated.
-- **Automatic fallback.** A file that storage cannot serve before the download starts goes through the API instead. A file that fails partway continues on the API's pinned per-chunk route and keeps what was already written.
-- **`bb pull --json` reports `transport`** (`direct`, `mixed` or `api`). This is an additive key; existing keys are unchanged.
-- **`BB_TRANSPORT=api`** (or `--transport api`) forces the API for every file. `BB_TRANSPORT_TRACE=1` prints each transport decision to stderr, never a URL. `bb sync --daemon` passes the chosen transport on to its child process.
-- Uploads still go through the API in this release.
+- **Direct uploads.** When the server offers them, uploads go to object storage over short-lived links, one file at a time. Chunks are encrypted on your machine before they leave it, exactly as before; the links only ever carry ciphertext. When the server does not offer direct uploads, the file goes through the API as it did in 0.14.4. A file that cannot finish directly starts over through the API. An authorization refusal stops that file instead, because the API would refuse it too. `BB_TRANSPORT=api` (or `--transport api`) still forces the API for every transfer.
+- **Folders you share.** Files that other people add to a folder you share now sync, and the CLI opens them with the key the folder gives them, never with a key derived from your own account. A file you add to a shared folder from the CLI stays readable only to you. The CLI prints "Only you can open this. Share it from the web or the app." when that happens.
+- **Moving files out of a shared folder.** Before a file someone else added leaves a shared folder, the CLI first takes it over under your own account, so you can still open it after the move. If that cannot be done, the move is refused and nothing changes.
+- **Files received through a file request.** These open through the same shared crypto code the web app uses. You can rename them, and the new name is encrypted under a key derived for that file, never under the key the sender used. Their content is read-only. `bb sync` saves an edit as a new file, and the mount refuses to overwrite one. `bb repair` leaves them alone.
+- **Mount (FUSE).** It is updated to fuser 0.18. The mount point and its files are now accessible only to your own user (directories 0700, files 0600, plus an owner-only session ACL). Renaming a file received through a file request works over the mount; writing to its content is refused.
 
 ### Bug Fixes / Hardening
 
-- A sync pass no longer aborts on a file it cannot read, or on a file that changes during its download. It defers that file and carries on. Under launchd or systemd an aborted pass meant a restart every 30 seconds.
-- `bb pull <file>` starts over once from fresh metadata when the file changes mid-download, then says "changed again" if it changes a second time.
-- The pinned per-chunk route retries rate limits (429), server errors (5xx), a file that is still being written (409) and a broken read: 4 attempts, at most 60 seconds of waiting, honouring `Retry-After`. A body of the wrong length, an authorization answer and a vanished version are final.
-- `bb sync` no longer mistakes a file ID containing `409` inside a decrypt error for "still uploading". This could make a failed pass exit 0.
-- Storage requests use an HTTP client of their own, with no cookies, no `Authorization` header, no redirects and https only. Their error messages never contain a storage URL.
-- `bb` refuses to install or remove a LaunchAgent or systemd unit when `HOME` is not your account's home directory (on Linux, also when `XDG_CONFIG_HOME` points elsewhere), because the service would run against a different configuration than the one you see. If your home directory is intentionally relocated (for example `sudo -E`), run the command again with `BB_SERVICE_INSTALL_ALLOW_CUSTOM_HOME=1`. Removing a service that is not installed is never refused.
-- A folder pull reads a file that changed during the pull again once instead of aborting, and the retry does not ask the overwrite question twice.
+- `bb sync` only moves a replaced file on the server to the trash after its new copy has been written and checked. It never trashes a file it cannot prove it is allowed to change.
+- A file you edited locally that turns out to be read-only is kept and reported with guidance, instead of failing the sync pass.
+- When the CLI can read a file but cannot safely change it, for example some files saved from the iOS Files app, the file is read-only, and the CLI tells you why. A rename of a file this device has no key for is refused with a reason.
+- Sync state is tied to the account you are signed in with, so switching accounts no longer mixes their state.
+- A downloaded chunk larger than the maximum chunk size is refused instead of being read.
+- A file request link whose token is not a single path segment is refused.
+- Key material the CLI copies while working is wiped after use.
 
 ### Compatibility
 
-- **This CLI with an older server:** the server advertises no direct downloads, so every file uses the API, exactly as in 0.14.3.
-- **An older CLI with a newer server:** unchanged. 0.14.3 and earlier never ask for storage links.
-- Dependency change: `beebeeb-core` / `beebeeb-types` pinned to `3235dc15` (the shared direct-transfer rules). No other dependency versions changed.
+- **This CLI with a server that offers no direct uploads:** every upload goes through the API, exactly as in 0.14.4. Direct uploads are used only when the server lists `object-upload-v1` in `GET /api/v1/transfer/capabilities`.
+- **Shared folders and file requests** use the same server endpoints the web app uses today.
+- **An older CLI with this server:** unchanged.
+- Dependency changes:
+  - `beebeeb-core` / `beebeeb-types` are pinned to `d3b40e3`, the same code as core `main` at the time of this release.
+  - fuser 0.14 → 0.18, notify 7 → 8, notify-debouncer-full 0.4 → 0.7, indicatif 0.17 → 0.18.
 
 ### Verification
 
-- Full test suite on Linux, at the commit this release is built from, in a sandbox with no network access and an egress recorder: 730 passed, 0 failed, 4 ignored across 24 test binaries; 0 outbound connection attempts; no service manager touched. Clippy with warnings denied and rustfmt are clean.
-- `tests/direct_download.rs` runs the real `bb` binary against a mock API and a hand-written storage socket. It covers faults, redirects, tampered chunks, expired links, the mixed fallback, and that no link signature appears in any output.
-- `tests/service_guard.rs` puts recording `launchctl` / `systemctl` stubs ahead of the real tools on `PATH` and scans `src/` for any unguarded call.
-- Release gates: full required CLI CI, five platform builds, and draft asset readback with checksum assertions before publishing.
+- **Test suites** at the commit this release is built from, on a Linux test machine:
+  - default features: 992 passed, 0 failed, 4 ignored (38 test binaries);
+  - with `--features fuse`: 1,039 passed, 0 failed, 4 ignored.
+- **Lint:** Clippy with warnings denied is clean, with default features and with `fuse`. rustfmt is clean.
+- **Crypto review:** the handling of files received through a file request (reads, renames, the mount and `bb repair`) went through three rounds of review. The last round found nothing that could seal a name or content under the sender's key.
+- **Release gates:** the full required CLI CI, five platform builds, a readback of the draft assets with checksum assertions, and an update test from 0.14.4 before publishing.
 
 ### Install / Update
 
 ```sh
 bb update
-bb --version   # bb 0.14.4
+bb --version   # bb 0.15.0
 ```
 
 Homebrew: `brew upgrade beebeeb-io/tap/bb`. Scoop: `scoop update bb`. New installs: `curl -fsSL https://get.beebeeb.io | sh`. Restart a running `bb sync` daemon after updating.
 
-Full changelog: https://github.com/beebeeb-io/cli/compare/v0.14.3...v0.14.4
+Full changelog: https://github.com/beebeeb-io/cli/compare/v0.14.4...v0.15.0
