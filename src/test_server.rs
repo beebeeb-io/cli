@@ -99,6 +99,9 @@ pub struct Mock {
     /// (file_id, body) of every move/rename PATCH, in order (N6: the sealed
     /// name a rename sends).
     pub move_bodies: Vec<(String, serde_json::Value)>,
+    /// `GET /file-requests` answers this document. Unset = no requests, so a
+    /// request row resolves as "keys not held" rather than the list failing.
+    pub requests_doc: serde_json::Value,
     /// Every request that changes state, in order: `init:<id>`,
     /// `chunk:<session>:<index>`, `complete:<session>`, `abandon:<id>`,
     /// `trash:<id>`, `folder:<id>`, `move:<id>` (a successful PATCH).
@@ -263,6 +266,17 @@ fn router(state: Shared) -> Router {
         )
         // The listing: nothing is listed (a WebDAV path resolves as new).
         .route("/api/v1/files", get(|| async { not_found() }))
+        .route(
+            "/api/v1/file-requests",
+            get(|State(st): State<Shared>| async move {
+                let doc = st.lock().unwrap().requests_doc.clone();
+                if doc.is_null() {
+                    Json(json!({ "file_requests": [] })).into_response()
+                } else {
+                    Json(doc).into_response()
+                }
+            }),
+        )
         .route(
             "/api/v1/files/:id",
             get(|State(st): State<Shared>, Path(fid): Path<String>| async move {

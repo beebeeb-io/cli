@@ -943,20 +943,35 @@ impl BeebeebFsState {
                     eprintln!("[mount] rename refused for {file_id}: {e}");
                     Errno::EPERM
                 })?;
-            let target = resolved.write_target.clone().ok_or_else(|| {
-                eprintln!("[mount] rename refused for {file_id}: the row is read-only");
-                Errno::EPERM
-            })?;
+            // L13/A9 (§15): the seal target ladder is the one `bb mv` and
+            // WebDAV MOVE take. An owner row re-seals through its write target;
+            // a request row re-seals through core's RenameTarget — the
+            // string-convention key derived from the row id and the pin the
+            // current name records, NEVER the content key `C` the uploader
+            // holds. An upper-repair request name has no target (read-only) and
+            // a row with neither is refused instead of sealed under a guess.
             let mime = if is_dir {
                 None
             } else {
                 beebeeb_core::media::guess_mime_type(newname)
             };
-            let sealed =
-                beebeeb_core::encrypt::encrypt_name_for(target.key(), newname, mime, target.pin()).map_err(|e| {
-                    eprintln!("[mount] rename encrypt: {e}");
-                    Errno::EIO
-                })?;
+            let sealed = if let Some(target) = resolved.write_target.clone() {
+                beebeeb_core::encrypt::encrypt_name_for(target.key(), newname, mime, target.pin())
+            } else if let Some(target) = resolved.rename_target.clone() {
+                beebeeb_core::rename::encrypt_name_for_rename_target(&target, newname, mime)
+            } else {
+                let reason = if resolved.read_only {
+                    "the row is read-only"
+                } else {
+                    crate::owned_keys::RENAME_UNKNOWN_KEY
+                };
+                eprintln!("[mount] rename refused for {file_id}: {reason}");
+                return Err(Errno::EPERM);
+            }
+            .map_err(|e| {
+                eprintln!("[mount] rename encrypt: {e}");
+                Errno::EIO
+            })?;
             Some(sealed)
         } else {
             None

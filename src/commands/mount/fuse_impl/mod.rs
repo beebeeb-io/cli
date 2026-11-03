@@ -326,6 +326,8 @@ mod state;
 mod state_ops;
 
 #[cfg(test)]
+mod request_rename_tests;
+#[cfg(test)]
 mod tests;
 
 impl Filesystem for BeebeebFs {
