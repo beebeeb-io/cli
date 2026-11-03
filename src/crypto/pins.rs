@@ -130,6 +130,22 @@ pub(crate) fn key_from_bytes(bytes: &[u8; 32]) -> FileKey {
     key
 }
 
+/// Build a `MasterKey` from raw bytes (R4-D).
+///
+/// Core takes the 32 bytes by value; this helper copies them into a
+/// `Zeroizing` buffer, hands core a copy, and wipes its own buffer. The caller
+/// never holds an un-wiped master-key array in its frame.
+pub(crate) fn master_key_from_bytes(bytes: &[u8]) -> Result<beebeeb_core::kdf::MasterKey, String> {
+    if bytes.len() != 32 {
+        return Err(format!("master key must be 32 bytes, got {}", bytes.len()));
+    }
+    let mut copy = zeroize::Zeroizing::new([0u8; 32]);
+    copy.copy_from_slice(bytes);
+    let key = beebeeb_core::kdf::MasterKey::from_bytes(*copy);
+    copy.zeroize();
+    Ok(key)
+}
+
 #[cfg(test)]
 mod key_copy_tests {
     use super::*;
@@ -141,47 +157,103 @@ mod key_copy_tests {
     /// depends on core's callee and cannot be checked from here.
     /// Drop `#[cfg(test)] mod ... { ... }` blocks so the scan sees only code
     /// that ships. Test modules may spell any key construction they like.
+    /// The item a `#[cfg(test)]` attribute applies to. R4-D: only a `mod <name>
+    /// { ... }` body is dropped; `mod <name>;` and every non-mod item stay.
+    enum CfgTestItem {
+        ModBlock { name: String, body_start: usize },
+        ModDecl { name: String },
+        Other,
+    }
+
+    fn cfg_test_item(src: &str, at: usize) -> CfgTestItem {
+        let mut offset = at + "#[cfg(test)]".len();
+        let mut rest = &src[offset..];
+        loop {
+            let trimmed = rest.trim_start();
+            offset += rest.len() - trimmed.len();
+            rest = trimmed;
+            // A second attribute (`#[path = ...]`) still belongs to this item.
+            if let Some(stripped) = rest.strip_prefix("#[") {
+                let Some(end) = stripped.find(']') else {
+                    return CfgTestItem::Other;
+                };
+                offset += "#[".len() + end + 1;
+                rest = &stripped[end + 1..];
+                continue;
+            }
+            break;
+        }
+        for vis in ["pub(crate) ", "pub(super) ", "pub "] {
+            if let Some(stripped) = rest.strip_prefix(vis) {
+                offset += vis.len();
+                rest = stripped;
+                break;
+            }
+        }
+        let Some(body) = rest.strip_prefix("mod ") else {
+            return CfgTestItem::Other;
+        };
+        offset += "mod ".len();
+        let ident_len = body
+            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .unwrap_or(body.len());
+        let name = body[..ident_len].to_string();
+        if name.is_empty() {
+            return CfgTestItem::Other;
+        }
+        let after = &body[ident_len..];
+        let trimmed = after.trim_start();
+        offset += ident_len + (after.len() - trimmed.len());
+        match trimmed.chars().next() {
+            Some('{') => CfgTestItem::ModBlock {
+                name,
+                body_start: offset,
+            },
+            Some(';') => CfgTestItem::ModDecl { name },
+            _ => CfgTestItem::Other,
+        }
+    }
+
     fn shipping_code(src: &str) -> String {
         let mut out = String::new();
         let mut rest = src;
-        loop {
-            let Some(at) = rest.find("#[cfg(test)]") else {
-                out.push_str(rest);
-                return out;
-            };
-            let after = &rest[at + "#[cfg(test)]".len()..];
-            let trimmed = after.trim_start();
-            let Some(body) = trimmed.strip_prefix("mod ") else {
-                // A cfg(test) item (not a module): keep it and move on.
-                out.push_str(&rest[..at + "#[cfg(test)]".len()]);
-                rest = after;
-                continue;
-            };
-            let Some(brace) = body.find('{') else {
-                out.push_str(rest);
-                return out;
-            };
-            out.push_str(&rest[..at]);
-            let open = rest.len() - after.len() + (after.len() - trimmed.len()) + "mod ".len() + brace;
-            let bytes = rest.as_bytes();
-            let mut depth = 0usize;
-            let mut j = open;
-            while j < bytes.len() {
-                match bytes[j] {
-                    b'{' => depth += 1,
-                    b'}' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            j += 1;
-                            break;
+        while let Some(at) = rest.find("#[cfg(test)]") {
+            match cfg_test_item(rest, at) {
+                CfgTestItem::ModBlock { body_start, .. } => {
+                    // Only a module BODY is test-only. A `mod x;` declaration
+                    // continues into a shipping file that is classified by
+                    // `cfg_test_modules`/`is_test_file`, never by stripping the
+                    // next block after it (R4-D).
+                    out.push_str(&rest[..at]);
+                    let bytes = rest.as_bytes();
+                    let mut depth = 0usize;
+                    let mut j = body_start;
+                    while j < bytes.len() {
+                        match bytes[j] {
+                            b'{' => depth += 1,
+                            b'}' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    j += 1;
+                                    break;
+                                }
+                            }
+                            _ => {}
                         }
+                        j += 1;
                     }
-                    _ => {}
+                    rest = &rest[j..];
                 }
-                j += 1;
+                _ => {
+                    // A cfg(test) item that is not a module body stays; keep its
+                    // attribute in the output and scan on after it.
+                    out.push_str(&rest[..at + "#[cfg(test)]".len()]);
+                    rest = &rest[at + "#[cfg(test)]".len()..];
+                }
             }
-            rest = &rest[j..];
         }
+        out.push_str(rest);
+        out
     }
 
     fn cfg_test_modules(files: &[(String, String)]) -> std::collections::HashSet<String> {
@@ -189,17 +261,10 @@ mod key_copy_tests {
         for (_, src) in files {
             let mut rest = src.as_str();
             while let Some(at) = rest.find("#[cfg(test)]") {
-                let after = &rest[at..];
-                if let Some(m) = after.find("mod ") {
-                    let ident: String = after[m + 4..]
-                        .chars()
-                        .take_while(|c| c.is_alphanumeric() || *c == '_')
-                        .collect();
-                    if !ident.is_empty() {
-                        mods.insert(ident);
-                    }
+                if let CfgTestItem::ModBlock { name, .. } | CfgTestItem::ModDecl { name } = cfg_test_item(rest, at) {
+                    mods.insert(name);
                 }
-                rest = &after["#[cfg(test)]".len()..];
+                rest = &rest[at + "#[cfg(test)]".len()..];
             }
         }
         mods
@@ -252,6 +317,25 @@ mod key_copy_tests {
                 !code.contains("let key: [u8; 32] ="),
                 "{name} holds a key array by value; wrap the array in Zeroizing and pass a reference"
             );
+            // R4-D: a master key is never built by value in a caller's frame.
+            assert!(
+                !code.contains("MasterKey::from_bytes("),
+                "{name} spells core's by-value master-key copy; use crypto::master_key_from_bytes"
+            );
+            let mut lines = code.lines();
+            while let Some(line) = lines.next() {
+                if !line.contains("[0u8; 32]") {
+                    continue;
+                }
+                let window: String = std::iter::once(line)
+                    .chain(lines.clone().take(5))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(
+                    !line.contains("let mut arr") && !window.contains("MasterKey::from_bytes("),
+                    "{name} holds a master-key array by value; use crypto::master_key_from_bytes"
+                );
+            }
         }
         // The one blessed copy is this file's helper, into a buffer it wipes.
         let pins = include_str!("pins.rs");

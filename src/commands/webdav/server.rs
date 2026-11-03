@@ -39,9 +39,7 @@ pub async fn run(port: u16, cache_ttl: u64, options: WebdavOptions) -> Result<()
     if mk_bytes.len() != 32 {
         return Err(format!("master key must be 32 bytes, got {}", mk_bytes.len()));
     }
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&mk_bytes);
-    let master_key = beebeeb_core::kdf::MasterKey::from_bytes(arr);
+    let master_key = crate::crypto::master_key_from_bytes(&mk_bytes)?;
 
     let effective_ttl = if no_cache || cache_ttl == 0 {
         Duration::ZERO

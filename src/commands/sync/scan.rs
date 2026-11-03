@@ -17,9 +17,7 @@ pub(super) fn load_master_key() -> Result<beebeeb_core::kdf::MasterKey, String> 
     if mk_bytes.len() != 32 {
         return Err(format!("master key must be 32 bytes, got {}", mk_bytes.len()));
     }
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&mk_bytes);
-    Ok(beebeeb_core::kdf::MasterKey::from_bytes(arr))
+    crate::crypto::master_key_from_bytes(&mk_bytes)
 }
 
 pub(super) fn rel_path_str(rel: &Path) -> String {
