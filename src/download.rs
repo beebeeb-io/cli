@@ -538,6 +538,28 @@ mod tests {
         }
     }
 
+    /// Review-5 F2 (P2): a legacy stream with no `X-Chunk-Size` sized each
+    /// frame as `total / count` with no bound, so a hostile `X-Original-Size`
+    /// could ask the reader to buffer gigabytes. Core's downloader refuses
+    /// such a frame; this path must too, before writing anything.
+    #[tokio::test]
+    async fn a_no_header_frame_above_the_max_frame_size_is_refused_before_allocating() {
+        let m = mk();
+        let total = ((beebeeb_core::download::MAX_FRAME_SIZE as u64) + 1) * 2;
+        let err = try_download_chunked(
+            vec![0x5au8; 4096],
+            vec![("x-original-size", total.to_string())],
+            2,
+            &m,
+        )
+        .await
+        .expect_err("a frame above MAX_FRAME_SIZE must be refused");
+        assert!(
+            err.contains("exceeds the maximum"),
+            "clear frame-size error, got: {err}"
+        );
+    }
+
     /// Round 3 P2-3: V2 header present but frame 0 is short (a JSON-blob file
     /// served with the header) takes the buffered fallback, not "truncated".
     #[tokio::test]

@@ -1,6 +1,7 @@
 //! The streaming download + decrypt path: try the raw format, fall back to the buffered legacy paths. The raw-format items live here too.
 
 use super::*;
+use beebeeb_core::download::MAX_FRAME_SIZE;
 
 /// Download a file's raw encrypted body into memory together with the server's
 /// `X-Chunk-Size` (the uniform plaintext chunk size, V2 files), for callers that
@@ -349,7 +350,19 @@ pub(super) async fn stream_raw(
             .and_then(|v| usize::try_from(v).ok())
             .ok_or_else(|| format!("chunk size {cs} is not addressable"))?
     } else {
-        (total / count as u64) as usize
+        // A legacy response has no `X-Chunk-Size`; the average is the best
+        // frame size we can guess. Bound it: the server controls
+        // `X-Original-Size`, so an unbounded average would let a hostile
+        // response make `fill_to` buffer gigabytes (core's downloader,
+        // 2b76195, refuses the same case).
+        let average = total / count as u64;
+        if average > MAX_FRAME_SIZE as u64 {
+            return Err(format!(
+                "average frame size {average} exceeds the maximum {MAX_FRAME_SIZE}"
+            )
+            .into());
+        }
+        usize::try_from(average).unwrap_or(usize::MAX)
     };
 
     let mut writer = AtomicFile::create(out_path)?;
