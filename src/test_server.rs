@@ -85,6 +85,8 @@ pub struct Mock {
     pub folder_echo: Option<String>,
     /// `folder_id` sent on every folder create, in order (empty = none sent).
     pub folder_requests: Vec<String>,
+    /// The body of every folder create, in order (the sealed name it carried).
+    pub folder_bodies: Vec<serde_json::Value>,
     /// id of every `DELETE /files/{id}` (trash), in order.
     pub trashed: Vec<String>,
     /// `GET /files/{id}` answers: id -> metadata. Absent = 404.
@@ -252,6 +254,7 @@ fn router(state: Shared) -> Router {
                         .to_string();
                     let mut m = st.lock().unwrap();
                     m.folder_requests.push(requested.clone());
+                    m.folder_bodies.push(body.clone());
                     m.events.push(format!("folder:{requested}"));
                     let echoed = m.folder_echo.clone().unwrap_or(requested);
                     Json(json!({ "id": echoed })).into_response()

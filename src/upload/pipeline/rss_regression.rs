@@ -116,6 +116,7 @@ async fn upload_peak_heap_is_bounded_at_conc4() {
             path: path.clone(),
             file_name: path.file_name().unwrap().to_string_lossy().into_owned(),
             file_id: Uuid::new_v4(),
+            resume_tag: None,
             base_version_number: None,
             replace_pin: None,
             replace_file_key: None,

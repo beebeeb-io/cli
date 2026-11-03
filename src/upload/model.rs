@@ -24,6 +24,10 @@ pub struct UploadSpec {
     /// The file UUID. A fresh random id for a new file, or the existing id for
     /// a server-side version replace (`bb push --replace`).
     pub file_id: Uuid,
+    /// Task 2275 L13/N4: the core resume tag minted with a NEW `file_id`
+    /// (`None` for a replace). Persisted with the resume record so a resumed
+    /// create can prove the id came from core's mint before continuing it.
+    pub resume_tag: Option<[u8; 32]>,
     /// For a `bb push --replace`: the existing file's current `version_number`,
     /// passed to the v2 init as `base_version_number` so the server enforces an
     /// optimistic concurrency check (stale-version 409) and bumps the version.

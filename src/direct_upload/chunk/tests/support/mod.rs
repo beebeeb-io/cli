@@ -404,6 +404,7 @@ fn spec(path: &std::path::Path, file_id: Uuid) -> UploadSpec {
         path: path.to_path_buf(),
         file_name: "payload.bin".to_string(),
         file_id,
+        resume_tag: None,
         base_version_number: None,
         replace_pin: None,
         replace_file_key: None,
@@ -516,6 +517,7 @@ fn resumed_session(
     crate::resume::record_with_transport(
         path,
         crate::item_id::Proposed::Minted(file_id),
+        None,
         sid,
         beebeeb_core::chunk_stream::ChunkFormat::V1Legacy,
         size,

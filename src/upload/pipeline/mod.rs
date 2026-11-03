@@ -124,7 +124,19 @@ pub async fn stream_encrypt_upload(
         crate::resume::clear(&spec.path);
     }
     let mut plan = match pending {
-        Some(pending) => match beebeeb_core::chunk_stream::resume_policy(pending.chunk_format, writing) {
+        Some(pending) => {
+            // L13/N4: a create's record carries the core resume tag. Continue
+            // the id only when core still resumes it with that tag; a record
+            // without one (a replace, or an older CLI) keeps the id-only gate.
+            let tag_resumes = pending.resume_tag.is_none_or(|tag| {
+                beebeeb_core::item_id::NewItemId::resume(&master_key, &pending.file_id.to_string(), &tag).is_ok()
+            });
+            let resume = if tag_resumes {
+                beebeeb_core::chunk_stream::resume_policy(pending.chunk_format, writing)
+            } else {
+                SessionResume::RestartWithFreshSession
+            };
+            match resume {
             SessionResume::ContinueSession => SessionPlan::Resume {
                 file_id: pending.file_id,
                 session_id: pending.session_id,
@@ -155,6 +167,7 @@ pub async fn stream_encrypt_upload(
                     fallback_file_id: (pending.file_id != spec.file_id).then_some(spec.file_id),
                     is_recovery: true,
                 }
+            }
             }
         },
         None => SessionPlan::Init {
@@ -493,6 +506,7 @@ pub(super) async fn upload_attempt(
             crate::resume::record_with_transport(
                 &spec.path,
                 proposed(spec, file_id),
+                spec.resume_tag,
                 sid,
                 format,
                 size,

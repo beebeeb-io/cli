@@ -463,6 +463,7 @@ pub(super) async fn do_upload(
             path: local_path,
             file_name: file_name.into(),
             file_id: remote.as_ref().unwrap().id,
+            resume_tag: None,
             base_version_number: Some(replacement_version(&r.canonical)?),
             replace_pin: Some(remote.as_ref().unwrap().pin.clone()?),
             replace_file_key: Some(r.key.clone()),
@@ -661,10 +662,12 @@ pub(super) fn new_file_spec(
     file_name: &str,
     parent_id: Option<Uuid>,
 ) -> Result<crate::upload::UploadSpec, String> {
+    let minted = crate::item_id::mint_owner(master_key)?;
     Ok(crate::upload::UploadSpec {
         path: file_path.to_path_buf(),
         file_name: file_name.to_string(),
-        file_id: crate::item_id::mint_owner(master_key)?.id(),
+        file_id: minted.id(),
+        resume_tag: Some(*minted.tag()),
         // Watch-loop uploads are always new files (fresh id) → no replace.
         base_version_number: None,
         replace_pin: None,

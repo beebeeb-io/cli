@@ -300,48 +300,6 @@ mod tests {
         beebeeb_core::kdf::MasterKey::from_bytes([0u8; 32])
     }
 
-    /// N4 (FUSE mkdir): the folder create mints through core and seals through
-    /// core's new-item name writer — the two calls `state_ops::mkdir` makes.
-    /// The old path took a bare `Uuid::new_v4()` (no resume tag) and sealed raw
-    /// metadata under the derived key, a shape core's name reader refuses.
-    #[test]
-    fn a_folder_mint_for_mkdir_is_core_minted_and_its_name_opens() {
-        let master = master();
-        let minted = mint_owner(&master).expect("core mints an owner id");
-        let id = minted.id();
-        let id_text = id.to_string();
-
-        // Core's mint, not a local v4: an owner class id, carrying its tag and
-        // resumable only with that tag.
-        assert_eq!(
-            beebeeb_core::item_id::item_class(&id_text).expect("a canonical id"),
-            beebeeb_core::item_id::ItemClass::Owner
-        );
-        assert_eq!(id.get_version(), Some(uuid::Version::Random));
-        assert_ne!(minted.tag(), &[0u8; 32], "the mint carries a resume tag");
-        let resumed = beebeeb_core::item_id::NewItemId::resume(&master, &id_text, minted.tag())
-            .expect("the tag core minted resumes this id");
-        assert_eq!(resumed.as_str(), id_text);
-
-        // The name is sealed by core's new-item writer and opens through core.
-        let sealed = minted
-            .seal_name(
-                &master,
-                "Folder",
-                None,
-                beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
-            )
-            .expect("core seals the new folder name");
-        let folder_key = beebeeb_core::kdf::derive_file_key(&master, id_text.as_bytes());
-        let meta = beebeeb_core::encrypt::decrypt_name_metadata_with_key(&folder_key, &sealed)
-            .expect("core opens the name it sealed");
-        assert_eq!(meta.name, "Folder");
-        assert_eq!(
-            meta.chunk_format,
-            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded
-        );
-    }
-
     /// A8 (every folder create: mkdir, push, sync, webdav MKCOL): the answer
     /// echoes a different id. The create aborts with the plain message and no
     /// id is returned for use as a parent.

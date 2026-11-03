@@ -699,6 +699,46 @@ mod truncate_tests {
             m.events
         );
     }
+
+    /// N4 (FUSE mkdir): drive the real create path `mkdir` calls. A local
+    /// `Uuid::new_v4()` (the old bug) carries no core resume tag, so core
+    /// cannot resume it and this test fails; a core mint can.
+    #[test]
+    fn mkdir_mints_through_core_and_carries_the_resume_tag() {
+        let (url, mock) = spawn_upload_server_with(crate::test_server::Mock::default());
+        let mut fs = BeebeebFsState::new(ApiClient::new_for_test(url), master_key(), Duration::from_secs(5));
+
+        let (ino, resume_tag) = fs
+            .create_folder_entry(ROOT_INO, "Folder".to_string())
+            .expect("mkdir plans the folder");
+        let id = fs.inodes[&ino].file_id.clone().expect("mkdir records the server id");
+        assert!(fs.inodes[&ino].is_dir, "the inode is a directory");
+        assert_eq!(
+            beebeeb_core::item_id::item_class(&id).expect("a canonical id"),
+            beebeeb_core::item_id::ItemClass::Owner
+        );
+        assert_eq!(
+            beebeeb_core::item_id::NewItemId::resume(&master_key(), &id, &resume_tag)
+                .expect("the tag core minted resumes this id")
+                .as_str(),
+            id
+        );
+
+        let (folder_id, body) = {
+            let m = mock.lock().unwrap();
+            (m.folder_requests[0].clone(), m.folder_bodies[0].clone())
+        };
+        assert_eq!(folder_id, id, "the client proposed the id it minted");
+        let sealed = body["name_encrypted"].as_str().expect("the name was sealed");
+        let folder_key = beebeeb_core::kdf::derive_file_key(&master_key(), id.as_bytes());
+        let meta = beebeeb_core::encrypt::decrypt_name_metadata_with_key(&folder_key, sealed)
+            .expect("core opens the name its writer sealed");
+        assert_eq!(meta.name, "Folder");
+        assert_eq!(
+            meta.chunk_format,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded
+        );
+    }
 }
 
 // ── SF-0002 rename check ──────────────────────────────────────────────────

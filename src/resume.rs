@@ -69,6 +69,11 @@ struct PendingEntry {
     /// client did not mint). Only a replace of that same row may resume it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     replaces: Option<Uuid>,
+    /// Task 2275 L13/N4: the core resume tag minted with `file_id` (a create).
+    /// Absent on a replace or an older record; core's `NewItemId::resume` takes
+    /// the id only with this tag, so a resumed create proves the id was minted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resume_tag: Option<Vec<u8>>,
     /// Task 2173: the session is a direct one (`object-upload-v1`). A direct session takes no proxy
     /// chunk PUT and an API session takes no grant, so a resumed upload must continue on the
     /// transport it began on. Absent on records from an older CLI, which only had the API route.
@@ -88,6 +93,10 @@ pub struct PendingUpload {
     pub chunk_format: Option<ChunkFormat>,
     /// The session was opened as a direct upload (task 2173); see [`PendingEntry`].
     pub direct: bool,
+    /// L13/N4: the core resume tag carried by a minted create, if the record
+    /// has one. The driver re-proves the id with `NewItemId::resume` before
+    /// continuing such a session.
+    pub resume_tag: Option<[u8; 32]>,
 }
 
 fn db_path() -> PathBuf {
@@ -194,6 +203,7 @@ impl PendingUpload {
             session_id,
             chunk_format: e.chunk_format.and_then(|c| ChunkFormat::from_u8(c).ok()),
             direct: e.direct,
+            resume_tag: e.resume_tag.as_deref().and_then(|b| <[u8; 32]>::try_from(b).ok()),
         })
     }
 }
@@ -227,6 +237,7 @@ pub fn record(
     record_with_transport(
         path,
         crate::item_id::Proposed::Minted(file_id),
+        None,
         upload_session_id,
         chunk_format,
         size,
@@ -241,6 +252,7 @@ pub fn record(
 pub fn record_with_transport(
     path: &Path,
     proposed: crate::item_id::Proposed,
+    resume_tag: Option<[u8; 32]>,
     upload_session_id: Uuid,
     chunk_format: ChunkFormat,
     size: u64,
@@ -257,6 +269,7 @@ pub fn record_with_transport(
             file_id,
             self_minted: matches!(proposed, Proposed::Minted(_)).then_some(file_id),
             replaces: matches!(proposed, Proposed::Listed(_)).then_some(file_id),
+            resume_tag: resume_tag.map(|t| t.to_vec()),
             upload_session_id: Some(upload_session_id),
             chunk_format: Some(chunk_format.as_u8()),
             direct,
@@ -310,6 +323,7 @@ mod tests {
             session_id,
             chunk_format,
             direct: false,
+            resume_tag: None,
         };
         record(&f, id, sid, ChunkFormat::V1Legacy, 5, 100);
         assert_eq!(
@@ -321,6 +335,7 @@ mod tests {
         record_with_transport(
             &f,
             crate::item_id::Proposed::Minted(id),
+            None,
             sid,
             ChunkFormat::V1Legacy,
             5,
@@ -398,6 +413,7 @@ mod tests {
         record_with_transport(
             &f,
             crate::item_id::Proposed::Listed(row),
+            None,
             sid,
             ChunkFormat::V1Legacy,
             5,

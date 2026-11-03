@@ -19,6 +19,7 @@ fn spec(path: &std::path::Path, file_id: Uuid) -> UploadSpec {
         path: path.to_path_buf(),
         file_name: "payload.bin".to_string(),
         file_id,
+        resume_tag: None,
         base_version_number: None,
         replace_pin: None,
         replace_file_key: None,
@@ -420,6 +421,7 @@ async fn replace_upload_5xx_is_retried_with_same_id_even_with_no_fallback_availa
     crate::resume::record_with_transport(
         &path,
         crate::item_id::Proposed::Listed(target_fid),
+        None,
         Uuid::new_v4(),
         beebeeb_core::chunk_stream::ChunkFormat::V1Legacy,
         size,
@@ -1059,6 +1061,7 @@ async fn an_interrupted_replace_record_is_not_resumed_by_a_later_create() {
     crate::resume::record_with_transport(
         &path,
         crate::item_id::Proposed::Listed(listed),
+        None,
         replace_sid,
         beebeeb_core::chunk_stream::ChunkFormat::V1Legacy,
         size,
@@ -1097,6 +1100,7 @@ async fn an_interrupted_replace_record_is_resumed_by_the_same_replace() {
     crate::resume::record_with_transport(
         &path,
         crate::item_id::Proposed::Listed(listed),
+        None,
         replace_sid,
         beebeeb_core::chunk_stream::ChunkFormat::V1Legacy,
         size,

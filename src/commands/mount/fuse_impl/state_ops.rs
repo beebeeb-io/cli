@@ -550,7 +550,6 @@ impl BeebeebFsState {
         _umask: u32,
         reply: ReplyEntry,
     ) {
-        let parent = parent.0;
         let name_str = match name.to_str() {
             Some(n) => n.to_string(),
             None => {
@@ -558,33 +557,44 @@ impl BeebeebFsState {
                 return;
             }
         };
+        match self.create_folder_entry(parent.0, name_str) {
+            Ok((ino, _resume_tag)) => {
+                let attr = self.inodes[&ino].file_attr(ino);
+                reply.entry(&ATTR_TTL, &attr, Generation(0));
+            }
+            Err((errno, message)) => {
+                eprintln!("[mount] mkdir: {message}");
+                reply.error(errno);
+            }
+        }
+    }
 
+    /// The non-reply half of [`Self::mkdir`], split out so the create path can
+    /// be driven in tests without a kernel reply channel. Returns the new inode
+    /// and the resume tag core minted with the id. A folder has no upload
+    /// session to persist the tag, but returning it is what lets the mkdir test
+    /// prove the id came from core's mint and not a local random number.
+    pub(super) fn create_folder_entry(
+        &mut self,
+        parent: u64,
+        name_str: String,
+    ) -> Result<(u64, [u8; 32]), (Errno, String)> {
         // N4: core mints the owner id (carrying the resume tag) and core seals
         // the folder name, the same new-item pair push uses. The old path took
         // a bare local v4 and sealed raw metadata under the derived key, a
         // shape core's name reader refuses.
-        let minted = match crate::item_id::mint_owner(&self.master_key) {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("[mount] mkdir mint: {e}");
-                reply.error(Errno::EIO);
-                return;
-            }
-        };
+        let minted = crate::item_id::mint_owner(&self.master_key)
+            .map_err(|e| (Errno::EIO, format!("mkdir mint: {e}")))?;
+        let resume_tag = *minted.tag();
         let folder_uuid = minted.id();
-        let name_enc = match minted.seal_name(
-            &self.master_key,
-            &name_str,
-            None,
-            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("[mount] mkdir encrypt: {e}");
-                reply.error(Errno::EIO);
-                return;
-            }
-        };
+        let name_enc = minted
+            .seal_name(
+                &self.master_key,
+                &name_str,
+                None,
+                beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+            )
+            .map_err(|e| (Errno::EIO, format!("mkdir encrypt: {e}")))?;
 
         let parent_file_id: Option<uuid::Uuid> = self
             .inodes
@@ -592,17 +602,10 @@ impl BeebeebFsState {
             .and_then(|e| e.file_id.as_deref())
             .and_then(|s| s.parse().ok());
 
-        let resp = match self
+        let resp = self
             .rt
             .block_on(self.api.create_folder(&name_enc, parent_file_id, Some(folder_uuid)))
-        {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("[mount] mkdir API: {e}");
-                reply.error(Errno::EIO);
-                return;
-            }
-        };
+            .map_err(|e| (Errno::EIO, format!("mkdir API: {e}")))?;
 
         // L15 = A (P2-11): a folder created in a shared folder stays owner-only.
         self.rt.block_on(crate::owned_keys::announce_owner_only(
@@ -613,14 +616,8 @@ impl BeebeebFsState {
 
         // L13 (SF-0001): only the id this client minted; a different echo
         // aborts before the folder is listed or used as a parent.
-        let server_id = match super::super::folder_create_reply(&resp, folder_uuid) {
-            Ok(id) => id,
-            Err(e) => {
-                eprintln!("[mount] mkdir: {e}");
-                reply.error(Errno::EIO);
-                return;
-            }
-        };
+        let server_id = super::super::folder_create_reply(&resp, folder_uuid)
+            .map_err(|e| (Errno::EIO, format!("mkdir: {e}")))?;
 
         let ino = self.alloc_ino();
         let now = SystemTime::now();
@@ -642,8 +639,7 @@ impl BeebeebFsState {
         );
         self.dir_cache.remove(&parent);
 
-        let attr = self.inodes[&ino].file_attr(ino);
-        reply.entry(&ATTR_TTL, &attr, Generation(0));
+        Ok((ino, resume_tag))
     }
 
     /// Soft-delete (trash) a file.

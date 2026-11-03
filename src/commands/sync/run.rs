@@ -783,14 +783,20 @@ pub async fn run(
                     .or(Some(remote_folder_id));
 
                     let file_name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+                    // L13/N4: a new owner item's id (and its resume tag) comes
+                    // from core's mint; a replace keeps the listed row.
+                    let (file_id, resume_tag) = match replacement.as_ref() {
+                        Some(_) => (replace_id.ok_or("missing replacement id")?, None),
+                        None => {
+                            let minted = crate::item_id::mint_owner(&master_key)?;
+                            (minted.id(), Some(*minted.tag()))
+                        }
+                    };
                     let spec = crate::upload::UploadSpec {
                         path: local_dir.join(&rel),
                         file_name,
-                        file_id: match replacement.as_ref() {
-                            Some(_) => replace_id.ok_or("missing replacement id")?,
-                            // L13: a new owner item's id is minted by core.
-                            None => crate::item_id::mint_owner(&master_key)?.id(),
-                        },
+                        file_id,
+                        resume_tag,
                         // A version replace only when the old remote's key is
                         // owned; otherwise a new file under a fresh id (the old
                         // one is trashed once it exists).
