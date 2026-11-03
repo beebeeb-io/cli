@@ -54,10 +54,9 @@ fn b64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-/// A request row as the mount lists it: content under `C`, name sealed
-/// under `name_key`, and the owner's request private key served by
-/// `GET /file-requests`, sealed with the 2236 (row-id) seal.
-fn request_row_mock(id: &str, name: &str, name_key: &beebeeb_core::kdf::FileKey) -> Mock {
+/// Insert one row the uploader sent through `REQ`: content under `C`, name
+/// sealed under `name_key`, `chunk_count` chunks declared by the listing.
+fn add_request_row(mock: &mut Mock, id: &str, name: &str, name_key: &beebeeb_core::kdf::FileKey, chunk_count: u32) {
     let content = [42u8; 32];
     let private = [31u8; 32];
     let public = beebeeb_core::opaque::derive_x25519_public(&private);
@@ -68,14 +67,11 @@ fn request_row_mock(id: &str, name: &str, name_key: &beebeeb_core::kdf::FileKey)
     let sealed_name =
         beebeeb_core::encrypt::encrypt_name_for(name_key, name, Some("text/plain"), ExpectedChunkFormat::V2)
             .expect("row name");
-    let mut mock = Mock {
-        requests_doc: serde_json::json!({"file_requests": [{
-            "id": REQ,
-            "wrapped_private_key": b64(&wrapped),
-            "wrap_nonce": b64(&nonce),
-        }]}),
-        ..Default::default()
-    };
+    mock.requests_doc = serde_json::json!({"file_requests": [{
+        "id": REQ,
+        "wrapped_private_key": b64(&wrapped),
+        "wrap_nonce": b64(&nonce),
+    }]});
     mock.files.insert(
         id.to_string(),
         serde_json::json!({
@@ -84,7 +80,7 @@ fn request_row_mock(id: &str, name: &str, name_key: &beebeeb_core::kdf::FileKey)
             "name_encrypted": sealed_name,
             "is_folder": false,
             "size_bytes": 0,
-            "chunk_count": 1,
+            "chunk_count": chunk_count,
             "file_request_id": REQ,
             "sender_ephemeral_pubkey": b64(&seal.e_pub),
             "wrapped_content_key": b64(&seal.wrapped_key),
@@ -97,6 +93,12 @@ fn request_row_mock(id: &str, name: &str, name_key: &beebeeb_core::kdf::FileKey)
         beebeeb_core::encrypt::encrypt_chunk_raw(&beebeeb_core::kdf::FileKey::from_bytes(content), b"")
             .expect("chunk 0 under C"),
     );
+}
+
+/// A request row as the mount lists it (one chunk, real geometry).
+fn request_row_mock(id: &str, name: &str, name_key: &beebeeb_core::kdf::FileKey) -> Mock {
+    let mut mock = Mock::default();
+    add_request_row(&mut mock, id, name, name_key, 1);
     mock
 }
 
@@ -199,4 +201,100 @@ fn an_upper_repair_name_is_refused_even_when_the_listing_flagged_it_writable() {
         mock.lock().unwrap().events.is_empty(),
         "an upper-repair name sent a move"
     );
+}
+
+/// P3-1 (2326 review3): the overwrite site passes no key — only the owner
+/// conventions may prove a version writable. A request row's content is sealed
+/// under `C`, which no owner derivation produces, so the check cannot decide:
+/// EAGAIN, and nothing is uploaded and nothing is trashed. Passing the resolved
+/// key here would make it `Writable` and the edit would trash the sender's row.
+#[test]
+fn an_overwrite_of_a_request_row_is_refused_before_any_upload_or_trash() {
+    let content_key = beebeeb_core::kdf::FileKey::from_bytes([42u8; 32]);
+    let (mut fs, mock) = setup(request_row_mock(ROW_ID, "request.txt", &content_key));
+    fs.inodes.insert(ROW_INO, entry(ROW_ID, "request.txt", false));
+    fs.id_to_ino.insert(ROW_ID.to_string(), ROW_INO);
+
+    assert_eq!(fs.commit_overwrite(ROW_INO, b"edited".to_vec()), Err(Errno::EAGAIN));
+    let m = mock.lock().unwrap();
+    assert!(m.inits.is_empty(), "an overwrite uploaded: {:?}", m.events);
+    assert!(
+        m.trashed.is_empty(),
+        "an overwrite trashed the request row: {:?}",
+        m.events
+    );
+    assert!(m.events.is_empty(), "an overwrite changed the server: {:?}", m.events);
+}
+
+/// P3-1: the create-over-an-existing-name site is unkeyed too: the request row
+/// there is refused with EAGAIN and stays in the inode table.
+#[test]
+fn a_create_over_a_request_row_is_refused_and_keeps_it() {
+    let content_key = beebeeb_core::kdf::FileKey::from_bytes([42u8; 32]);
+    let (mut fs, mock) = setup(request_row_mock(ROW_ID, "request.txt", &content_key));
+    fs.inodes.insert(ROW_INO, entry(ROW_ID, "request.txt", false));
+    fs.id_to_ino.insert(ROW_ID.to_string(), ROW_INO);
+    fs.dir_cache.insert(
+        ROOT_INO,
+        CachedDir {
+            children: vec![ROW_INO],
+            expires_at: std::time::Instant::now() + Duration::from_secs(60),
+        },
+    );
+
+    assert_eq!(fs.take_replaced_child(ROOT_INO, "request.txt"), Err(Errno::EAGAIN));
+    assert!(fs.inodes.contains_key(&ROW_INO), "the refused row's inode was dropped");
+    let m = mock.lock().unwrap();
+    assert!(m.inits.is_empty(), "a replace uploaded: {:?}", m.events);
+    assert!(
+        m.trashed.is_empty(),
+        "a replace trashed the request row: {:?}",
+        m.events
+    );
+}
+
+const CONFLICT_ID: &str = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+const CONFLICT_INO: u64 = 31;
+
+/// P3-1: the third unkeyed site is the row a rename lands on. The writable
+/// source is the request row itself (it renames through core's `RenameTarget`);
+/// the target name is held by another request row, whose check is unkeyed:
+/// EAGAIN, no move and nothing trashed.
+#[test]
+fn a_rename_onto_a_request_row_is_refused_before_the_move() {
+    let content_key = beebeeb_core::kdf::FileKey::from_bytes([42u8; 32]);
+    let mut mock = request_row_mock(ROW_ID, "request.txt", &content_key);
+    add_request_row(&mut mock, CONFLICT_ID, "taken.txt", &content_key, 1);
+    let (mut fs, mock) = setup(mock);
+    fs.inodes.insert(ROW_INO, entry(ROW_ID, "request.txt", false));
+    fs.id_to_ino.insert(ROW_ID.to_string(), ROW_INO);
+    fs.inodes.insert(CONFLICT_INO, entry(CONFLICT_ID, "taken.txt", false));
+    fs.id_to_ino.insert(CONFLICT_ID.to_string(), CONFLICT_INO);
+    fs.dir_cache.insert(
+        ROOT_INO,
+        CachedDir {
+            children: vec![ROW_INO, CONFLICT_INO],
+            expires_at: std::time::Instant::now() + Duration::from_secs(60),
+        },
+    );
+
+    let renamed = fs.rename_stored(
+        ROW_INO,
+        ROW_ID,
+        ROW_ID.parse().ok(),
+        "request.txt",
+        ROOT_INO,
+        ROOT_INO,
+        "taken.txt",
+        None,
+    );
+    assert_eq!(renamed, Err(Errno::EAGAIN));
+    let m = mock.lock().unwrap();
+    assert!(
+        m.events.is_empty(),
+        "a refused rename changed the server: {:?}",
+        m.events
+    );
+    assert_eq!(fs.inodes[&ROW_INO].name, "request.txt", "the source was renamed anyway");
+    assert_eq!(fs.inodes[&CONFLICT_INO].file_id.as_deref(), Some(CONFLICT_ID));
 }
