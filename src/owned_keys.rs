@@ -939,11 +939,12 @@ fn legacy_invite_child_key(folder_key: &FileKey, frame: &[u8]) -> Result<FileKey
         beebeeb_core::encrypt::decrypt_chunk_raw(folder_key, frame)
             .map_err(|_| "invalid legacy invite child envelope")?,
     );
-    let key: [u8; 32] = bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| "invalid legacy invite child key length")?;
-    Ok(FileKey::from_bytes(key))
+    // N5: keep the array in a Zeroizing buffer. A bare `[u8; 32]` in this
+    // frame would never be wiped; core only wipes the value it is handed.
+    let key = zeroize::Zeroizing::new(
+        <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| "invalid legacy invite child key length")?,
+    );
+    Ok(crate::crypto::key_from_bytes(&key))
 }
 
 /// An approved invite's owner copy of the folder key (task 2266). The purpose-bound format first, which needs

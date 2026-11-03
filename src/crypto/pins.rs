@@ -139,30 +139,115 @@ mod key_copy_tests {
     /// [`key_copy`]), which copies into a `Zeroizing` buffer and wipes it; a
     /// bare `FileKey::from_bytes(*k.as_bytes())` leaves a stack copy whose wipe
     /// depends on core's callee and cannot be checked from here.
+    /// Drop `#[cfg(test)] mod ... { ... }` blocks so the scan sees only code
+    /// that ships. Test modules may spell any key construction they like.
+    fn shipping_code(src: &str) -> String {
+        let mut out = String::new();
+        let mut rest = src;
+        loop {
+            let Some(at) = rest.find("#[cfg(test)]") else {
+                out.push_str(rest);
+                return out;
+            };
+            let after = &rest[at + "#[cfg(test)]".len()..];
+            let trimmed = after.trim_start();
+            let Some(body) = trimmed.strip_prefix("mod ") else {
+                // A cfg(test) item (not a module): keep it and move on.
+                out.push_str(&rest[..at + "#[cfg(test)]".len()]);
+                rest = after;
+                continue;
+            };
+            let Some(brace) = body.find('{') else {
+                out.push_str(rest);
+                return out;
+            };
+            out.push_str(&rest[..at]);
+            let open = rest.len() - after.len() + (after.len() - trimmed.len()) + "mod ".len() + brace;
+            let bytes = rest.as_bytes();
+            let mut depth = 0usize;
+            let mut j = open;
+            while j < bytes.len() {
+                match bytes[j] {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            j += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            rest = &rest[j..];
+        }
+    }
+
+    fn cfg_test_modules(files: &[(String, String)]) -> std::collections::HashSet<String> {
+        let mut mods = std::collections::HashSet::new();
+        for (_, src) in files {
+            let mut rest = src.as_str();
+            while let Some(at) = rest.find("#[cfg(test)]") {
+                let after = &rest[at..];
+                if let Some(m) = after.find("mod ") {
+                    let ident: String = after[m + 4..]
+                        .chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect();
+                    if !ident.is_empty() {
+                        mods.insert(ident);
+                    }
+                }
+                rest = &after["#[cfg(test)]".len()..];
+            }
+        }
+        mods
+    }
+
+    fn is_test_file(name: &str, test_mods: &std::collections::HashSet<String>) -> bool {
+        let stem = name.rsplit('/').next().unwrap_or(name).trim_end_matches(".rs");
+        name.split('/').any(|seg| seg == "tests") || stem.ends_with("_tests") || test_mods.contains(stem)
+    }
+
+    fn rust_files(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).expect("read src") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                rust_files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let name = path
+                    .strip_prefix(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"))
+                    .expect("under src")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.push((name, std::fs::read_to_string(&path).expect("read source")));
+            }
+        }
+    }
+
+    /// N5: scan ALL of `src/` (not a hand list) and forbid core's by-value
+    /// `FileKey::from_bytes(` outside this file. A key array held by value is
+    /// also forbidden: core wipes the argument it receives, but an array in a
+    /// caller's frame is not wiped when that call returns.
     #[test]
-    fn no_write_site_spells_its_own_by_value_key_copy() {
-        for (name, src) in [
-            ("commands/mv.rs", include_str!("../commands/mv.rs")),
-            ("commands/webdav/verbs.rs", include_str!("../commands/webdav/verbs.rs")),
-            ("owned_keys.rs", include_str!("../owned_keys.rs")),
-            ("commands/pull/run.rs", include_str!("../commands/pull/run.rs")),
-            ("commands/request.rs", include_str!("../commands/request.rs")),
-            ("commands/share.rs", include_str!("../commands/share.rs")),
-            ("upload/pipeline/mod.rs", include_str!("../upload/pipeline/mod.rs")),
-            (
-                "upload/pipeline/swept_session_reinit.rs",
-                include_str!("../upload/pipeline/swept_session_reinit.rs"),
-            ),
-            ("commands/push.rs", include_str!("../commands/push.rs")),
-            ("commands/sync/run.rs", include_str!("../commands/sync/run.rs")),
-            ("commands/sync/transfer.rs", include_str!("../commands/sync/transfer.rs")),
-            ("commands/mount.rs", include_str!("../commands/mount.rs")),
-            ("crypto.rs", include_str!("../crypto.rs")),
-            ("download.rs", include_str!("../download.rs")),
-        ] {
+    fn no_shipping_site_spells_its_own_by_value_key_copy() {
+        let mut files = Vec::new();
+        rust_files(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+        assert!(files.len() > 40, "scanned the whole crate: {}", files.len());
+        let test_mods = cfg_test_modules(&files);
+        for (name, src) in &files {
+            if name == "crypto/pins.rs" || is_test_file(name, &test_mods) {
+                continue; // the blessed copy / test-only source, asserted below
+            }
+            let code = shipping_code(src);
             assert!(
-                !src.contains("FileKey::from_bytes(*"),
-                "{name} spells its own by-value key copy; use crypto::key_from_bytes / key_copy"
+                !code.contains("FileKey::from_bytes("),
+                "{name} spells core's by-value key copy; use crypto::key_from_bytes / key_copy"
+            );
+            assert!(
+                !code.contains("let key: [u8; 32] ="),
+                "{name} holds a key array by value; wrap the array in Zeroizing and pass a reference"
             );
         }
         // The one blessed copy is this file's helper, into a buffer it wipes.
