@@ -171,7 +171,7 @@ fn an_upper_repair_request_row_is_refused() {
     );
 }
 
-/// P3-1 (2326 review2): the same upper-repair name, but the listing did not
+/// P3-2 (2326 review2): the same upper-repair name, but the listing did not
 /// flag the row read-only. The write check cannot see the name (the inode
 /// carries no such verdict), so the refusal must come from the resolver's
 /// upper-repair verdict having no `RenameTarget` — the `else` arm of the
