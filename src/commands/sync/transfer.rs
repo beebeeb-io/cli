@@ -386,6 +386,13 @@ pub(super) async fn replace_decision<'a>(
     let Some(r) = resolved else {
         return Replace::Skip(WRITE_CHECK_UNKNOWN);
     };
+    // R4-B (review-5 F4): a row that is read-only for a reason the resolver
+    // already knows (a failed request-key load) must say that reason. The
+    // write check below cannot see it and would fall through to the
+    // old-iOS repair sentence, which describes a different problem.
+    if let Some(reason) = r.read_only_reason {
+        return Replace::Skip(reason);
+    }
     // P2-10: a plaintext name is not the SF-0002 repair convention, and the
     // sentence must say what is actually wrong.
     if r.read_only && crate::crypto::name_is_plaintext(&r.canonical) {

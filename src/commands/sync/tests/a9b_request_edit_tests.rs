@@ -76,6 +76,43 @@ async fn watch_upload_of_request_edit(mut mock: Mock, s: &Scratch) -> (Result<()
 /// A9b (watch): the edit is uploaded as a new owner item, its init names a
 /// different id than the request row and carries no version base, and the
 /// request row is not trashed. No chunk is PUT under the request row's id.
+/// Review-5 F4: a request row whose keys could not be loaded (the request-list
+/// call failed) is read-only for that reason. Sync must say so, not fall
+/// through to the write check and print the old-iOS repair sentence.
+#[tokio::test]
+async fn a_request_list_failure_is_skipped_with_the_request_keys_reason() {
+    use crate::commands::sync::transfer::{Replace, replace_decision};
+    use crate::owned_keys::ResolvedCliKey;
+    use std::sync::Arc;
+
+    let master = beebeeb_core::kdf::MasterKey::from_bytes([7u8; 32]);
+    let id = "11111111-1111-4111-8111-111111111111";
+    let resolved = ResolvedCliKey {
+        key: Arc::new(beebeeb_core::kdf::derive_file_key(&master, id.as_bytes())),
+        name_key: None,
+        name_pin: None,
+        name_origin: None,
+        origin: beebeeb_core::owned_keys::KeyOrigin::Derived,
+        canonical: serde_json::json!({
+            "id": id, "name_encrypted": "{}", "size_bytes": 5, "chunk_count": 1
+        }),
+        pending_owner_wrap: None,
+        shared_root_id: None,
+        name: "payload.bin".to_string(),
+        read_only: true,
+        read_only_reason: Some(crate::owned_keys::REQUEST_KEYS_UNAVAILABLE),
+        write_target: None,
+    };
+    let api = ApiClient::new_for_test("http://127.0.0.1:9".to_string());
+    match replace_decision(&api, &master, Some(&resolved), true).await {
+        Replace::Skip(reason) => {
+            assert_eq!(reason, crate::owned_keys::REQUEST_KEYS_UNAVAILABLE);
+            assert_ne!(reason, crate::crypto::OWNER_REPAIR_READ_ONLY);
+        }
+        _ => panic!("an unverifiable request row must be skipped with its reason"),
+    }
+}
+
 #[tokio::test]
 async fn a_request_row_edit_in_the_watch_loop_is_a_new_owner_item() {
     let s = Scratch::new("a9b-watch");
