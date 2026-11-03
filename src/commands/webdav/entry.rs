@@ -13,6 +13,11 @@ pub(super) async fn write_refusal(state: &Arc<DavState>, entry: &ResolvedEntry) 
     if entry.read_only && entry.plaintext_name {
         return Err((StatusCode::FORBIDDEN, crate::owned_keys::PLAINTEXT_NAME_READ_ONLY).into_response());
     }
+    // R4-B: a row whose request fields could not be classified is read-only
+    // with its own one-line reason, never the SF-0002 repair sentence.
+    if let Some(reason) = entry.read_only_reason {
+        return Err((StatusCode::FORBIDDEN, reason).into_response());
+    }
     let target = crate::owned_keys::WriteTarget {
         file_id,
         is_folder: entry.is_collection,
@@ -105,7 +110,14 @@ pub(super) fn decode_file_entry(
     // L12 (P2-9): a request row's content stays under `C` and an edit becomes a
     // NEW owner item (A9b). It is one only when the resolver opens it; a server
     // that adds `file_request_id` to a v2-pinned owner file changes nothing.
-    if let Some(keys) = requests.and_then(|r| r.row_keys(master_key, file)) {
+    // R4-B: a row that carries request fields while the request list could not
+    // load is refused for writes instead of falling through as an owner row.
+    let requests_unavailable = requests.is_none();
+    let mut opened = None;
+    if let Some(requests) = requests {
+        opened = requests.row_keys(master_key, file);
+    }
+    if let Some(keys) = opened {
         let name = keys.name;
         return Some(ResolvedEntry {
             file_id: Some(file_id),
@@ -127,6 +139,8 @@ pub(super) fn decode_file_entry(
             origin: KeyOrigin::RequestContent,
         });
     }
+    let unverified_request = crate::commands::request::is_request_upload(file) && requests_unavailable;
+
     // L12: the id class decides the key path, and core resolves it. WebDAV has
     // no shared-folder ancestry here, so a foreign row stays unresolved (and
     // unwritable) rather than being guessed at.
@@ -192,6 +206,19 @@ pub(super) fn decode_file_entry(
             Err("this row's name does not authenticate under its own key".to_string()),
         ),
     };
+    // R4-B: a request-field row whose request list could not load proves
+    // nothing about its key path. Keep the name the owner resolver could show,
+    // but give it no seal target and a reason a write surfaces.
+    let (read_only, write_target, read_only_reason) = if unverified_request {
+        (
+            true,
+            None,
+            Some(crate::owned_keys::REQUEST_KEYS_UNAVAILABLE),
+        )
+    } else {
+        (read_only, write_target, None)
+    };
+
     Some(ResolvedEntry {
         file_id: Some(file_id),
         parent_id,
@@ -207,7 +234,7 @@ pub(super) fn decode_file_entry(
         name_pin: None,
         name_key: None,
         name_origin: None,
-        read_only_reason: None,
+        read_only_reason,
         write_target,
         origin,
     })

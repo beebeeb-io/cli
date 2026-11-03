@@ -188,6 +188,11 @@ async fn move_single(
         if src.read_only && src_keys.name_is_plaintext_for(&src_id) {
             return Err(crate::owned_keys::PLAINTEXT_NAME_READ_ONLY.to_string());
         }
+        // R4-B: request fields whose request list could not load stay read-only
+        // for their own reason, never writable as an owner row.
+        if let Some(reason) = src_keys.read_only_reason_for(&src_id) {
+            return Err(reason.to_string());
+        }
         // The listing that resolved this path already carries the version's
         // geometry, so no second GET is made.
         let row_key = src_keys.key_for(&src_id);

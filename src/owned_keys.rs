@@ -32,6 +32,11 @@ pub const PLAINTEXT_NAME_READ_ONLY: &str = "This file's name isn't encrypted, so
 /// request row; it falls back to the plaintext-owner path and a rename refuses
 /// with [`RENAME_UNKNOWN_KEY`] (2275 review-3 P2-9).
 pub const RENAME_UNKNOWN_KEY: &str = "can't rename this item: this device doesn't hold the key its name uses";
+/// R4-B: a row that carries request fields while the request list could not be
+/// loaded cannot be classified. Treating it as an owner row would let a 5xx
+/// turn a renamed request row writable, so it stays read-only and says why.
+pub const REQUEST_KEYS_UNAVAILABLE: &str =
+    "can't change this item: this device couldn't load your file-request keys. Try again when it can.";
 pub const OWNER_ONLY_NOTICE: &str = "Only you can open this. Share it from the web or the app.";
 
 /// Print [`OWNER_ONLY_NOTICE`] when `folder_id` sits in a shared folder.
@@ -104,6 +109,9 @@ pub struct OwnedKeyResolver {
     absent_roots: HashSet<String>,
     pending: HashMap<String, Vec<u8>>,
     requests: Option<RequestKeyResolver>,
+    /// R4-B: `GET /file-requests` failed. A row carrying request fields can no
+    /// longer be classified, so it must not fall through to the owner path.
+    requests_failed: bool,
     sent_invites: Option<Vec<Value>>,
     resolved: HashMap<String, ResolvedCliKey>,
     custody: Option<crate::custody::CustodyStore>,
@@ -176,6 +184,11 @@ impl OwnedKeyResolver {
     /// R4-A: which convention `name_key` came from (a request row only).
     pub fn name_origin_for(&self, id: &str) -> Option<KeyOrigin> {
         self.resolved.get(id).and_then(|r| r.name_origin)
+    }
+    /// R4-B: the one-line reason a row is read-only when it is not the
+    /// SF-0002 or plaintext-name reason.
+    pub fn read_only_reason_for(&self, id: &str) -> Option<&'static str> {
+        self.resolved.get(id).and_then(|r| r.read_only_reason)
     }
     /// Load (and cache) a shared root's custody and inventory, so the L14 check
     /// has the wrap even when the row itself resolves through an owner envelope.
@@ -330,11 +343,20 @@ impl OwnedKeyResolver {
         // resolves it; a server that adds those fields to a v2-pinned owner file
         // must not turn it into one, so a refusal falls through to the owner path
         // below, which keeps the recorded pin and its write target.
+        // R4-B: when the request list itself could not load, the fall-through is
+        // not safe: a 5xx would turn a renamed request row into a writable owner
+        // row. Such a row is refused for writes below, with a reason.
+        let mut unverified_request = false;
         if crate::commands::request::is_request_upload(&canonical) {
-            if self.requests.is_none() {
-                self.requests = RequestKeyResolver::load(api).await.ok();
+            if self.requests.is_none() && !self.requests_failed {
+                match RequestKeyResolver::load(api).await {
+                    Ok(requests) => self.requests = Some(requests),
+                    Err(_) => self.requests_failed = true,
+                }
             }
-            if let Some(keys) = self.requests.as_mut().and_then(|r| r.row_keys(master, &canonical)) {
+            if self.requests_failed {
+                unverified_request = true;
+            } else if let Some(keys) = self.requests.as_mut().and_then(|r| r.row_keys(master, &canonical)) {
                 let beebeeb_core::owned_keys::RequestRowKeys {
                     content_key,
                     name_key,
@@ -373,13 +395,13 @@ impl OwnedKeyResolver {
                 shared_root_id: None,
                 name: enc.to_string(),
                 read_only: true,
-                read_only_reason: None,
+                read_only_reason: unverified_request.then_some(REQUEST_KEYS_UNAVAILABLE),
                 write_target: None,
             });
         }
         let resolved = owned_keys::resolve_owned_key(master, id, kind, None, None, &enc, None)
             .map_err(|_| "can't decrypt item name".to_string())?;
-        let read_only = resolved.write_target.is_none();
+        let read_only = resolved.write_target.is_none() || unverified_request;
         let name_pin = match &resolved.name {
             beebeeb_core::owned_keys::ResolvedName::Encrypted(meta) => Some(meta.chunk_format),
             beebeeb_core::owned_keys::ResolvedName::Plaintext(_) => None,
@@ -395,8 +417,12 @@ impl OwnedKeyResolver {
             shared_root_id: None,
             name: resolved_name(&resolved.name),
             read_only,
-            read_only_reason: None,
-            write_target: resolved.write_target.map(Arc::new),
+            read_only_reason: unverified_request.then_some(REQUEST_KEYS_UNAVAILABLE),
+            write_target: if unverified_request {
+                None
+            } else {
+                resolved.write_target.map(Arc::new)
+            },
         })
     }
     /// L12: a foreign id is never derived. Its key is an L8 owner envelope that

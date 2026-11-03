@@ -97,6 +97,9 @@ pub struct Fixture {
     pub requests: Vec<(String, String, Vec<u8>)>,
     pub cycle: bool,
     pub requests_doc: Value,
+    /// R4-B: when set, `GET /api/v1/file-requests` answers this status instead
+    /// of the document (a 500 proves the fail-closed path).
+    pub requests_status: Option<u16>,
     pub legacy_invite: bool,
     pub frames: Vec<Vec<u8>>,
     pub stride: u64,
@@ -621,6 +624,9 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
         }));
         json!({"files_received": 1})
     } else if method == "GET" && path == "/api/v1/file-requests" {
+        if let Some(status) = f.requests_status {
+            return StatusCode::from_u16(status).unwrap().into_response();
+        }
         f.requests_doc.clone()
     } else if method == "GET" && path == "/api/v1/shares/invites/sent" {
         let seed = |id: &str| {

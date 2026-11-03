@@ -307,6 +307,39 @@ async fn r4a_request_row_name_under_content_key_renames_under_it() {
     h.close().await;
 }
 
+/// R4-B (review-4 P3): a 5xx on `GET /file-requests` must not turn a row that
+/// carries request fields into a writable owner row. It stays read-only with
+/// its own reason.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r4b_request_list_5xx_keeps_request_field_rows_read_only() {
+    const MARKED: &str = "66666666-6666-4666-8666-666666666666";
+    const REQ: &str = "88888888-8888-4888-8888-888888888888";
+    let mut f = Fixture::basic();
+    f.requests_status = Some(500);
+    let owner_key = beebeeb_core::kdf::derive_file_key(&master(), MARKED.as_bytes());
+    let body = b"pinned body";
+    f.plaintext = body.to_vec();
+    f.frames = vec![beebeeb_core::encrypt::encrypt_chunk_raw(&owner_key, body).unwrap()];
+    f.stride = body.len() as u64;
+    let mut r = row(MARKED, None, "marked.bin", RowFacts { ..Default::default() });
+    r["size_bytes"] = json!(body.len());
+    r["chunk_count"] = json!(1);
+    r["file_request_id"] = json!(REQ);
+    r["sender_ephemeral_pubkey"] = json!("AA");
+    r["wrapped_content_key"] = json!("AA");
+    f.rows.push(r);
+    let h = Harness::new(shared_folder(f)).await;
+    let out = h.run(&["mv", "marked.bin", "renamed.bin"]).await;
+    assert!(!out.status.success(), "a request-field row is not writable without the request list");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("couldn't load your file-request keys"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(h.count("PATCH", &format!("/api/v1/files/{MARKED}")), 0, "no rename");
+    h.close().await;
+}
+
 /// P2-9 (R3-N2): a server that adds the request fields to a v2-pinned owner
 /// file must not turn it into a request row. The fields do not resolve (the id
 /// names no request this device holds), so the rename keeps the owner path:

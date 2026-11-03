@@ -29,9 +29,7 @@ pub(crate) fn load_master_key() -> Result<beebeeb_core::kdf::MasterKey, String> 
     if mk_bytes.len() != 32 {
         return Err(format!("master key must be 32 bytes, got {}", mk_bytes.len()));
     }
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&mk_bytes);
-    Ok(beebeeb_core::kdf::MasterKey::from_bytes(arr))
+    crate::crypto::master_key_from_bytes(&mk_bytes)
 }
 
 /// How to handle a filename conflict when uploading.
@@ -476,6 +474,11 @@ async fn push_single_file(
                 mint_tag = Some(*minted.tag());
                 (None, None, None, Some(minted.id()))
             } else {
+                // R4-B: request fields whose request list could not load stay
+                // read-only with their own reason.
+                if let Some(reason) = resolved.read_only_reason {
+                    return Err(reason.to_string());
+                }
                 // P2-10: a plaintext name proves nothing; say so, not "older iOS app".
                 if resolved.read_only && crate::crypto::name_is_plaintext(&resolved.canonical) {
                     return Err(crate::owned_keys::PLAINTEXT_NAME_READ_ONLY.to_string());
