@@ -69,6 +69,8 @@ pub(super) async fn pull_folder_inner(
         let is_subfolder = item.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
         let name_enc = item.get("name_encrypted").and_then(|v| v.as_str()).unwrap_or("");
 
+        // Request-uploaded files decrypt their name via the request-key path.
+        let content_key = resolve_request_key(api, &master_key, item, request_keys).await;
         let resolved = match keys.resolve(api, &master_key, item).await {
             Ok(r) => r,
             Err(e) => {
@@ -78,9 +80,6 @@ pub(super) async fn pull_folder_inner(
             }
         };
         let decrypted_name = resolved.name;
-        // R3-P3: only after core had the row (the resolve above tries the bound
-        // reader first) does the R5 legacy content-key reader get consulted.
-        let content_key = resolve_request_key(api, &master_key, item, request_keys).await;
         let explicit_key = if !crate::owned_keys::is_derived_origin(resolved.origin) && content_key.is_none() {
             Some(resolved.key.clone())
         } else {

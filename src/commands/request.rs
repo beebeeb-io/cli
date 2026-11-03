@@ -585,11 +585,13 @@ impl RequestKeyResolver {
     /// shipped CLI and the web client wrote before either id existed.
     ///
     /// INVARIANT: this is not a general request-row reader and must not become
-    /// one. A caller may use it only after core has had the row
+    /// one. Every caller resolves the same row through core as well
     /// (`OwnedKeyResolver`, or `row_keys` above, which tries the bound
-    /// `resolve_request_row` first); the class+name gates below are the minimum
-    /// the legacy shape can prove, not an authentication. A bound envelope
-    /// cannot open here by construction, and core is the only reader for it.
+    /// `resolve_request_row` first); core wins when it resolves, and this only
+    /// fills `C` for the pre-2236 rows core cannot read. The class+name gates
+    /// below are the minimum the legacy shape can prove, not an authentication.
+    /// A bound envelope cannot open here by construction, and core is the only
+    /// reader for it.
     pub fn legacy_content_key(&mut self, master_key: &MasterKey, file: &serde_json::Value) -> Option<FileKey> {
         let fields = request_upload_fields(file)?;
         // P2-8 (review-2): the pull folder walk and `pull --zip` consume this
