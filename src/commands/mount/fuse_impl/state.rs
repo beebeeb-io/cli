@@ -36,6 +36,7 @@ impl BeebeebFsState {
                 parent_ino: ROOT_INO,
                 pin: no_content(),
                 read_only: false,
+                request_class: false,
             },
         );
         fs
@@ -95,6 +96,10 @@ impl BeebeebFsState {
             };
             let read_only =
                 name_encrypted.is_some_and(|enc| crate::crypto::name_is_upper_repair(&self.master_key, &file_id, enc));
+            // P3-3: the row came through a file request. Presence alone is the
+            // fail-safe signal (4ca0894): a grafted field can only refuse a
+            // content write, never allow one.
+            let request_class = file.get("file_request_id").and_then(|v| v.as_str()).is_some();
             let pin = match (is_folder, name_encrypted) {
                 (true, _) => no_content(),
                 (false, Some(enc)) => {
@@ -111,6 +116,7 @@ impl BeebeebFsState {
                     entry.modified = modified;
                     entry.pin = pin;
                     entry.read_only = read_only;
+                    entry.request_class = request_class;
                 }
                 existing
             } else {
@@ -131,6 +137,7 @@ impl BeebeebFsState {
                         parent_ino: dir_ino,
                         pin,
                         read_only,
+                        request_class,
                     },
                 );
                 ino

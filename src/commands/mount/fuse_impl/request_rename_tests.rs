@@ -46,6 +46,7 @@ fn entry(file_id: &str, name: &str, read_only: bool) -> InodeEntry {
         parent_ino: ROOT_INO,
         pin: Ok(ExpectedChunkFormat::Unrecorded),
         read_only,
+        request_class: true,
     }
 }
 
@@ -297,4 +298,31 @@ fn a_rename_onto_a_request_row_is_refused_before_the_move() {
     );
     assert_eq!(fs.inodes[&ROW_INO].name, "request.txt", "the source was renamed anyway");
     assert_eq!(fs.inodes[&CONFLICT_INO].file_id.as_deref(), Some(CONFLICT_ID));
+}
+
+/// P3-3 (2326 review3): the server declares the empty request row with 0
+/// chunks, so the write check skips the probe and the row would be `Writable`.
+/// The resolution is request-class, so a content write is still refused: an
+/// edit would upload a new owner file and trash the sender's row.
+#[test]
+fn an_empty_request_row_overwrite_is_refused_and_trashes_nothing() {
+    let content_key = beebeeb_core::kdf::FileKey::from_bytes([42u8; 32]);
+    let mut mock = Mock::default();
+    add_request_row(&mut mock, ROW_ID, "request.txt", &content_key, 0);
+    let (mut fs, mock) = setup(mock);
+    let mut inode = entry(ROW_ID, "request.txt", false);
+    inode.chunk_count = 0;
+    fs.inodes.insert(ROW_INO, inode);
+    fs.id_to_ino.insert(ROW_ID.to_string(), ROW_INO);
+
+    assert_eq!(fs.commit_overwrite(ROW_INO, b"edited".to_vec()), Err(Errno::EPERM));
+    let m = mock.lock().unwrap();
+    assert!(
+        m.inits.is_empty(),
+        "an empty request row was uploaded over: {:?}",
+        m.events
+    );
+    assert!(m.trashed.is_empty(), "the sender's row was trashed: {:?}", m.events);
+    drop(m);
+    assert_eq!(fs.inodes[&ROW_INO].file_id.as_deref(), Some(ROW_ID));
 }

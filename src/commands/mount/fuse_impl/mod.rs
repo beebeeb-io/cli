@@ -182,6 +182,15 @@ struct InodeEntry {
     /// convention. A rename is refused with EPERM; the content is checked
     /// at rename time as well (the name alone does not decide).
     read_only: bool,
+    /// The listing carried `file_request_id`: the row was uploaded through a
+    /// file request, so the sender owns its content and this device holds only
+    /// the probe key `C`, which never seals. A content write is refused even
+    /// when the probe cannot run (an empty, 0-chunk row): an edit would upload
+    /// a new owner file and trash the sender's row (P3-3, 2326 review3). The
+    /// field's presence alone is enough — a grafted one can only refuse a
+    /// write (the 4ca0894 rule). A rename stays allowed through core's
+    /// `RenameTarget`.
+    request_class: bool,
 }
 
 /// What a directory carries in [`InodeEntry::pin`].

@@ -179,6 +179,7 @@ impl BeebeebFsState {
                 // pin (task 1943: the new-file writer pin is Unrecorded).
                 pin: Ok(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded),
                 read_only: false,
+                request_class: false,
             },
         );
         self.pending_creates.insert(
@@ -635,6 +636,7 @@ impl BeebeebFsState {
                 parent_ino: parent,
                 pin: no_content(),
                 read_only: false,
+                request_class: false,
             },
         );
         self.dir_cache.remove(&parent);
@@ -743,7 +745,7 @@ impl BeebeebFsState {
     /// content (sealed under `C`) comes back `EAGAIN`. `EPERM` for a read-only
     /// row; the row is never marked read-only on an undecided check.
     pub(super) fn check_stored_row(&self, ino: u64, what: &str) -> Result<(), Errno> {
-        self.check_write(ino, what, None)
+        self.check_write(ino, what, None, true)
     }
 
     /// The write check for a `rename`'s SOURCE row only. The rename ladder
@@ -763,10 +765,16 @@ impl BeebeebFsState {
         what: &str,
         row_key: Option<&beebeeb_core::kdf::FileKey>,
     ) -> Result<(), Errno> {
-        self.check_write(ino, what, row_key)
+        self.check_write(ino, what, row_key, false)
     }
 
-    fn check_write(&self, ino: u64, what: &str, row_key: Option<&beebeeb_core::kdf::FileKey>) -> Result<(), Errno> {
+    fn check_write(
+        &self,
+        ino: u64,
+        what: &str,
+        row_key: Option<&beebeeb_core::kdf::FileKey>,
+        content_write: bool,
+    ) -> Result<(), Errno> {
         let Some(entry) = self.inodes.get(&ino) else {
             return Err(Errno::ENOENT);
         };
@@ -790,6 +798,15 @@ impl BeebeebFsState {
             .rt
             .block_on(crate::owned_keys::write_check(&self.api, &self.master_key, &target))
         {
+            // P3-3: a request row's content belongs to the sender. The probe
+            // may still say Writable (an empty row skips it), but an edit
+            // would upload a new owner file and trash the sender's row. A
+            // rename is not a content write: it goes through the request's
+            // `RenameTarget` instead.
+            crate::owned_keys::WriteCheck::Writable if content_write && entry.request_class => {
+                eprintln!("[mount] {what} refused for {file_id}: a file-request row's content is the sender's");
+                Err(Errno::EPERM)
+            }
             crate::owned_keys::WriteCheck::Writable => Ok(()),
             crate::owned_keys::WriteCheck::UpperRepair => {
                 eprintln!(

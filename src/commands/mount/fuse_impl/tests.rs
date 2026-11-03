@@ -27,6 +27,7 @@ mod owner_only_tests {
             parent_ino: ROOT_INO,
             pin: Err("a directory has no content".to_string()),
             read_only: false,
+            request_class: false,
         }
     }
 
@@ -121,6 +122,7 @@ mod truncate_tests {
             parent_ino: ROOT_INO,
             pin,
             read_only: false,
+            request_class: false,
         }
     }
 
@@ -624,6 +626,7 @@ mod truncate_tests {
                 parent_ino: ROOT_INO,
                 pin: Ok(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded),
                 read_only: false,
+                request_class: false,
             },
         );
 
@@ -775,6 +778,7 @@ mod rename_check_tests {
             parent_ino: ROOT_INO,
             pin: no_content(),
             read_only,
+            request_class: false,
         }
     }
 
@@ -872,6 +876,7 @@ mod replace_tests {
             parent_ino: ROOT_INO,
             pin: Ok(ExpectedChunkFormat::Unrecorded),
             read_only,
+            request_class: false,
         }
     }
 
