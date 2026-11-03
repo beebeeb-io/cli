@@ -1,36 +1,42 @@
-# bb 0.15.0: shared folders and file requests, more honest about read-only
+# bb 0.15.0: direct uploads, and safer handling of shared folders and file requests
 
-This release brings shared folders and file requests into focus. The CLI now syncs guest changes in shared folders, keeps owner writes owner-only, and refuses writes it cannot prove. It is more explicit about read-only cases, repair, mount (FUSE), WebDAV, and sync. The codebase was split into smaller modules; no behaviour change is intended beyond the items listed.
+`bb push` and `bb sync` can now upload a file's encrypted chunks straight to Beebeeb's object storage, the same way 0.14.4 started doing for downloads. This release also changes how the CLI treats files you did not create yourself: files other people add to a folder you share, and files someone sends you through a file request. The CLI opens them with the keys meant for them, keeps your own writes private where it has to, and refuses a change it cannot make safely instead of guessing. The code was also split into smaller modules; that split is not meant to change behaviour beyond what is listed here.
 
 ### What's New
 
-- **Shared folders.** `bb sync` and the mount adopt guest changes in shared folders. An owner's write into a shared folder stays owner-only. Before a move out of a shared root, the CLI adopts foreign descendants. A shared folder is indexed only for rows whose key proves the row. A shared subtree is adopted before every move surface.
-- **File requests.** `bb push` and `bb sync` support uploads to file requests. A request-row rename seals under the string key, never the content key. `bb repair` skips request uploads instead of re-sealing their names. The CLI refuses a content write to a request-class row. A request-link token that is not one path segment is refused.
-- **Mount (FUSE).** The mount is ported to fuser 0.18 and compiled in CI. It gets an owner-only session ACL and 0o700/0o600 modes. Writes are marked dirty, content is loaded before a resize, and a file's content is kept when it is truncated. The mount refuses a rename of a read-only repair row. It never trashes a row it has not checked or replaced. `node_perm()` and `mount_config()` are extracted as pure functions.
-- **WebDAV.** A plaintext-named v2 file is refused on read instead of guessing its pin. A PUT resolves the request row.
-- **Sync.** Manifests are bound to the session account. Canonical versions and shared index tombstones converge. Watch reconciliation stays within its bound root. Partial and deferred search index repairs are reported. Client metadata is sent and read only as ciphertext. The stop commands keep working against older servers. The CLI adopts core's owner file-key envelopes. It remembers authenticated custody in account-bound sync state, retains custody facts when the first sync fails, and retains custody history across safe root rebinding. Sign-out repairs an unreadable account binding. Account-wide custody is persisted before inventory I/O.
-- **Downloads and uploads.** `bb push` and `bb sync` use direct S3 uploads (`object-upload-v1`) when the server offers them. A no-header download frame above the maximum frame size is refused. A legacy multi-chunk frame size is probed like the read path. A legacy JSON-blob chunk 0 is decided, not Unknown.
+- **Direct uploads.** When the server offers them, uploads go to object storage over short-lived links, one file at a time. Chunks are encrypted on your machine before they leave it, exactly as before; the links only ever carry ciphertext. When the server does not offer direct uploads, the file goes through the API as it did in 0.14.4. A file that cannot finish directly starts over through the API. An authorization refusal stops that file instead, because the API would refuse it too. `BB_TRANSPORT=api` (or `--transport api`) still forces the API for every transfer.
+- **Folders you share.** Files that other people add to a folder you share now sync, and the CLI opens them with the key the folder gives them, never with a key derived from your own account. A file you add to a shared folder from the CLI stays readable only to you. The CLI prints "Only you can open this. Share it from the web or the app." when that happens.
+- **Moving files out of a shared folder.** Before a file someone else added leaves a shared folder, the CLI first takes it over under your own account, so you can still open it after the move. If that cannot be done, the move is refused and nothing changes.
+- **Files received through a file request.** These open through the same shared crypto code the web app uses. You can rename them, and the new name is encrypted under a key derived for that file, never under the key the sender used. Their content is read-only. `bb sync` saves an edit as a new file, and the mount refuses to overwrite one. `bb repair` leaves them alone.
+- **Mount (FUSE).** It is updated to fuser 0.18. The mount point and its files are now accessible only to your own user (directories 0700, files 0600, plus an owner-only session ACL). Renaming a file received through a file request works over the mount; writing to its content is refused.
 
 ### Bug Fixes / Hardening
 
-- A folder rename is never probed. `bb sync` never trashes a row it cannot prove writable. A kept read-only edit is a sync notice with guidance. The mount never trashes a row it has not checked or replaced. A rename of a file added by someone else seals under the string key, never the content key. The mount's source row is resolved before the write check. The keyed write check is the rename source check.
-- A request row's pin is read under its resolved name key. The CLI fails closed when the request list cannot load. A request-row rename over the mount takes core's `RenameTarget`.
-- The CLI refuses corrupt move destination metadata. An explicit replacement resume is bound to the intended file. Sync identity is compared before remote versions. A legacy invite owner copy is opened only with a possession proof. One owner-only notice is printed per command on every write surface. The CLI says why a plaintext-named row cannot be changed. A rename the device has no key for is refused.
-- Replace and rename are refused when the current version content is repair-sealed. An explicit key never falls back to owner keys. An explicit-key download fails at frame 0 again and wipes key copies. `bb repair` writes a verified new version, never trashing first. A repair row is skipped on `file_request_id` alone. The upper-repair request row's resolution is pinned, not just its refusal.
-- The FUSE-only name helpers are gated to the fuse feature. The mount's ACL comment is corrected. The mount's owner-only session ACL and 0o700/0o600 modes are added. The mount's owner-only tests are added.
+- `bb sync` only moves a replaced file on the server to the trash after its new copy has been written and checked. It never trashes a file it cannot prove it is allowed to change.
+- A file you edited locally that turns out to be read-only is kept and reported with guidance, instead of failing the sync pass.
+- When the CLI can read a file but cannot safely change it, for example some files saved from the iOS Files app, the file is read-only, and the CLI tells you why. A rename of a file this device has no key for is refused with a reason.
+- Sync state is tied to the account you are signed in with, so switching accounts no longer mixes their state.
+- A downloaded chunk larger than the maximum chunk size is refused instead of being read.
+- A file request link whose token is not a single path segment is refused.
+- Key material the CLI copies while working is wiped after use.
 
 ### Compatibility
 
-- **This CLI with an older server:** the server may not advertise the new shared-folder and file-request endpoints. The CLI falls back to the API where possible. A server without the new upload endpoints uses the API for uploads. A server without the request-row features refuses the relevant operations with a clear message. The CLI keeps the stop commands working against older servers.
-- **An older CLI with a newer server:** unchanged. 0.14.4 and earlier never ask for the new endpoints.
-- Dependency change: `beebeeb-core` / `beebeeb-types` pinned to `d3b40e3` (core main is `125bce8` with the same tree). New dependencies: `notify 8`, `notify-debouncer-full 0.7`, `open 5.4.5`, `indicatif 0.18.6`, `rpassword 7.5.4`. Updated GitHub Actions.
+- **This CLI with a server that offers no direct uploads:** every upload goes through the API, exactly as in 0.14.4. Direct uploads are used only when the server lists `object-upload-v1` in `GET /api/v1/transfer/capabilities`.
+- **Shared folders and file requests** use the same server endpoints the web app uses today.
+- **An older CLI with this server:** unchanged.
+- Dependency changes:
+  - `beebeeb-core` / `beebeeb-types` are pinned to `d3b40e3`, the same code as core `main` at the time of this release.
+  - fuser 0.14 → 0.18, notify 7 → 8, notify-debouncer-full 0.4 → 0.7, indicatif 0.17 → 0.18.
 
 ### Verification
 
-- `cargo test --locked --features fuse` on the remote runner: 210 passed, 0 failed, 1 ignored.
-- `cargo test --locked` (default features) on the remote runner: 250 passed, 0 failed, 1 ignored.
-- Clippy with warnings denied: rc 0 for default and fuse. `cargo fmt --check`: rc 0.
-- Release gates: full required CLI CI, five platform builds, draft asset readback with checksum assertions, and an update test from 0.14.4 before publishing. (The lead does those.)
+- **Test suites** at the commit this release is built from, on a Linux test machine:
+  - default features: 992 passed, 0 failed, 4 ignored (38 test binaries);
+  - with `--features fuse`: 1,039 passed, 0 failed, 4 ignored.
+- **Lint:** Clippy with warnings denied is clean, with default features and with `fuse`. rustfmt is clean.
+- **Crypto review:** the handling of files received through a file request (reads, renames, the mount and `bb repair`) went through three rounds of review. The last round found nothing that could seal a name or content under the sender's key.
+- **Release gates:** the full required CLI CI, five platform builds, a readback of the draft assets with checksum assertions, and an update test from 0.14.4 before publishing.
 
 ### Install / Update
 
