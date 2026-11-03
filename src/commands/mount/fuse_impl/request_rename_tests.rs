@@ -66,7 +66,7 @@ fn request_row_mock(id: &str, name: &str, name_key: &beebeeb_core::kdf::FileKey)
     let seal = beebeeb_core::file_request::seal_to_request(&public, id.as_bytes(), &content)
         .expect("seal the content key to the request");
     let sealed_name =
-        beebeeb_core::encrypt::encrypt_name_for(name_key, name, Some("text/plain"), ExpectedChunkFormat::Unrecorded)
+        beebeeb_core::encrypt::encrypt_name_for(name_key, name, Some("text/plain"), ExpectedChunkFormat::V2)
             .expect("row name");
     let mut mock = Mock {
         requests_doc: serde_json::json!({"file_requests": [{
@@ -135,8 +135,8 @@ fn a_request_row_is_renamed_under_the_string_key_never_the_content_key() {
     assert_eq!(after.name, "renamed.txt");
     assert_eq!(
         after.chunk_format,
-        ExpectedChunkFormat::Unrecorded,
-        "the rename carries the pin the current name records"
+        ExpectedChunkFormat::V2,
+        "the rename carries the pin the current name records, not a hard-coded default"
     );
     assert!(
         beebeeb_core::encrypt::decrypt_name_metadata_with_key(&content_key, sent).is_err(),
