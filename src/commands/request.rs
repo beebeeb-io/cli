@@ -46,10 +46,15 @@ use crate::api::ApiClient;
 use crate::ui;
 
 /// HKDF context for wrapping a request's X25519 private key under the master key.
-/// Empty: the server-assigned request id/token do not exist at wrap time.
+/// Empty is the cross-client contract (the web client's FILE_REQUEST_EMPTY_ID):
+/// the server mints the request id AFTER this wrap, so there is no id to bind.
+/// Core's bound 2236 writer takes one, but using it here would write an envelope
+/// only a client that already knows that id could open. Keep the legacy shape;
+/// the R5 reader opens it (see `w_request_created_here_sends_uploads_our_pull_can_open`).
 const REQUEST_WRAP_CONTEXT: &[u8] = b"";
 /// HKDF context for sealing a per-file content key to a request public key.
-/// Empty: the server-assigned file id does not exist at seal time.
+/// Empty for the same reason: the server mints the file id after the seal (the
+/// web client passes `FILE_REQUEST_EMPTY_ID` too). See [`REQUEST_WRAP_CONTEXT`].
 const REQUEST_SEAL_CONTEXT: &[u8] = b"";
 
 /// Default base used to build the shareable link when the server response does

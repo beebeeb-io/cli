@@ -426,6 +426,11 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
     let method = req.method().to_string();
     let uri = req.uri().clone();
     let path = uri.path();
+    let content_type = req
+        .headers()
+        .get("content-type")
+        .map(|v| v.to_str().unwrap_or("").to_string())
+        .unwrap_or_default();
     let query: HashMap<String, String> = reqwest::Url::parse(&format!("http://localhost{uri}"))
         .unwrap()
         .query_pairs()
@@ -577,6 +582,41 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
             FILE
         };
         json!({"file_id":completed_id,"id":completed_id})
+    } else if method == "POST" && path == "/api/v1/file-requests" {
+        let body = f.requests.last().unwrap().2.clone();
+        let doc: Value = serde_json::from_slice(&body).unwrap();
+        f.requests_doc = json!({"file_requests":[{
+            "id": SUB,
+            "wrapped_private_key": doc["wrapped_private_key"].clone(),
+            "wrap_nonce": doc["wrap_nonce"].clone(),
+        }]});
+        json!({"id": SUB, "token": "tok-r15", "request_url": format!("http://{host}/r/tok-r15")})
+    } else if method == "POST" && path == "/api/v1/r/tok-r15/upload" {
+        let body = f.requests.last().unwrap().2.clone();
+        let parts = multipart_parts(&content_type, &body);
+        let meta: Value =
+            serde_json::from_slice(parts.get("metadata").expect("request upload metadata")).unwrap();
+        let chunk = parts.get("chunk_0").cloned().expect("request upload chunk_0");
+        f.frames = vec![chunk];
+        f.stride = meta["size_bytes"].as_u64().unwrap_or(0);
+        f.rows.push(json!({
+            "id": "99999999-9999-4999-8999-999999999999",
+            "parent_id": null,
+            "name_encrypted": meta["name_encrypted"].clone(),
+            "is_folder": false,
+            "size_bytes": meta["size_bytes"].clone(),
+            "chunk_count": 1,
+            "version_number": 1,
+            "created_at": "2026-10-28T10:00:00Z",
+            "updated_at": "2026-10-28T10:00:00Z",
+            "acted_via_share_id": null,
+            "uploaded_by": null,
+            "owner_wrapped_file_key": null,
+            "file_request_id": SUB,
+            "sender_ephemeral_pubkey": meta["sender_ephemeral_pubkey"].clone(),
+            "wrapped_content_key": meta["wrapped_key"].clone(),
+        }));
+        json!({"files_received": 1})
     } else if method == "GET" && path == "/api/v1/file-requests" {
         f.requests_doc.clone()
     } else if method == "GET" && path == "/api/v1/shares/invites/sent" {
@@ -695,4 +735,51 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
         return (StatusCode::NOT_FOUND, Body::empty()).into_response();
     };
     axum::Json(value).into_response()
+}
+
+/// Split a `multipart/form-data` body into its named parts. The mock only
+/// needs the two parts `bb request send` writes: the metadata JSON and chunk_0.
+fn multipart_parts(content_type: &str, body: &[u8]) -> HashMap<String, Vec<u8>> {
+    let boundary = content_type
+        .split("boundary=")
+        .nth(1)
+        .unwrap_or("")
+        .trim_matches('"');
+    let delimiter = format!("--{boundary}").into_bytes();
+    let mut parts = HashMap::new();
+    let mut rest = body;
+    while let Some(at) = find_bytes(rest, &delimiter) {
+        rest = &rest[at + delimiter.len()..];
+        if rest.starts_with(b"--") {
+            break;
+        }
+        if rest.starts_with(b"\r\n") {
+            rest = &rest[2..];
+        }
+        let Some(headers_end) = find_bytes(rest, b"\r\n\r\n") else {
+            break;
+        };
+        let headers = String::from_utf8_lossy(&rest[..headers_end]).to_string();
+        rest = &rest[headers_end + 4..];
+        let Some(next) = find_bytes(rest, &delimiter) else {
+            break;
+        };
+        let mut content = &rest[..next];
+        if content.ends_with(b"\r\n") {
+            content = &content[..content.len() - 2];
+        }
+        let name = headers
+            .split("name=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap_or("")
+            .to_string();
+        parts.insert(name, content.to_vec());
+        rest = &rest[next..];
+    }
+    parts
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
 }

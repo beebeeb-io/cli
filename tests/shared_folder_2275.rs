@@ -981,3 +981,29 @@ async fn a_owner_only_notice_is_printed_once_per_command() {
     assert_eq!(h.count("POST", "/owner-key"), 0);
     h.close().await;
 }
+
+/// P2-9 (R3-W): the shape `bb request create` + `bb request send` write must be
+/// one this CLI's own pull can open. Core at the pinned rev has the bound 2236
+/// writers, but the server mints the row id AFTER the crypto (and the web client
+/// still writes `FILE_REQUEST_EMPTY_ID`), so create/send keep the legacy empty
+/// wrap/seal contexts and the R5 reader opens them. This test proves that
+/// contract end to end: no local key, no second implementation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn w_request_created_here_sends_uploads_our_pull_can_open() {
+    let content = b"sent through the request".to_vec();
+    let mut f = Fixture::basic();
+    f.plaintext = content.clone();
+    f.stride = content.len() as u64;
+    let h = Harness::new(shared_folder(f)).await;
+
+    let created = h.json(&["request", "create"]).await;
+    let link = created["link"].as_str().expect("a request link").to_string();
+    let src = h.home.join("sent.bin");
+    std::fs::write(&src, &content).unwrap();
+    ok(h.run(&["request", "send", &link, src.to_str().unwrap()]).await);
+
+    let out = h.home.join("received.bin");
+    ok(h.run(&["pull", "sent.bin", "-o", out.to_str().unwrap()]).await);
+    assert_eq!(std::fs::read(out).unwrap(), content, "the owner opens what the request accepted");
+    h.close().await;
+}
