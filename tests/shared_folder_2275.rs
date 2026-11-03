@@ -330,7 +330,10 @@ async fn r4b_request_list_5xx_keeps_request_field_rows_read_only() {
     f.rows.push(r);
     let h = Harness::new(shared_folder(f)).await;
     let out = h.run(&["mv", "marked.bin", "renamed.bin"]).await;
-    assert!(!out.status.success(), "a request-field row is not writable without the request list");
+    assert!(
+        !out.status.success(),
+        "a request-field row is not writable without the request list"
+    );
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("couldn't load your file-request keys"),
         "{}",

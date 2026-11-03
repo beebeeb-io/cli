@@ -307,7 +307,9 @@ pub(super) async fn upload_attempt(
             session_id,
             direct,
         } => (file_id, Some(session_id), direct, None),
-        SessionPlan::Init { file_id, resume_tag, .. } => (file_id, None, false, resume_tag),
+        SessionPlan::Init {
+            file_id, resume_tag, ..
+        } => (file_id, None, false, resume_tag),
     };
     let file_id_str = file_id.to_string();
 

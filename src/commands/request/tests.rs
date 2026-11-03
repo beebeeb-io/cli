@@ -280,8 +280,7 @@ fn r4a_a_donated_r5_envelope_on_a_binary_owner_row_is_refused() {
     let (metadata, _chunks) = seal_file_for_request(&r_pub, "donor.bin", None, b"donor content", 16).unwrap();
     let meta: serde_json::Value = serde_json::from_str(&metadata).unwrap();
     let item_id = "99999999-8888-7777-6666-555555555555";
-    let binary_key =
-        beebeeb_core::kdf::derive_file_key(&mk, uuid::Uuid::parse_str(item_id).unwrap().as_bytes());
+    let binary_key = beebeeb_core::kdf::derive_file_key(&mk, uuid::Uuid::parse_str(item_id).unwrap().as_bytes());
     let owner_name = beebeeb_core::encrypt::encrypt_name_for(
         &binary_key,
         "owner.bin",

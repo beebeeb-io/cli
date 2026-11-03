@@ -210,11 +210,7 @@ pub(super) fn decode_file_entry(
     // nothing about its key path. Keep the name the owner resolver could show,
     // but give it no seal target and a reason a write surfaces.
     let (read_only, write_target, read_only_reason) = if unverified_request {
-        (
-            true,
-            None,
-            Some(crate::owned_keys::REQUEST_KEYS_UNAVAILABLE),
-        )
+        (true, None, Some(crate::owned_keys::REQUEST_KEYS_UNAVAILABLE))
     } else {
         (read_only, write_target, None)
     };

@@ -149,7 +149,7 @@ pub(super) async fn pull_folder_inner(
                         explicit_key.clone(),
                     )
                     .await
-                        .map_err(|e| format!("{}: {}", target.display(), String::from(e)))?;
+                    .map_err(|e| format!("{}: {}", target.display(), String::from(e)))?;
                 }
                 // Every other failure (an expired session, a server error, a full disk, a file that does
                 // not decrypt) stops the folder pull and names the file, as it always did: a pull that
