@@ -377,6 +377,7 @@ impl OwnedKeyResolver {
                     name_key,
                     name_origin,
                     name,
+                    ..
                 } = keys;
                 return Ok(ResolvedCliKey {
                     key: Arc::new(content_key),

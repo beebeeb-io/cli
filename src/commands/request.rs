@@ -714,12 +714,15 @@ impl RequestKeyResolver {
                 beebeeb_core::encrypt::decrypt_name_metadata_with_key(&content_key, enc).ok()?,
             ),
         };
-        Some(RequestRowKeys {
+        Some(RequestRowKeys::new(
+            master_key,
+            id,
             content_key,
             name_key,
             name_origin,
             name,
-        })
+            beebeeb_core::owned_keys::RequestSeal::Unbound,
+        ))
     }
 }
 
