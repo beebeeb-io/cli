@@ -170,3 +170,33 @@ fn an_upper_repair_request_row_is_refused() {
         "a read-only request row sent a move"
     );
 }
+
+/// P3-1 (2326 review2): the same upper-repair name, but the listing did not
+/// flag the row read-only. The write check cannot see the name (the inode
+/// carries no such verdict), so the refusal must come from the resolver's
+/// upper-repair verdict having no `RenameTarget` — the `else` arm of the
+/// ladder, which the read-only inode above never reaches.
+#[test]
+fn an_upper_repair_name_is_refused_even_when_the_listing_flagged_it_writable() {
+    const UPPER: &str = "5f0c2a9e-3b1d-4c7e-9a2f-6d8e1b4c7a30";
+    let upper_key = beebeeb_core::kdf::derive_file_key(&master(), UPPER.to_uppercase().as_bytes());
+    let (mut fs, mock) = setup(request_row_mock(UPPER, "request.txt", &upper_key));
+    fs.inodes.insert(ROW_INO, entry(UPPER, "request.txt", false));
+    fs.id_to_ino.insert(UPPER.to_string(), ROW_INO);
+
+    let renamed = fs.rename_stored(
+        ROW_INO,
+        UPPER,
+        UPPER.parse().ok(),
+        "request.txt",
+        ROOT_INO,
+        ROOT_INO,
+        "renamed.txt",
+        None,
+    );
+    assert_eq!(renamed, Err(Errno::EPERM));
+    assert!(
+        mock.lock().unwrap().events.is_empty(),
+        "an upper-repair name sent a move"
+    );
+}
