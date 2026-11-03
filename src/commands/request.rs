@@ -679,17 +679,22 @@ impl RequestKeyResolver {
         )
         .ok()?;
         let content_key = crate::crypto::key_from_bytes(&content);
-        let derived = beebeeb_core::kdf::owner_file_key_for_name(master_key, id, enc)
-            .ok()
-            .and_then(|(key, convention)| {
-                let origin = match convention {
-                    beebeeb_core::kdf::OwnerKeyConvention::String => KeyOrigin::Derived,
-                    beebeeb_core::kdf::OwnerKeyConvention::Binary => KeyOrigin::DerivedBinary,
-                    beebeeb_core::kdf::OwnerKeyConvention::UpperRepair => KeyOrigin::DerivedUpperRepair,
-                };
+        // R4-A: the R5 envelope binds no ids, so its three fields can be
+        // grafted onto any owner row the server likes. Only the STRING owner
+        // convention is the pre-2236 request shape; a binary or upper-repair
+        // name proves this row is an owner row, not a request row, and is
+        // refused rather than re-sealed under the donor's content key.
+        let derived = match beebeeb_core::kdf::owner_file_key_for_name(master_key, id, enc) {
+            Ok((key, beebeeb_core::kdf::OwnerKeyConvention::String)) => {
                 let name = beebeeb_core::encrypt::decrypt_name_metadata_with_key(&key, enc).ok()?;
-                Some((key, origin, name))
-            });
+                Some((key, KeyOrigin::Derived, name))
+            }
+            Ok((
+                _,
+                beebeeb_core::kdf::OwnerKeyConvention::Binary | beebeeb_core::kdf::OwnerKeyConvention::UpperRepair,
+            )) => return None,
+            Err(_) => None,
+        };
         let (name_key, name_origin, name) = match derived {
             Some(v) => v,
             None => (

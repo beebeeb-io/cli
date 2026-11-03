@@ -267,6 +267,46 @@ fn a_foreign_id_request_row_is_refused_not_resolved_locally() {
         "a foreign-id request row is refused by core and must not fall back"
     );
 }
+/// R4-A (review-4 P2): the R5 envelope binds no ids. A server can copy a
+/// pre-2236 request row's three fields onto a binary-convention owner file;
+/// R5 must not resolve that row as a request row (the name is the owner's,
+/// under the binary convention, while the content key is the donor's).
+#[test]
+fn r4a_a_donated_r5_envelope_on_a_binary_owner_row_is_refused() {
+    let mk = test_master_key();
+    let request_id = "11111111-2222-3333-4444-555555555555".parse::<uuid::Uuid>().unwrap();
+    let (r_priv, r_pub) = generate_request_keypair();
+    let (wrapped, nonce) = file_request::wrap_request_private(&mk, REQUEST_WRAP_CONTEXT, &r_priv).unwrap();
+    let (metadata, _chunks) = seal_file_for_request(&r_pub, "donor.bin", None, b"donor content", 16).unwrap();
+    let meta: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+    let item_id = "99999999-8888-7777-6666-555555555555";
+    let binary_key =
+        beebeeb_core::kdf::derive_file_key(&mk, uuid::Uuid::parse_str(item_id).unwrap().as_bytes());
+    let owner_name = beebeeb_core::encrypt::encrypt_name_for(
+        &binary_key,
+        "owner.bin",
+        None,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap();
+    let row = serde_json::json!({
+        "id": item_id,
+        "name_encrypted": owner_name,
+        "is_folder": false,
+        "file_request_id": request_id.to_string(),
+        "sender_ephemeral_pubkey": meta["sender_ephemeral_pubkey"].as_str().unwrap(),
+        "wrapped_content_key": meta["wrapped_key"].as_str().unwrap(),
+    });
+    let mut resolver = RequestKeyResolver {
+        wrapped: std::collections::HashMap::from([(request_id, (b64std().encode(&wrapped), b64std().encode(&nonce)))]),
+        privs: std::collections::HashMap::new(),
+    };
+    assert!(
+        resolver.row_keys(&mk, &row).is_none(),
+        "a binary-convention owner name never resolves through the R5 request reader"
+    );
+}
+
 /// R5 (run 14): the pre-2236 request upload every shipped CLI and web client
 /// wrote — empty seal and wrap contexts, owner-class id — must still open.
 /// Core's bound-envelope reader refuses that shape, so the legacy reader

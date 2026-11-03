@@ -61,6 +61,13 @@ pub(super) struct ResolvedEntry {
     pub(super) key: Option<std::sync::Arc<beebeeb_core::kdf::FileKey>>,
     /// L12 (P2-9): the pin recorded in a request row's resolved name.
     pub(super) name_pin: Option<beebeeb_core::chunk_stream::ExpectedChunkFormat>,
+    /// R4-A: the key a request row's name resolved under, and its convention.
+    /// A rename seals under this, never a fresh derivation.
+    pub(super) name_key: Option<std::sync::Arc<beebeeb_core::kdf::FileKey>>,
+    pub(super) name_origin: Option<beebeeb_core::owned_keys::KeyOrigin>,
+    /// R4-B: a request-field row whose request list could not load stays
+    /// read-only, with this one-line reason.
+    pub(super) read_only_reason: Option<&'static str>,
     /// L13: the seal target core issued for this row, if it is writable.
     pub(super) write_target: Option<std::sync::Arc<beebeeb_core::owned_keys::WriteTarget>>,
     /// L12: where the key came from (a request row's content is read-only).
@@ -110,14 +117,16 @@ pub(super) fn decode_file_entry(
             chunk_count,
             modified,
             pin: Err("a request row's content opens only under its request key".to_string()),
-            read_only: false,
+            read_only: keys.name_origin == KeyOrigin::DerivedUpperRepair,
             key: Some(std::sync::Arc::new(keys.content_key)),
             name_pin: Some(name.chunk_format),
+            name_key: Some(std::sync::Arc::new(keys.name_key)),
+            name_origin: Some(keys.name_origin),
+            read_only_reason: None,
             write_target: None,
             origin: KeyOrigin::RequestContent,
         });
     }
-
     // L12: the id class decides the key path, and core resolves it. WebDAV has
     // no shared-folder ancestry here, so a foreign row stays unresolved (and
     // unwritable) rather than being guessed at.
@@ -183,7 +192,6 @@ pub(super) fn decode_file_entry(
             Err("this row's name does not authenticate under its own key".to_string()),
         ),
     };
-
     Some(ResolvedEntry {
         file_id: Some(file_id),
         parent_id,
@@ -197,6 +205,9 @@ pub(super) fn decode_file_entry(
         read_only,
         key,
         name_pin: None,
+        name_key: None,
+        name_origin: None,
+        read_only_reason: None,
         write_target,
         origin,
     })
@@ -225,6 +236,9 @@ pub(super) async fn resolve_path(state: &Arc<DavState>, path: &str) -> Result<Re
             read_only: false,
             key: None,
             name_pin: None,
+            name_key: None,
+            name_origin: None,
+            read_only_reason: None,
             write_target: None,
             origin: beebeeb_core::owned_keys::KeyOrigin::Derived,
         });

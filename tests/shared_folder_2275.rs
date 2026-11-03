@@ -279,6 +279,34 @@ async fn a9_request_row_rename_seals_name_under_string_convention() {
     h.close().await;
 }
 
+/// R4-A (review-4 P2): a pre-2236 row whose name is sealed under its CONTENT
+/// key (the shape `bb request send` wrote) re-seals a rename under that
+/// resolved key, never a fresh string-convention guess.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r4a_request_row_name_under_content_key_renames_under_it() {
+    let mut f = Fixture::basic();
+    f.plaintext = b"request body".to_vec();
+    f.add_request();
+    let row_index = f.rows.len() - 1;
+    f.rows[row_index]["name_encrypted"] = json!(name(&item_key(), "request.txt"));
+    let h = Harness::new(f).await;
+    ok(h.run(&["mv", "request.txt", "renamed.txt"]).await);
+    let patch = {
+        let state = h.state.lock().unwrap();
+        state
+            .requests
+            .iter()
+            .find(|(m, p, _)| m == "PATCH" && p.contains(SUB))
+            .map(|(_, _, b)| serde_json::from_slice::<Value>(b).unwrap())
+            .expect("the rename is a PATCH of the request row")
+    };
+    let sealed = patch["name_encrypted"].as_str().unwrap();
+    assert_eq!(decrypt_name(&item_key(), sealed), "renamed.txt");
+    assert_eq!(pull_bytes(&h, SUB).await, b"request body");
+    assert_eq!(owner_key_posts(&h, SUB), 0);
+    h.close().await;
+}
+
 /// P2-9 (R3-N2): a server that adds the request fields to a v2-pinned owner
 /// file must not turn it into a request row. The fields do not resolve (the id
 /// names no request this device holds), so the rename keeps the owner path:

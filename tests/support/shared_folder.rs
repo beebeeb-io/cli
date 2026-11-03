@@ -186,6 +186,10 @@ impl Fixture {
             },
         );
         r["acted_via_share_id"] = Value::Null;
+        // R4-A: a real pre-2236 request row's name is an owner
+        // string-convention envelope; its CONTENT stays under C.
+        let string_key = beebeeb_core::kdf::derive_file_key(&master(), SUB.as_bytes());
+        r["name_encrypted"] = json!(name(&string_key, "request.txt"));
         r["file_request_id"] = json!(SUB);
         r["sender_ephemeral_pubkey"] = json!(B64.encode(seal.e_pub));
         r["wrapped_content_key"] = json!(B64.encode(seal.wrapped_key));

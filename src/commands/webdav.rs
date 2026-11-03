@@ -109,6 +109,9 @@ mod parent_target_tests {
             read_only: false,
             key: None,
             name_pin: None,
+            name_key: None,
+            name_origin: None,
+            read_only_reason: None,
             write_target: None,
             origin: beebeeb_core::owned_keys::KeyOrigin::Derived,
         }

@@ -34,6 +34,7 @@ async fn watch_upload_of_request_edit(mut mock: Mock, s: &Scratch) -> (Result<()
         resolved: Some(ResolvedCliKey {
             name_key: None,
             name_pin: None,
+            name_origin: None,
             key: Arc::new(content_key),
             origin: KeyOrigin::RequestContent,
             canonical: serde_json::json!({
@@ -46,6 +47,7 @@ async fn watch_upload_of_request_edit(mut mock: Mock, s: &Scratch) -> (Result<()
             shared_root_id: None,
             name: REL.to_string(),
             read_only: false,
+            read_only_reason: None,
             write_target: None,
         }),
         chunk_count: 1,
@@ -116,6 +118,7 @@ async fn a_plaintext_name_is_skipped_with_its_own_reason() {
         key: Arc::new(beebeeb_core::kdf::derive_file_key(&master, id.as_bytes())),
         name_key: None,
         name_pin: None,
+        name_origin: None,
         origin: beebeeb_core::owned_keys::KeyOrigin::Derived,
         canonical: serde_json::json!({
             "id": id, "name_encrypted": "plain.txt", "size_bytes": 5, "chunk_count": 1
@@ -124,6 +127,7 @@ async fn a_plaintext_name_is_skipped_with_its_own_reason() {
         shared_root_id: None,
         name: "plain.txt".to_string(),
         read_only: true,
+        read_only_reason: None,
         write_target: None,
     };
     let api = ApiClient::new_for_test("http://127.0.0.1:9".to_string());
