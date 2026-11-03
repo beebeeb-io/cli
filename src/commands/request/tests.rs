@@ -217,9 +217,11 @@ fn a_bound_request_row_downloads() {
     let content = [42u8; 32];
     let (wrapped, nonce) = file_request::wrap_request_private(&mk, REQUEST_WRAP_CONTEXT, &r_priv).unwrap();
     let sealed = file_request::seal_to_request(&r_pub, item_id.as_bytes(), &content).unwrap();
-    let content_key = crate::crypto::key_from_bytes(&content);
+    // The owner's name convention: the new name (and the rename target) use the
+    // string-derived key, never the uploader-held content key `C`.
+    let string_key = beebeeb_core::kdf::derive_file_key(&mk, item_id.as_bytes());
     let name = beebeeb_core::encrypt::encrypt_name_for(
-        &content_key,
+        &string_key,
         "bound.bin",
         None,
         beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
@@ -240,8 +242,41 @@ fn a_bound_request_row_downloads() {
         .expect("a bound request row downloads through core");
     assert!(matches!(keys.seal, RequestSeal::Bound));
     assert_eq!(keys.name.name, "bound.bin");
-    assert_eq!(keys.content_key.as_bytes(), &content);
-    assert!(resolver.content_key(&mk, &row).is_some());
+    assert_eq!(
+        keys.content_key.as_bytes(),
+        &content,
+        "the content key is the sealed content key, byte for byte"
+    );
+    assert_eq!(
+        keys.name_key.as_bytes(),
+        string_key.as_bytes(),
+        "the name opens under the string-derived key"
+    );
+    let target = keys
+        .rename_target
+        .as_ref()
+        .expect("a bound request row has a rename target");
+    assert_eq!(
+        target.key().as_bytes(),
+        string_key.as_bytes(),
+        "a rename seals under the string-derived key for the row id"
+    );
+    assert_ne!(
+        target.key().as_bytes(),
+        &content,
+        "a rename must never seal the new name under the uploader-held content key"
+    );
+    assert_eq!(
+        target.pin(),
+        keys.name.chunk_format,
+        "the rename carries the pin the current name records"
+    );
+    let resolved = resolver.content_key(&mk, &row).expect("the content key opens the row");
+    assert_eq!(
+        resolved.as_bytes(),
+        &content,
+        "content_key() is the sealed content key, never the name key"
+    );
 }
 /// P2-8 (review-2): a row core refuses as a foreign id is refused. bcc7320
 /// fell back to the local legacy reader on ANY core error, so this row
