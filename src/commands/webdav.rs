@@ -109,7 +109,6 @@ mod parent_target_tests {
             read_only: false,
             key: None,
             name_pin: None,
-            name_key: None,
             name_origin: None,
             read_only_reason: None,
             write_target: None,
@@ -492,6 +491,181 @@ mod sf_0002_write_check_tests {
         assert_eq!(rename.status(), StatusCode::FORBIDDEN);
         assert_eq!(m.writes.load(Ordering::SeqCst), 0, "a refused write sent a request");
         assert_eq!(m.downloads.load(Ordering::SeqCst), 0, "the name decides; no probe");
+        m.server.abort();
+    }
+}
+
+/// A9 + L13 (P1): a WebDAV MOVE of a pre-2236 request row. Reading its current
+/// name still uses the content key `C` (the uploader's key); the NEW name is
+/// sealed under the string-convention key derived from the row id, never under
+/// `C` — otherwise the anonymous uploader and the server could read the
+/// owner's new name.
+#[cfg(test)]
+mod a9_request_rename_tests {
+    use super::*;
+    use axum::extract::Path;
+    use axum::{Json, routing::get};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const SUB: &str = "33333333-3333-4333-8333-333333333333";
+    const BODY: &[u8] = b"request body";
+    const B64: base64::engine::general_purpose::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+
+    fn master() -> beebeeb_core::kdf::MasterKey {
+        beebeeb_core::kdf::MasterKey::from_bytes([7u8; 32])
+    }
+    fn content_key() -> beebeeb_core::kdf::FileKey {
+        beebeeb_core::kdf::FileKey::from_bytes([160u8; 32])
+    }
+
+    struct RenameMock {
+        state: Arc<DavState>,
+        patches: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        writes: Arc<AtomicUsize>,
+        /// The row's current name envelope (sealed under `C`) and its content.
+        sealed_name: String,
+        frame: Vec<u8>,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    /// A pre-2236 request row: the R5 legacy request envelope (empty wrap and
+    /// seal contexts), its NAME and its content both sealed under `C`.
+    async fn rename_mock() -> RenameMock {
+        let private = [31u8; 32];
+        let public = beebeeb_core::opaque::derive_x25519_public(&private);
+        let (wrapped, nonce) = beebeeb_core::file_request::wrap_request_private(&master(), b"", &private).unwrap();
+        let seal = beebeeb_core::file_request::seal_to_request(&public, b"", content_key().as_bytes()).unwrap();
+        let sealed_name =
+            serde_json::to_string(&beebeeb_core::encrypt::encrypt_metadata(&content_key(), "request.txt").unwrap())
+                .unwrap();
+        let rows = vec![json!({
+            "id": SUB, "parent_id": null, "name_encrypted": sealed_name,
+            "is_folder": false, "size_bytes": BODY.len(), "chunk_count": 1,
+            "updated_at": "2026-11-01T10:00:00Z",
+            "file_request_id": SUB,
+            "sender_ephemeral_pubkey": B64.encode(seal.e_pub),
+            "wrapped_content_key": B64.encode(seal.wrapped_key),
+        })];
+        let requests_doc = json!({"file_requests": [{"id": SUB, "wrapped_private_key": B64.encode(wrapped), "wrap_nonce": B64.encode(nonce)}]});
+        let frame = beebeeb_core::encrypt::encrypt_chunk_raw(&content_key(), BODY).unwrap();
+        let served_frame = frame.clone();
+
+        let patches = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writes = Arc::new(AtomicUsize::new(0));
+        let recorded = patches.clone();
+        let counted = writes.clone();
+        let app = Router::new()
+            .route(
+                "/api/v1/files",
+                get(move || {
+                    let rows = rows.clone();
+                    async move { Json(json!({ "files": rows })) }
+                }),
+            )
+            .route(
+                "/api/v1/file-requests",
+                get(move || {
+                    let doc = requests_doc.clone();
+                    async move { Json(doc) }
+                }),
+            )
+            .route(
+                "/api/v1/files/:id/download",
+                get(move || {
+                    let frame = served_frame.clone();
+                    async move { axum::body::Body::from(frame) }
+                }),
+            )
+            .route(
+                "/api/v1/files/:id",
+                axum::routing::patch(
+                    |State(p): State<Arc<std::sync::Mutex<Vec<serde_json::Value>>>>,
+                     Path(fid): Path<String>,
+                     Json(body): Json<serde_json::Value>| async move {
+                        p.lock().unwrap().push(json!({ "id": fid, "body": body }));
+                        Json(json!({ "id": fid })).into_response()
+                    },
+                )
+                .with_state(recorded),
+            )
+            .fallback(move |req: Request| {
+                let counted = counted.clone();
+                async move {
+                    if req.method() != Method::GET {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                    }
+                    (StatusCode::INTERNAL_SERVER_ERROR, "mock: unhandled").into_response()
+                }
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let state = Arc::new(DavState {
+            api: ApiClient::new_for_test(format!("http://{}", listener.local_addr().unwrap())),
+            master_key: master(),
+            read_only: false,
+            dir_cache: Mutex::new(HashMap::new()),
+            cache_ttl: Duration::ZERO,
+            locks: Mutex::new(HashMap::new()),
+            request_count: std::sync::atomic::AtomicU64::new(0),
+            error_count: std::sync::atomic::AtomicU64::new(0),
+            verbose: false,
+        });
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        RenameMock {
+            state,
+            patches,
+            writes,
+            sealed_name,
+            frame,
+            server,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_move_seals_a_pre_2236_request_rows_new_name_under_the_string_key() {
+        use beebeeb_core::chunk_stream::ExpectedChunkFormat;
+        let m = rename_mock().await;
+        let response = move_response(&m.state, "/request.txt", "/renamed.txt").await;
+        assert_eq!(
+            response.status(),
+            StatusCode::CREATED,
+            "MOVE refused: {}",
+            String::from_utf8_lossy(&axum::body::to_bytes(response.into_body(), 4096).await.unwrap())
+        );
+
+        let patches = m.patches.lock().unwrap().clone();
+        assert_eq!(patches.len(), 1, "one PATCH renames the row");
+        assert_eq!(patches[0]["id"], SUB);
+        let sealed = patches[0]["body"]["name_encrypted"]
+            .as_str()
+            .expect("the rename sends a sealed name");
+        let string_key = beebeeb_core::kdf::derive_file_key(&master(), SUB.as_bytes());
+        let after = beebeeb_core::encrypt::decrypt_name_metadata_with_key(&string_key, sealed)
+            .expect("the new name opens under the string-convention key");
+        assert_eq!(after.name, "renamed.txt");
+        let before = beebeeb_core::encrypt::decrypt_name_metadata_with_key(&content_key(), &m.sealed_name)
+            .expect("the current name still opens under C");
+        assert_eq!(
+            after.chunk_format, before.chunk_format,
+            "the rename carries the pin the current name records"
+        );
+        assert_eq!(before.chunk_format, ExpectedChunkFormat::Unrecorded);
+        assert!(
+            beebeeb_core::encrypt::decrypt_name_metadata_with_key(&content_key(), sealed).is_err(),
+            "the uploader's content key must not open the owner's new name"
+        );
+        assert_eq!(
+            beebeeb_core::encrypt::decrypt_chunk_raw(&content_key(), &m.frame).unwrap(),
+            BODY,
+            "the content stays under C, untouched"
+        );
+        assert_eq!(
+            m.writes.load(Ordering::SeqCst),
+            0,
+            "no owner-key POST: a rename publishes nothing"
+        );
         m.server.abort();
     }
 }

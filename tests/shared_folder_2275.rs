@@ -279,16 +279,24 @@ async fn a9_request_row_rename_seals_name_under_string_convention() {
     h.close().await;
 }
 
-/// R4-A (review-4 P2): a pre-2236 row whose name is sealed under its CONTENT
-/// key (the shape `bb request send` wrote) re-seals a rename under that
-/// resolved key, never a fresh string-convention guess.
+/// A9 + L13 (P1): a pre-2236 request row's CURRENT name is sealed under its
+/// CONTENT key `C` (the shape `bb request send` wrote), which the anonymous
+/// uploader holds. Reading the name keeps using C, but a rename must seal the
+/// owner's NEW name under the string-convention key derived from the row id:
+/// sealing under C would hand the new name to the uploader and the server.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn r4a_request_row_name_under_content_key_renames_under_it() {
+async fn a9_request_row_whose_name_is_under_the_content_key_renames_under_the_string_key() {
+    use beebeeb_core::chunk_stream::ExpectedChunkFormat;
     let mut f = Fixture::basic();
     f.plaintext = b"request body".to_vec();
     f.add_request();
     let row_index = f.rows.len() - 1;
     f.rows[row_index]["name_encrypted"] = json!(name(&item_key(), "request.txt"));
+    let before = beebeeb_core::encrypt::decrypt_name_metadata_with_key(
+        &item_key(),
+        f.rows[row_index]["name_encrypted"].as_str().unwrap(),
+    )
+    .unwrap();
     let h = Harness::new(f).await;
     ok(h.run(&["mv", "request.txt", "renamed.txt"]).await);
     let patch = {
@@ -301,8 +309,24 @@ async fn r4a_request_row_name_under_content_key_renames_under_it() {
             .expect("the rename is a PATCH of the request row")
     };
     let sealed = patch["name_encrypted"].as_str().unwrap();
-    assert_eq!(decrypt_name(&item_key(), sealed), "renamed.txt");
-    assert_eq!(pull_bytes(&h, SUB).await, b"request body");
+    let string_key = beebeeb_core::kdf::derive_file_key(&master(), SUB.as_bytes());
+    let after = beebeeb_core::encrypt::decrypt_name_metadata_with_key(&string_key, sealed)
+        .expect("the new name opens under the string-convention key");
+    assert_eq!(after.name, "renamed.txt");
+    assert_eq!(
+        after.chunk_format, before.chunk_format,
+        "the rename carries the pin the current name records"
+    );
+    assert_eq!(before.chunk_format, ExpectedChunkFormat::Unrecorded);
+    assert!(
+        beebeeb_core::encrypt::decrypt_name_metadata_with_key(&item_key(), sealed).is_err(),
+        "the uploader's content key must not open the owner's new name"
+    );
+    assert_eq!(
+        pull_bytes(&h, SUB).await,
+        b"request body",
+        "the content stays under C, untouched"
+    );
     assert_eq!(owner_key_posts(&h, SUB), 0);
     h.close().await;
 }

@@ -66,9 +66,8 @@ pub(super) struct ResolvedEntry {
     pub(super) key: Option<std::sync::Arc<beebeeb_core::kdf::FileKey>>,
     /// L12 (P2-9): the pin recorded in a request row's resolved name.
     pub(super) name_pin: Option<beebeeb_core::chunk_stream::ExpectedChunkFormat>,
-    /// R4-A: the key a request row's name resolved under, and its convention.
-    /// A rename seals under this, never a fresh derivation.
-    pub(super) name_key: Option<std::sync::Arc<beebeeb_core::kdf::FileKey>>,
+    /// R4-A: which convention the request row's current name resolved under.
+    /// A9: a rename seals under the string key, never the resolved name key.
     pub(super) name_origin: Option<beebeeb_core::owned_keys::KeyOrigin>,
     /// R4-B: a request-field row whose request list could not load stays
     /// read-only, with this one-line reason.
@@ -132,7 +131,6 @@ pub(super) fn decode_file_entry(
             read_only: keys.name_origin == KeyOrigin::DerivedUpperRepair,
             key: Some(std::sync::Arc::new(keys.content_key)),
             name_pin: Some(name.chunk_format),
-            name_key: Some(std::sync::Arc::new(keys.name_key)),
             name_origin: Some(keys.name_origin),
             read_only_reason: None,
             write_target: None,
@@ -228,7 +226,6 @@ pub(super) fn decode_file_entry(
         read_only,
         key,
         name_pin: None,
-        name_key: None,
         name_origin: None,
         read_only_reason,
         write_target,
@@ -259,7 +256,6 @@ pub(super) async fn resolve_path(state: &Arc<DavState>, path: &str) -> Result<Re
             read_only: false,
             key: None,
             name_pin: None,
-            name_key: None,
             name_origin: None,
             read_only_reason: None,
             write_target: None,

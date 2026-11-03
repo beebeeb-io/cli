@@ -39,6 +39,25 @@ pub const REQUEST_KEYS_UNAVAILABLE: &str =
     "can't change this item: this device couldn't load your file-request keys. Try again when it can.";
 pub const OWNER_ONLY_NOTICE: &str = "Only you can open this. Share it from the web or the app.";
 
+/// L13/A9 (2275): the string-convention owner key for `id` — the key a request
+/// row's NEW name is sealed under on a rename, whatever key its CURRENT name
+/// resolved under.
+///
+/// A pre-2236 request row's name is sealed under its content key `C`, which the
+/// anonymous uploader holds; re-sealing under it would hand the owner's new name
+/// to the uploader and the server. Core's [`OwnerKeyConvention::String`] is
+/// exactly `derive_file_key(master, id.as_bytes())`, and `item_class` enforces
+/// the canonical lowercase hyphenated id that derivation requires.
+///
+/// [`OwnerKeyConvention::String`]: beebeeb_core::kdf::OwnerKeyConvention::String
+pub fn string_name_key(master: &MasterKey, id: &str) -> Result<Arc<FileKey>, String> {
+    match beebeeb_core::item_id::item_class(id) {
+        Ok(beebeeb_core::item_id::ItemClass::Owner) => {}
+        _ => return Err(RENAME_UNKNOWN_KEY.to_string()),
+    }
+    Ok(Arc::new(beebeeb_core::kdf::derive_file_key(master, id.as_bytes())))
+}
+
 /// Print [`OWNER_ONLY_NOTICE`] when `folder_id` sits in a shared folder.
 pub async fn announce_owner_only(api: &ApiClient, master: &MasterKey, folder_id: Option<&str>) {
     let Some(folder_id) = folder_id else {
@@ -51,6 +70,7 @@ pub async fn announce_owner_only(api: &ApiClient, master: &MasterKey, folder_id:
         println!("{OWNER_ONLY_NOTICE}");
     }
 }
+
 #[derive(Clone)]
 pub struct ResolvedCliKey {
     pub key: Arc<FileKey>,
@@ -175,11 +195,6 @@ impl OwnedKeyResolver {
     /// name. A rename re-seals under it instead of assuming `Unrecorded`.
     pub fn name_pin_for(&self, id: &str) -> Option<beebeeb_core::chunk_stream::ExpectedChunkFormat> {
         self.resolved.get(id).and_then(|r| r.name_pin)
-    }
-    /// R4-A: the key a request row's name resolved under. A rename must seal
-    /// the new name under this key and convention, never a fresh guess.
-    pub fn name_key_for(&self, id: &str) -> Option<Arc<FileKey>> {
-        self.resolved.get(id).and_then(|r| r.name_key.clone())
     }
     /// R4-A: which convention `name_key` came from (a request row only).
     pub fn name_origin_for(&self, id: &str) -> Option<KeyOrigin> {
