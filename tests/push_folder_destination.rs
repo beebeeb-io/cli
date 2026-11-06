@@ -82,6 +82,8 @@ struct Vault {
     invites_status: Option<u16>,
     /// A server without the invite and folder-link routes (both 404).
     shares_unsupported: bool,
+    /// Shared folders switched off for the account: the folder-link route answers 501 `shared_folders_v1`.
+    folder_links_off: bool,
     /// Listing rows carry `share_count: 0` (otherwise they carry none).
     listing_share_count: bool,
 }
@@ -164,6 +166,9 @@ async fn start_mock(vault: Shared) -> String {
                 let v = v.lock().unwrap();
                 if v.shares_unsupported {
                     return err(StatusCode::NOT_FOUND, "not_found");
+                }
+                if v.folder_links_off {
+                    return err(StatusCode::NOT_IMPLEMENTED, "shared_folders_v1");
                 }
                 Json(json!({ "links": v.links })).into_response()
             }),
@@ -1169,6 +1174,13 @@ async fn reuse_shared_does_not_need_the_share_lists() {
     )
     .await;
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    // Not silent: the user is told the check failed, and the owner-only notice checks this folder.
+    assert!(
+        stderr(&out).contains(&format!("could not check whether {MOVIE_DIR} is shared"))
+            && stderr(&out).contains("uploading into it (--reuse-shared)"),
+        "{}",
+        stderr(&out)
+    );
     let v = vault.lock().unwrap();
     assert_eq!(folders_named(&v, Some(&movies), MOVIE_DIR), vec![shared.clone()]);
     assert!(file_names_in(&v, &shared).contains(&"extras.mkv".to_string()));
@@ -1239,8 +1251,9 @@ async fn a_subfolder_name_that_is_not_utf8_never_merges_into_an_existing_one() {
 }
 
 /// "Not supported" is unknown, never private (lead ruling, 2026-11-06): a
-/// server with no invite or folder-link route, whose listing carries no
-/// `share_count`, cannot say who sees a folder, so it counts as shared.
+/// server with no invite route cannot say who was invited, and the listing's
+/// `share_count` (public links only) cannot either, so even `share_count: 0`
+/// leaves the folder counted as shared.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_folder_the_server_cannot_say_is_private_counts_as_shared() {
     let vault: Shared = Arc::default();
@@ -1249,7 +1262,11 @@ async fn a_folder_the_server_cannot_say_is_private_counts_as_shared() {
     write_file(&home, &format!("{MOVIE_DIR}/{MOVIE}"), b"one movie");
     let out = bb(&home, &["--api", &api, "push", "--folder", "Movies", MOVIE_DIR]).await;
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-    vault.lock().unwrap().shares_unsupported = true;
+    {
+        let mut v = vault.lock().unwrap();
+        v.shares_unsupported = true;
+        v.listing_share_count = true;
+    }
     write_file(&home, &format!("{MOVIE_DIR}/extras.mkv"), b"extras");
     let inits_before = vault.lock().unwrap().inits;
 
@@ -1289,10 +1306,11 @@ async fn a_folder_the_server_cannot_say_is_private_counts_as_shared() {
     assert!(file_names_in(&v, &folder).contains(&"extras.mkv".to_string()));
 }
 
-/// The same server, but its listing carries `share_count`: that decides, and
-/// 0 means the folder is reused without a question.
+/// Shared folders switched off for the account (folder links answer 501):
+/// none of its folder links is served then, so the listing's `share_count`
+/// is the link exposure, and 0 with no invite reuses the folder silently.
 #[tokio::test(flavor = "multi_thread")]
-async fn without_share_routes_the_listings_share_count_decides() {
+async fn with_shared_folders_off_the_listings_share_count_decides() {
     let vault: Shared = Arc::default();
     let api = start_mock(vault.clone()).await;
     let home = scratch_home(&api);
@@ -1301,7 +1319,7 @@ async fn without_share_routes_the_listings_share_count_decides() {
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     {
         let mut v = vault.lock().unwrap();
-        v.shares_unsupported = true;
+        v.folder_links_off = true;
         v.listing_share_count = true;
     }
     write_file(&home, &format!("{MOVIE_DIR}/extras.mkv"), b"extras");

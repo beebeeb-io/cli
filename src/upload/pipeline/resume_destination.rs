@@ -3,8 +3,8 @@
 //! The server sets a new file's parent at its first init and keeps it at completion, so continuing a session
 //! the first attempt opened elsewhere completes the file there. The driver reads the row's parent first: the
 //! same folder continues; another folder is ended (abandon, which deletes the never-completed row) and the file
-//! starts again under this write's id and parent; an answer it cannot read, or an abandon that fails, keeps the
-//! record and starts nothing.
+//! starts again under this write's id and parent. When the server cannot say, the parent the record holds
+//! decides; a record without one, or an abandon that fails, keeps the record and starts nothing.
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
@@ -168,25 +168,14 @@ async fn when_the_other_folders_upload_cannot_be_ended_the_record_is_kept_and_no
     assert_eq!(record.file_id, stored, "so the next run ends it");
 }
 
-/// A record written since 2334 says where its upload was going: another folder is ended at once, without
-/// asking the server (whose answer here would fail the file).
+/// A record written since 2334 says where its upload was going: when the server cannot say where the row is,
+/// a record for another folder is ended and the file starts again here.
 #[tokio::test]
-async fn a_recorded_destination_elsewhere_restarts_here_without_asking_the_server() {
+async fn when_the_server_cannot_answer_a_recorded_destination_elsewhere_is_ended_and_started_here() {
     let s = Scratch::new("2334-recorded-elsewhere");
     let (elsewhere, wanted) = (Uuid::new_v4(), Uuid::new_v4());
     let (path, stored, sid, state) = interrupted(&s, Some(elsewhere));
-    let (size, mtime) = size_and_mtime(&path);
-    crate::resume::record_upload(
-        &path,
-        crate::item_id::Proposed::Minted(stored),
-        None,
-        sid,
-        ChunkFormat::V1Legacy,
-        size,
-        mtime,
-        false,
-        Some(elsewhere),
-    );
+    record_going_to(&path, stored, sid, Some(elsewhere));
     state.lock().unwrap().file_status = Some(503);
     let fresh = Uuid::new_v4();
 
@@ -207,18 +196,7 @@ async fn a_recorded_destination_that_matches_is_still_checked_against_the_server
     let s = Scratch::new("2334-recorded-moved");
     let (moved_to, wanted) = (Uuid::new_v4(), Uuid::new_v4());
     let (path, stored, sid, state) = interrupted(&s, Some(moved_to));
-    let (size, mtime) = size_and_mtime(&path);
-    crate::resume::record_upload(
-        &path,
-        crate::item_id::Proposed::Minted(stored),
-        None,
-        sid,
-        ChunkFormat::V1Legacy,
-        size,
-        mtime,
-        false,
-        Some(wanted),
-    );
+    record_going_to(&path, stored, sid, Some(wanted));
 
     run(&state, spec(&path, Uuid::new_v4(), Some(wanted)))
         .await
@@ -231,6 +209,43 @@ async fn a_recorded_destination_that_matches_is_still_checked_against_the_server
         "the row now lives elsewhere: ended"
     );
     assert_eq!(m.init_bodies[0]["parent_id"], json!(wanted));
+}
+
+/// The same, for a record of this folder: the upload is continued, not failed for this run.
+#[tokio::test]
+async fn when_the_server_cannot_answer_a_recorded_destination_here_is_continued() {
+    let s = Scratch::new("2334-recorded-here-unanswered");
+    let wanted = Uuid::new_v4();
+    let (path, stored, sid, state) = interrupted(&s, Some(wanted));
+    record_going_to(&path, stored, sid, Some(wanted));
+    state.lock().unwrap().file_status = Some(503);
+
+    let out = run(&state, spec(&path, Uuid::new_v4(), Some(wanted)))
+        .await
+        .expect("continued");
+
+    assert_eq!(out.server_id, stored, "the interrupted upload itself completes");
+    let m = state.lock().unwrap();
+    assert!(m.abandons.is_empty() && m.inits.is_empty(), "{:?}", m.events);
+    assert_eq!(m.completed, vec![sid.to_string()]);
+}
+
+/// The server's row decides when it answers: a row moved into this folder in the web app is continued, whatever
+/// folder the record names.
+#[tokio::test]
+async fn a_row_moved_into_this_folder_is_continued_whatever_the_record_says() {
+    let s = Scratch::new("2334-moved-here");
+    let (elsewhere, wanted) = (Uuid::new_v4(), Uuid::new_v4());
+    let (path, stored, sid, state) = interrupted(&s, Some(wanted));
+    record_going_to(&path, stored, sid, Some(elsewhere));
+
+    let out = run(&state, spec(&path, Uuid::new_v4(), Some(wanted)))
+        .await
+        .expect("continued");
+
+    assert_eq!(out.server_id, stored);
+    let m = state.lock().unwrap();
+    assert!(m.abandons.is_empty() && m.inits.is_empty(), "{:?}", m.events);
 }
 
 /// A new upload records the folder it asked for.
@@ -250,6 +265,22 @@ async fn a_new_upload_records_the_folder_it_asked_for() {
 
     let record = crate::resume::resumable_upload_now(&path).expect("the interrupted upload is recorded");
     assert_eq!(record.destination, Some(Some(wanted)));
+}
+
+/// Rewrite the record of `path` as one written since 2334, going to `parent`.
+fn record_going_to(path: &std::path::Path, stored: Uuid, sid: Uuid, parent: Option<Uuid>) {
+    let (size, mtime) = size_and_mtime(path);
+    crate::resume::record_upload(
+        path,
+        crate::item_id::Proposed::Minted(stored),
+        None,
+        sid,
+        ChunkFormat::V1Legacy,
+        size,
+        mtime,
+        false,
+        parent,
+    );
 }
 
 fn size_and_mtime(path: &std::path::Path) -> (u64, u128) {

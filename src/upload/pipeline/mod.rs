@@ -293,48 +293,46 @@ pub async fn stream_encrypt_upload(
     }
 }
 
-/// Task 2334: may this create continue `pending`, the interrupted upload of the same local file? Only when the
-/// server's row for it is in the folder this write asks for (`spec.parent_id`): the server set that row's parent
-/// at the first attempt's init and completion keeps it. A record that says it was going elsewhere is ended at
-/// once; otherwise the server is asked (a record from before 2334 says nothing, and a row may have been moved
-/// in the web app since). `None`: start this file afresh.
+/// Task 2334: may this create continue `pending`, the interrupted upload of the same local file? Only when its
+/// row is in the folder this write asks for (`spec.parent_id`): the server set that row's parent at the first
+/// attempt's init, and completion keeps it. `None`: start this file afresh.
 ///
-/// No login, or a refused one, is said in the words the rest of the CLI uses. Any other answer that cannot be
-/// read keeps the record and fails this file for this run.
+/// The server's row decides when it answers: it is where completion puts the file, and the web app can move a
+/// row in either direction while its upload waits. When the server cannot say, the parent recorded when the
+/// session was opened decides; a record from before 2334 has none, so the record is kept and this file fails
+/// for this run. No login, or a refused one, is said in the words the rest of the CLI uses.
 async fn resumable_here(
     api: &ApiClient,
     spec: &UploadSpec,
     pending: crate::resume::PendingUpload,
 ) -> Result<Option<crate::resume::PendingUpload>, UploadError> {
     api.require_auth().map_err(|e| UploadError::from(e.message))?;
-    if pending.destination.is_some_and(|recorded| recorded != spec.parent_id) {
-        return end_elsewhere(api, spec, pending).await;
-    }
     let name = display_name(&spec.file_name);
-    let going_to = match api.get_file(&pending.file_id.to_string()).await {
-        // `Some(parent)` when the answer names one (`None` = the root).
+    let server_parent: Result<Option<Uuid>, String> = match api.get_file(&pending.file_id.to_string()).await {
         Ok(row) => match row.get("parent_id") {
-            Some(serde_json::Value::Null) => Some(None),
-            Some(serde_json::Value::String(parent)) => Uuid::parse_str(parent).ok().map(Some),
-            _ => None,
+            Some(serde_json::Value::Null) => Ok(None),
+            Some(serde_json::Value::String(parent)) => Uuid::parse_str(parent)
+                .map(Some)
+                .map_err(|_| "the answer's folder id is not an id".to_string()),
+            _ => Err("the answer names no folder".to_string()),
         },
         // No row: its session is gone too, and the swept-session recovery (task 1589) re-inits the stored id,
         // which creates the row anew under the parent this write sends. Nothing can complete elsewhere.
         Err(e) if e.status == 404 => return Ok(Some(pending)),
         Err(e) if e.status == 401 => return Err(e.message.into()),
-        Err(e) => {
-            return Err(format!(
-                "{name}: could not check which folder the interrupted upload was going to ({}); \
-                 its progress is kept: run the command again",
-                e.message
-            )
-            .into());
-        }
+        Err(e) => Err(e.message),
     };
-    if going_to == Some(spec.parent_id) {
-        return Ok(Some(pending));
+    match (server_parent, pending.destination) {
+        (Ok(parent), _) if parent == spec.parent_id => Ok(Some(pending)),
+        (Ok(_), _) => end_elsewhere(api, spec, pending).await,
+        (Err(_), Some(recorded)) if recorded == spec.parent_id => Ok(Some(pending)),
+        (Err(_), Some(_)) => end_elsewhere(api, spec, pending).await,
+        (Err(e), None) => Err(format!(
+            "{name}: could not check which folder the interrupted upload was going to ({e}); \
+             its progress is kept: run the command again"
+        )
+        .into()),
     }
-    end_elsewhere(api, spec, pending).await
 }
 
 /// End `pending`, an interrupted upload going to another folder, by the one explicit route

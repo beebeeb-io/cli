@@ -94,7 +94,7 @@ impl ApiClient {
     /// folder links, or with shared folders switched off for the account
     /// (`501 shared_folders_v1`), answers `Value::Null`; any other failure is
     /// an error, never "no links".
-    pub async fn list_folder_links(&self) -> Result<Value, ApiError> {
+    pub async fn list_links_to_folders(&self) -> Result<Value, ApiError> {
         self.get_feature_listing("/api/v1/shares/folder-links").await
     }
 
