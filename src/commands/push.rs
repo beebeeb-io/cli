@@ -586,6 +586,9 @@ async fn upload_one(
         // bb push uploads one file at a time → full Cli cap (128 MiB).
         concurrency: 1,
         unrecorded_resume_concurrency: 1,
+        chunks_in_flight: 1,
+        limits: crate::upload::limits::ChunkLimits::single(),
+        interrupt: None,
         shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         read_row,
     };

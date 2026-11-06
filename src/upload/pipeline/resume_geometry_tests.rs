@@ -32,6 +32,9 @@ fn spec(path: &std::path::Path, file_id: Uuid, concurrency: u32, unrecorded: u32
         parent_id: None,
         concurrency,
         unrecorded_resume_concurrency: unrecorded,
+        chunks_in_flight: 1,
+        limits: crate::upload::limits::ChunkLimits::single(),
+        interrupt: None,
         shutdown: Arc::new(AtomicBool::new(false)),
         read_row: None,
     }

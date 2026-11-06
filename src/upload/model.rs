@@ -52,6 +52,18 @@ pub struct UploadSpec {
     /// push` 1, `bb sync` its own `--concurrency`. Kept apart from `concurrency` so the rule cannot drift with
     /// `--parallel`.
     pub unrecorded_resume_concurrency: u32,
+    /// How many chunks of THIS file may be in flight at once, before the budget lowers it (`bb push --parallel`;
+    /// `1` for `bb sync`, which runs whole files in parallel instead). The driver takes `used = min(this, budget
+    /// fit)`.
+    pub chunks_in_flight: u32,
+    /// The byte budget this file's chunk-sized buffers are charged to (spec §4.2). `bb sync` gets a FRESH
+    /// `ChunkLimits::single()` per file (one shared across its parallel files could deadlock: two pipelines each
+    /// holding a read buffer and waiting for a seal); `bb push` gets one for the whole push.
+    pub limits: Arc<crate::upload::limits::ChunkLimits>,
+    /// One awaitable interrupt for the whole push (spec §5.1): a Ctrl-C drops the chunks in flight and ends a
+    /// rate-limit pause at once. `None` for `bb sync`, which keeps its own `shutdown` flag and its uninterruptible
+    /// 429 wait.
+    pub interrupt: Option<crate::interrupt::Interrupt>,
     /// Shared cancellation flag (set by the Ctrl-C handler).
     pub shutdown: Arc<AtomicBool>,
     /// Task 2334: the interrupted upload's row as the caller just read it, so the driver does not read it

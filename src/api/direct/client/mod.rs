@@ -321,6 +321,8 @@ pub(crate) enum UploadCall<T> {
     /// The upload session is gone (a JSON 404, or a 400 "not writable: expired"): the caller's own
     /// session recovery re-inits it, exactly as for a proxy chunk PUT.
     SessionGone(String),
+    /// Spec §5.2: the session is already completed (a 400 "not writable: completed"): the file is finished.
+    SessionCompleted,
 }
 
 /// Is this failed answer "the session is gone"? The one rule of the proxy routes
@@ -435,6 +437,10 @@ impl ApiClient {
 }
 
 pub(super) fn failed_upload_call<T>(seen: &Seen, outcome: dt::Outcome) -> UploadCall<T> {
+    // A completed session is told apart from an expired (gone) one before anything else (spec §5.2).
+    if crate::api::upload_session_completed(seen.answer.status, seen.answer.error_code().unwrap_or("")) {
+        return UploadCall::SessionCompleted;
+    }
     if upload_session_gone(seen) {
         return UploadCall::SessionGone(format!("upload session is gone (HTTP {})", seen.answer.status));
     }

@@ -131,8 +131,36 @@ pub struct Mock {
     /// buffers each body, so a test that aborts a body must not set it).
     pub requests: Option<RequestLog>,
     /// `--parallel`: keep only the length of each chunk PUT, not its bytes (a 2 GiB fixture would otherwise be
-    /// held whole in `chunk_bodies`).
+    /// held whole in `chunk_bodies`). The body is still streamed and discarded, so the client's PUT completes.
     pub drop_chunk_bodies: bool,
+    /// `--parallel` Task 5 (the memory and interrupt tests): when set, every chunk PUT drains its body then
+    /// parks forever (the client keeps the frame in flight), so the pipeline reaches its worst memory moment and
+    /// the test can drop the PUTs with an interrupt. [`ChunkHold::held`] counts the PUTs currently parked.
+    pub hold_chunk_puts: Option<Arc<ChunkHold>>,
+    /// `--parallel` Task 5 (spec §5.2): a chunk write to one of these sessions answers `400 ... not writable:
+    /// completed`, and `complete` answers `already_completed` — a session finished out from under a resumed run.
+    pub completed_sessions: HashSet<String>,
+    /// `--parallel` Task 5: these `(session, index)` chunks are already held, so their PUT answers `skipped:true`
+    /// without storing (a resumed session's out-of-order chunks).
+    pub skip_chunks: HashSet<(String, u32)>,
+    /// `--parallel` Task 5: the indexes a PUT stored ANEW (not skipped, not held), in order — so a test can prove
+    /// a resume re-stored only the missing chunk.
+    pub chunk_stored_fresh: Vec<u32>,
+}
+
+/// A gate the mock's held chunk PUTs park on (never released; the test drops the client PUTs instead).
+#[derive(Default)]
+pub struct ChunkHold {
+    held: std::sync::atomic::AtomicUsize,
+    /// Never notified: `notified()` then waits until the client cancels the request.
+    forever: tokio::sync::Notify,
+}
+
+impl ChunkHold {
+    /// How many chunk PUTs are parked now.
+    pub fn held(&self) -> usize {
+        self.held.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 pub type Shared = Arc<Mutex<Mock>>;
@@ -219,17 +247,42 @@ fn router(state: Shared) -> Router {
             "/api/v1/uploads/:session/chunks/:idx",
             put(
                 |State(st): State<Shared>, Path((sid, idx)): Path<(String, u32)>, body: Body| async move {
+                    // Stream the body, discarding it when the test does not need the bytes (a 2 GiB fixture must
+                    // not be buffered on either side); the PUT still completes, so the client's budget frees.
+                    let drop_bodies = st.lock().unwrap().drop_chunk_bodies;
                     let mut stream = body.into_data_stream();
                     let mut data = Vec::new();
+                    let mut n = 0usize;
                     while let Some(frame) = stream.next().await {
-                        data.extend_from_slice(&frame.unwrap_or_default());
+                        let frame = frame.unwrap_or_default();
+                        n += frame.len();
+                        if !drop_bodies {
+                            data.extend_from_slice(&frame);
+                        }
                     }
-                    let n = data.len();
+                    let hold = {
+                        let mut m = st.lock().unwrap();
+                        m.chunk_puts.push((sid.clone(), idx));
+                        m.events.push(format!("chunk:{sid}:{idx}"));
+                        if !m.drop_chunk_bodies {
+                            m.chunk_bodies.insert((sid.clone(), idx), data);
+                        }
+                        m.hold_chunk_puts.clone()
+                    };
+                    // Park forever: the body is received (so the client holds the frame in flight), but no answer
+                    // comes until the client cancels the PUT (an interrupt or a sibling's final error).
+                    if let Some(hold) = hold {
+                        hold.held.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        hold.forever.notified().await;
+                        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    }
                     let mut m = st.lock().unwrap();
-                    m.chunk_puts.push((sid.clone(), idx));
-                    m.events.push(format!("chunk:{sid}:{idx}"));
-                    if !m.drop_chunk_bodies {
-                        m.chunk_bodies.insert((sid.clone(), idx), data);
+                    if m.completed_sessions.contains(&sid) {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({ "error": "upload session is not writable: completed" })),
+                        )
+                            .into_response();
                     }
                     if m.chunk_rate_limited_once.remove(&idx) {
                         return (
@@ -261,6 +314,11 @@ fn router(state: Shared) -> Router {
                         }
                         m.chunk_accept_count.insert(sid.clone(), count + 1);
                     }
+                    // A chunk the (resumed) session already holds answers `skipped` without storing (spec §3).
+                    if m.skip_chunks.contains(&(sid.clone(), idx)) {
+                        return Json(json!({ "index": idx, "size": n, "skipped": true })).into_response();
+                    }
+                    m.chunk_stored_fresh.push(idx);
                     Json(json!({ "index": idx, "size": n, "skipped": false })).into_response()
                 },
             ),
@@ -293,6 +351,22 @@ fn router(state: Shared) -> Router {
             "/api/v1/uploads/:session/complete",
             post(|State(st): State<Shared>, Path(sid): Path<String>| async move {
                 let mut m = st.lock().unwrap();
+                // Spec §5.2: a session already completed answers idempotently (`already_completed`), even though
+                // its chunk writes 400. This is BEFORE the gone check so a completed session is not read as swept.
+                if m.completed_sessions.contains(&sid) {
+                    m.completed.push(sid.clone());
+                    m.events.push(format!("complete:{sid}"));
+                    let fid = m
+                        .complete_echo
+                        .clone()
+                        .or_else(|| m.session_file.get(&sid).cloned())
+                        .unwrap_or_default();
+                    return Json(merged(
+                        json!({ "id": fid, "status": "completed", "already_completed": true }),
+                        &m.complete_extra,
+                    ))
+                    .into_response();
+                }
                 if !m.live.contains(&sid) || m.complete_gone.contains(&sid) {
                     return gone_response(m.gone);
                 }

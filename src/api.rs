@@ -439,6 +439,18 @@ pub(crate) fn upload_session_gone(status: u16, a_404_counts: bool, text: &str) -
     }
 }
 
+/// A chunk write (API PUT, or a direct grant) answered `400 ... not writable: completed` (spec §5.2): the session
+/// finished, told apart from `expired` (which is [`upload_session_gone`], a swept-session re-init). The server
+/// sends the text in `{error}`, which `message` carries. One place so the two routes cannot drift.
+pub(crate) fn upload_session_completed(status: u16, text: &str) -> bool {
+    status == 400 && text.contains("upload session is not writable: completed")
+}
+
+/// [`upload_session_completed`] for an [`ApiError`] from a proxy chunk PUT.
+pub(crate) fn is_upload_session_completed(e: &ApiError) -> bool {
+    upload_session_completed(e.status, &e.message)
+}
+
 impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.message)

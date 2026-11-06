@@ -60,11 +60,20 @@ pub(super) enum AttemptErr {
     /// The init for the stored `file_id` was refused in a way a fresh id can
     /// fix. Carries the fresh id to try (at most once).
     InitRefused { message: String, fresh_file_id: Uuid },
+    /// Spec §5.2: a resumed session finished in another folder (or its file is gone), so this file is uploaded
+    /// again under a fresh id, in the folder asked for. The record is already cleared and the line already
+    /// printed; the driver inits `fresh_file_id` from chunk 0.
+    RestartFresh { fresh_file_id: Uuid },
     /// Task 2173: the session was opened as a direct upload and cannot finish as one (the server turned
     /// the direction off, a node has no direct routes, a link was refused, storage kept failing). Its
     /// transport cannot change, so the driver abandons it and inits again WITHOUT the capability token,
     /// once per file per run. `confirmed` is rolled back like for [`AttemptErr::SessionGone`].
     DirectUnavailable { confirmed: Tally },
+    /// Spec §5.2: a resumed session the server reports already completed (a chunk write answers `400 ... not
+    /// writable: completed`). Not a failure: the file is finished. The driver calls `complete` (which answers
+    /// `already_completed`) and clears the record, re-creating the file only if the server's row says it finished
+    /// elsewhere or is gone.
+    SessionCompleted { confirmed: Tally },
     /// Anything else — surfaced to the caller unchanged.
     Other(String),
 }
@@ -76,6 +85,8 @@ impl AttemptErr {
             | AttemptErr::InitRefused { message, .. }
             | AttemptErr::Other(message) => message,
             AttemptErr::DirectUnavailable { .. } => "the direct upload is unavailable for this file".to_string(),
+            AttemptErr::SessionCompleted { .. } => "the upload session is already completed".to_string(),
+            AttemptErr::RestartFresh { .. } => "restarting this file under a fresh id".to_string(),
         }
     }
 }
