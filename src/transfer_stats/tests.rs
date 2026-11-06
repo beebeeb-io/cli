@@ -311,11 +311,12 @@ fn retries_count_per_chunk_and_run() {
 }
 
 #[test]
-fn unplan_removes_a_skipped_file() {
+fn a_skipped_file_leaves_the_plan() {
     let mut t = TransferStats::new(Direction::Upload, 0);
     t.plan_file(10 * MB, 10);
     t.plan_file(4 * MB, 4);
-    t.unplan_file(4 * MB, 4);
+    t.next_file(4 * MB, 4);
+    t.end_file(FileEnd::NotSent);
     t.seal_plan();
     let s = t.snapshot(0);
     assert_eq!((s.files_total, s.bytes_total, s.chunks_total), (1, 10 * MB, 10));
@@ -323,16 +324,15 @@ fn unplan_removes_a_skipped_file() {
 
 #[test]
 fn pools_are_listed_once_with_chunk_counts() {
-    let pool = |id: u128, country: &str| PoolLabel {
-        id: Some(uuid::Uuid::from_u128(id)),
+    let pool = |country: &str| PoolLabel {
         country: Some(country.to_string()),
         country_code: None,
     };
     let mut t = TransferStats::new(Direction::Upload, 0);
-    t.plan_file(5 * MB, 5);
+    t.plan_file(6 * MB, 6);
     t.seal_plan();
     let a = t.begin_file("a", 3 * MB, 3, MB);
-    t.pool(a, pool(1, "Germany"));
+    t.pool(a, pool("Germany"));
     for i in 0..3 {
         chunk(&mut t, a, i, MB, 0, 10);
     }
@@ -341,10 +341,14 @@ fn pools_are_listed_once_with_chunk_counts() {
         chunk(&mut t, b, i, MB, 10, 20);
     }
     // A resumed upload learns its pool at completion, after its chunks.
-    t.pool(b, pool(2, "Finland"));
-    let s = t.snapshot(20);
+    t.pool(b, pool("Finland"));
+    // Another pool in the same country is the same place to a user: one entry.
+    let c = t.begin_file("c", MB, 1, MB);
+    t.pool(c, pool("Germany"));
+    chunk(&mut t, c, 0, MB, 20, 30);
+    let s = t.snapshot(30);
     let got: Vec<(Option<String>, u32)> = s.pools.iter().map(|p| (p.label.country.clone(), p.chunks)).collect();
-    assert_eq!(got, [(Some("Germany".into()), 3), (Some("Finland".into()), 2)]);
+    assert_eq!(got, [(Some("Germany".into()), 4), (Some("Finland".into()), 2)]);
 }
 
 #[test]
@@ -369,7 +373,6 @@ fn summary_json_has_the_contract_fields() {
     t.pool(
         f,
         PoolLabel {
-            id: None,
             country: Some("Germany".into()),
             country_code: Some("DE".into()),
         },
@@ -406,7 +409,7 @@ fn summary_json_has_the_contract_fields() {
     assert_eq!(j["routes"], serde_json::json!({"direct": 0, "api": 2}));
     assert_eq!(
         j["pools"],
-        serde_json::json!([{"id": null, "country": "Germany", "country_code": "DE", "chunks": 2}])
+        serde_json::json!([{"country": "Germany", "country_code": "DE", "chunks": 2}])
     );
     assert_eq!(j["max_chunks_in_flight"], 1);
 }
@@ -505,4 +508,91 @@ fn eta_leaves_out_what_a_failed_file_will_not_send() {
     assert_eq!(t.snapshot(19_000).eta_secs, Some(5.0), "only the running file is left");
     let s = t.snapshot(19_000);
     assert_eq!((s.bytes_done, s.bytes_total), (200 * MB, 1300 * MB), "the plan stays");
+}
+
+/// When everything left is given up, nothing is waiting to be sent: the ETA hides instead of reading `1s` (review
+/// finding, task 2333; e.g. while a later file's conflict lookup runs).
+#[test]
+fn eta_hides_when_everything_left_is_given_up() {
+    let mut t = TransferStats::new(Direction::Upload, 0);
+    t.plan_file(300 * MB, 3);
+    t.plan_file(1000 * MB, 10);
+    t.seal_plan();
+    t.set_limit(1);
+    let f = t.begin_file("a", 300 * MB, 3, 100 * MB);
+    chunk(&mut t, f, 0, 100 * MB, 0, 8000);
+    chunk(&mut t, f, 1, 100 * MB, 8000, 16_000);
+    chunk(&mut t, f, 2, 100 * MB, 16_000, 24_000);
+    t.file_done(f, true);
+    t.give_up(1000 * MB);
+    let s = t.snapshot(27_000);
+    assert!(matches!(s.current, Speed::BytesPerSec(_)), "premise: a rate exists");
+    assert_eq!(s.eta_secs, None, "nothing is waiting to be sent");
+}
+
+/// Review P2 (task 2333): the command plans a file from its size; the driver reads the size again when the file
+/// begins, after the conflict lookup and any prompt. A file that changed in between moves its share of the totals to
+/// what the driver read, so done never passes total (I1). A second attempt at the same size changes nothing.
+#[test]
+fn a_file_that_begins_at_another_size_moves_its_share() {
+    let mut t = TransferStats::new(Direction::Upload, 0);
+    t.plan_file(100, 1);
+    t.plan_file(50, 1);
+    t.seal_plan();
+    t.set_limit(1);
+    t.next_file(100, 1);
+    t.begin_file("grew.log", 300, 3, 100);
+    let s = t.snapshot(0);
+    assert_eq!(
+        (s.files_total, s.bytes_total, s.chunks_total),
+        (2, 350, 4),
+        "the share follows the new size"
+    );
+    let f = t.begin_file("grew.log", 300, 3, 100);
+    let s = t.snapshot(0);
+    assert_eq!(
+        (s.bytes_total, s.chunks_total),
+        (350, 4),
+        "a second attempt counts the file once"
+    );
+    for i in 0..3 {
+        chunk(&mut t, f, i, 100, i as u64 * 10, i as u64 * 10 + 10);
+    }
+    t.file_done(f, true);
+    t.end_file(FileEnd::Uploaded);
+    let s = t.summary(30);
+    assert_eq!((s.bytes_done, s.chunks_done), (300, 3));
+    assert_eq!((s.bytes_total, s.chunks_total), (350, 4));
+}
+
+/// A file that is not sent takes its share out of the run; a failed one keeps it in the totals and gives up only
+/// what it did not send (its share as the driver read it).
+#[test]
+fn a_file_that_ends_unsent_or_failed_settles_its_share() {
+    let mut t = TransferStats::new(Direction::Upload, 0);
+    t.plan_file(100, 1);
+    t.plan_file(200, 2);
+    t.seal_plan();
+    t.set_limit(1);
+    t.next_file(100, 1);
+    t.end_file(FileEnd::NotSent);
+    let s = t.snapshot(0);
+    assert_eq!(
+        (s.files_total, s.bytes_total, s.chunks_total),
+        (1, 200, 2),
+        "the skipped file left the run"
+    );
+
+    t.next_file(200, 2);
+    let f = t.begin_file("b", 300, 3, 100);
+    chunk(&mut t, f, 0, 100, 0, 10);
+    t.file_done(f, false);
+    t.end_file(FileEnd::Failed);
+    let s = t.snapshot(10);
+    assert_eq!(
+        (s.files_total, s.bytes_total, s.chunks_total),
+        (1, 300, 3),
+        "the failed file keeps its share"
+    );
+    assert_eq!(t.given_up_bytes, 200, "what it did not send is given up");
 }

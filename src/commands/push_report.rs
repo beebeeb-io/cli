@@ -27,32 +27,13 @@ impl FilePlan {
         }
     }
 
-    /// The plan of the file at `path` as it is now (a file that cannot be read plans as empty: its upload fails).
-    pub(super) fn of_path(path: &std::path::Path) -> Self {
-        Self::of_size(std::fs::metadata(path).map(|m| m.len()).unwrap_or(0))
-    }
-
-    pub(super) fn add_to(self, progress: &LiveProgress) {
+    fn add_to(self, progress: &LiveProgress) {
         progress.plan_file(self.bytes, self.chunks);
     }
 
-    pub(super) fn take_from(self, progress: &LiveProgress) {
-        progress.unplan_file(self.bytes, self.chunks);
-    }
-
-    pub(super) fn bytes(self) -> u64 {
-        self.bytes
-    }
-
-    /// The plan of the file at `path` now: when its size changed since `self` was planned, the run's totals are
-    /// moved from the old plan to the new one.
-    pub(super) fn follow(self, path: &std::path::Path, progress: &LiveProgress) -> Self {
-        let now = Self::of_path(path);
-        if now != self {
-            self.take_from(progress);
-            now.add_to(progress);
-        }
-        now
+    /// This file is the one sent next: the run's totals follow the size the driver reads when it begins.
+    pub(super) fn announce(self, progress: &LiveProgress) {
+        progress.next_file(self.bytes, self.chunks);
     }
 }
 
@@ -69,11 +50,7 @@ pub(super) fn start(plans: impl IntoIterator<Item = FilePlan>, verbose: bool) ->
 
 /// `  {n} file[s] · {size} · encrypting with AES-256-GCM`, dim (rich mode).
 pub(super) fn print_resolve_line(files: usize, size: u64) {
-    let files = if files == 1 {
-        "1 file".to_string()
-    } else {
-        format!("{files} files")
-    };
+    let files = line::count(files as u32, "file", "files");
     println!(
         "  {}",
         format!(

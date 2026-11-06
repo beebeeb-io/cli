@@ -3,7 +3,7 @@
 //! error of both together, a failed or grown file in a folder, and what must never be shown.
 
 #[path = "support/upload_mock.rs"]
-mod upload_mock;
+pub mod upload_mock;
 
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -138,9 +138,9 @@ async fn quiet_and_verbose_is_a_usage_error_in_both_orders() {
     assert!(serde_json::from_str::<Value>(&stdout).is_ok(), "{stdout}");
 }
 
-/// N2a (spec §9.4; Guus 2026-11-06): `bb push -v` shows the pool as its country, and `bb --json push` carries the
-/// pool's id and country; neither shows the datacenter code, the city, the session token, the master key or a
-/// provider name, and the verbose lines show no pool id.
+/// N2a (spec §9.4; Guus and the lead, 2026-11-06): `bb push -v` and `bb --json push` name the pool by its country
+/// only, and never show the pool id, the datacenter code, the city, the session token, the master key or a provider
+/// name.
 #[tokio::test(flavor = "multi_thread")]
 async fn verbose_push_prints_no_secret_or_provider() {
     let mock = Mock {
@@ -169,15 +169,15 @@ async fn verbose_push_prints_no_secret_or_provider() {
         if args.contains(&"--json") {
             let v: Value = serde_json::from_str(&stdout).expect("stdout is one JSON document");
             assert_eq!(
-                v["transfer"]["pools"][0]["id"], "3e15382b-0000-4000-8000-000000000001",
+                v["transfer"]["pools"],
+                json!([{"country": "Germany", "country_code": "DE", "chunks": 1}]),
                 "{v}"
             );
-            assert_eq!(v["transfer"]["pools"][0]["country"], "Germany", "{v}");
         } else {
             assert!(stdout.contains("· pool Germany"), "the country is shown: {shown}");
-            assert_absent(&shown, &["3e15382b"]);
         }
-        assert_absent(&shown, &["zz9", "Testville", TOKEN, KEY]);
+        // The pool id has no meaning to a user and is never shown, nor put in --json (lead, 2026-11-06).
+        assert_absent(&shown, &["3e15382b", "zz9", "Testville", TOKEN, KEY]);
         assert_absent(&shown, &PROVIDER_NAMES);
     }
 }
@@ -257,4 +257,62 @@ async fn push_folder_with_a_file_that_grew_counts_its_new_size() {
         "{t}"
     );
     assert_eq!(t["bytes_done"], v["total_bytes"], "{v}");
+}
+
+/// Review P2: a file that changes after the push planned it, during its own conflict lookup (where a prompt can wait
+/// for minutes), is uploaded at its new size, and the totals follow it: done never passes total, nothing panics.
+#[tokio::test(flavor = "multi_thread")]
+async fn push_file_that_changes_during_its_conflict_lookup_counts_its_new_size() {
+    let mock = Mock::default();
+    mock.hold_conflict_checks.store(true, Ordering::SeqCst);
+    let api = start_mock(mock.clone()).await;
+    let home = scratch_home(&api);
+    let folder = make_folder2(&home);
+
+    let run = {
+        let (home, api) = (home.clone(), api.clone());
+        tokio::spawn(async move { bb(&home, &["--api", &api, "--json", "push", "folder2/a.txt"]).await })
+    };
+    let waited = std::time::Instant::now();
+    while *mock.conflict_checks.lock().unwrap() == 0 && waited.elapsed() < Duration::from_secs(20) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let held = *mock.conflict_checks.lock().unwrap() > 0;
+    std::fs::write(folder.join("a.txt"), vec![b'a'; 5 * 1024 * 1024]).unwrap();
+    mock.hold_conflict_checks.store(false, Ordering::SeqCst);
+    let out = run.await.unwrap();
+    assert!(held, "premise: the conflict lookup arrived and was held");
+
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success(), "{stdout}{stderr}");
+    let v: Value = serde_json::from_str(&stdout).expect("stdout is one JSON document");
+    let t = &v["transfer"];
+    assert_eq!(t["bytes_done"], t["bytes_total"], "{t}");
+    assert_eq!(
+        (t["chunks_done"].clone(), t["chunks_total"].clone()),
+        (json!(2), json!(2)),
+        "{t}"
+    );
+    assert_eq!(t["bytes_done"], v["total_bytes"], "{v}");
+}
+
+/// Review P3: `bb push -v 2>log` with stdout coloured (a terminal; here forced): the per-chunk lines in the log carry
+/// no colour codes.
+#[tokio::test(flavor = "multi_thread")]
+async fn verbose_chunk_lines_on_a_redirected_stderr_carry_no_colour() {
+    let api = start_mock(Mock::default()).await;
+    let home = scratch_home(&api);
+    make_folder2(&home);
+
+    let out = bb_coloured(&home, &["--api", &api, "push", "-v", "folder2/a.txt"]).await;
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(stdout.contains("\u{1b}["), "premise: stdout is coloured: {stdout:?}");
+    let chunk_lines: Vec<&str> = stderr.lines().filter(|l| l.contains("chunk 1/1")).collect();
+    assert_eq!(chunk_lines.len(), 1, "{stderr:?}");
+    assert!(
+        !chunk_lines[0].contains('\u{1b}'),
+        "no colour codes in the log: {:?}",
+        chunk_lines[0]
+    );
 }

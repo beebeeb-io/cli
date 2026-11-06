@@ -3,7 +3,7 @@
 //!
 //! Lines: `begin <name> <expected> <chunks> <chunk_size>`, `start <i> <route>`,
 //! `retry <i>`, `done <i> <bytes> <held>`,
-//! `settle <i>`, `pool <id8|-> <country|->`, `finish <ok>`,
+//! `settle <i>`, `pool <country|->`, `finish <ok>`,
 //! `rollback <bytes> <chunks> <already_stored>`, `limit <n>`,
 //! `note <out|err> <line>`. A legacy call the drivers should no longer make is
 //! recorded too (`confirmed <bytes>`, `rollback-bytes <bytes>`,
@@ -148,8 +148,7 @@ impl FileProgress for Recording {
     }
 
     fn pool(&self, label: PoolLabel) {
-        let id = label.id8().unwrap_or_else(|| "-".to_string());
         let country = label.country.unwrap_or_else(|| "-".to_string());
-        self.push(format!("pool {id} {country}"));
+        self.push(format!("pool {country}"));
     }
 }

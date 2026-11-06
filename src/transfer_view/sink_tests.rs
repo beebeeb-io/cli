@@ -23,7 +23,6 @@ fn guus_at_66(level: Level) -> (LiveProgress, Arc<Mutex<Vec<String>>>) {
     p.set_limit(1);
     let f = p.begin_file_chunks(GUUS, TOTAL, 131, 134_217_728);
     f.pool(PoolLabel {
-        id: Some(uuid::Uuid::parse_str("3e15382b-0000-4000-8000-000000000001").unwrap()),
         country: Some("Germany".into()),
         country_code: Some("DE".into()),
     });
@@ -181,7 +180,7 @@ fn suspend_while_ticking_never_deadlocks() {
             // Hold the suspension long enough that the 1 ms ticker tries to draw inside it.
             std::thread::sleep(Duration::from_millis(100));
             for _ in 0..1000 {
-                p.unplan_file(0, 0);
+                p.next_file(0, 0);
                 p.note("  inside the prompt", Stream::Stderr);
             }
         });

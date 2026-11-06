@@ -10,6 +10,7 @@ use zeroize::Zeroizing;
 use crate::api::ApiClient;
 use crate::commands::push_report::{self, FilePlan};
 use crate::config::load_config;
+use crate::transfer_stats::FileEnd;
 use crate::transfer_view::LiveProgress;
 use crate::ui;
 use crate::upload::{ChunkProgress, Stream};
@@ -195,14 +196,14 @@ pub async fn run(
     let plan = FilePlan::of_size(file_size);
     let progress = push_report::start([plan], verbose);
     let total_start = std::time::Instant::now();
-    // For the owner-only sentence after the upload: the key loaded and the parent id normalised now, as the upload
+    // Loaded once, for the upload and the owner-only sentence after it; the parent id normalised now, as the upload
     // itself does (an invalid id fails the upload first), so a push that went up cannot fail afterwards.
-    let notice_key = load_master_key()?;
+    let master_key = std::sync::Arc::new(load_master_key()?);
     let notice_parent = parent_id
         .as_deref()
         .and_then(|p| p.parse::<uuid::Uuid>().ok())
         .map(|p| p.to_string());
-    let result = push_single_file(&api, &path, parent_id, strategy, false, &progress, plan).await?;
+    let result = push_single_file(&api, &master_key, &path, parent_id, strategy, false, &progress, plan).await?;
     let total_elapsed = total_start.elapsed();
     // The live lines are cleared here: everything below prints under them.
     let transfer = progress.summary();
@@ -212,7 +213,7 @@ pub async fn run(
             // L15 = A: the CLI never publishes an owner key. A write into a shared
             // folder stays owner-only until the owner shares it from web or mobile.
             if !ui::is_json() {
-                crate::owned_keys::announce_owner_only(&api, &notice_key, notice_parent.as_deref()).await;
+                crate::owned_keys::announce_owner_only(&api, &master_key, notice_parent.as_deref()).await;
             }
             if ui::is_json() {
                 let speed = ur.speed_bps();
@@ -308,13 +309,16 @@ impl UploadResult {
 
 /// Upload a single file, counted in `progress` under `plan` (what the run planned for it).
 ///
-/// The run planned the file at its size then; if it has changed since, the run's totals follow it first, so done
-/// never passes total (spec §4.6, I1; the driver reads the size once more itself). A file that is not uploaded (a
-/// skip, or already uploaded) takes its plan back out of the run. A failed one keeps it, so the run ends short of
-/// its total, and gives up what it did not send, so the ETA does not wait for it. `in_folder`: part of a folder
-/// push, which prints no `resuming` line (as before).
+/// The file is announced to the run as the one sent next, and its end settles its share (`TransferStats::next_file`,
+/// `end_file`): its totals follow the size the driver reads when the file begins (after the conflict lookup and any
+/// prompt), so done never passes total (spec §4.6, I1). A file that is not uploaded (a skip, or already uploaded)
+/// takes its share back out of the run. A failed one keeps it, so the run ends short of its total, and gives up what
+/// it did not send, so the ETA does not wait for it. `in_folder`: part of a folder push, which prints no `resuming`
+/// line (as before).
+#[allow(clippy::too_many_arguments)]
 async fn push_single_file(
     api: &ApiClient,
+    master_key: &std::sync::Arc<beebeeb_core::kdf::MasterKey>,
     path: &std::path::Path,
     parent_id: Option<String>,
     strategy: ConflictStrategy,
@@ -322,24 +326,19 @@ async fn push_single_file(
     progress: &LiveProgress,
     plan: FilePlan,
 ) -> Result<Pushed, String> {
-    let plan = plan.follow(path, progress);
-    let done_before = progress.bytes_done();
-    match upload_one(api, path, parent_id, strategy, in_folder, progress).await {
-        Ok(Pushed::Uploaded(result)) => Ok(Pushed::Uploaded(result)),
-        Ok(not_uploaded) => {
-            plan.take_from(progress);
-            Ok(not_uploaded)
-        }
-        Err(e) => {
-            let sent = progress.bytes_done().saturating_sub(done_before);
-            progress.give_up(plan.bytes().saturating_sub(sent));
-            Err(e)
-        }
-    }
+    plan.announce(progress);
+    let pushed = upload_one(api, master_key, path, parent_id, strategy, in_folder, progress).await;
+    progress.end_file(match &pushed {
+        Ok(Pushed::Uploaded(_)) => FileEnd::Uploaded,
+        Ok(Pushed::AlreadyUploaded | Pushed::Skipped) => FileEnd::NotSent,
+        Err(_) => FileEnd::Failed,
+    });
+    pushed
 }
 
 async fn upload_one(
     api: &ApiClient,
+    master_key: &std::sync::Arc<beebeeb_core::kdf::MasterKey>,
     path: &std::path::Path,
     parent_id: Option<String>,
     strategy: ConflictStrategy,
@@ -347,10 +346,7 @@ async fn upload_one(
     progress: &LiveProgress,
 ) -> Result<Pushed, String> {
     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
-
-    // The streaming uploader stats + reads the file itself in bounded chunks;
-    // no full read here.
-    let master_key = load_master_key()?;
+    // The streaming uploader stats + reads the file itself in bounded chunks; no full read here.
 
     let parent_uuid: Option<uuid::Uuid> = parent_id.as_deref().and_then(|s| s.parse().ok());
 
@@ -378,7 +374,7 @@ async fn upload_one(
     let mut mint_tag: Option<[u8; 32]> = None;
     let mut read_row = None;
     let (file_id, upload_name, replace_file_id) = {
-        let existing = find_conflict(api, &master_key, &file_name, parent_uuid).await?;
+        let existing = find_conflict(api, master_key, &file_name, parent_uuid).await?;
         // Our own upload of this very file is not a conflict (`push_repeat`): an interrupted one resumes
         // (task 1950, with no explicit --replace / --keep-both), and a finished one, unchanged on both sides, is
         // skipped (task 2334). --replace always uploads.
@@ -402,7 +398,7 @@ async fn upload_one(
             None => {
                 // L13/N4: a new item's id comes from core's mint (it carries
                 // the resume tag), never from a local random number.
-                let minted = crate::item_id::mint_owner(&master_key)?;
+                let minted = crate::item_id::mint_owner(master_key)?;
                 mint_tag = Some(*minted.tag());
                 (minted.id(), file_name.clone(), None)
             }
@@ -486,7 +482,7 @@ async fn upload_one(
                     }
                     // L13: a fresh item's id comes from core's minting type.
                     ConflictResolution::Upload { filename } => {
-                        let minted = crate::item_id::mint_owner(&master_key)?;
+                        let minted = crate::item_id::mint_owner(master_key)?;
                         mint_tag = Some(*minted.tag());
                         (minted.id(), filename, None)
                     }
@@ -521,13 +517,13 @@ async fn upload_one(
                 .and_then(|v| v.as_str())
                 .ok_or("server response missing name_encrypted")?;
             let resolved = crate::owned_keys::OwnedKeyResolver::new()
-                .resolve(api, &master_key, &meta)
+                .resolve(api, master_key, &meta)
                 .await?;
             // L13: a request row's content is read-only. An edit is saved as a
             // new owner item — never sealed under `C`, never published.
             if resolved.origin == beebeeb_core::owned_keys::KeyOrigin::RequestContent {
                 // L13: the edit is a NEW owner item, minted by core.
-                let minted = crate::item_id::mint_owner(&master_key)?;
+                let minted = crate::item_id::mint_owner(master_key)?;
                 mint_tag = Some(*minted.tag());
                 (None, None, None, Some(minted.id()))
             } else {
@@ -545,7 +541,7 @@ async fn upload_one(
                 // too: only a proven-writable row gets a new version.
                 crate::owned_keys::write_check(
                     api,
-                    &master_key,
+                    master_key,
                     &crate::owned_keys::WriteTarget {
                         file_id: &existing,
                         is_folder: false,
@@ -569,7 +565,6 @@ async fn upload_one(
         None => (None, None, None, None),
     };
     let file_id = fresh_id.unwrap_or(file_id);
-    let master_key = std::sync::Arc::new(master_key);
     let display_name = upload_name.clone();
 
     let parent_uuid: Option<uuid::Uuid> = match &parent_id {
@@ -593,7 +588,7 @@ async fn upload_one(
         read_row,
     };
     let signature = crate::resume::local_signature(path);
-    let outcome = crate::upload::stream_encrypt_upload(api, std::sync::Arc::clone(&master_key), spec, progress).await?;
+    let outcome = crate::upload::stream_encrypt_upload(api, std::sync::Arc::clone(master_key), spec, progress).await?;
     // Task 2334: remember this upload, so a re-run of the push skips it while the file stays unchanged. Only
     // when the file did not change while it was read (same signature before and after, the size uploaded) and
     // the server named the version it completed.
@@ -655,7 +650,7 @@ async fn push_directory(
     shared: crate::commands::push_folders::SharedReuse,
     verbose: bool,
 ) -> Result<(), String> {
-    let master_key = load_master_key()?;
+    let master_key = std::sync::Arc::new(load_master_key()?);
     let dir_name = dir_path
         .file_name()
         .and_then(|n| n.to_str())
@@ -666,13 +661,14 @@ async fn push_directory(
     collect_entries(dir_path, &mut entries)?;
 
     let file_count = entries.iter().filter(|(_, is_dir)| !*is_dir).count();
-    let _folder_count = entries.iter().filter(|(_, is_dir)| *is_dir).count();
-    let total_file_size: u64 = entries
+    // One stat of every file (a file that cannot be read counts as empty: its upload fails): the resolve line's
+    // size and the run's plan. A file that changes later is followed when it begins (`push_single_file`).
+    let file_sizes: Vec<u64> = entries
         .iter()
         .filter(|(_, is_dir)| !*is_dir)
-        .filter_map(|(p, _)| std::fs::metadata(p).ok())
-        .map(|m| m.len())
-        .sum();
+        .map(|(p, _)| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+        .collect();
+    let total_file_size: u64 = file_sizes.iter().sum();
 
     // ── Resolve line ────────────────────────────────────────────────────────
     if ui::is_rich() {
@@ -714,12 +710,8 @@ async fn push_directory(
         folder_map.insert(entry_path.clone(), folder_id);
     }
 
-    // Every file planned before the first one goes up (its size now): the run's totals and ETA.
-    let plans: Vec<FilePlan> = entries
-        .iter()
-        .filter(|(_, is_dir)| !*is_dir)
-        .map(|(p, _)| FilePlan::of_path(p))
-        .collect();
+    // Every file planned before the first one goes up: the run's totals and ETA.
+    let plans: Vec<FilePlan> = file_sizes.into_iter().map(FilePlan::of_size).collect();
     let progress = push_report::start(plans.iter().copied(), verbose);
     let mut plans = plans.into_iter();
 
@@ -743,7 +735,8 @@ async fn push_directory(
             // used to stop the push, so later siblings were never uploaded).
             let plan = plans.next().unwrap_or(FilePlan::of_size(0));
             let parent = Some(entry_parent_id.to_string());
-            let ur = match push_single_file(api, entry_path, parent, strategy, true, &progress, plan).await {
+            let ur = match push_single_file(api, &master_key, entry_path, parent, strategy, true, &progress, plan).await
+            {
                 Ok(ur) => ur,
                 Err(e) => {
                     let rel = entry_path

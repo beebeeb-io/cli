@@ -20,7 +20,7 @@
 //! config may hold a live session) and `BB_NO_UPDATE=1`.
 
 #[path = "support/upload_mock.rs"]
-mod upload_mock;
+pub mod upload_mock;
 
 use upload_mock::*;
 
@@ -203,7 +203,7 @@ async fn push_json_reports_transfer_stats() {
     assert_eq!(t["retries"], 0, "{t}");
     assert_eq!(
         t["pools"],
-        json!([{"id": "3e15382b-0000-4000-8000-000000000001", "country": "Germany", "country_code": "DE", "chunks": 1}]),
+        json!([{"country": "Germany", "country_code": "DE", "chunks": 1}]),
         "{t}"
     );
     // The existing keys keep their names and meaning.

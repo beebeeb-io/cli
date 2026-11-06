@@ -23,7 +23,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 use super::line::{self, Role};
 use crate::transfer_stats::{
-    ChunkRecord, Direction, FileSlot, Held, PoolLabel, Route, Snapshot, Summary, Tally, TransferStats,
+    ChunkRecord, Direction, FileEnd, FileSlot, Held, PoolLabel, Route, Snapshot, Summary, Tally, TransferStats,
 };
 use crate::upload::{ChunkProgress, FileProgress, Stream};
 
@@ -176,10 +176,12 @@ impl Shared {
             return;
         }
         let text = line::chunk_line(record, multi_file, self.columns());
-        let text = if self.record.is_some() {
-            text
-        } else {
+        // Coloured only where the live lines are drawn (both streams terminals): `colored` decides by stdout alone,
+        // so a `2>log` beside a terminal stdout would fill the log with colour codes.
+        let text = if self.options.draw == Draw::Terminal && self.record.is_none() {
             line::paint(&text, Role::Dim)
+        } else {
+            text
         };
         self.emit(Stream::Stderr, &text);
     }
@@ -330,22 +332,18 @@ impl LiveProgress {
         lock(&self.shared.model).plan_file(bytes, chunks);
     }
 
-    pub(crate) fn unplan_file(&self, bytes: u64, chunks: u32) {
-        lock(&self.shared.model).unplan_file(bytes, chunks);
+    /// The next file the command sends was planned as `bytes` and `chunks` (`TransferStats::next_file`).
+    pub(crate) fn next_file(&self, bytes: u64, chunks: u32) {
+        lock(&self.shared.model).next_file(bytes, chunks);
+    }
+
+    /// The file announced by [`next_file`](Self::next_file) ended (`TransferStats::end_file`).
+    pub(crate) fn end_file(&self, end: FileEnd) {
+        lock(&self.shared.model).end_file(end);
     }
 
     pub(crate) fn seal_plan(&self) {
         lock(&self.shared.model).seal_plan();
-    }
-
-    /// `bytes` of the plan will not be sent (a file failed for good): kept in the totals, left out of the ETA.
-    pub(crate) fn give_up(&self, bytes: u64) {
-        lock(&self.shared.model).give_up(bytes);
-    }
-
-    /// Bytes confirmed so far, net of rollbacks.
-    pub(crate) fn bytes_done(&self) -> u64 {
-        lock(&self.shared.model).bytes_done()
     }
 
     /// The run's end: stops the ticker, clears the lines, then reads the numbers.

@@ -244,7 +244,7 @@ async fn pool_label_from_init_and_complete() {
         });
         let rec = Recording::default();
         run(&state, spec(&path, Uuid::new_v4()), &rec).await.expect("upload");
-        assert_eq!(rec.of("pool"), ["pool 3e15382b Germany"]);
+        assert_eq!(rec.of("pool"), ["pool Germany"]);
     }
 
     // A resumed session skips init: its completion names the pool.
@@ -264,7 +264,7 @@ async fn pool_label_from_init_and_complete() {
             state.lock().unwrap().inits.is_empty(),
             "premise: the session was continued"
         );
-        assert_eq!(rec.of("pool"), ["pool 4f26493c Finland"]);
+        assert_eq!(rec.of("pool"), ["pool Finland"]);
     }
 }
 

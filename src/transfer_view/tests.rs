@@ -38,7 +38,6 @@ fn snap(done: u64, total: u64) -> Snapshot {
         retries: 0,
         pools: vec![PoolCount {
             label: PoolLabel {
-                id: Some(uuid::Uuid::parse_str("3e15382b-0000-4000-8000-000000000001").unwrap()),
                 country: Some("Germany".into()),
                 country_code: Some("DE".into()),
             },
@@ -162,7 +161,6 @@ fn verbose_lines_drop_from_the_end() {
     assert_eq!(pool_line(&s, 60), "    pool Germany · direct 66 · api 0 · 0 retries");
     assert_eq!(pool_line(&s, 40), "    pool Germany · direct 66 · api 0");
     let mut download = s.clone();
-    download.pools[0].label.id = None;
     download.avg_bytes_per_sec = None;
     download.oldest_in_flight_ms = None;
     assert!(pool_line(&download, 100).starts_with("    pool Germany · direct 66"));
@@ -386,10 +384,9 @@ fn names_never_carry_control_characters() {
 /// guessed; two pools in one country read as one; the server's text is cleaned like a name (no terminal codes).
 #[test]
 fn pool_shows_only_a_received_country_cleaned() {
-    let label = |id: Option<&str>, country: Option<&str>| PoolLabel {
-        id: id.map(|i| uuid::Uuid::parse_str(i).unwrap()),
+    let label = |country: Option<&str>, code: Option<&str>| PoolLabel {
         country: country.map(str::to_string),
-        country_code: None,
+        country_code: code.map(str::to_string),
     };
     let mut s = snap(DONE, TOTAL);
     s.pools = vec![];
@@ -399,25 +396,25 @@ fn pool_shows_only_a_received_country_cleaned() {
         "not known yet"
     );
     s.pools = vec![PoolCount {
-        label: label(Some("3e15382b-0000-4000-8000-000000000001"), None),
+        label: label(None, Some("DE")),
         chunks: 3,
     }];
     assert_eq!(
         pool_line(&s, 100),
         "    direct 66 · api 0 · 0 retries · chunk 134.2 MB",
-        "an id without a country shows nothing"
+        "no country name received: nothing is shown"
     );
     s.pools = vec![
         PoolCount {
-            label: label(Some("3e15382b-0000-4000-8000-000000000001"), Some("Germany")),
+            label: label(Some("Germany"), Some("DE")),
             chunks: 3,
         },
         PoolCount {
-            label: label(Some("4f26493c-0000-4000-8000-000000000002"), Some("Germany")),
+            label: label(Some("Germany"), None),
             chunks: 2,
         },
         PoolCount {
-            label: label(None, Some("Finland")),
+            label: label(Some("Finland"), Some("FI")),
             chunks: 1,
         },
     ];
@@ -427,7 +424,7 @@ fn pool_shows_only_a_received_country_cleaned() {
         pool_line(&s, 100)
     );
     s.pools = vec![PoolCount {
-        label: label(None, Some("Ger\u{1b}[2J\nmany")),
+        label: label(Some("Ger\u{1b}[2J\nmany"), None),
         chunks: 1,
     }];
     let line = pool_line(&s, 100);

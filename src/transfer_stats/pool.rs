@@ -1,27 +1,23 @@
-//! Which storage pool a file's bytes went to, as far as a user may be told
-//! (spec §4.4): the pool's id and its country. Nothing else from the server's
-//! answer is kept, so nothing else can be printed.
+//! Where a file's bytes are stored, as far as a user may be told (spec §4.4;
+//! Guus and the lead, 2026-11-06): the storage country. Nothing else from the
+//! server's answer is kept, so nothing else can be printed or put in `--json`.
 
-/// The pool of one file. Every field is optional: an older server, or a
-/// download (whose file rows carry no pool id), answers with less.
+/// The storage country of one file's pool. Both fields are optional: an older
+/// server answers with less.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PoolLabel {
-    pub id: Option<uuid::Uuid>,
     pub country: Option<String>,
     pub country_code: Option<String>,
 }
 
 impl PoolLabel {
-    /// Read the pool from a server answer (an upload init or completion, or a
-    /// file row). Only `storage_pool_id` and `storage_location.country` /
-    /// `.country_code` are read: never `region` (a datacenter code), never the
-    /// deprecated `storage_location.city` (Guus, LD-0021: countries, never
-    /// cities). `None` when the answer names no pool at all.
+    /// Read the storage country from a server answer (an upload init or
+    /// completion, or a file row). Only `storage_location.country` and
+    /// `.country_code` are read: never `storage_pool_id` (no meaning to a user),
+    /// never `region` (it can be a datacenter code), never the deprecated
+    /// `storage_location.city` (Guus, LD-0021: countries, never cities). `None`
+    /// when the answer names no country.
     pub(crate) fn from_answer(answer: &serde_json::Value) -> Option<PoolLabel> {
-        let id = answer
-            .get("storage_pool_id")
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse::<uuid::Uuid>().ok());
         let location = answer.get("storage_location");
         let text = |key: &str| {
             location
@@ -30,21 +26,10 @@ impl PoolLabel {
                 .map(str::to_string)
         };
         let (country, country_code) = (text("country"), text("country_code"));
-        if id.is_none() && country.is_none() && country_code.is_none() {
+        if country.is_none() && country_code.is_none() {
             return None;
         }
-        Some(PoolLabel {
-            id,
-            country,
-            country_code,
-        })
-    }
-
-    /// Tests: the first 8 hex digits of the pool id (the form `bb ls` uses for file ids). Never shown: the
-    /// lines name a pool by its country (Guus, 2026-11-06).
-    #[cfg(test)]
-    pub(crate) fn id8(&self) -> Option<String> {
-        self.id.map(|id| id.simple().to_string()[..8].to_string())
+        Some(PoolLabel { country, country_code })
     }
 }
 
@@ -102,30 +87,40 @@ mod tests {
     }
 
     #[test]
-    fn pool_label_keeps_only_id_and_country() {
+    fn pool_label_keeps_only_the_country() {
         let label = PoolLabel::from_answer(&answer()).expect("a label");
-        let shown = format!("{label:?} {}", label.id8().unwrap());
-        let mut never = vec!["zz9", "Testville", "objects.storage.test", "Storageco", "storageco"];
+        let shown = format!("{label:?}");
+        let mut never = vec![
+            "3e15382b",
+            "zz9",
+            "Testville",
+            "objects.storage.test",
+            "Storageco",
+            "storageco",
+        ];
         never.extend(PROVIDER_NAMES);
         assert_absent(&shown, &never);
-        assert!(shown.contains("Germany") && shown.contains("DE"), "{shown}");
-        assert_eq!(label.id8().as_deref(), Some("3e15382b"));
+        assert_eq!(
+            label,
+            PoolLabel {
+                country: Some("Germany".into()),
+                country_code: Some("DE".into())
+            }
+        );
     }
 
     #[test]
-    fn pool_label_without_an_id_keeps_the_country() {
+    fn a_pool_id_without_a_country_is_no_label() {
         let row = serde_json::json!({
             "id": "file-1",
             "storage_location": {"region": "europe", "country": "Finland", "country_code": "FI", "city": "Testville"}
         });
         let label = PoolLabel::from_answer(&row).expect("a label");
-        assert_eq!(label.id, None);
         assert_eq!(label.country.as_deref(), Some("Finland"));
-        assert_eq!(label.id8(), None);
         assert_eq!(
-            PoolLabel::from_answer(&serde_json::json!({"id": "x"})),
+            PoolLabel::from_answer(&serde_json::json!({"storage_pool_id": "3e15382b-0000-4000-8000-000000000001"})),
             None,
-            "nothing to label"
+            "an id alone names no country: nothing is shown, never a guess"
         );
     }
 

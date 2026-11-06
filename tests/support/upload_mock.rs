@@ -1,8 +1,8 @@
 //! The in-process mock API and `bb` runner of the binary push tests (`zero_byte_files`, `transfer_stats_output`),
-//! moved here unchanged from `zero_byte_files.rs` (task 2333) and given two knobs: extra init-answer fields and a
-//! held first init. Every run uses a scratch `HOME` / `XDG_CONFIG_HOME` (the developer's real config may hold a
-//! live session), `BB_REFUSE_NON_LOOPBACK_API=1`, an explicit loopback `--api` and `BB_NO_UPDATE=1`.
-#![allow(dead_code)]
+//! moved here unchanged from `zero_byte_files.rs` (task 2333) and given three knobs: extra init-answer fields, a
+//! held first init and held conflict lookups. Every run uses a scratch `HOME` / `XDG_CONFIG_HOME` (the developer's
+//! real config may hold a live session), `BB_REFUSE_NON_LOOPBACK_API=1`, an explicit loopback `--api` and
+//! `BB_NO_UPDATE=1`. Each test binary declares it `pub mod`, so what one of them does not use is not dead code.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -38,6 +38,10 @@ pub struct Mock {
     pub init_extra: Option<Value>,
     /// Task 2333: while set, the FIRST init is held (not answered) — a test changes a file meanwhile.
     pub hold_first_init: Arc<AtomicBool>,
+    /// Task 2333: while set, every conflict lookup (`check-conflict`) is held — a test changes a file meanwhile.
+    pub hold_conflict_checks: Arc<AtomicBool>,
+    /// Number of conflict lookups that arrived.
+    pub conflict_checks: Arc<Mutex<usize>>,
 }
 
 pub async fn start_mock(mock: Mock) -> String {
@@ -52,7 +56,13 @@ pub async fn start_mock(mock: Mock) -> String {
         )
         .route(
             "/api/v1/files/check-conflict",
-            post(|| async { Json(json!({ "files": [] })) }),
+            post(|State(m): State<Mock>| async move {
+                *m.conflict_checks.lock().unwrap() += 1;
+                while m.hold_conflict_checks.load(Ordering::SeqCst) {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Json(json!({ "files": [] }))
+            }),
         )
         .route(
             "/api/v1/files/folder",
@@ -208,22 +218,36 @@ pub fn make_folder2(home: &Path) -> PathBuf {
 }
 
 pub async fn bb(home: &Path, args: &[&str]) -> Output {
+    run_bb(home, args, false).await
+}
+
+/// [`bb`] with colour forced on (`CLICOLOR_FORCE=1`, no `NO_COLOR`): stdout is coloured although it is a pipe.
+pub async fn bb_coloured(home: &Path, args: &[&str]) -> Output {
+    run_bb(home, args, true).await
+}
+
+async fn run_bb(home: &Path, args: &[&str], coloured: bool) -> Output {
     let home = home.to_path_buf();
     let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
     let out = tokio::task::spawn_blocking(move || {
-        Command::new(env!("CARGO_BIN_EXE_bb"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_bb"));
+        command
             .env("BB_REFUSE_NON_LOOPBACK_API", "1")
             .args(&args)
             .current_dir(&home)
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", home.join(".config"))
             .env("BB_NO_UPDATE", "1")
-            .env("NO_COLOR", "1")
+            .env_remove("CLICOLOR_FORCE")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .expect("run bb")
+            .stderr(Stdio::piped());
+        if coloured {
+            command.env_remove("NO_COLOR").env("CLICOLOR_FORCE", "1");
+        } else {
+            command.env("NO_COLOR", "1");
+        }
+        command.output().expect("run bb")
     })
     .await
     .unwrap();

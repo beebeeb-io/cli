@@ -161,7 +161,6 @@ impl Summary {
             .iter()
             .map(|p| {
                 serde_json::json!({
-                    "id": p.label.id.map(|id| id.to_string()),
                     "country": p.label.country,
                     "country_code": p.label.country_code,
                     "chunks": p.chunks,
@@ -202,6 +201,27 @@ pub(crate) struct ChunkRecord {
     pub(crate) duration_ms: u64,
 }
 
+/// How a file the command announced with [`TransferStats::next_file`] ended (spec §4.6, I1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FileEnd {
+    /// Its share was sent.
+    Uploaded,
+    /// Not sent (a conflict answered "skip", or already uploaded): its share leaves the run.
+    NotSent,
+    /// Failed for good: its share stays in the totals (the run ends short of them), and what it did not send
+    /// leaves the ETA.
+    Failed,
+}
+
+/// The share of the totals of the file being sent: as planned, then as the driver read it when the file began.
+#[derive(Clone, Copy)]
+struct Share {
+    bytes: u64,
+    chunks: u32,
+    /// `bytes_done` when the file was announced: what the file sent is measured from here.
+    done_at_start: u64,
+}
+
 struct FileState {
     name: String,
     bytes_total: u64,
@@ -231,6 +251,8 @@ pub(crate) struct TransferStats {
     chunks_total: u32,
     /// Planned bytes a failed file will never send (`give_up`): in the totals, out of the ETA.
     given_up_bytes: u64,
+    /// The file the command is sending now (`next_file` to `end_file`).
+    share: Option<Share>,
     plan_final: bool,
     limit: u32,
     max_limit: u32,
@@ -260,6 +282,7 @@ impl TransferStats {
             bytes_total: 0,
             chunks_total: 0,
             given_up_bytes: 0,
+            share: None,
             plan_final: false,
             limit: 0,
             max_limit: 0,
@@ -284,22 +307,38 @@ impl TransferStats {
         self.chunks_total += chunks;
     }
 
-    /// A planned file that will not be transferred (a push conflict answered "skip").
-    pub(crate) fn unplan_file(&mut self, bytes: u64, chunks: u32) {
-        self.files_total = self.files_total.saturating_sub(1);
-        self.bytes_total = self.bytes_total.saturating_sub(bytes);
-        self.chunks_total = self.chunks_total.saturating_sub(chunks);
+    /// The next file the command sends was planned as `bytes` and `chunks` (its share of the totals). The driver
+    /// reads the file's size again when it begins (after the conflict lookup and any prompt): `begin_file` moves the
+    /// share to what it read, so a file that changed meanwhile never takes done past total (spec §4.6, I1).
+    pub(crate) fn next_file(&mut self, bytes: u64, chunks: u32) {
+        self.share = Some(Share {
+            bytes,
+            chunks,
+            done_at_start: self.bytes_done,
+        });
+    }
+
+    /// The file announced by [`next_file`](Self::next_file) ended: its share is settled as `end` says.
+    pub(crate) fn end_file(&mut self, end: FileEnd) {
+        let Some(share) = self.share.take() else { return };
+        match end {
+            FileEnd::Uploaded => {}
+            FileEnd::NotSent => {
+                self.files_total = self.files_total.saturating_sub(1);
+                self.bytes_total = self.bytes_total.saturating_sub(share.bytes);
+                self.chunks_total = self.chunks_total.saturating_sub(share.chunks);
+            }
+            FileEnd::Failed => {
+                let sent = self.bytes_done.saturating_sub(share.done_at_start);
+                self.give_up(share.bytes.saturating_sub(sent));
+            }
+        }
     }
 
     /// `bytes` of the plan will not be sent: a file failed for good. They stay in the totals (the run ends short
     /// of them), but they are not waiting to be sent, so the ETA leaves them out.
-    pub(crate) fn give_up(&mut self, bytes: u64) {
+    fn give_up(&mut self, bytes: u64) {
         self.given_up_bytes = self.given_up_bytes.saturating_add(bytes);
-    }
-
-    /// Bytes confirmed so far, net of rollbacks (a command measures one file's share with it).
-    pub(crate) fn bytes_done(&self) -> u64 {
-        self.bytes_done
     }
 
     /// A file has begun: the run got as far as moving bytes.
@@ -318,7 +357,20 @@ impl TransferStats {
         self.max_limit = self.max_limit.max(max_in_flight);
     }
 
+    /// A file (or another attempt at it) begins, as the driver read it: `bytes` of ciphertext in `chunk_count`
+    /// chunks (0: not known). The announced file's share of the totals becomes these numbers.
     pub(crate) fn begin_file(&mut self, name: &str, bytes: u64, chunk_count: u32, chunk_size: u64) -> FileSlot {
+        if let Some(share) = self.share.as_mut() {
+            self.bytes_total = self.bytes_total.saturating_sub(share.bytes).saturating_add(bytes);
+            share.bytes = bytes;
+            if chunk_count > 0 {
+                self.chunks_total = self
+                    .chunks_total
+                    .saturating_sub(share.chunks)
+                    .saturating_add(chunk_count);
+                share.chunks = chunk_count;
+            }
+        }
         self.files.push(FileState {
             name: name.to_string(),
             bytes_total: bytes,
@@ -548,7 +600,8 @@ impl TransferStats {
         let (Speed::BytesPerSec(rate), Some(taken)) = (current, taken) else {
             return None;
         };
-        if !self.plan_final || taken.span_ms() < ETA_MIN_SPAN_MS || self.bytes_done >= self.bytes_total {
+        let settled = self.bytes_done.saturating_add(self.given_up_bytes);
+        if !self.plan_final || taken.span_ms() < ETA_MIN_SPAN_MS || settled >= self.bytes_total {
             return None;
         }
         let remaining = self
