@@ -160,7 +160,10 @@ pub async fn run(
     strategy: ConflictStrategy,
     shared: crate::commands::push_folders::SharedReuse,
     verbose: bool,
+    parallel: u32,
 ) -> Result<(), String> {
+    // Wired into the upload (chunks at once, the budget, the interrupt) in the next commit.
+    let _ = parallel;
     if !path.exists() {
         return Err(format!("file not found: {}", path.display()));
     }
