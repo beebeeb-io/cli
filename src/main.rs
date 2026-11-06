@@ -201,6 +201,11 @@ enum Commands {
         /// Show transfer details: speed, chunks, chunks in flight, pool and route. No effect with --json
         #[arg(short = 'v', long)]
         verbose: bool,
+
+        /// How many chunks to send at once, 1 to 8 [default: 4]. A file whose chunks do not fit the 640 MiB
+        /// upload buffer gets fewer; the output says so.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=8), default_value_t = 4)]
+        parallel: u32,
     },
 
     /// Download a file by UUID, short ID, or path
@@ -641,6 +646,7 @@ async fn main() {
             keep_both,
             reuse_shared,
             verbose,
+            parallel,
         } => {
             let strategy = if replace {
                 commands::push::ConflictStrategy::Replace
@@ -654,7 +660,7 @@ async fn main() {
             } else {
                 commands::push_folders::SharedReuse::Ask
             };
-            commands::push::run(path, parent, folder, strategy, shared, verbose).await
+            commands::push::run(path, parent, folder, strategy, shared, verbose, parallel).await
         }
         Commands::Pull {
             file_id,
