@@ -49,20 +49,20 @@ pub(super) enum SessionPlan {
 pub(super) enum AttemptErr {
     /// The server no longer has the upload session (task 1589: its lease
     /// expired and the sweeper removed it). Recoverable once per file per run by
-    /// a re-init. `bytes_confirmed` is how much ciphertext THIS attempt had
-    /// already reported to `FileProgress::chunk_confirmed` before it died —
-    /// the retry restarts at chunk 0 under a fresh progress handle, so the
-    /// caller must roll this amount back on the shared/overall counter before
-    /// looping, or a full resend double-counts it (Codex thread #2).
-    SessionGone { message: String, bytes_confirmed: u64 },
+    /// a re-init. `confirmed` is what THIS attempt had already reported done
+    /// (`FileProgress::chunk_done`) before it died: its bytes, chunks and
+    /// already-stored chunks. The retry restarts at chunk 0 under a fresh
+    /// progress handle, so the caller must roll this back on the run's counts
+    /// before looping, or a full resend double-counts it (Codex thread #2).
+    SessionGone { message: String, confirmed: Tally },
     /// The init for the stored `file_id` was refused in a way a fresh id can
     /// fix. Carries the fresh id to try (at most once).
     InitRefused { message: String, fresh_file_id: Uuid },
     /// Task 2173: the session was opened as a direct upload and cannot finish as one (the server turned
     /// the direction off, a node has no direct routes, a link was refused, storage kept failing). Its
     /// transport cannot change, so the driver abandons it and inits again WITHOUT the capability token,
-    /// once per file per run. `bytes_confirmed` is rolled back like for [`AttemptErr::SessionGone`].
-    DirectUnavailable { bytes_confirmed: u64 },
+    /// once per file per run. `confirmed` is rolled back like for [`AttemptErr::SessionGone`].
+    DirectUnavailable { confirmed: Tally },
     /// Anything else — surfaced to the caller unchanged.
     Other(String),
 }
@@ -86,10 +86,9 @@ impl From<String> for AttemptErr {
 
 /// Map a chunk-PUT / complete failure: a swept session becomes
 /// [`AttemptErr::SessionGone`], everything else [`AttemptErr::Other`] with the
-/// same text the caller always saw. `bytes_confirmed` is the ciphertext this
-/// attempt had already gotten past the server before `e` — see
-/// [`AttemptErr::SessionGone`].
-pub(super) fn session_err(prefix: Option<String>, e: crate::api::ApiError, bytes_confirmed: u64) -> AttemptErr {
+/// same text the caller always saw. `confirmed` is what this attempt had
+/// already gotten past the server before `e` — see [`AttemptErr::SessionGone`].
+pub(super) fn session_err(prefix: Option<String>, e: crate::api::ApiError, confirmed: Tally) -> AttemptErr {
     let gone = crate::api::is_upload_session_gone(&e);
     let text = match prefix {
         Some(p) => format!("{p}: {e}"),
@@ -98,7 +97,7 @@ pub(super) fn session_err(prefix: Option<String>, e: crate::api::ApiError, bytes
     if gone {
         AttemptErr::SessionGone {
             message: text,
-            bytes_confirmed,
+            confirmed,
         }
     } else {
         AttemptErr::Other(text)

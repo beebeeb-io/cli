@@ -211,11 +211,27 @@ impl ApiClient {
         index: u32,
         data: Bytes,
     ) -> Result<Value, ApiError> {
+        self.upload_chunk_observed(upload_session_id, index, data, &|| {}).await
+    }
+
+    /// [`upload_chunk_typed`](Self::upload_chunk_typed), calling `on_retry` once before every
+    /// re-attempt of the PUT (a rate limit, or a transient transport error), so the upload driver can
+    /// count retries per chunk (task 2333). Never called for the first attempt, nor after the last.
+    pub async fn upload_chunk_observed(
+        &self,
+        upload_session_id: impl Into<DirectUploadId>,
+        index: u32,
+        data: Bytes,
+        on_retry: &(dyn Fn() + Sync),
+    ) -> Result<Value, ApiError> {
         let upload_session_id = upload_session_id.into();
         let token = self.require_auth()?;
         let url = self.url(&format!("/api/v1/uploads/{upload_session_id}/chunks/{index}"));
         let mut last_err = String::new();
         for attempt in 1..=CHUNK_RETRY.max_attempts {
+            if attempt > 1 {
+                on_retry();
+            }
             pace_if_needed().await;
             let send = self
                 .client
