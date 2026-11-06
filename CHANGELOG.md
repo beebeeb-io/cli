@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-11-06
+
+### Added
+- `bb push` shows live numbers on a terminal: a bar, the current speed in Mbps and the time left, updated as the server confirms chunks. `-v` / `--verbose` adds the chunks done and in flight, the average speed, the storage country (Germany or Finland), the direct and API chunk counts, retries and one line per chunk. `--quiet -v` is a usage error.
+- `bb push --json` gains a `transfer` object (totals, `avg_mbps`, `duration_ms`, route counts, retries, and `pools` with the storage country only). Existing keys are unchanged; `total_duration_ms` is still the whole run's wall time.
+- `bb push` of a folder reuses a same-name folder at every level instead of making a second one. A shared folder is reused only after a yes at a terminal or with the new `--reuse-shared` flag; without a terminal it exits 2.
+- A re-pushed file that this machine already uploaded unchanged is skipped and counted (`skipped N already uploaded`, `total_already_uploaded` in `--json`).
+
+### Changed
+- Of several same-name folders, `bb push` and `bb push --folder` use the oldest folder that is not shared and say how many there are.
+- Speeds in `bb push` and `bb speedtest` are decimal Mbps with one decimal. Durations read `7m 21s`, not milliseconds, and the end line says `1 file`.
+- Running an unchanged, already completed `bb push` again skips the file and exits 0; it used to refuse with "already exists" and exit 2 without a terminal. A changed file is still a conflict (exit 2).
+- Pushing a folder whose name already exists as a shared folder asks at a terminal, and without a terminal, with `--json` or with `--quiet` uploads nothing and exits 2 unless `--reuse-shared` is passed; 0.15.0 made a new private folder and exited 0.
+- Dependencies: `libc` 0.2.191, `serde_json` 1.0.154, `regex` 1.13.1; `unicode-width` is now a direct dependency.
+
+### Fixed
+- A resumed upload finishes in the folder the push asked for. An interrupted upload that sits in another folder is ended on the server and the file starts again in the right one; the file is never moved.
+- When the CLI cannot tell who can see a folder, it treats the folder as shared, and with several same-name folders it uploads nothing, also with `--reuse-shared`.
+- A name check that cannot be read, or a possible file-request upload whose keys did not load, fails the file instead of uploading a duplicate.
+- A file that changes size after the push planned it is counted at its new size. The rate-limit pause message no longer tears the live lines.
+
+### Security
+- The log of finished uploads, which names local paths, is written owner-only (0600), also when the log already exists.
+
 ## [0.15.0] - 2026-11-03
 
 ### Added
