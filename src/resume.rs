@@ -305,8 +305,7 @@ pub fn record_finished(path: &Path, upload: FinishedUpload) {
     if let Some(dir) = log.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let appended = private_file(std::fs::OpenOptions::new().create(true).append(true))
-        .open(&log)
+    let appended = open_private(std::fs::OpenOptions::new().create(true).append(true), &log)
         .and_then(|mut f| std::io::Write::write_all(&mut f, text.as_bytes()));
     let mut cache = FINISHED.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((cached_for, entries)) = cache.as_mut()
@@ -328,12 +327,16 @@ pub fn finished_upload(path: &Path) -> Option<FinishedUpload> {
     cache.as_ref().and_then(|(_, entries)| entries.get(&key(path)).copied())
 }
 
-/// `options`, creating the file readable by this user only: the log names local paths of pushed files (task
-/// 2334), as private as `config.json`.
-fn private_file(options: &mut std::fs::OpenOptions) -> &mut std::fs::OpenOptions {
+/// Open `path` with `options`, readable by this user only (task 2334): the log names local paths of pushed
+/// files, as private as `config.json`. A file that already exists with a wider mode (a leftover `.tmp`, or a
+/// log an earlier build made) is narrowed too, as `config.rs` does.
+fn open_private(options: &mut std::fs::OpenOptions, path: &Path) -> std::io::Result<std::fs::File> {
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(options, 0o600);
-    options
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    Ok(file)
 }
 
 /// Read the log (newest line per path wins) and compact it when its superseded lines outnumber the live ones.
@@ -367,9 +370,11 @@ fn load_finished(log: &Path) -> HashMap<String, FinishedUpload> {
             }
         }
         let tmp = log.with_extension("jsonl.tmp");
-        let written = private_file(std::fs::OpenOptions::new().create(true).write(true).truncate(true))
-            .open(&tmp)
-            .and_then(|mut f| std::io::Write::write_all(&mut f, out.as_bytes()));
+        let written = open_private(
+            std::fs::OpenOptions::new().create(true).write(true).truncate(true),
+            &tmp,
+        )
+        .and_then(|mut f| std::io::Write::write_all(&mut f, out.as_bytes()));
         if written.is_ok() {
             let _ = std::fs::rename(&tmp, log);
         }
@@ -704,6 +709,11 @@ mod tests {
             mtime_ns: 100,
         };
 
+        let log = dir.join("finished-uploads.jsonl");
+        // A log an earlier build made, readable by everyone: narrowed on the next write.
+        std::fs::write(&log, "").unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&log, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
         assert_eq!(finished_upload(&f), None);
         record_finished(&f, upload(1));
         assert_eq!(finished_upload(&f), Some(upload(1)));
@@ -737,7 +747,6 @@ mod tests {
             "a whole-second or absent mtime proves nothing"
         );
 
-        let log = dir.join("finished-uploads.jsonl");
         assert_eq!(
             std::fs::read_to_string(&log).unwrap().lines().count(),
             2,

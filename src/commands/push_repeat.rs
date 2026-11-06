@@ -70,7 +70,7 @@ pub(crate) async fn existing_upload(
             Err(_) => return Existing::Other,
         },
     };
-    if completed_as(&row, finished, parent) {
+    if completed_as(&row, finished) {
         Existing::AlreadyUploaded
     } else {
         Existing::Other
@@ -84,11 +84,11 @@ fn is_unfinished_first_upload(row: &serde_json::Value) -> bool {
         && row.get("download_version").is_none_or(serde_json::Value::is_null)
 }
 
-/// The row is in `parent`, the folder this push writes into (the record must name it too, see
-/// [`existing_upload`]), not trashed, completed at the version `finished` made, with the same plaintext size (`size_bytes` is the plaintext size: server `routes/uploads/complete.rs`). A later
+/// The row is still in the folder `finished` went to (which [`existing_upload`] requires to be the folder this
+/// push writes into), not trashed, completed at the version it made, with the same plaintext size (`size_bytes` is the plaintext size: server `routes/uploads/complete.rs`). A later
 /// version (another device replaced it), a move or the trash is not.
-fn completed_as(row: &serde_json::Value, finished: crate::resume::FinishedUpload, parent: Option<Uuid>) -> bool {
-    crate::upload::row_parent(row) == Ok(parent)
+fn completed_as(row: &serde_json::Value, finished: crate::resume::FinishedUpload) -> bool {
+    crate::upload::row_parent(row) == Ok(finished.parent_id)
         && row.get("is_trashed").and_then(serde_json::Value::as_bool) != Some(true)
         && row.get("is_uploading").and_then(serde_json::Value::as_bool) != Some(true)
         && row.get("download_version").is_some_and(serde_json::Value::is_object)
@@ -121,27 +121,21 @@ mod tests {
                 "download_version": version.map(|v| json!({ "version_number": v })),
             })
         };
-        assert!(completed_as(&row(false, Some(1), 9), finished(1, 9), None));
+        assert!(completed_as(&row(false, Some(1), 9), finished(1, 9)));
         let mut moved = row(false, Some(1), 9);
         moved["parent_id"] = json!(Uuid::from_u128(5));
-        assert!(!completed_as(&moved, finished(1, 9), None), "moved to another folder");
+        assert!(!completed_as(&moved, finished(1, 9)), "moved to another folder");
         let mut trashed = row(false, Some(1), 9);
         trashed["is_trashed"] = json!(true);
-        assert!(!completed_as(&trashed, finished(1, 9), None), "in the trash");
+        assert!(!completed_as(&trashed, finished(1, 9)), "in the trash");
+        assert!(!completed_as(&row(false, Some(2), 9), finished(1, 9)), "replaced since");
+        assert!(!completed_as(&row(false, Some(1), 8), finished(1, 9)), "another size");
         assert!(
-            !completed_as(&row(false, Some(2), 9), finished(1, 9), None),
-            "replaced since"
-        );
-        assert!(
-            !completed_as(&row(false, Some(1), 8), finished(1, 9), None),
-            "another size"
-        );
-        assert!(
-            !completed_as(&row(true, Some(1), 9), finished(1, 9), None),
+            !completed_as(&row(true, Some(1), 9), finished(1, 9)),
             "a new version is uploading"
         );
         assert!(
-            !completed_as(&row(false, None, 9), finished(1, 9), None),
+            !completed_as(&row(false, None, 9), finished(1, 9)),
             "nothing to download"
         );
     }

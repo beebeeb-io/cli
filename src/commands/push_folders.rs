@@ -17,7 +17,10 @@
 //! the terminal, or with `--reuse-shared`; without a terminal the push stops and says why; a no makes a new
 //! folder, as before. "Shared on its own" counts the folder's own invited people and its own links: what it
 //! inherits from its parent does not count, because a new folder in that parent inherits the same. A folder
-//! named EXPLICITLY (`--folder`) is the user's own choice and is reused even when shared.
+//! named EXPLICITLY (`--folder`) is the user's own choice and is reused even when shared, but of several of
+//! that name the oldest unshared one still wins; a shared one only when every one is shared. Of several, share
+//! lists that cannot be read, or a folder the server does not say is private or shared, stop the push: the
+//! unshared one cannot be told, so the oldest is never guessed.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Write;
@@ -329,6 +332,9 @@ impl<'a> PushFolders<'a> {
             }
             Err(e) => return Err(e),
         };
+        if let Some(e) = &exposures {
+            unknown_among_several(&candidates, e, shown)?;
+        }
         if let Some(i) = exposures.as_ref().and_then(|e| e.iter().position(|x| !x.is_shared())) {
             let which = if i == 0 {
                 "the oldest"
@@ -379,6 +385,7 @@ impl<'a> PushFolders<'a> {
             .exposures(&candidates, name)
             .await
             .map_err(|e| cannot_choose(&e, candidates.len(), name))?;
+        unknown_among_several(&candidates, &exposures, name)?;
         if let Some(i) = exposures.iter().position(|x| !x.is_shared()) {
             let which = if i == 0 {
                 "the oldest"
@@ -478,6 +485,19 @@ fn cannot_choose(why: &str, count: usize, shown: &str) -> String {
     format!(
         "{why}; {count} folders named {shown} are here and the one that is not shared cannot be told, so nothing is uploaded"
     )
+}
+
+/// Of several same-name folders, one the server does not say is private or shared (`Exposure::Unknown`) may be
+/// the private one a "no" made: as for share lists that cannot be read, nothing is guessed.
+fn unknown_among_several(candidates: &[Candidate], exposures: &[Exposure], shown: &str) -> Result<(), String> {
+    if candidates.len() > 1 && exposures.contains(&Exposure::Unknown) {
+        return Err(cannot_choose(
+            "the server does not say who can see each of them",
+            candidates.len(),
+            shown,
+        ));
+    }
+    Ok(())
 }
 
 /// "2 folders named X are here; using the oldest", when there is more than one.

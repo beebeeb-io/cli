@@ -1015,7 +1015,8 @@ async fn a_request_row_unopened_while_the_request_list_fails_fails_the_file() {
     .await;
     assert_ne!(out.status.code(), Some(0), "{}", stderr(&out));
     assert!(
-        stderr(&out).contains("could not check whether note.txt already exists"),
+        stderr(&out).contains("could not check whether note.txt already exists")
+            && stderr(&out).contains("couldn't load your file-request keys"),
         "{}",
         stderr(&out)
     );
@@ -1105,4 +1106,52 @@ async fn a_file_uploaded_into_one_folder_is_not_skipped_in_another() {
         inits_before,
         "nothing uploaded, nothing skipped"
     );
+}
+
+/// Self-review of the delta: of several same-name folders, one the server does not say is private or shared
+/// (here: no invite route) may be the private one, so `--folder` stops instead of guessing the oldest.
+#[tokio::test(flavor = "multi_thread")]
+async fn folder_does_not_guess_among_same_name_folders_the_server_cannot_say_are_private() {
+    let vault: Shared = Arc::default();
+    let api = start_mock(vault.clone()).await;
+    let home = scratch_home(&api);
+    seed_folder(&vault, None, "Movies");
+    seed_folder(&vault, None, "Movies");
+    vault.lock().unwrap().shares_unsupported = true;
+    let film = write_file(&home, "film.mkv", b"a film");
+
+    let out = bb(
+        &home,
+        &["--api", &api, "push", "--folder", "Movies", film.to_str().unwrap()],
+    )
+    .await;
+    assert_ne!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("the server does not say who can see each of them"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(vault.lock().unwrap().inits, 0, "nothing uploaded");
+}
+
+/// The same for a folder found implicitly, even with `--reuse-shared`: never "the oldest" of several when the
+/// server does not say who can see each.
+#[tokio::test(flavor = "multi_thread")]
+async fn of_several_same_name_folders_an_unknown_exposure_stops_the_push() {
+    let vault: Shared = Arc::default();
+    let api = start_mock(vault.clone()).await;
+    let home = scratch_home(&api);
+    seed_folder(&vault, None, MOVIE_DIR);
+    seed_folder(&vault, None, MOVIE_DIR);
+    vault.lock().unwrap().shares_unsupported = true;
+    write_file(&home, &format!("{MOVIE_DIR}/{MOVIE}"), b"one movie");
+
+    let out = bb(&home, &["--api", &api, "push", "--reuse-shared", MOVIE_DIR]).await;
+    assert_ne!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("the server does not say who can see each of them"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(vault.lock().unwrap().inits, 0, "nothing uploaded");
 }

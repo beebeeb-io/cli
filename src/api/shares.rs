@@ -83,11 +83,11 @@ impl ApiClient {
     }
 
     /// Every invite this account has sent: `GET /api/v1/shares/invites/sent`,
-    /// `{ "invites": [...] }`. The CLI's one reader of this list. A server
-    /// without the route (404/405/501) answers `Value::Null`, and each caller
-    /// says what that means for its question (no invite to open a key from;
-    /// for a push, nobody it can say is invited, so unknown); any other failure
-    /// is an error, never "no invites".
+    /// `{ "invites": [...] }`, read for a push's share check. A server without
+    /// the route (404/405/501) answers `Value::Null`, which a push reads as
+    /// "nobody it can say is invited", so unknown; any other failure is an
+    /// error, never "no invites". Key resolution reads the same route through
+    /// [`Self::list_sent_invites_for_keys`], where a 404 is an error.
     pub async fn list_sent_invites(&self) -> Result<Value, ApiError> {
         self.sent_invites(&[404, 405, 501]).await
     }
