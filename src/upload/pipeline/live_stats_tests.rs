@@ -3,7 +3,7 @@
 //! and what a failed attempt takes back.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 
 use beebeeb_core::kdf::MasterKey;
 use serde_json::json;
@@ -12,7 +12,10 @@ use uuid::Uuid;
 use super::{CHUNKS_IN_FLIGHT_PER_FILE, UploadOutcome, UploadSpec, stream_encrypt_upload};
 use crate::api::ApiClient;
 use crate::test_server::{Mock, Scratch, Shared, shared, spawn};
-use crate::upload::{Recording, UploadError};
+use crate::transfer_stats::Direction;
+use crate::transfer_view::LiveProgress;
+use crate::transfer_view::sink::Level;
+use crate::upload::{ChunkProgress, Recording, UploadError};
 
 const MIB: usize = 1024 * 1024;
 /// One full chunk on the wire: 4 MiB of plaintext plus nonce and tag.
@@ -34,11 +37,11 @@ fn spec(path: &std::path::Path, file_id: Uuid) -> UploadSpec {
     }
 }
 
-async fn run(state: &Shared, spec: UploadSpec, rec: &Recording) -> Result<UploadOutcome, UploadError> {
+async fn run(state: &Shared, spec: UploadSpec, progress: &dyn ChunkProgress) -> Result<UploadOutcome, UploadError> {
     let base = spawn(state.clone()).await;
     let api = ApiClient::new_for_test(base);
     let mk = Arc::new(MasterKey::from_bytes([9u8; 32]));
-    stream_encrypt_upload(&api, mk, spec, rec).await
+    stream_encrypt_upload(&api, mk, spec, progress).await
 }
 
 fn chunks_of(size: u64) -> u32 {
@@ -258,4 +261,35 @@ async fn pool_label_from_init_and_complete() {
         );
         assert_eq!(rec.of("pool"), ["pool 4f26493c Finland"]);
     }
+}
+
+/// Spec §6.7: the API layer's rate-limit pause is printed through the live sink (around its lines),
+/// never past it; once the run's sink is done, such a line goes straight to stderr again.
+#[tokio::test]
+async fn rate_limit_pause_prints_through_the_live_sink() {
+    let s = Scratch::new("2333-pause-line");
+    let (path, _, _) = s.file(9 * MIB);
+    let mut mock = Mock::default();
+    mock.chunk_rate_limited_once.insert(1);
+    let state = shared(mock);
+    let (live, record) = LiveProgress::for_test(Direction::Upload, Level::Default, 80, Arc::new(AtomicU64::new(0)));
+    live.register_notices_for_test();
+
+    run(&state, spec(&path, Uuid::new_v4()), &live).await.expect("upload");
+
+    let printed = record.lock().unwrap().clone();
+    let pauses: Vec<&String> = printed
+        .iter()
+        .filter(|l| l.contains("rate limited \u{2014} pausing 0s"))
+        .collect();
+    assert!(
+        !pauses.is_empty() && pauses.iter().all(|l| l.starts_with("err:")),
+        "the pause line goes through the sink, on stderr: {printed:?}"
+    );
+    let _ = live.summary();
+    crate::transfer_view::notice::stderr("  after the run");
+    assert!(
+        !record.lock().unwrap().iter().any(|l| l.contains("after the run")),
+        "a finished sink lets go of the notices"
+    );
 }

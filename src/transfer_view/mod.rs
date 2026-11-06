@@ -5,6 +5,7 @@
 
 pub(crate) mod clock;
 pub(crate) mod line;
+pub(crate) mod notice;
 pub(crate) mod sink;
 pub(crate) mod units;
 

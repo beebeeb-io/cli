@@ -218,6 +218,12 @@ impl Shared {
     }
 }
 
+impl super::notice::Notices for Shared {
+    fn stderr(&self, line: &str) {
+        self.emit(Stream::Stderr, line);
+    }
+}
+
 /// The sink of one run (spec §6.8).
 pub(crate) struct LiveProgress {
     shared: Arc<Shared>,
@@ -229,7 +235,20 @@ impl LiveProgress {
     pub(crate) fn new(direction: Direction, options: ViewOptions) -> Self {
         let mp = (options.draw == Draw::Terminal).then(MultiProgress::new);
         let tick = (options.draw == Draw::Terminal).then(|| Duration::from_millis(TICK_MS));
-        Self::build(direction, options, Arc::new(super::clock::now_ms), None, mp, None, tick)
+        let p = Self::build(direction, options, Arc::new(super::clock::now_ms), None, mp, None, tick);
+        if options.draw == Draw::Terminal {
+            p.register_notices();
+        }
+        p
+    }
+
+    /// Lines printed by code that holds no sink (`notice::stderr`) go around this sink's lines.
+    fn register_notices(&self) {
+        super::notice::register(self.notices());
+    }
+
+    fn notices(&self) -> std::sync::Weak<dyn super::notice::Notices> {
+        Arc::downgrade(&self.shared) as std::sync::Weak<dyn super::notice::Notices>
     }
 
     fn build(
@@ -363,6 +382,12 @@ impl LiveProgress {
         lines
     }
 
+    /// Tests: take `notice::stderr`'s lines, as the Terminal sink of a run does.
+    #[cfg(test)]
+    pub(crate) fn register_notices_for_test(&self) {
+        self.register_notices();
+    }
+
     #[cfg(test)]
     pub(crate) fn ticker_running(&self) -> bool {
         lock(&self.ticker).as_ref().is_some_and(|t| !t.is_finished())
@@ -397,6 +422,7 @@ impl ChunkProgress for LiveProgress {
 
     /// Stops and joins the ticker, then clears the lines. Idempotent.
     fn finish_all(&self) {
+        super::notice::unregister(&self.notices());
         self.shared.stop.store(true, Ordering::SeqCst);
         let handle = lock(&self.ticker).take();
         if let Some(handle) = handle {

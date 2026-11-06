@@ -489,12 +489,14 @@ async fn parse_response_typed(resp: reqwest::Response) -> Result<Value, ApiError
 
         if !crate::ui::is_quiet() {
             use colored::Colorize;
-            eprintln!(
+            // Through the live transfer lines when a run draws them (task 2333, spec §6.7): any request
+            // of a push, pull or sync can meet a 429.
+            crate::transfer_view::notice::stderr(&format!(
                 "  {} rate limited — pausing {}s{}",
                 "⏸".custom_color(crate::colors::AMBER),
                 retry_after,
                 remaining.map_or(String::new(), |r| format!(" ({r} requests remaining)")),
-            );
+            ));
         }
 
         tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
