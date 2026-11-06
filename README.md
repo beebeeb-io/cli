@@ -97,8 +97,9 @@ bb backup remove /srv/photos  # stop; what is already in Backups stays there
 ```
 
 The machine is named by its pretty hostname (else its hostname) and recognised by `/etc/machine-id`, so a
-reinstall keeps backing up into the same folder. bb's own folders (its settings, a `bb sync` folder, a
-`bb mount`) are never backed up.
+reinstall keeps backing up into the same folder. A folder inside bb's own folders (its settings, a `bb sync`
+folder, a `bb mount`) cannot be added; bb's settings and mounts are never walked into. A `bb sync` folder below a
+folder you add is backed up like any other folder, so add the folders next to it instead.
 
 Backups is read-only everywhere else: `bb push`, `bb mkdir` and `bb mv` into it are refused, and `bb ls` shows it
 as `[Read-only]`. `bb rm` can delete a device's backup or one of its folders after a question (`--yes` for

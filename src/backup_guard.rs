@@ -82,7 +82,14 @@ pub(crate) fn server_refusal(e: ApiError, m: Mutation) -> String {
 pub(crate) async fn depth_of(api: &ApiClient, id: &str) -> Result<Option<usize>, String> {
     let mut current = id.to_string();
     for steps in 0..MAX_ANCESTORS {
-        let row = api.get_file(current.as_str()).await?;
+        let row = match api.get_file(current.as_str()).await {
+            Ok(row) => row,
+            // Above a folder shared with this account sits the sharer's own
+            // folder, which this account cannot read: the shared tree is not
+            // this account's Backups tree (its root has no parent).
+            Err(e) if steps > 0 && matches!(e.status, 403 | 404) => return Ok(None),
+            Err(e) => return Err(e.message),
+        };
         if is_backups_root(&row) {
             return Ok(Some(steps));
         }

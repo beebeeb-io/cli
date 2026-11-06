@@ -143,6 +143,16 @@ pub async fn add(folder: PathBuf) -> Result<(), String> {
             .unwrap_or_default();
         category = Category::Custom(beebeeb_core::backup::custom_category_name(&raw, &taken));
     }
+    if store
+        .settings
+        .sources
+        .iter()
+        .any(|s| s.off.as_ref().is_some_and(|o| o.reason == OffReason::DeviceDeleted))
+    {
+        // The device folder is gone: a new folder is backed up into a new one.
+        store.settings.device_folder_id = None;
+        store.settings.manifest_folders.clear();
+    }
     let records_file = store.next_records_file();
     store.settings.sources.push(Source {
         path: path.clone(),
@@ -237,6 +247,10 @@ fn stop_words(device: &str, folder: &str, _reason: OffReason) -> String {
     format!("{device}'s backup of {folder} was deleted from another device.")
 }
 
+/// How old `.device.json` may get before a run writes it again, so other
+/// devices see the last run (one small version a day, not one per run).
+const MANIFEST_REFRESH_MS: i64 = 24 * 60 * 60 * 1000;
+
 /// What `run` did for one folder.
 struct FolderRun {
     folder: String,
@@ -315,7 +329,7 @@ pub async fn run() -> Result<(), String> {
                 category: s.category.clone(),
                 enabled: s.off.is_none(),
                 last_pass_at_ms: s.last_pass.as_ref().map(|p| p.at_ms),
-                items: 0,
+                items: store.records(s.records_file).map_or(0, |r| r.len() as u64),
                 other: serde_json::Map::new(),
             })
             .collect();
@@ -323,7 +337,11 @@ pub async fn run() -> Result<(), String> {
             .iter()
             .map(|f| format!("{}:{}", f.category, f.enabled))
             .collect();
-        if fresh || listed != store.settings.manifest_folders {
+        let stale = store
+            .settings
+            .manifest_written_ms
+            .is_none_or(|at| now_ms() - at > MANIFEST_REFRESH_MS);
+        if fresh || stale || listed != store.settings.manifest_folders {
             remote::write_manifest(&api, &master_key, device, &me, folders).await?;
             store.settings.manifest_folders = listed;
             store.settings.manifest_written_ms = Some(now_ms());

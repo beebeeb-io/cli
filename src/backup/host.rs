@@ -267,7 +267,10 @@ impl BackupHost for CliHost<'_> {
             None if records.find_remote(expected.remote_id).is_none() => record,
             None => return Ok(false),
         };
-        if expected.key != next.key {
+        let at_old_key_is_moved = records
+            .get(&expected.key)
+            .is_some_and(|r| r.remote_id == expected.remote_id);
+        if expected.key != next.key && at_old_key_is_moved {
             records.delete(&expected.key).map_err(HostError)?;
         }
         records.put(next).map_err(HostError)?;

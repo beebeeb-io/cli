@@ -292,3 +292,16 @@ async fn ls_shows_the_read_only_badge_and_never_the_manifest() {
     assert_eq!(root["badge"], MSG_BADGE);
     assert_eq!(root["system_role"], "backups_root");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_folder_shared_with_me_whose_parent_i_cannot_read_is_outside_the_tree() {
+    let (vault, api, home, _) = vault_with_backups().await;
+    // A share's root: its parent is the sharer's folder, which GET /files/{id} answers 404 for.
+    let sharers_folder = uuid::Uuid::new_v4().to_string();
+    let shared = seed_folder(&vault, Some(&sharers_folder), "Shared with me");
+    write_file(&home, "note.txt", b"note");
+
+    let out = bb(&home, &["--api", &api, "push", "note.txt", "--parent", &shared]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(vault.lock().unwrap().inits, 1);
+}
