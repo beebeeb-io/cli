@@ -338,6 +338,16 @@ impl LiveProgress {
         lock(&self.shared.model).seal_plan();
     }
 
+    /// `bytes` of the plan will not be sent (a file failed for good): kept in the totals, left out of the ETA.
+    pub(crate) fn give_up(&self, bytes: u64) {
+        lock(&self.shared.model).give_up(bytes);
+    }
+
+    /// Bytes confirmed so far, net of rollbacks.
+    pub(crate) fn bytes_done(&self) -> u64 {
+        lock(&self.shared.model).bytes_done()
+    }
+
     /// The run's end: stops the ticker, clears the lines, then reads the numbers.
     pub(crate) fn summary(&self) -> Summary {
         self.finish_all();
@@ -452,12 +462,18 @@ impl LiveProgress {
 }
 
 /// Dropped without a summary, the run ended in an error: the ticker stops and the last lines stay on screen above
-/// the error message (spec §6.7). After a summary the lines are already cleared.
+/// the error message (spec §6.7), when a file had begun. A run stopped before that (a lock held, a refused
+/// conflict) leaves no transfer line behind. After a summary the lines are already cleared.
 impl Drop for LiveProgress {
     fn drop(&mut self) {
         if !self.ended.load(Ordering::SeqCst) {
             self.stop_ticker();
-            self.shared.leave();
+            let begun = lock(&self.shared.model).has_begun();
+            if begun {
+                self.shared.leave();
+            } else {
+                self.shared.clear();
+            }
         }
     }
 }

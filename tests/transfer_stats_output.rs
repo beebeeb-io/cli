@@ -126,10 +126,21 @@ async fn quiet_and_verbose_is_a_usage_error_in_both_orders() {
         assert!(stderr.contains("--verbose cannot be combined with --quiet"), "{stderr}");
     }
     assert!(mock.inits.lock().unwrap().is_empty(), "nothing was uploaded");
+
+    // `--json` wins over `--quiet` (main's output mode), and `-v` has no effect with `--json`: no conflict.
+    let out = bb(
+        &home,
+        &["--api", &api, "--json", "--quiet", "push", "-v", "folder2/a.txt"],
+    )
+    .await;
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(serde_json::from_str::<Value>(&stdout).is_ok(), "{stdout}");
 }
 
-/// N2a (spec §9.4): `bb push -v` and `bb --json push` show the pool's id prefix and country, and never the
-/// datacenter code, the city, the session token, the master key or a provider name.
+/// N2a (spec §9.4; Guus 2026-11-06): `bb push -v` shows the pool as its country, and `bb --json push` carries the
+/// pool's id and country; neither shows the datacenter code, the city, the session token, the master key or a
+/// provider name, and the verbose lines show no pool id.
 #[tokio::test(flavor = "multi_thread")]
 async fn verbose_push_prints_no_secret_or_provider() {
     let mock = Mock {
@@ -155,8 +166,17 @@ async fn verbose_push_prints_no_secret_or_provider() {
         let (stdout, stderr) = text(&out);
         assert!(out.status.success(), "{args:?}: {stdout}{stderr}");
         let shown = format!("{stdout}\n{stderr}");
-        assert!(shown.contains("3e15382b"), "the pool id prefix is shown: {shown}");
-        assert!(shown.contains("Germany"), "the country is shown: {shown}");
+        if args.contains(&"--json") {
+            let v: Value = serde_json::from_str(&stdout).expect("stdout is one JSON document");
+            assert_eq!(
+                v["transfer"]["pools"][0]["id"], "3e15382b-0000-4000-8000-000000000001",
+                "{v}"
+            );
+            assert_eq!(v["transfer"]["pools"][0]["country"], "Germany", "{v}");
+        } else {
+            assert!(stdout.contains("· pool Germany"), "the country is shown: {shown}");
+            assert_absent(&shown, &["3e15382b"]);
+        }
         assert_absent(&shown, &["zz9", "Testville", TOKEN, KEY]);
         assert_absent(&shown, &PROVIDER_NAMES);
     }

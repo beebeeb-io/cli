@@ -58,7 +58,7 @@ fn verbose_level_adds_stats_pool_and_chunk_lines() {
     assert_eq!(lines[1], "    chunks 66/131 · 0/1 in flight · avg 317.3 Mbps");
     assert_eq!(
         lines[2],
-        "    pool 3e15382b · Germany · direct 66 · api 0 · 0 retries · chunk 134.2 MB"
+        "    pool Germany · direct 66 · api 0 · 0 retries · chunk 134.2 MB"
     );
     let record = record.lock().unwrap();
     let chunks: Vec<&String> = record.iter().filter(|l| l.starts_with("err:    chunk ")).collect();
@@ -276,10 +276,19 @@ fn an_error_leaves_the_last_lines_on_screen() {
     let (p, record) = LiveProgress::for_terminal_test();
     p.plan_file(10, 1);
     p.seal_plan();
+    let _file = p.begin_file_chunks("a.txt", 10, 1, 10);
     drop(p);
     let marks = record.lock().unwrap().clone();
     assert!(marks.contains(&"draw:left".to_string()), "{marks:?}");
     assert!(!marks.contains(&"draw:cleared".to_string()), "{marks:?}");
+
+    // Stopped before any file began (a lock held, a refused conflict): no transfer line is left behind.
+    let (p, record) = LiveProgress::for_terminal_test();
+    p.plan_file(10, 1);
+    p.seal_plan();
+    drop(p);
+    let marks = record.lock().unwrap().clone();
+    assert_eq!(marks, ["draw:cleared"], "nothing moved: nothing is left");
 
     let (p, record) = LiveProgress::for_terminal_test();
     let _ = p.summary();

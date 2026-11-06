@@ -39,6 +39,21 @@ impl FilePlan {
     pub(super) fn take_from(self, progress: &LiveProgress) {
         progress.unplan_file(self.bytes, self.chunks);
     }
+
+    pub(super) fn bytes(self) -> u64 {
+        self.bytes
+    }
+
+    /// The plan of the file at `path` now: when its size changed since `self` was planned, the run's totals are
+    /// moved from the old plan to the new one.
+    pub(super) fn follow(self, path: &std::path::Path, progress: &LiveProgress) -> Self {
+        let now = Self::of_path(path);
+        if now != self {
+            self.take_from(progress);
+            now.add_to(progress);
+        }
+        now
+    }
 }
 
 /// The sink of one push: every file planned, the plan sealed, one chunk in flight at a time.

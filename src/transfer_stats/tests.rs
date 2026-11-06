@@ -485,3 +485,24 @@ fn transfer_stats_is_pure() {
         "the scanner can fail"
     );
 }
+
+/// A file that failed for good keeps its plan (the run ends short of its total), but what it will never send is
+/// not waiting to be sent: the ETA leaves it out (review finding, task 2333).
+#[test]
+fn eta_leaves_out_what_a_failed_file_will_not_send() {
+    let mut t = TransferStats::new(Direction::Upload, 0);
+    t.plan_file(300 * MB, 3);
+    t.plan_file(1000 * MB, 10);
+    t.seal_plan();
+    t.set_limit(1);
+    let f = t.begin_file("a", 300 * MB, 3, 100 * MB);
+    chunk(&mut t, f, 0, 100 * MB, 0, 8000);
+    chunk(&mut t, f, 1, 100 * MB, 8000, 16_000);
+    t.chunk_started(f, 2, Route::Api, 16_000);
+    // 1,100 MB left at 12.5 MB/s, 3 s after the newest chunk.
+    assert_eq!(t.snapshot(19_000).eta_secs, Some(85.0));
+    t.give_up(1000 * MB);
+    assert_eq!(t.snapshot(19_000).eta_secs, Some(5.0), "only the running file is left");
+    let s = t.snapshot(19_000);
+    assert_eq!((s.bytes_done, s.bytes_total), (200 * MB, 1300 * MB), "the plan stays");
+}

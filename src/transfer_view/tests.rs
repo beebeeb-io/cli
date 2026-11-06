@@ -154,15 +154,13 @@ fn verbose_lines_drop_from_the_end() {
     );
     assert_eq!(stats_line(&s, 60), "    chunks 66/131 · 1/1 in flight · avg 309.9 Mbps");
     assert_eq!(stats_line(&s, 40), "    chunks 66/131 · 1/1 in flight");
+    // Guus (2026-11-06): the pool is shown by its storage country only, never an id, a city or a provider.
     assert_eq!(
         pool_line(&s, 100),
-        "    pool 3e15382b · Germany · direct 66 · api 0 · 0 retries · chunk 134.2 MB"
+        "    pool Germany · direct 66 · api 0 · 0 retries · chunk 134.2 MB"
     );
-    assert_eq!(
-        pool_line(&s, 60),
-        "    pool 3e15382b · Germany · direct 66 · api 0 · 0 retries"
-    );
-    assert_eq!(pool_line(&s, 40), "    pool 3e15382b · Germany · direct 66");
+    assert_eq!(pool_line(&s, 60), "    pool Germany · direct 66 · api 0 · 0 retries");
+    assert_eq!(pool_line(&s, 40), "    pool Germany · direct 66 · api 0");
     let mut download = s.clone();
     download.pools[0].label.id = None;
     download.avg_bytes_per_sec = None;
@@ -274,7 +272,7 @@ fn verbose_summary_detail() {
     s.api = 20;
     assert_eq!(
         verbose_detail(&s),
-        "    32 chunks (12 already on the server) · 1 at a time · direct 0 · api 20 · 0 retries · pool 3e15382b · Germany"
+        "    32 chunks (12 already on the server) · 1 at a time · direct 0 · api 20 · 0 retries · pool Germany"
     );
     s.peak = 4;
     assert!(verbose_detail(&s).contains(" · up to 4 at once · "));
@@ -382,4 +380,60 @@ fn names_never_carry_control_characters() {
         assert!(line.contains(clean), "{line:?}");
         assert!(!line.chars().any(char::is_control), "{line:?}");
     }
+}
+
+/// Guus (2026-11-06): the pool reads as its country; a country the client did not receive is not shown, never
+/// guessed; two pools in one country read as one; the server's text is cleaned like a name (no terminal codes).
+#[test]
+fn pool_shows_only_a_received_country_cleaned() {
+    let label = |id: Option<&str>, country: Option<&str>| PoolLabel {
+        id: id.map(|i| uuid::Uuid::parse_str(i).unwrap()),
+        country: country.map(str::to_string),
+        country_code: None,
+    };
+    let mut s = snap(DONE, TOTAL);
+    s.pools = vec![];
+    assert_eq!(
+        pool_line(&s, 100),
+        "    direct 66 · api 0 · 0 retries · chunk 134.2 MB",
+        "not known yet"
+    );
+    s.pools = vec![PoolCount {
+        label: label(Some("3e15382b-0000-4000-8000-000000000001"), None),
+        chunks: 3,
+    }];
+    assert_eq!(
+        pool_line(&s, 100),
+        "    direct 66 · api 0 · 0 retries · chunk 134.2 MB",
+        "an id without a country shows nothing"
+    );
+    s.pools = vec![
+        PoolCount {
+            label: label(Some("3e15382b-0000-4000-8000-000000000001"), Some("Germany")),
+            chunks: 3,
+        },
+        PoolCount {
+            label: label(Some("4f26493c-0000-4000-8000-000000000002"), Some("Germany")),
+            chunks: 2,
+        },
+        PoolCount {
+            label: label(None, Some("Finland")),
+            chunks: 1,
+        },
+    ];
+    assert!(
+        pool_line(&s, 100).starts_with("    pools Germany, Finland · direct 66"),
+        "{}",
+        pool_line(&s, 100)
+    );
+    s.pools = vec![PoolCount {
+        label: label(None, Some("Ger\u{1b}[2J\nmany")),
+        chunks: 1,
+    }];
+    let line = pool_line(&s, 100);
+    assert!(!line.chars().any(char::is_control), "{line:?}");
+    assert!(line.starts_with("    pool Ger?[2J?many · "), "{line:?}");
+    let mut sum = summary(TOTAL, 440_673);
+    sum.pools = s.pools.clone();
+    assert!(!verbose_detail(&sum).chars().any(char::is_control));
 }

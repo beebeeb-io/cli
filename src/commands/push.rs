@@ -195,7 +195,13 @@ pub async fn run(
     let plan = FilePlan::of_size(file_size);
     let progress = push_report::start([plan], verbose);
     let total_start = std::time::Instant::now();
-    let parent_for_notice = parent_id.clone();
+    // For the owner-only sentence after the upload: the key loaded and the parent id normalised now, as the upload
+    // itself does (an invalid id fails the upload first), so a push that went up cannot fail afterwards.
+    let notice_key = load_master_key()?;
+    let notice_parent = parent_id
+        .as_deref()
+        .and_then(|p| p.parse::<uuid::Uuid>().ok())
+        .map(|p| p.to_string());
     let result = push_single_file(&api, &path, parent_id, strategy, false, &progress, plan).await?;
     let total_elapsed = total_start.elapsed();
     // The live lines are cleared here: everything below prints under them.
@@ -206,8 +212,7 @@ pub async fn run(
             // L15 = A: the CLI never publishes an owner key. A write into a shared
             // folder stays owner-only until the owner shares it from web or mobile.
             if !ui::is_json() {
-                let master_key = load_master_key()?;
-                crate::owned_keys::announce_owner_only(&api, &master_key, parent_for_notice.as_deref()).await;
+                crate::owned_keys::announce_owner_only(&api, &notice_key, notice_parent.as_deref()).await;
             }
             if ui::is_json() {
                 let speed = ur.speed_bps();
@@ -284,7 +289,9 @@ struct UploadResult {
     /// `"direct"` or `"api"` (additive `--json` key `transport`, as for `bb pull`).
     transport: &'static str,
     duration: std::time::Duration,
-    /// What crossed the wire for it, every attempt (a re-sent chunk counts each time): its end line's speed.
+    /// The bytes of its chunks confirmed sent, over every upload attempt of the file (a chunk re-sent by a later
+    /// attempt, after a swept session, counts each time; one HTTP chunk retried counts once, when confirmed;
+    /// spec §7 `bytes_transferred`): its end line's speed.
     transferred_bytes: u64,
 }
 
@@ -299,9 +306,13 @@ impl UploadResult {
     }
 }
 
-/// Upload a single file, counted in `progress` under `plan` (what the run planned for it). A file that is not
-/// uploaded (a skip, or already uploaded) takes its plan back out of the run; a failed one keeps it, so the run
-/// ends short of its total. `in_folder`: part of a folder push, which prints no `resuming` line (as before).
+/// Upload a single file, counted in `progress` under `plan` (what the run planned for it).
+///
+/// The run planned the file at its size then; if it has changed since, the run's totals follow it first, so done
+/// never passes total (spec §4.6, I1; the driver reads the size once more itself). A file that is not uploaded (a
+/// skip, or already uploaded) takes its plan back out of the run. A failed one keeps it, so the run ends short of
+/// its total, and gives up what it did not send, so the ETA does not wait for it. `in_folder`: part of a folder
+/// push, which prints no `resuming` line (as before).
 async fn push_single_file(
     api: &ApiClient,
     path: &std::path::Path,
@@ -311,11 +322,20 @@ async fn push_single_file(
     progress: &LiveProgress,
     plan: FilePlan,
 ) -> Result<Pushed, String> {
-    let pushed = upload_one(api, path, parent_id, strategy, in_folder, progress, plan).await?;
-    if !matches!(pushed, Pushed::Uploaded(_)) {
-        plan.take_from(progress);
+    let plan = plan.follow(path, progress);
+    let done_before = progress.bytes_done();
+    match upload_one(api, path, parent_id, strategy, in_folder, progress).await {
+        Ok(Pushed::Uploaded(result)) => Ok(Pushed::Uploaded(result)),
+        Ok(not_uploaded) => {
+            plan.take_from(progress);
+            Ok(not_uploaded)
+        }
+        Err(e) => {
+            let sent = progress.bytes_done().saturating_sub(done_before);
+            progress.give_up(plan.bytes().saturating_sub(sent));
+            Err(e)
+        }
     }
-    Ok(pushed)
 }
 
 async fn upload_one(
@@ -325,7 +345,6 @@ async fn upload_one(
     strategy: ConflictStrategy,
     in_folder: bool,
     progress: &LiveProgress,
-    plan: FilePlan,
 ) -> Result<Pushed, String> {
     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
 
@@ -557,14 +576,6 @@ async fn upload_one(
         Some(pid) => Some(pid.parse().map_err(|e| format!("invalid parent ID: {e}"))?),
         None => None,
     };
-
-    // The run planned this file at its size then; if it has changed since (before its upload starts), the run's
-    // totals follow it, so done never passes total (spec §4.6, I1). The driver reads the size once more itself.
-    let now = FilePlan::of_path(path);
-    if now != plan {
-        plan.take_from(progress);
-        now.add_to(progress);
-    }
 
     let file_start = std::time::Instant::now();
     let spec = crate::upload::UploadSpec {

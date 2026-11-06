@@ -109,5 +109,8 @@ pub struct UploadOutcome {
     /// `"api"` (the chunk PUT route). A direct session that was given up reports the route that finished
     /// the file, `"api"`.
     pub transport: &'static str,
+    /// Task 2333: the ciphertext of the chunks this file's attempts sent and had confirmed, summed over every
+    /// attempt (a chunk re-sent after a swept session counts each time; a chunk the server already held, none;
+    /// one chunk retried over HTTP counts once, when confirmed).
     pub transferred_bytes: u64,
 }

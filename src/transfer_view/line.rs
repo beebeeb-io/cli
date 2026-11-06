@@ -142,20 +142,21 @@ pub(crate) fn stats_line(s: &Snapshot, columns: u16) -> String {
     drop_from_end("    ", segments, columns)
 }
 
-/// The pool part of a line: `pool {id8} · {country}`, `pool {country}` without an
-/// id (downloads), `{n} pools · {countries}`, or `pool —` before it is known.
+/// The pool part of a line (Guus, 2026-11-06): the storage country the client received, `pool Germany`, or
+/// `pools Germany, Finland` when chunks went to several countries. Nothing when no country was received: never a
+/// guess, and never the pool's id, a city, a datacenter code or a provider. The server's text is cleaned like a
+/// name, so it cannot send codes to the terminal.
 fn pool_segments(pools: &[PoolCount]) -> Vec<String> {
-    let country = |p: &PoolCount| p.label.country.clone().unwrap_or_else(|| "country unknown".to_string());
-    match pools {
-        [] => vec!["pool \u{2014}".to_string()],
-        [one] => match one.label.id8() {
-            Some(id) => vec![format!("pool {id}"), country(one)],
-            None => vec![format!("pool {}", country(one))],
-        },
-        many => vec![
-            format!("{} pools", many.len()),
-            many.iter().map(country).collect::<Vec<_>>().join(", "),
-        ],
+    let mut countries: Vec<String> = Vec::new();
+    for country in pools.iter().filter_map(|p| p.label.country.as_deref()).map(clean_name) {
+        if !countries.contains(&country) {
+            countries.push(country);
+        }
+    }
+    match countries.as_slice() {
+        [] => Vec::new(),
+        [one] => vec![format!("pool {one}")],
+        many => vec![format!("pools {}", many.join(", "))],
     }
 }
 
@@ -287,9 +288,7 @@ pub(crate) fn verbose_detail(s: &Summary) -> String {
     segments.push(format!("direct {}", s.direct));
     segments.push(format!("api {}", s.api));
     segments.push(retries(s.retries));
-    if !s.pools.is_empty() {
-        segments.extend(pool_segments(&s.pools));
-    }
+    segments.extend(pool_segments(&s.pools));
     format!("    {}", segments.join(SEP))
 }
 

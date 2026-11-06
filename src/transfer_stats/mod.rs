@@ -229,6 +229,8 @@ pub(crate) struct TransferStats {
     files_done: u32,
     bytes_total: u64,
     chunks_total: u32,
+    /// Planned bytes a failed file will never send (`give_up`): in the totals, out of the ETA.
+    given_up_bytes: u64,
     plan_final: bool,
     limit: u32,
     max_limit: u32,
@@ -257,6 +259,7 @@ impl TransferStats {
             files_done: 0,
             bytes_total: 0,
             chunks_total: 0,
+            given_up_bytes: 0,
             plan_final: false,
             limit: 0,
             max_limit: 0,
@@ -286,6 +289,22 @@ impl TransferStats {
         self.files_total = self.files_total.saturating_sub(1);
         self.bytes_total = self.bytes_total.saturating_sub(bytes);
         self.chunks_total = self.chunks_total.saturating_sub(chunks);
+    }
+
+    /// `bytes` of the plan will not be sent: a file failed for good. They stay in the totals (the run ends short
+    /// of them), but they are not waiting to be sent, so the ETA leaves them out.
+    pub(crate) fn give_up(&mut self, bytes: u64) {
+        self.given_up_bytes = self.given_up_bytes.saturating_add(bytes);
+    }
+
+    /// Bytes confirmed so far, net of rollbacks (a command measures one file's share with it).
+    pub(crate) fn bytes_done(&self) -> u64 {
+        self.bytes_done
+    }
+
+    /// A file has begun: the run got as far as moving bytes.
+    pub(crate) fn has_begun(&self) -> bool {
+        !self.files.is_empty()
     }
 
     /// The totals are final: the bar, the percent and the ETA may be shown.
@@ -532,7 +551,10 @@ impl TransferStats {
         if !self.plan_final || taken.span_ms() < ETA_MIN_SPAN_MS || self.bytes_done >= self.bytes_total {
             return None;
         }
-        let remaining = (self.bytes_total - self.bytes_done) as f64;
+        let remaining = self
+            .bytes_total
+            .saturating_sub(self.bytes_done)
+            .saturating_sub(self.given_up_bytes) as f64;
         let secs = if late {
             remaining / rate
         } else {

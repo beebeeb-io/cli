@@ -597,7 +597,8 @@ async fn main() {
     // Spec §6.2 (task 2333): checked here, before anything is sent, not with clap's `conflicts_with`: `--quiet`
     // is global, and `bb --quiet push -v` parses it before the subcommand, where a subcommand's conflict may
     // not see it.
-    if cli.quiet && cli.command.verbose() {
+    // `--json` wins over `--quiet` (the output mode above) and makes `-v` moot, so only quiet output conflicts.
+    if cli.quiet && !cli.json && cli.command.verbose() {
         fail(exit::with_code(
             exit::USAGE,
             "--verbose cannot be combined with --quiet",

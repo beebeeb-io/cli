@@ -40,7 +40,9 @@ impl PoolLabel {
         })
     }
 
-    /// The first 8 hex digits of the pool id (the form `bb ls` uses for file ids).
+    /// Tests: the first 8 hex digits of the pool id (the form `bb ls` uses for file ids). Never shown: the
+    /// lines name a pool by its country (Guus, 2026-11-06).
+    #[cfg(test)]
     pub(crate) fn id8(&self) -> Option<String> {
         self.id.map(|id| id.simple().to_string()[..8].to_string())
     }
