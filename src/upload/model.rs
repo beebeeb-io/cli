@@ -99,6 +99,10 @@ pub struct UploadOutcome {
     pub server_id: Uuid,
     /// Plaintext size (bytes).
     pub plaintext_bytes: u64,
+    /// The version this upload completed, as the completion answer names it (server
+    /// `routes/uploads/complete.rs`). `None` when the answer does not say: the idempotent "already completed"
+    /// answer to a repeated completion carries no version.
+    pub version_number: Option<i64>,
     /// Total ciphertext uploaded (`plaintext + 28 * chunk_count`).
     pub ciphertext_bytes: u64,
     /// How the chunks reached the server (task 2173): `"direct"` (grant -> object storage -> commit) or

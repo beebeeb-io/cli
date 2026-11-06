@@ -257,7 +257,7 @@ pub fn local_signature(path: &Path) -> Option<(u64, u128)> {
 
 /// One file `bb push` finished: the server id and folder it went to, the version it made, and the local file's
 /// signature at the time.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FinishedUpload {
     pub file_id: Uuid,
     /// `None`: the root.
@@ -267,15 +267,11 @@ pub struct FinishedUpload {
     pub mtime_ns: u128,
 }
 
+/// One line of the log. Nested, not `#[serde(flatten)]`: a flattened struct cannot carry the `u128` mtime.
 #[derive(Serialize, Deserialize)]
 struct FinishedLine {
     key: String,
-    file_id: Uuid,
-    #[serde(default)]
-    parent_id: Option<Uuid>,
-    version: i64,
-    size: u64,
-    mtime_ns: u128,
+    upload: FinishedUpload,
 }
 
 /// At most this many paths are remembered; past it the oldest go at the next compaction.
@@ -288,17 +284,18 @@ fn finished_path() -> PathBuf {
     db_path().with_file_name("finished-uploads.jsonl")
 }
 
-/// Remember that `bb push` finished `path` as `upload`.
+/// Remember that `bb push` finished `path` as `upload`. Not when the file's mtime is a whole second (or
+/// absent, 0): a file system that keeps whole seconds cannot tell a same-size edit in that second from no
+/// edit, so such a file is never proven unchanged and meets the conflict rule on a re-push.
 pub fn record_finished(path: &Path, upload: FinishedUpload) {
+    if upload.mtime_ns % 1_000_000_000 == 0 {
+        return;
+    }
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let key = key(path);
     let line = FinishedLine {
         key: key.clone(),
-        file_id: upload.file_id,
-        parent_id: upload.parent_id,
-        version: upload.version,
-        size: upload.size,
-        mtime_ns: upload.mtime_ns,
+        upload,
     };
     let log = finished_path();
     let Ok(mut text) = serde_json::to_string(&line) else {
@@ -345,14 +342,7 @@ fn load_finished(log: &Path) -> HashMap<String, FinishedUpload> {
         let Ok(l) = serde_json::from_str::<FinishedLine>(line) else {
             continue;
         };
-        let upload = FinishedUpload {
-            file_id: l.file_id,
-            parent_id: l.parent_id,
-            version: l.version,
-            size: l.size,
-            mtime_ns: l.mtime_ns,
-        };
-        newest.insert(l.key, (at, upload));
+        newest.insert(l.key, (at, l.upload));
     }
     if newest.len() > FINISHED_MAX || lines > 2 * newest.len() + 1_000 {
         let mut kept: Vec<(String, (usize, FinishedUpload))> = newest.into_iter().collect();
@@ -360,14 +350,10 @@ fn load_finished(log: &Path) -> HashMap<String, FinishedUpload> {
         let drop = kept.len().saturating_sub(FINISHED_MAX);
         kept.drain(..drop);
         let mut out = String::new();
-        for (key, (_, u)) in &kept {
+        for (key, (_, upload)) in &kept {
             let line = FinishedLine {
                 key: key.clone(),
-                file_id: u.file_id,
-                parent_id: u.parent_id,
-                version: u.version,
-                size: u.size,
-                mtime_ns: u.mtime_ns,
+                upload: *upload,
             };
             if let Ok(text) = serde_json::to_string(&line) {
                 out.push_str(&text);
@@ -721,11 +707,36 @@ mod tests {
             "read back from the log, as a new process does"
         );
         assert_eq!(finished_upload(&dir.join("other.mkv")), None);
+        let coarse = dir.join("coarse.mkv");
+        record_finished(
+            &coarse,
+            FinishedUpload {
+                mtime_ns: 1_700_000_000_000_000_000,
+                ..upload(1)
+            },
+        );
+        record_finished(
+            &coarse,
+            FinishedUpload {
+                mtime_ns: 0,
+                ..upload(1)
+            },
+        );
+        assert_eq!(
+            finished_upload(&coarse),
+            None,
+            "a whole-second or absent mtime proves nothing"
+        );
 
+        let log = dir.join("finished-uploads.jsonl");
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap().lines().count(),
+            2,
+            "nothing written for the coarse mtimes"
+        );
         for version in 3..1_300 {
             record_finished(&f, upload(version));
         }
-        let log = dir.join("finished-uploads.jsonl");
         assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1_299);
         *FINISHED.lock().unwrap() = None;
         assert_eq!(finished_upload(&f), Some(upload(1_299)));

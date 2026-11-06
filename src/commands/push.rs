@@ -71,9 +71,10 @@ enum ConflictResolution {
 ///
 /// A listing that cannot be read is an error, never "no conflict" (task 2334:
 /// a re-pushed folder is reused, so a missed conflict would put a second file
-/// of the same name beside the first). So is a row whose name this device
-/// cannot read (its key needs the server, and that read failed) when no other
-/// row matches: it may be the same name. A row without a readable id is skipped.
+/// of the same name beside the first). So is a row whose name could not be
+/// read NOW (a read its key needs did not answer) when no other row matches: it
+/// may be the same name. A row this device can never open is passed over, as
+/// before: no run could tell its name. A row without a readable id is skipped.
 pub(crate) async fn find_conflict(
     api: &ApiClient,
     master_key: &beebeeb_core::kdf::MasterKey,
@@ -101,11 +102,11 @@ pub(crate) async fn find_conflict(
         else {
             continue;
         };
-        match keys.resolve(api, master_key, file).await {
+        match keys.resolve_or_why(api, master_key, file).await {
             Ok(resolved) if resolved.name == filename => return Ok(Some(file_uuid)),
-            Ok(_) => {}
-            Err(e) => {
-                cannot_read.get_or_insert_with(|| format!("a file here could not be read ({e})"));
+            Ok(_) | Err(crate::owned_keys::Unresolved::Never(_)) => {}
+            Err(crate::owned_keys::Unresolved::NotNow(e)) => {
+                cannot_read.get_or_insert_with(|| format!("a file here could not be read now ({e}); run it again"));
             }
         }
     }
@@ -242,7 +243,7 @@ pub async fn run(
                     "total_bytes": 0,
                     "avg_speed_bps": 0,
                     "total_duration_ms": total_elapsed.as_millis() as u64,
-                    "total_skipped": already,
+                    "total_already_uploaded": already,
                 });
                 println!("{}", serde_json::to_string_pretty(&json).unwrap());
             } else if already > 0 && ui::is_rich() {
@@ -552,16 +553,17 @@ async fn push_single_file(
     )
     .await?;
     // Task 2334: remember this upload, so a re-run of the push skips it while the file stays unchanged. Only
-    // when the file did not change while it was read (same signature before and after, the size uploaded).
-    if let Some((size, mtime_ns)) = signature
-        .filter(|before| crate::resume::local_signature(path) == Some(*before) && before.0 == outcome.plaintext_bytes)
-    {
+    // when the file did not change while it was read (same signature before and after, the size uploaded) and
+    // the server named the version it completed.
+    let unchanged = signature
+        .filter(|before| crate::resume::local_signature(path) == Some(*before) && before.0 == outcome.plaintext_bytes);
+    if let (Some((size, mtime_ns)), Some(version)) = (unchanged, outcome.version_number) {
         crate::resume::record_finished(
             path,
             crate::resume::FinishedUpload {
                 file_id: outcome.server_id,
                 parent_id: parent_uuid,
-                version: base_version_number.map_or(1, |base| i64::from(base) + 1),
+                version,
                 size,
                 mtime_ns,
             },
@@ -786,7 +788,7 @@ async fn push_directory(
             "avg_speed_bps": avg_speed as u64,
             "total_duration_ms": total_elapsed.as_millis() as u64,
             "total_failed": failures.len(),
-            "total_skipped": already_uploaded,
+            "total_already_uploaded": already_uploaded,
             "failed": failures
                 .iter()
                 .map(|(path, error)| serde_json::json!({ "path": path, "error": error }))

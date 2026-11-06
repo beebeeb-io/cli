@@ -6,9 +6,11 @@
 //! - an INTERRUPTED first upload of this exact file (task 1950): the resume record names that id, and the
 //!   server still has it uploading with no completed version. The push resumes it;
 //! - a FINISHED upload of this exact file, unchanged on both sides (lead ruling, 2026-11-06): the finished
-//!   record (`resume::finished_upload`) names that id, in this folder, for the same size and mtime, and the
-//!   server's row is completed at the version that upload made, with the same plaintext size. The push skips
-//!   it and counts it. The CLI writes no content hash a server row carries, so this record is the proof.
+//!   record (`resume::finished_upload`) says this file, at this size and mtime, went into this folder as some
+//!   id, and the server's row for that id is still there, not trashed, completed at the version that upload
+//!   made, with the same plaintext size. The push skips it and counts it. That id may be the same-name file or
+//!   a `--keep-both` copy beside it. The CLI writes no content hash a server row carries, so this record is the
+//!   proof.
 //!
 //! Anything else, including a row that cannot be read now, is not proven to be ours: the usual conflict rule
 //! applies, so a changed file is never skipped silently. The row is read at most once, and handed on to the
@@ -29,7 +31,8 @@ pub(crate) enum Existing {
     AlreadyUploaded,
 }
 
-/// Whether `existing_id`, the same-name file in `parent`, is this machine's own upload of `path`.
+/// What the same-name file `existing_id` in `parent` says about `path`: this machine's interrupted upload of
+/// it, or its finished upload (that file, or a `--keep-both` copy beside it), or neither.
 /// `resume_interrupted`: an interrupted upload counts (with no conflict flag; `--keep-both` keeps both).
 pub(crate) async fn existing_upload(
     api: &ApiClient,
@@ -38,32 +41,39 @@ pub(crate) async fn existing_upload(
     parent: Option<Uuid>,
     resume_interrupted: bool,
 ) -> Existing {
-    let interrupted =
-        resume_interrupted && crate::resume::resumable_upload_now(path).is_some_and(|p| p.file_id == existing_id);
+    let mut existing_row = None;
+    if resume_interrupted && crate::resume::resumable_upload_now(path).is_some_and(|p| p.file_id == existing_id) {
+        if let Ok(row) = api.get_file(&existing_id.to_string()).await {
+            if is_unfinished_first_upload(&row) {
+                let read = crate::upload::row_parent(&row)
+                    .ok()
+                    .map(|parent_id| crate::upload::ReadRow {
+                        file_id: existing_id,
+                        parent_id,
+                    });
+                return Existing::Interrupted(read);
+            }
+            existing_row = Some(row);
+        }
+    }
     let finished = crate::resume::local_signature(path).and_then(|(size, mtime_ns)| {
         crate::resume::finished_upload(path)
-            .filter(|f| f.file_id == existing_id && f.parent_id == parent && f.size == size && f.mtime_ns == mtime_ns)
+            .filter(|f| f.parent_id == parent && f.size == size && f.mtime_ns == mtime_ns)
     });
-    if !interrupted && finished.is_none() {
-        return Existing::Other;
-    }
-    let Ok(row) = api.get_file(&existing_id.to_string()).await else {
+    let Some(finished) = finished else {
         return Existing::Other;
     };
-    if interrupted && is_unfinished_first_upload(&row) {
-        let parent_id = match row.get("parent_id") {
-            Some(serde_json::Value::Null) => Some(None),
-            Some(serde_json::Value::String(p)) => Uuid::parse_str(p).ok().map(Some),
-            _ => None,
-        };
-        return Existing::Interrupted(parent_id.map(|parent_id| crate::upload::ReadRow {
-            file_id: existing_id,
-            parent_id,
-        }));
-    }
-    match finished {
-        Some(f) if completed_as(&row, f) => Existing::AlreadyUploaded,
-        _ => Existing::Other,
+    let row = match existing_row.filter(|_| finished.file_id == existing_id) {
+        Some(row) => row,
+        None => match api.get_file(&finished.file_id.to_string()).await {
+            Ok(row) => row,
+            Err(_) => return Existing::Other,
+        },
+    };
+    if completed_as(&row, finished) {
+        Existing::AlreadyUploaded
+    } else {
+        Existing::Other
     }
 }
 
@@ -74,10 +84,13 @@ fn is_unfinished_first_upload(row: &serde_json::Value) -> bool {
         && row.get("download_version").is_none_or(serde_json::Value::is_null)
 }
 
-/// The row is the version `finished` made, completed, with the same plaintext size (`size_bytes` is the
-/// plaintext size: server `routes/uploads/complete.rs`). A later version (another device replaced it) is not.
+/// The row is still in the folder `finished` went to, not trashed, completed at the version it made, with the
+/// same plaintext size (`size_bytes` is the plaintext size: server `routes/uploads/complete.rs`). A later
+/// version (another device replaced it), a move or the trash is not.
 fn completed_as(row: &serde_json::Value, finished: crate::resume::FinishedUpload) -> bool {
-    row.get("is_uploading").and_then(serde_json::Value::as_bool) != Some(true)
+    crate::upload::row_parent(row) == Ok(finished.parent_id)
+        && row.get("is_trashed").and_then(serde_json::Value::as_bool) != Some(true)
+        && row.get("is_uploading").and_then(serde_json::Value::as_bool) != Some(true)
         && row.get("download_version").is_some_and(serde_json::Value::is_object)
         && crate::api::current_version_number(row) == Some(finished.version)
         && row.get("size_bytes").and_then(serde_json::Value::as_u64) == Some(finished.size)
@@ -102,12 +115,19 @@ mod tests {
     fn only_the_completed_version_that_upload_made_counts_as_already_uploaded() {
         let row = |uploading: bool, version: Option<i64>, size: u64| {
             json!({
+                "parent_id": null,
                 "is_uploading": uploading,
                 "size_bytes": size,
                 "download_version": version.map(|v| json!({ "version_number": v })),
             })
         };
         assert!(completed_as(&row(false, Some(1), 9), finished(1, 9)));
+        let mut moved = row(false, Some(1), 9);
+        moved["parent_id"] = json!(Uuid::from_u128(5));
+        assert!(!completed_as(&moved, finished(1, 9)), "moved to another folder");
+        let mut trashed = row(false, Some(1), 9);
+        trashed["is_trashed"] = json!(true);
+        assert!(!completed_as(&trashed, finished(1, 9)), "in the trash");
         assert!(!completed_as(&row(false, Some(2), 9), finished(1, 9)), "replaced since");
         assert!(!completed_as(&row(false, Some(1), 8), finished(1, 9)), "another size");
         assert!(

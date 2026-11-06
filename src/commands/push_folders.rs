@@ -4,8 +4,9 @@
 //! making a second one. A name matches only when it decrypts to the same bytes (the 1022 spec's rule for a
 //! client that mirrors a local tree), through the key resolver `bb ls` and the conflict check use, so a folder a
 //! collaborator made inside a shared folder (sealed under that folder's key) matches too; a plaintext name,
-//! which anyone with database access could have planted, never matches. A folder row this device cannot read
-//! fails the lookup when nothing else matches: it may be the one. When several folders of the name exist, the
+//! which anyone with database access could have planted, never matches. A folder row whose name could not be
+//! read NOW (a read its key needs did not answer) fails the lookup, since it may be the one, or an older one; a
+//! row this device can never open is passed over. When several folders of the name exist, the
 //! oldest is used (`created_at`, then the smallest id), so every run picks the same one; for a folder found
 //! implicitly, the oldest one that is not shared on its own comes first, with or without `--reuse-shared` (a
 //! "no" below stays a no). One line, after the choice, says how many there are and which was used.
@@ -49,17 +50,17 @@ pub(crate) struct Candidate {
 }
 
 /// The folders of one parent as a push read them: each readable folder with its decrypted name, and the folder
-/// rows this device could not read. Read once per parent per push.
+/// rows whose name could not be read now. Read once per parent per push.
 #[derive(Debug, Default)]
 pub(crate) struct ParentFolders {
     named: Vec<(Candidate, String)>,
-    /// How many folder rows could not be read, and why the first one could not.
+    /// How many folder rows could not be read now, and why the first one could not.
     unreadable: Option<(usize, String)>,
 }
 
 impl ParentFolders {
-    /// Read the folder rows of a listing with `keys`. Rows that are not folders, are trashed, have no id or carry
-    /// a plaintext name are left out.
+    /// Read the folder rows of a listing with `keys`. Rows that are not folders, are trashed, have no id, carry
+    /// a plaintext name, or that this device can never open are left out.
     pub async fn read(keys: &mut OwnedKeyResolver, api: &ApiClient, master_key: &MasterKey, rows: &[Value]) -> Self {
         keys.seed(rows);
         let mut folders = ParentFolders::default();
@@ -89,9 +90,10 @@ impl ParentFolders {
                     .map(|t| t.with_timezone(&Utc)),
                 share_count: row.get("share_count").and_then(Value::as_u64),
             };
-            match keys.resolve(api, master_key, row).await {
+            match keys.resolve_or_why(api, master_key, row).await {
                 Ok(resolved) => folders.named.push((candidate, resolved.name)),
-                Err(e) => {
+                Err(crate::owned_keys::Unresolved::Never(_)) => {}
+                Err(crate::owned_keys::Unresolved::NotNow(e)) => {
                     let (count, _) = folders.unreadable.get_or_insert((0, e));
                     *count += 1;
                 }
@@ -100,23 +102,23 @@ impl ParentFolders {
         folders
     }
 
-    /// The folders named exactly `wanted`, oldest first. None of them while a folder row here could not be read
-    /// is an error, never "none": that row may be the one.
+    /// The folders named exactly `wanted`, oldest first. While a folder row here could not be read now, an
+    /// error, never an answer: that row may be the one, or an older one, and a later run would choose another.
     pub fn named(&self, wanted: &str, shown: &str) -> Result<Vec<Candidate>, String> {
-        let found: Vec<Candidate> = self
-            .named
-            .iter()
-            .filter(|(_, name)| name == wanted)
-            .map(|(candidate, _)| candidate.clone())
-            .collect();
-        match &self.unreadable {
-            Some((count, why)) if found.is_empty() => Err(format!(
+        if let Some((count, why)) = &self.unreadable {
+            return Err(format!(
                 "cannot tell whether {shown} already exists: {count} folder{} in the folder it goes into could \
-                 not be read ({why})",
+                 not be read now ({why}); run it again",
                 if *count == 1 { "" } else { "s" }
-            )),
-            _ => Ok(oldest_first(found)),
+            ));
         }
+        Ok(oldest_first(
+            self.named
+                .iter()
+                .filter(|(_, name)| name == wanted)
+                .map(|(candidate, _)| candidate.clone())
+                .collect(),
+        ))
     }
 }
 
@@ -577,11 +579,13 @@ mod tests {
             trashed,
             sealed_folder(&master, "a house of dynamite (2025)", "2026-11-06T10:00:00Z"),
             sealed_folder(&master, &format!("{wanted} "), "2026-11-06T10:00:00Z"),
-            sealed_folder(&other_key, wanted, "2026-11-06T10:00:00Z"),
+            // Sealed under another account's key, with every field a full row carries: read in full, and this
+            // device can never open it. Passed over, as no run could tell its name.
+            full_row(sealed_folder(&other_key, wanted, "2026-11-06T10:00:00Z")),
             // A plaintext name decrypts "as is", but proves nothing: never adopted.
             json!({ "id": id(4).to_string(), "name_encrypted": wanted, "is_folder": true }),
         ];
-        // The row sealed under another key needs the server to be read, and this one answers nothing.
+        // A row whose key needs the server, which here answers nothing.
         let api = ApiClient::new_for_test("http://127.0.0.1:9".to_string());
         let read = |rows: Vec<Value>| {
             let (api, master) = (&api, &master);
@@ -592,17 +596,33 @@ mod tests {
         assert_eq!(found[0].id.to_string(), mine["id"].as_str().unwrap());
         assert_eq!(found[0].created_at, at("2026-11-06T10:00:00Z"));
         assert_eq!(found[0].share_count, Some(2));
+        let without_mine: Vec<Value> = rows.iter().filter(|r| r["id"] != mine["id"]).cloned().collect();
+        assert_eq!(
+            read(without_mine).await.named(wanted, wanted).unwrap(),
+            vec![],
+            "one it can never open does not stop a new folder"
+        );
 
-        // Without that match, the unreadable folder may be the one: an error, never "none here".
-        let without_mine: Vec<Value> = rows.into_iter().filter(|r| r["id"] != mine["id"]).collect();
-        let err = read(without_mine).await.named(wanted, wanted).unwrap_err();
+        // A row that could not be read NOW (its key needs the server's row, and the server did not answer) may
+        // be the one, or an older one: an error, whatever else matched, never an answer a later run changes.
+        let mut not_now = rows.clone();
+        not_now.push(sealed_folder(&other_key, "Another", "2026-11-05T10:00:00Z"));
+        let err = read(not_now).await.named(wanted, wanted).unwrap_err();
         assert!(
-            err.contains("1 folder in the folder it goes into could not be read"),
+            err.contains("1 folder in the folder it goes into could not be read now"),
             "{err}"
         );
         // And with no unreadable row, an absent name is simply none.
         let readable = vec![sealed_folder(&master, "Other", "2026-11-06T10:00:00Z")];
         assert_eq!(read(readable).await.named(wanted, wanted).unwrap(), vec![]);
+    }
+
+    /// `row` with the attribution fields a full server row carries, so the resolver has nothing to fetch.
+    fn full_row(mut row: Value) -> Value {
+        for field in ["owner_wrapped_file_key", "acted_via_share_id", "uploaded_by"] {
+            row[field] = Value::Null;
+        }
+        row
     }
 
     #[test]

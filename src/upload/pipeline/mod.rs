@@ -319,6 +319,18 @@ async fn resumable_here(
     }
 }
 
+/// The folder a `GET /files/{id}` row is in (`None` = the root), or why the row does not say. The one reading
+/// of `parent_id` for the push path (`commands::push_repeat` too).
+pub(crate) fn row_parent(row: &serde_json::Value) -> Result<Option<Uuid>, String> {
+    match row.get("parent_id") {
+        Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(parent)) => Uuid::parse_str(parent)
+            .map(Some)
+            .map_err(|_| "the answer's folder id is not an id".to_string()),
+        _ => Err("the answer names no folder".to_string()),
+    }
+}
+
 /// What `GET /files/{id}` says about an interrupted upload's row.
 enum RowAnswer {
     /// The folder it is in (`None` = the root).
@@ -332,13 +344,9 @@ enum RowAnswer {
 /// Ask the server where `file_id`'s row is. A refused login is the one error, in the CLI's usual words.
 async fn read_row_parent(api: &ApiClient, file_id: Uuid) -> Result<RowAnswer, UploadError> {
     Ok(match api.get_file(&file_id.to_string()).await {
-        Ok(row) => match row.get("parent_id") {
-            Some(serde_json::Value::Null) => RowAnswer::In(None),
-            Some(serde_json::Value::String(parent)) => match Uuid::parse_str(parent) {
-                Ok(parent) => RowAnswer::In(Some(parent)),
-                Err(_) => RowAnswer::Unknown("the answer's folder id is not an id".to_string()),
-            },
-            _ => RowAnswer::Unknown("the answer names no folder".to_string()),
+        Ok(row) => match row_parent(&row) {
+            Ok(parent) => RowAnswer::In(parent),
+            Err(why) => RowAnswer::Unknown(why),
         },
         Err(e) if e.status == 404 => RowAnswer::Gone,
         Err(e) if e.status == 401 => return Err(e.message.into()),
@@ -732,6 +740,7 @@ pub(super) async fn upload_attempt(
     Ok(UploadOutcome {
         server_id: file_id,
         plaintext_bytes: size,
+        version_number: completed.get("version_number").and_then(serde_json::Value::as_i64),
         ciphertext_bytes: expected_total,
         transport: if direct.is_some() { "direct" } else { "api" },
     })

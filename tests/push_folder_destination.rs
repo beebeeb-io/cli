@@ -46,22 +46,48 @@ async fn repushing_a_folder_reuses_the_same_name_folder() {
     .await;
     assert_eq!(out.status.code(), Some(0), "second push: {}", stderr(&out));
 
-    let v = vault.lock().unwrap();
-    let movies = the_folder(&v, None, "Movies");
-    let pushed = folders_named(&v, Some(&movies), MOVIE_DIR);
-    assert_eq!(
-        pushed.len(),
-        1,
-        "a re-push must reuse the existing {MOVIE_DIR:?} in Movies, not make another: {pushed:?}"
-    );
-    assert_eq!(
-        file_names_in(&v, &pushed[0]),
-        vec![
-            "A House of Dynamite (2025) (2160p) (1).mkv".to_string(),
-            MOVIE.to_string()
+    let pushed = {
+        let v = vault.lock().unwrap();
+        let movies = the_folder(&v, None, "Movies");
+        let pushed = folders_named(&v, Some(&movies), MOVIE_DIR);
+        assert_eq!(
+            pushed.len(),
+            1,
+            "a re-push must reuse the existing {MOVIE_DIR:?} in Movies, not make another: {pushed:?}"
+        );
+        assert_eq!(
+            file_names_in(&v, &pushed[0]),
+            vec![
+                "A House of Dynamite (2025) (2160p) (1).mkv".to_string(),
+                MOVIE.to_string()
+            ],
+            "both pushes' files are in that one folder (the second kept both, per --keep-both)"
+        );
+        pushed
+    };
+
+    // The same --keep-both push again, nothing changed: the recut is this machine's own upload, the copy
+    // beside the same-name file, so it is skipped, not kept a third time.
+    let out = bb(
+        &home,
+        &[
+            "--api",
+            &api,
+            "--json",
+            "push",
+            "--folder",
+            "Movies",
+            "--keep-both",
+            MOVIE_DIR,
         ],
-        "both pushes' files are in that one folder (the second kept both, per --keep-both)"
-    );
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(0), "third push: {}", stderr(&out));
+    let answer: serde_json::Value = serde_json::from_slice(&out.stdout).expect("--json answer");
+    assert_eq!(answer["total_already_uploaded"], 1, "{answer}");
+    assert_eq!(answer["total_files"], 0, "{answer}");
+    let v = vault.lock().unwrap();
+    assert_eq!(file_names_in(&v, &pushed[0]).len(), 2, "no third copy");
 }
 
 /// The same at every level under the pushed folder: a re-push that adds a new
@@ -543,7 +569,7 @@ async fn a_folder_row_that_cannot_be_read_fails_the_file_instead_of_duplicating_
     let api = start_mock(vault.clone()).await;
     let home = scratch_home(&api);
     let movies = seed_folder(&vault, None, "Movies");
-    seed_unreadable_file(&vault, Some(&movies));
+    seed_unreadable(&vault, Some(&movies), false);
     vault.lock().unwrap().file_status = Some(503);
     let file = write_file(&home, "note.txt", b"a note");
 
@@ -559,6 +585,55 @@ async fn a_folder_row_that_cannot_be_read_fails_the_file_instead_of_duplicating_
         stderr(&out)
     );
     assert_eq!(vault.lock().unwrap().inits, 0, "nothing uploaded");
+}
+
+/// A same-folder file this device can read in full and still not open (sealed
+/// under another account's key, no share relation: nothing a later run can
+/// change) cannot be the same name: the push goes on past it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_row_this_device_can_never_open_does_not_block_a_push() {
+    let vault: Shared = Arc::default();
+    let api = start_mock(vault.clone()).await;
+    let home = scratch_home(&api);
+    let movies = seed_folder(&vault, None, "Movies");
+    seed_unreadable(&vault, Some(&movies), false);
+    let file = write_file(&home, "note.txt", b"a note");
+
+    let out = bb(
+        &home,
+        &["--api", &api, "push", "--folder", "Movies", file.to_str().unwrap()],
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let v = vault.lock().unwrap();
+    assert_eq!(v.inits, 1, "note.txt uploaded");
+    let notes: Vec<_> = files_named(&v, "note.txt")
+        .into_iter()
+        .map(|(_, parent, done)| (parent, done))
+        .collect();
+    assert_eq!(
+        notes,
+        vec![(Some(movies.clone()), true)],
+        "one note.txt, completed, in Movies"
+    );
+}
+
+/// The same for a folder row in the folder a push makes its folder in: it is
+/// passed over, and the push makes the one it needs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_folder_row_this_device_can_never_open_does_not_block_a_push() {
+    let vault: Shared = Arc::default();
+    let api = start_mock(vault.clone()).await;
+    let home = scratch_home(&api);
+    seed_unreadable(&vault, None, true);
+    write_file(&home, &format!("{MOVIE_DIR}/{MOVIE}"), b"one movie");
+
+    let out = bb(&home, &["--api", &api, "push", "--folder", "Movies", MOVIE_DIR]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let v = vault.lock().unwrap();
+    let movies = the_folder(&v, None, "Movies");
+    the_folder(&v, Some(&movies), MOVIE_DIR);
+    assert_eq!(files_named(&v, MOVIE).len(), 1);
 }
 
 /// A conflict check that cannot be read fails that file; it is never read as

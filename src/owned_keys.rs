@@ -115,6 +115,18 @@ pub struct OwnedKeyResolver {
     sent_invites: Option<Vec<Value>>,
     resolved: HashMap<String, ResolvedCliKey>,
     custody: Option<crate::custody::CustodyStore>,
+    /// Task 2334: a server read failed during the resolution in progress (see [`Self::resolve_or_why`]).
+    server_failed: bool,
+}
+
+/// Why [`OwnedKeyResolver::resolve_or_why`] could not resolve a row (task 2334).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unresolved {
+    /// A read the resolution needs did not answer (the server, or this device's custody store): a later run may
+    /// resolve the row, so it may still be anything.
+    NotNow(String),
+    /// Everything was read and this device cannot open the row: no run on this device will.
+    Never(String),
 }
 impl OwnedKeyResolver {
     pub fn new() -> Self {
@@ -247,7 +259,7 @@ impl OwnedKeyResolver {
             }
             return Ok((!root.legacy_invite).then(|| root.key.clone()));
         }
-        let custody = api.get_shared_folder(id).await?;
+        let custody = self.served(api.get_shared_folder(id).await)?;
         if custody.is_null() {
             if seen {
                 return Err(CUSTODY_UNAVAILABLE.into());
@@ -263,6 +275,33 @@ impl OwnedKeyResolver {
         Ok(Some(Arc::new(key)))
     }
 
+    /// [`Self::resolve`], saying whether a failure is a read that did not answer ([`Unresolved::NotNow`]) or
+    /// the row itself ([`Unresolved::Never`]). A caller that must never mistake an unread row for "not the one
+    /// I look for" fails on `NotNow`, and can pass over `Never`, which this device cannot open on any run.
+    pub async fn resolve_or_why(
+        &mut self,
+        api: &ApiClient,
+        master: &MasterKey,
+        row: &Value,
+    ) -> Result<ResolvedCliKey, Unresolved> {
+        self.server_failed = false;
+        let resolved = self.resolve(api, master, row).await;
+        let server_failed = std::mem::take(&mut self.server_failed);
+        resolved.map_err(|e| {
+            if server_failed || e == CUSTODY_UNAVAILABLE {
+                Unresolved::NotNow(e)
+            } else {
+                Unresolved::Never(e)
+            }
+        })
+    }
+    /// A server read on the way to a key: its failure marks the resolution in progress as "not now".
+    fn served<T>(&mut self, answer: Result<T, crate::api::ApiError>) -> Result<T, String> {
+        answer.map_err(|e| {
+            self.server_failed = true;
+            e.message
+        })
+    }
     pub async fn resolve(
         &mut self,
         api: &ApiClient,
@@ -293,7 +332,7 @@ impl OwnedKeyResolver {
             .iter()
             .any(|k| row.get(k).is_none());
         if sparse && crate::crypto::decrypt_name(master, &id, text(row, "name_encrypted")?).is_none() {
-            canonical = api.get_file(&id).await?;
+            canonical = self.served(api.get_file(&id).await)?;
             if canonical["id"].as_str() != Some(&id) {
                 return Err("canonical item identity changed".into());
             }
@@ -516,7 +555,7 @@ impl OwnedKeyResolver {
         if let Some(r) = self.rows.get(id) {
             return Ok(r.clone());
         }
-        let r = api.get_file(id).await?;
+        let r = self.served(api.get_file(id).await)?;
         if r["id"].as_str() != Some(id) {
             return Err("ancestor identity changed".into());
         }
@@ -551,7 +590,7 @@ impl OwnedKeyResolver {
         if self.roots.contains_key(id) || self.absent_roots.contains(id) {
             return Ok(());
         }
-        let custody = api.get_shared_folder(id).await?;
+        let custody = self.served(api.get_shared_folder(id).await)?;
         if custody.is_null() {
             if seen {
                 return Err(CUSTODY_UNAVAILABLE.into());
@@ -561,7 +600,7 @@ impl OwnedKeyResolver {
             if self.sent_invites.is_none() {
                 // The one reader of this list (`ApiClient::list_sent_invites`): a server without the route sent
                 // no invite, so there is no legacy copy to open here.
-                let sent = api.list_sent_invites().await?;
+                let sent = self.served(api.list_sent_invites().await)?;
                 self.sent_invites = Some(sent["invites"].as_array().cloned().unwrap_or_default());
             }
             if let Some(invite) = self.sent_invites.as_ref().unwrap().iter().find(|r| {
@@ -573,9 +612,10 @@ impl OwnedKeyResolver {
                 let invite_id = text(invite, "id")?;
                 // The rows come through the APPROVED invite (the server answers 400 for any other). They are the
                 // folder's child inventory and also the evidence a legacy owner copy is proven against.
-                let page = api
-                    .get_json(&format!("/api/v1/shares/invites/{invite_id}/folder-keys"))
-                    .await?;
+                let page = self.served(
+                    api.get_json(&format!("/api/v1/shares/invites/{invite_id}/folder-keys"))
+                        .await,
+                )?;
                 let mut rows: Vec<(String, Vec<u8>)> = Vec::new();
                 let mut children = HashMap::new();
                 for row in page["keys"].as_array().ok_or("missing invite inventory")? {
@@ -617,7 +657,7 @@ impl OwnedKeyResolver {
         let mut cursor = None;
         let mut cursors = HashSet::new();
         loop {
-            let page = api.get_shared_folder_keys(id, cursor.as_deref()).await?;
+            let page = self.served(api.get_shared_folder_keys(id, cursor.as_deref()).await)?;
             let rows = page["keys"].as_array().ok_or("missing folder key inventory")?;
             for row in rows {
                 if let (Some(id), Ok(Some(frame))) =
@@ -661,7 +701,7 @@ impl OwnedKeyResolver {
         // Regardless of adopted=false or a lost response, canonical readback is
         // the only confirmation. A different valid key is not our winner.
         let posted = api.adopt_owner_key(id, &B64.encode(frame)).await;
-        let winner = api.get_file(id).await?;
+        let winner = self.served(api.get_file(id).await)?;
         let confirmed = (|| {
             if winner["id"].as_str() != Some(id) {
                 return Err("adoption identity changed".to_string());

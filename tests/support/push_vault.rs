@@ -454,9 +454,9 @@ pub fn seed_folder(vault: &Shared, parent: Option<&str>, name: &str) -> String {
     id
 }
 
-/// A finished file in `parent` whose name is sealed under ANOTHER account's key: this device cannot read it
-/// without asking the server for the row (`GET /files/{id}`).
-pub fn seed_unreadable_file(vault: &Shared, parent: Option<&str>) -> String {
+/// A finished file (or folder) in `parent` whose name is sealed under ANOTHER account's key, with no share
+/// relation: this device reads the row (`GET /files/{id}`) and still cannot open it, on any run.
+pub fn seed_unreadable(vault: &Shared, parent: Option<&str>, is_folder: bool) -> String {
     let stranger = beebeeb_core::kdf::MasterKey::from_bytes([9u8; 32]);
     let item = beebeeb_core::item_id::NewItemId::owner(&stranger).unwrap();
     let sealed = beebeeb_core::encrypt::encrypt_name_for_new_item(
@@ -477,7 +477,7 @@ pub fn seed_unreadable_file(vault: &Shared, parent: Option<&str>) -> String {
             id: id.clone(),
             parent: parent.map(str::to_string),
             name_encrypted: sealed,
-            is_folder: false,
+            is_folder,
             seq,
             uploading: false,
             version: 1,
