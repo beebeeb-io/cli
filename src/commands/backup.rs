@@ -23,11 +23,11 @@ use crate::backup::{PASS_BUDGET, identity, now_ms};
 use crate::commands::push::load_master_key;
 use crate::{colors, ui};
 
-/// The signed-in account's id: the store belongs to it.
+/// The signed-in account's id (`GET /auth/me` `user_id`): the store belongs to it.
 async fn account_id(api: &ApiClient) -> Result<String, String> {
     api.require_auth()?;
     let me = api.get_me().await?;
-    me.get("id")
+    me.get("user_id")
         .and_then(|v| v.as_str())
         .map(str::to_string)
         .ok_or_else(|| "the server did not say which account this is".to_string())

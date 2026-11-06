@@ -305,7 +305,7 @@ pub async fn start_mock(vault: Shared) -> String {
         )
         .route(
             "/api/v1/auth/me",
-            get(|| async { Json(json!({ "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" })) }),
+            get(|| async { Json(json!({ "user_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" })) }),
         )
         .route(
             "/api/v1/backups/root",
