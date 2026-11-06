@@ -19,6 +19,8 @@ pub(super) enum SessionPlan {
         file_id: Uuid,
         session_id: Uuid,
         direct: bool,
+        /// The chunk size the session was opened with, when its record says (`--parallel`, spec §4.3).
+        recorded_chunk_size: Option<u64>,
     },
     /// Open a new session for `file_id`.
     Init {

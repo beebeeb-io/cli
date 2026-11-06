@@ -479,6 +479,7 @@ pub(super) async fn do_upload(
             replace_file_key: Some(r.key.clone()),
             parent_id,
             concurrency: 1,
+            unrecorded_resume_concurrency: 1,
             shutdown: Arc::new(AtomicBool::new(false)),
             read_row: None,
         },
@@ -686,6 +687,7 @@ pub(super) fn new_file_spec(
         parent_id,
         // Single in-flight file in this watch-loop wrapper → full Cli cap.
         concurrency: 1,
+        unrecorded_resume_concurrency: 1,
         shutdown: Arc::new(AtomicBool::new(false)),
         read_row: None,
     })

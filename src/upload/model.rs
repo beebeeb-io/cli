@@ -43,11 +43,15 @@ pub struct UploadSpec {
     pub replace_file_key: Option<Arc<beebeeb_core::kdf::FileKey>>,
     /// Destination folder, or `None` for the vault root.
     pub parent_id: Option<Uuid>,
-    /// Number of files uploaded in parallel by the caller (sync `--concurrency`;
-    /// `1` for `bb push`/single-file paths). Threaded into the concurrency-aware
-    /// chunk plan so parallel uploads emit smaller chunks to stay in the memory
-    /// budget.
+    /// The concurrency a NEW session's chunk plan follows (`plan_chunks_concurrent`): `bb sync`'s files at
+    /// once (`--concurrency`), `bb push`'s chunks at once (`--parallel`). A higher value plans smaller chunks,
+    /// so the buffers of what runs at once stay within the memory budget.
     pub concurrency: u32,
+    /// `--parallel` (spec §4.3): the concurrency a resumed session whose record names NO chunk size (one written
+    /// before `--parallel`) is planned at, which must be what this caller planned at before that change: `bb
+    /// push` 1, `bb sync` its own `--concurrency`. Kept apart from `concurrency` so the rule cannot drift with
+    /// `--parallel`.
+    pub unrecorded_resume_concurrency: u32,
     /// Shared cancellation flag (set by the Ctrl-C handler).
     pub shutdown: Arc<AtomicBool>,
     /// Task 2334: the interrupted upload's row as the caller just read it, so the driver does not read it

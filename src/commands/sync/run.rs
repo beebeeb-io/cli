@@ -817,6 +817,7 @@ pub async fn run(
                         replace_file_key: replacement.as_ref().map(|r| r.key.clone()),
                         parent_id,
                         concurrency: concurrency as u32,
+                        unrecorded_resume_concurrency: concurrency as u32,
                         shutdown,
                         read_row: None,
                     };

@@ -29,6 +29,7 @@ fn spec(path: &std::path::Path, file_id: Uuid, parent_id: Option<Uuid>) -> Uploa
         replace_file_key: None,
         parent_id,
         concurrency: 1,
+        unrecorded_resume_concurrency: 1,
         shutdown: Arc::new(AtomicBool::new(false)),
         read_row: None,
     }
@@ -303,6 +304,7 @@ fn record_going_to(path: &std::path::Path, stored: Uuid, sid: Uuid, parent: Opti
         mtime,
         false,
         parent,
+        4 * 1024 * 1024,
     );
 }
 

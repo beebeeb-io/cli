@@ -435,6 +435,7 @@ fn spec(path: &std::path::Path, file_id: Uuid) -> UploadSpec {
         replace_file_key: None,
         parent_id: None,
         concurrency: CONCURRENCY,
+        unrecorded_resume_concurrency: CONCURRENCY,
         shutdown: Arc::new(AtomicBool::new(false)),
         read_row: None,
     }

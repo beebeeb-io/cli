@@ -117,6 +117,23 @@ pub async fn stream_encrypt_upload(
             crate::resume::clear(&spec.path);
         }
     }
+    // `--parallel` (spec §4.3): a record whose chunk size is above core's Cli cap was written by no CLI (a
+    // damaged or edited record); framing against it would send bodies no session of this CLI accepts. Ended
+    // like a record this upload cannot continue; the file starts again.
+    let pending = match pending {
+        Some(p) if p.chunk_size_bytes.is_some_and(|c| c > ChunkProfile::Cli.static_cap()) => {
+            end_interrupted(
+                api,
+                &spec,
+                progress,
+                p.file_id,
+                "the interrupted upload's chunk size is not one this CLI writes; starting it again",
+            )
+            .await?;
+            None
+        }
+        other => other,
+    };
     // Task 2334: the server fixes a new file's parent when its upload is inited and keeps it at completion, so a
     // continued session completes in the folder its FIRST attempt named. A create continues only an upload going
     // to the folder this write asks for; one going elsewhere is ended (its row, listed and counted in the quota
@@ -156,6 +173,7 @@ pub async fn stream_encrypt_upload(
                     file_id: pending.file_id,
                     session_id: pending.session_id,
                     direct: pending.direct,
+                    recorded_chunk_size: pending.chunk_size_bytes,
                 },
                 SessionResume::RestartWithFreshSession => {
                     crate::resume::clear(&spec.path);
@@ -468,6 +486,7 @@ pub(super) async fn upload_attempt(
             file_id,
             session_id,
             direct,
+            ..
         } => (file_id, Some(session_id), direct, None),
         SessionPlan::Init {
             file_id, resume_tag, ..
@@ -481,12 +500,22 @@ pub(super) async fn upload_attempt(
 
     // 3. Open the file and build the streaming encryptor (derives the file key
     //    once; the encryptor owns it and is `Send`). The CLI uses the Cli
-    //    profile with a concurrency-aware chunk size: parallel `bb sync` uploads
-    //    emit smaller chunks (memory budget), while `bb push` (concurrency 1)
-    //    gets the full Cli 128 MiB cap. This same plan is sent to the v2 init so
-    //    the server frames the file exactly as the encryptor emits it.
-    let chunk_size =
-        beebeeb_types::plan_chunks_concurrent(size, ChunkProfile::Cli, spec.concurrency.max(1)).chunk_size_bytes;
+    //    profile with a concurrency-aware chunk size: what runs at once (sync's
+    //    files, push's chunks) emits smaller chunks (memory budget). This same
+    //    plan is sent to the v2 init so the server frames the file exactly as
+    //    the encryptor emits it. A resumed session keeps the size it was opened
+    //    with (`--parallel`, spec §4.3): the plan is the session's, not the run's.
+    let chunk_size = match plan {
+        SessionPlan::Resume {
+            recorded_chunk_size, ..
+        } => chunk_size_for(
+            size,
+            spec.concurrency,
+            spec.unrecorded_resume_concurrency,
+            Some(recorded_chunk_size),
+        ),
+        SessionPlan::Init { .. } => chunk_size_for(size, spec.concurrency, spec.unrecorded_resume_concurrency, None),
+    };
     let file = std::fs::File::open(&spec.path).map_err(|e| format!("open {}: {e}", spec.path.display()))?;
     let encryptor = match &spec.replace_file_key {
         Some(key) => ChunkEncryptor::from_reader_with_file_key(
@@ -702,6 +731,7 @@ pub(super) async fn upload_attempt(
                 mtime_ns,
                 session_direct,
                 spec.parent_id,
+                chunk_size,
             );
         }
         let direct = if session_direct { offer } else { None };
@@ -1062,6 +1092,42 @@ fn seal_thumbnail(
     }
 }
 
+/// The chunk size the driver frames a file of `size` with (`--parallel`, spec §4.3): a new session plans at
+/// `concurrency`; a resumed one keeps the size its record names, and a record from before this change (no size)
+/// is planned at `unrecorded_resume_concurrency`, what the caller planned at then. `pending`: the record of the
+/// file, `Some(None)` for one that names no size. The one rule for the driver and for the push's plan
+/// (`commands::push_report`), so the run's totals match the chunks sent.
+pub fn planned_chunk_size(
+    size: u64,
+    concurrency: u32,
+    unrecorded_resume_concurrency: u32,
+    pending: Option<&crate::resume::PendingUpload>,
+) -> u64 {
+    chunk_size_for(
+        size,
+        concurrency,
+        unrecorded_resume_concurrency,
+        pending.map(|p| p.chunk_size_bytes),
+    )
+}
+
+/// [`planned_chunk_size`] on the resumed session's recorded size (`Some(recorded)`) or none (a new session).
+fn chunk_size_for(
+    size: u64,
+    concurrency: u32,
+    unrecorded_resume_concurrency: u32,
+    resumed: Option<Option<u64>>,
+) -> u64 {
+    let plan_at = |concurrency: u32| {
+        beebeeb_types::plan_chunks_concurrent(size, ChunkProfile::Cli, concurrency.max(1)).chunk_size_bytes
+    };
+    match resumed {
+        Some(Some(recorded)) => recorded,
+        Some(None) => plan_at(unrecorded_resume_concurrency),
+        None => plan_at(concurrency),
+    }
+}
+
 /// Expected ciphertext for a file of `size` under `ChunkProfile::Cli` at the
 /// given upload `concurrency`: `size + 28 · chunk_count`. Used by callers to
 /// size the overall progress bar without opening the file — matches the
@@ -1098,3 +1164,7 @@ mod live_stats_tests;
 /// `--parallel` Task 1: at one chunk at a time, today's requests in today's order (the golden).
 #[cfg(test)]
 pub(crate) mod request_log_tests;
+
+/// `--parallel` Task 3 (spec §4.3): a resumed session keeps the chunk size it was opened with.
+#[cfg(test)]
+mod resume_geometry_tests;
