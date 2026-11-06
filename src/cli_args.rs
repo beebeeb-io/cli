@@ -10,6 +10,30 @@
 use super::*;
 
 #[derive(Subcommand)]
+pub(super) enum BackupCmd {
+    /// Back up a folder of this machine (read in place, never changed)
+    Add {
+        /// The folder to back up
+        folder: PathBuf,
+    },
+
+    /// Stop backing up a folder (what is backed up stays in Backups)
+    Remove {
+        /// The folder to stop backing up
+        folder: PathBuf,
+    },
+
+    /// List the folders this machine backs up
+    List,
+
+    /// Back up every folder once: one pass, for a systemd timer or cron
+    Run,
+
+    /// Show each folder's state and the counts of its last run
+    Status,
+}
+
+#[derive(Subcommand)]
 pub(super) enum TrashCmd {
     /// List trashed files and folders
     List,

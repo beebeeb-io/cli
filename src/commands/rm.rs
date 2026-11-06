@@ -294,7 +294,12 @@ async fn confirm_backup_deletes(
 ) -> Result<Option<bool>, String> {
     let backups: Vec<&Target> = targets
         .iter()
-        .filter(|t| matches!(t.position, BackupPosition::DeviceFolder | BackupPosition::CategoryFolder))
+        .filter(|t| {
+            matches!(
+                t.position,
+                BackupPosition::DeviceFolder | BackupPosition::CategoryFolder
+            )
+        })
         .collect();
     if backups.is_empty() {
         return Ok(Some(false));
@@ -310,7 +315,9 @@ async fn confirm_backup_deletes(
     }
     for t in backups.iter().copied() {
         let row = api.get_file(t.id.as_str()).await?;
-        let own = decrypted_name(api, master_key, &row).await.unwrap_or_else(|| t.display.clone());
+        let own = decrypted_name(api, master_key, &row)
+            .await
+            .unwrap_or_else(|| t.display.clone());
         let (device, folder) = if t.position == BackupPosition::DeviceFolder {
             (own, None)
         } else {

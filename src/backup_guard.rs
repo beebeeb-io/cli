@@ -30,7 +30,10 @@ const MAX_ANCESTORS: usize = 256;
 /// Whether a server row is the account's flagged Backups root. Only the exact
 /// wire role counts; a folder NAMED "Backups" is not the root.
 pub(crate) fn is_backups_root(row: &Value) -> bool {
-    row.get("system_role").and_then(Value::as_str).and_then(SystemRole::parse) == Some(SystemRole::BackupsRoot)
+    row.get("system_role")
+        .and_then(Value::as_str)
+        .and_then(SystemRole::parse)
+        == Some(SystemRole::BackupsRoot)
 }
 
 /// The depth below the flagged root of `row`, listed in a folder whose own
@@ -118,7 +121,11 @@ pub(crate) async fn count_items(api: &ApiClient, id: &str) -> Result<(u64, bool)
             return Ok((items, false));
         }
         let listing = api.list_files(Some(&folder)).await?;
-        let rows = listing.get("files").and_then(Value::as_array).cloned().unwrap_or_default();
+        let rows = listing
+            .get("files")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         for row in rows {
             items += 1;
             if row.get("is_folder").and_then(Value::as_bool).unwrap_or(false)
@@ -161,7 +168,9 @@ mod tests {
     #[test]
     fn only_the_wire_role_is_the_root() {
         assert!(is_backups_root(&json!({ "system_role": "backups_root" })));
-        assert!(!is_backups_root(&json!({ "system_role": null, "name_encrypted": "Backups" })));
+        assert!(!is_backups_root(
+            &json!({ "system_role": null, "name_encrypted": "Backups" })
+        ));
         assert!(!is_backups_root(&json!({ "system_role": "Backups" })));
         assert!(!is_backups_root(&json!({})));
     }
@@ -178,7 +187,10 @@ mod tests {
 
     #[test]
     fn a_refused_write_carries_the_hint_and_a_refused_delete_does_not() {
-        assert_eq!(check(BackupPosition::Root, Mutation::Trash), Err(MSG_DELETE.to_string()));
+        assert_eq!(
+            check(BackupPosition::Root, Mutation::Trash),
+            Err(MSG_DELETE.to_string())
+        );
         assert_eq!(check(BackupPosition::Root, Mutation::Move), Err(MSG_MOVE.to_string()));
         assert_eq!(
             check(BackupPosition::Inside, Mutation::Create),
@@ -211,8 +223,9 @@ mod tests {
             "Delete GLegion's backup? 3 items. GLegion will stop backing up these folders until you choose Back \
              up again on it."
         );
-        assert!(delete_backup_question("GLegion", Some("Pictures"), 10, false).starts_with(
-            "Delete GLegion's backup of Pictures? More than 10 items."
-        ));
+        assert!(
+            delete_backup_question("GLegion", Some("Pictures"), 10, false)
+                .starts_with("Delete GLegion's backup of Pictures? More than 10 items.")
+        );
     }
 }

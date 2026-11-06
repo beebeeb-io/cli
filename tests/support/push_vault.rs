@@ -154,7 +154,12 @@ pub fn subtree(v: &Vault, id: &str) -> Vec<String> {
     let mut i = 0;
     while i < out.len() {
         let parent = out[i].clone();
-        out.extend(v.items.values().filter(|c| c.parent.as_deref() == Some(&parent)).map(|c| c.id.clone()));
+        out.extend(
+            v.items
+                .values()
+                .filter(|c| c.parent.as_deref() == Some(&parent))
+                .map(|c| c.id.clone()),
+        );
         i += 1;
     }
     out
@@ -391,27 +396,27 @@ pub async fn start_mock(vault: Shared) -> String {
                 }
             })
             // A move and/or rename (`PATCH /files/{id}`); the root is refused, as on the server (§5.3 row 5).
-            .patch(|State(v): State<Shared>, UrlPath(id): UrlPath<String>, Json(body): Json<Value>| async move {
-                let mut v = v.lock().unwrap();
-                v.patch_calls += 1;
-                if v.roles.contains_key(&id) {
-                    return protected();
-                }
-                let parent = body
-                    .get("parent_id")
-                    .map(|p| p.as_str().map(str::to_string));
-                let Some(item) = v.items.get_mut(&id) else {
-                    return err(StatusCode::NOT_FOUND, "not_found");
-                };
-                if let Some(parent) = parent {
-                    item.parent = parent;
-                }
-                if let Some(name) = body.get("name_encrypted").and_then(Value::as_str) {
-                    item.name_encrypted = name.to_string();
-                }
-                let answer = row(item);
-                Json(answer).into_response()
-            }),
+            .patch(
+                |State(v): State<Shared>, UrlPath(id): UrlPath<String>, Json(body): Json<Value>| async move {
+                    let mut v = v.lock().unwrap();
+                    v.patch_calls += 1;
+                    if v.roles.contains_key(&id) {
+                        return protected();
+                    }
+                    let parent = body.get("parent_id").map(|p| p.as_str().map(str::to_string));
+                    let Some(item) = v.items.get_mut(&id) else {
+                        return err(StatusCode::NOT_FOUND, "not_found");
+                    };
+                    if let Some(parent) = parent {
+                        item.parent = parent;
+                    }
+                    if let Some(name) = body.get("name_encrypted").and_then(Value::as_str) {
+                        item.name_encrypted = name.to_string();
+                    }
+                    let answer = row(item);
+                    Json(answer).into_response()
+                },
+            ),
         )
         .route(
             "/api/v1/files/:id/upload/abandon",

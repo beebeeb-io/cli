@@ -7,13 +7,25 @@ impl ApiClient {
         Self::with_config(load_config())
     }
 
+    /// The client of a backup pass (LD-0113): [`from_config`](Self::from_config)
+    /// with `X-Beebeeb-Origin: backup` on every API request, so the server can
+    /// tell the device's own backup from any other write under the Backups root
+    /// (spec Amendment 8; the server ignores it until phase 2).
+    pub fn for_backup() -> Self {
+        Self::with_config_and_origin(load_config(), Some(beebeeb_types::backup::ORIGIN_BACKUP))
+    }
+
     /// [`from_config`](Self::from_config) for a config already in hand.
     pub(super) fn with_config(config: crate::config::Config) -> Self {
+        Self::with_config_and_origin(config, None)
+    }
+
+    fn with_config_and_origin(config: crate::config::Config, origin: Option<&'static str>) -> Self {
         // 300s per-request timeout, matching beebeeb-upload, so a stalled chunk
         // PUT fails instead of hanging forever. Long-lived calls that need more
         // (the SSE sync stream) override this per-request with their own
         // `.timeout(...)`, so this default is safe for them.
-        let client = build_client(std::time::Duration::from_secs(300));
+        let client = build_client_with_origin(std::time::Duration::from_secs(300), origin);
         // The direct-transfer state is the process's, per API base: a daemon builds a new client for every resync,
         // and what discovery said (and that a direct upload was given up on) must outlive each of them.
         let direct = direct::DirectState::shared(&config.api_url);
@@ -72,7 +84,7 @@ impl ApiClient {
             "a test must point the client at a local server, not {base_url}"
         );
         Self {
-            client: build_client(std::time::Duration::from_secs(300)),
+            client: build_client_with_origin(std::time::Duration::from_secs(300), None),
             base_url,
             token: token.map(str::to_string),
             refusal_account_state: tokio::sync::OnceCell::new(),

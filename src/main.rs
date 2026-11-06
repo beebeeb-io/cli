@@ -3,6 +3,7 @@
 
 mod account_state;
 mod api;
+mod backup;
 mod backup_guard;
 mod cli_args;
 use cli_args::*;
@@ -259,6 +260,12 @@ enum Commands {
         /// One or more sources, plus a destination as the final positional
         #[arg(num_args = 2.., required = true)]
         paths: Vec<String>,
+    },
+
+    /// Back up folders of this machine into Backups (one pass per `run`)
+    Backup {
+        #[command(subcommand)]
+        cmd: BackupCmd,
     },
 
     /// Move files/folders to the trash (reversible with `bb restore`)
@@ -690,6 +697,13 @@ async fn main() {
             )
             .await
         }
+        Commands::Backup { cmd } => match cmd {
+            BackupCmd::Add { folder } => commands::backup::add(folder).await,
+            BackupCmd::Remove { folder } => commands::backup::remove(folder).await,
+            BackupCmd::List => commands::backup::list().await,
+            BackupCmd::Run => commands::backup::run().await,
+            BackupCmd::Status => commands::backup::status().await,
+        },
         Commands::Restore { target } => commands::restore::run(target).await,
         Commands::Trash { cmd } => match cmd {
             TrashCmd::List => commands::trash::list().await,

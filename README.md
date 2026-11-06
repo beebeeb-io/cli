@@ -69,6 +69,7 @@ bb sync ~/vault /Documents  # Two-way sync, then watch for live changes
 | `bb shares` / `bb unshare` | List or revoke share links |
 | `bb request <create\|list\|send\|rm>` | Account-less links that let anyone upload *into* your vault |
 | `bb sync <local> [remote]` | Bidirectional folder sync; continuous by default (`--once`, `--daemon`, `--delete`) |
+| `bb backup <add\|remove\|list\|run\|status>` | Back up folders of this machine (a Linux server or NAS) into `Backups/<this machine>/`, read where they are; see [Backups](#backups) |
 | `bb webdav` | Serve the vault over local WebDAV (Finder, rclone, Cyberduck, WinSCP; not Windows Explorer, see below). Read-only by default (`--read-write` to allow changes); prints a random per-run password that every client must send |
 | `bb mount <point>` | FUSE mount (macFUSE / libfuse3). Source builds with `--features fuse` only; release binaries do not include it, so use `bb webdav` |
 | `bb billing <show\|usage\|invoices\|portal\|addons>` | Plan and renewal info, per-region usage, invoices (`bb billing invoices --open <id>` downloads one as PDF), the Beebeeb web billing page, and add-ons |
@@ -80,6 +81,61 @@ bb sync ~/vault /Documents  # Two-way sync, then watch for live changes
 `bb webdav` listens on `127.0.0.1` over plain HTTP and protects the vault with a random per-run password (HTTP Basic). Windows Explorer ("Map network drive") refuses Basic authentication over plain HTTP by default, so **Windows Explorer is not supported by `bb webdav`**. On Windows, use the Beebeeb desktop app, or connect with rclone, Cyberduck or WinSCP, which send the password over HTTP on loopback. On macOS, Finder's Go, Connect to Server accepts the printed URL and asks for the password.
 
 Command overview: `bb --help`. Every flag of a command: `bb <command> --help` (for example `bb push --help`).
+
+### Backups
+
+`bb backup` backs up folders of a headless Linux machine into `Backups/<this machine>/<folder>/`, end-to-end
+encrypted. Files are read where they are and never changed. Each run uploads what is new or changed since the
+last run; a changed file becomes a new version of the same file.
+
+```sh
+bb backup add /srv/photos   # back up a folder of this machine
+bb backup run               # one pass: what is new or changed since the last run
+bb backup status            # each folder: on or off, files backed up, the last run's counts
+bb backup list
+bb backup remove /srv/photos  # stop; what is already in Backups stays there
+```
+
+The machine is named by its pretty hostname (else its hostname) and recognised by `/etc/machine-id`, so a
+reinstall keeps backing up into the same folder. bb's own folders (its settings, a `bb sync` folder, a
+`bb mount`) are never backed up.
+
+Backups is read-only everywhere else: `bb push`, `bb mkdir` and `bb mv` into it are refused, and `bb ls` shows it
+as `[Read-only]`. `bb rm` can delete a device's backup or one of its folders after a question (`--yes` for
+scripts). If a folder's backup is deleted from another device, it turns off: `bb backup run` uploads nothing of it,
+`bb backup status` says why and exits 4, and `bb backup add <folder>` backs it up again.
+
+To run it every hour, as your user, with systemd:
+
+```ini
+# ~/.config/systemd/user/beebeeb-backup.service
+[Unit]
+Description=Beebeeb backup (one pass)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/bb backup run
+```
+
+```ini
+# ~/.config/systemd/user/beebeeb-backup.timer
+[Unit]
+Description=Run the Beebeeb backup every hour
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=5m
+
+[Install]
+WantedBy=timers.target
+```
+
+Then `systemctl --user daemon-reload && systemctl --user enable --now beebeeb-backup.timer`. On a server
+without a login session, also run `loginctl enable-linger $USER` once, so the timer runs while nobody is signed
+in. `journalctl --user -u beebeeb-backup` shows each run's counts. Exit codes: `0` done, `3` some files failed
+(tried again next run), `4` a backup is off, `75` another run is still going.
 
 ## Security model
 

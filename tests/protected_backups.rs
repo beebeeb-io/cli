@@ -81,7 +81,10 @@ async fn vault_with_backups() -> (Shared, String, PathBuf, Tree) {
 fn assert_refused(out: &Output, words: &str) {
     let err = stderr(out);
     assert_eq!(out.status.code(), Some(1), "a refusal exits non-zero: {err}");
-    assert!(err.contains(&format!("error: {words}")), "core's exact words, got: {err}");
+    assert!(
+        err.contains(&format!("error: {words}")),
+        "core's exact words, got: {err}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -90,7 +93,10 @@ async fn rm_backups_refused_locally_nonzero_exit_exact_words() {
 
     let out = bb(&home, &["--api", &api, "rm", "-r", "-f", "Backups"]).await;
     assert_refused(&out, MSG_DELETE);
-    assert!(!stderr(&out).contains(HINT), "a refused delete is no write: no backup hint");
+    assert!(
+        !stderr(&out).contains(HINT),
+        "a refused delete is no write: no backup hint"
+    );
 
     let out = bb(&home, &["--api", &api, "rm", "-r", "--permanent", "Backups"]).await;
     assert_refused(&out, MSG_DELETE);
@@ -124,10 +130,29 @@ async fn mv_backups_refused() {
     // Out of the tree, and into it: both are writes the device's own pass alone makes.
     let out = bb(&home, &["--api", &api, "mv", "Backups/GLegion/Pictures", "Docs"]).await;
     assert_refused(&out, MSG_READ_ONLY);
-    let out = bb(&home, &["--api", &api, "mv", "Docs/report.txt", "Backups/GLegion/Pictures"]).await;
+    let out = bb(
+        &home,
+        &["--api", &api, "mv", "Docs/report.txt", "Backups/GLegion/Pictures"],
+    )
+    .await;
     assert_refused(&out, MSG_READ_ONLY);
-    assert!(stderr(&out).contains(HINT), "a refused write says how to back up: {}", stderr(&out));
-    let out = bb(&home, &["--api", &api, "mv", "Docs/report.txt", "Backups/GLegion/Pictures", "Docs"]).await;
+    assert!(
+        stderr(&out).contains(HINT),
+        "a refused write says how to back up: {}",
+        stderr(&out)
+    );
+    let out = bb(
+        &home,
+        &[
+            "--api",
+            &api,
+            "mv",
+            "Docs/report.txt",
+            "Backups/GLegion/Pictures",
+            "Docs",
+        ],
+    )
+    .await;
     assert_refused(&out, MSG_READ_ONLY);
 
     assert_eq!(vault.lock().unwrap().patch_calls, 0, "nothing was sent to the server");
@@ -142,12 +167,19 @@ async fn server_protected_folder_answer_prints_core_words() {
 
     let out = bb(&home, &["--api", &api, "rm", "-r", "-f", "Backups"]).await;
     assert_refused(&out, MSG_DELETE);
-    assert!(!stderr(&out).contains("refused by the mock server"), "core's words, not the server's text");
+    assert!(
+        !stderr(&out).contains("refused by the mock server"),
+        "core's words, not the server's text"
+    );
     let out = bb(&home, &["--api", &api, "mv", "Backups", "Old Backups"]).await;
     assert_refused(&out, MSG_RENAME);
 
     let v = vault.lock().unwrap();
-    assert_eq!((v.trash_calls, v.patch_calls), (1, 1), "the server was asked and refused");
+    assert_eq!(
+        (v.trash_calls, v.patch_calls),
+        (1, 1),
+        "the server was asked and refused"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -207,7 +239,10 @@ async fn rm_of_a_device_folder_asks_and_yes_answers_for_scripts() {
     );
     assert_eq!(vault.lock().unwrap().trash_calls, 0, "{run:?}");
     let run = bb_at_terminal(&home, &["--api", &api, "rm", "-r", &tree.category], "n").await;
-    assert!(run.stdout.contains("Delete GLegion's backup of Pictures? 1 item."), "{run:?}");
+    assert!(
+        run.stdout.contains("Delete GLegion's backup of Pictures? 1 item."),
+        "{run:?}"
+    );
 
     // --yes answers it.
     let out = bb(&home, &["--api", &api, "rm", "-r", "--yes", "Backups/GLegion"]).await;
@@ -236,11 +271,24 @@ async fn ls_shows_the_read_only_badge_and_never_the_manifest() {
 
     let out = bb(&home, &["--api", &api, "--json", "ls", "-R", "Backups"]).await;
     let json: Value = serde_json::from_slice(&out.stdout).unwrap();
-    let names: Vec<&str> = json["files"].as_array().unwrap().iter().filter_map(|f| f["name"].as_str()).collect();
-    assert!(names.contains(&"a.jpg") && !names.contains(&".device.json"), "{names:?}");
+    let names: Vec<&str> = json["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|f| f["name"].as_str())
+        .collect();
+    assert!(
+        names.contains(&"a.jpg") && !names.contains(&".device.json"),
+        "{names:?}"
+    );
     let out = bb(&home, &["--api", &api, "--json", "ls"]).await;
     let json: Value = serde_json::from_slice(&out.stdout).unwrap();
-    let root = json["files"].as_array().unwrap().iter().find(|f| f["name"] == "Backups").unwrap();
+    let root = json["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == "Backups")
+        .unwrap();
     assert_eq!(root["badge"], MSG_BADGE);
     assert_eq!(root["system_role"], "backups_root");
 }

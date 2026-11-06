@@ -42,6 +42,11 @@ Account-less links for uploads into your vault; crypto via core's `file_request`
 - `bb watch` — deprecated alias for `bb sync`.
 - `bb mount` — FUSE, `--features fuse` only; release binaries ship WITHOUT FUSE (hidden, stub exits 1 → `bb webdav`; pinned by `tests/mount_availability.rs`) / `bb unmount` / `bb webdav` (`--port`, `--read-only`, `--cache-ttl`, `--no-cache`, `--verbose`).
 
+### Backups (LD-0113, `src/backup/`, `src/backup_guard.rs`)
+
+- **The rule (spec Amendments 8/8a):** a device's backup is written by its own backup pass only. `rm`/`mv`/`mkdir`/`push` ask core's `check_app_mutation` with the row's `BackupPosition` (depth below the row flagged `system_role = "backups_root"`: `ResolvedPath.backup_depth` on a walk down, `backup_guard::depth_of` through `GET /files/{id}` parents for an id). Refusals print core's words; Create/Write add `backup_guard::BACKUP_HINT`. A server `409 protected_folder` prints core's root words (`server_refusal`), never the server's text. `bb rm` of a device/category folder asks the §8 question (`--yes`; no terminal → exit 2). `bb ls`: `[Read-only]` (`MSG_BADGE`) on the root, `.device.json` never listed. Tests: `tests/protected_backups.rs`.
+- **`bb backup add|remove|list|run|status`:** `beebeeb_backup::run_pass` with `backup::host::CliHost` as the `BackupHost`; uploads drain after the pass through `upload::stream_encrypt_upload` with the `ChunkProgress::before_complete` fingerprint guard (a file changed mid-read is abandoned, never completed). Every request goes through `ApiClient::for_backup()` (`X-Beebeeb-Origin: backup`). Device id: core `device_id_from_machine_id(/etc/machine-id)`, name from `PRETTY_HOSTNAME` (test seams `BB_BACKUP_MACHINE_ID_FILE` / `BB_BACKUP_MACHINE_INFO_FILE`), platform `cli`. Root via `PUT /api/v1/backups/root` (core `resolve_root`; duplicates are claimed, never merged). Store: `<config>/beebeeb/backup.json` (bound to the `/auth/me` id) + `backup-records-<n>.jsonl` (append per completed upload, compacted per run). A folder gone elsewhere turns off (`stop_words`, the seam for core's `backup_stop`, LD-0121); exit 4 (`exit::BACKUP_OFF`); `add` again = "Back up again". Tests: `tests/backup_command.rs`.
+
 ### Billing
 
 - `bb billing show` (`--json` = raw API merge) / `bb billing usage` / `invoices [--open <id>]` / `portal` (the Beebeeb web billing page) / `addons [purchase <addon_id>]`.
@@ -57,7 +62,7 @@ Account-less links for uploads into your vault; crypto via core's `file_request`
 
 ### Exit codes and non-interactive runs (`src/exit.rs`)
 
-`0` success · `1` any error · `2` a prompt was needed but stdin is not a terminal · `3` the run finished but left items failed or unresolved (`exit::with_code`). Non-interactive: `bb push` existing name → 2; `bb rm` without `-f` → 2; `bb unshare` without id → 2; `bb sync --once` with failures → 3 (`! incomplete · N failed · M ⚡`). Covered by `tests/non_interactive.rs`.
+`0` success · `1` any error · `2` a prompt was needed but stdin is not a terminal · `3` the run finished but left items failed or unresolved · `4` a backup is off (`bb backup run`/`status`, LD-0113) (`exit::with_code`). Non-interactive: `bb push` existing name → 2; `bb rm` without `-f` → 2; `bb unshare` without id → 2; `bb sync --once` with failures → 3 (`! incomplete · N failed · M ⚡`). Covered by `tests/non_interactive.rs`.
 
 ### Utilities
 
