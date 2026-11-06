@@ -139,6 +139,7 @@ pub async fn run(
     parent_id: Option<String>,
     folder: Option<String>,
     strategy: ConflictStrategy,
+    shared: crate::commands::push_folders::SharedReuse,
 ) -> Result<(), String> {
     if !path.exists() {
         return Err(format!("file not found: {}", path.display()));
@@ -164,7 +165,7 @@ pub async fn run(
     };
 
     if path.is_dir() {
-        return push_directory(&api, &path, parent_id, strategy).await;
+        return push_directory(&api, &path, parent_id, strategy, shared).await;
     }
 
     // ── Resolve line (single file) ──────────────────────────────────────────
@@ -245,38 +246,15 @@ async fn resolve_upload_folder(api: &ApiClient, folder: &str) -> Result<String, 
         return Ok(folder_id.to_string());
     }
 
+    // Task 2334: the same find-or-create as a pushed folder's own name, so the same one of several same-name
+    // folders is chosen. The user named it, so it is reused even when shared.
     let master_key = load_master_key()?;
-    let listing = api.list_files(None).await?;
-    let files = listing
-        .as_array()
-        .or_else(|| listing.get("files").and_then(|f| f.as_array()))
-        .ok_or("invalid file listing response")?;
-
-    for file in files {
-        let is_folder = file.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
-        if !is_folder {
-            continue;
-        }
-
-        let file_id = file
-            .get("id")
-            .and_then(|v| v.as_str())
-            .ok_or("folder response missing id")?;
-        let name_encrypted = file
-            .get("name_encrypted")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| format!("folder response missing name_encrypted for {file_id}"))?;
-        let name = crate::crypto::decrypt_name(&master_key, file_id, name_encrypted)
-            .ok_or_else(|| format!("failed to decrypt folder name for {file_id}"))?;
-
-        if name == folder {
-            return Ok(file_id.to_string());
-        }
-    }
-
-    // L13 (SF-0001): the client's own id, echoed unchanged by the answer.
-    let created_id = crate::item_id::create_owned_folder(api, &master_key, folder, None).await?;
-    Ok(created_id.to_string())
+    let mut folders = crate::commands::push_folders::PushFolders::new(
+        api,
+        &master_key,
+        crate::commands::push_folders::SharedReuse::Allow,
+    );
+    Ok(folders.named(folder).await?.to_string())
 }
 
 /// Result data from a single file upload, used for summary + JSON output.
@@ -593,6 +571,7 @@ async fn push_directory(
     dir_path: &std::path::Path,
     parent_id: Option<String>,
     strategy: ConflictStrategy,
+    shared: crate::commands::push_folders::SharedReuse,
 ) -> Result<(), String> {
     let master_key = load_master_key()?;
     let dir_name = dir_path
@@ -631,8 +610,10 @@ async fn push_directory(
         .transpose()
         .map_err(|e| format!("invalid parent ID: {e}"))?;
 
-    // L13 (SF-0001): the client's own id, echoed unchanged by the answer.
-    let root_id = crate::item_id::create_owned_folder(api, &master_key, &dir_name, parent_uuid).await?;
+    // Task 2334: a re-push writes into the folder of this name already there (at every level below too),
+    // never into a second one; one it finds that is shared on its own needs a yes first (`push_folders`).
+    let mut folders = crate::commands::push_folders::PushFolders::new(api, &master_key, shared);
+    let root_id = folders.child(parent_uuid, &dir_name, &dir_name).await?;
 
     let mut folder_map: std::collections::HashMap<PathBuf, uuid::Uuid> = std::collections::HashMap::new();
     folder_map.insert(dir_path.to_path_buf(), root_id);
@@ -648,11 +629,13 @@ async fn push_directory(
 
         if *is_dir {
             let name = entry_path.file_name().and_then(|n| n.to_str()).unwrap_or("folder");
+            let shown = std::path::Path::new(&dir_name)
+                .join(entry_path.strip_prefix(dir_path).unwrap_or(entry_path))
+                .display()
+                .to_string();
+            let folder_id = folders.child(Some(entry_parent_id), name, &shown).await?;
 
-            // L13 (SF-0001): the client's own id, echoed unchanged by the answer.
-            let created_id = crate::item_id::create_owned_folder(api, &master_key, name, Some(entry_parent_id)).await?;
-
-            folder_map.insert(entry_path.clone(), created_id);
+            folder_map.insert(entry_path.clone(), folder_id);
         } else {
             // One file failing (a server reject, a read error, a network blip)
             // must not abandon the rest of the folder: record it with its path,
@@ -769,12 +752,10 @@ async fn push_directory(
     // L15 = A (P2-11): a directory push into a shared folder says the owner-only
     // sentence ONCE for the command (the per-file line is suppressed here).
     if uploaded_count > 0 && !ui::is_json() {
-        // The folder the batch landed IN decides; when the push is the folder
-        // itself, its parent is the shared one.
-        let target = parent_uuid
-            .map(|p| p.to_string())
-            .unwrap_or_else(|| root_id.to_string());
-        crate::owned_keys::announce_owner_only(api, &master_key, Some(&target)).await;
+        // The folder the batch landed in decides. Since task 2334 that folder
+        // may be an existing, shared one; the walk up from it also finds a
+        // shared parent.
+        crate::owned_keys::announce_owner_only(api, &master_key, Some(&root_id.to_string())).await;
     }
     if !failures.is_empty() {
         let names: Vec<&str> = failures.iter().map(|(path, _)| path.as_str()).collect();

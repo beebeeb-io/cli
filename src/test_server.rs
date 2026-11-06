@@ -91,6 +91,9 @@ pub struct Mock {
     pub trashed: Vec<String>,
     /// `GET /files/{id}` answers: id -> metadata. Absent = 404.
     pub files: HashMap<String, serde_json::Value>,
+    /// Task 2334: `GET /files/{id}` answers this status for every id instead
+    /// (a server that cannot say where an upload was going).
+    pub file_status: Option<u16>,
     /// `GET /files/{id}/download` answers: id -> body. Absent = 404.
     pub downloads: HashMap<String, Vec<u8>>,
     /// SF-0002 r3: a move/rename (`PATCH /files/{id}`) answers this status
@@ -280,7 +283,12 @@ fn router(state: Shared) -> Router {
         .route(
             "/api/v1/files/:id",
             get(|State(st): State<Shared>, Path(fid): Path<String>| async move {
-                match st.lock().unwrap().files.get(&fid) {
+                let m = st.lock().unwrap();
+                if let Some(code) = m.file_status {
+                    let status = StatusCode::from_u16(code).unwrap();
+                    return (status, Json(json!({ "error": "failed by mock" }))).into_response();
+                }
+                match m.files.get(&fid) {
                     Some(meta) => Json(meta.clone()).into_response(),
                     None => not_found(),
                 }

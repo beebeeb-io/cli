@@ -14,7 +14,12 @@
 //! Black box: the real `bb` binary against an in-process mock that, like the
 //! server, keeps folders by parent, creates a file's row (with its parent) at
 //! init, never changes that parent at completion, and lists a folder's
-//! children. Scratch `HOME`, stdin not a terminal, loopback only.
+//! children. Scratch `HOME`, stdin not a terminal (a pty where a test answers
+//! a question), loopback only.
+//!
+//! The fix reuses a same-name folder only when it is not shared on its own,
+//! unless the user says yes at the terminal or passes `--reuse-shared` (lead
+//! ruling 5, 2026-11-06); those branches are tested here too.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -67,6 +72,10 @@ struct Vault {
     abandons: usize,
     /// Chunk PUTs answered `skipped` (the session already held that index).
     skipped: usize,
+    /// `GET /shares/invites/sent` rows.
+    invites: Vec<Value>,
+    /// `GET /shares/folder-links` rows.
+    links: Vec<Value>,
 }
 
 type Shared = Arc<Mutex<Vault>>;
@@ -116,6 +125,14 @@ async fn start_mock(vault: Shared) -> String {
                     Json(json!({ "files": files, "next_cursor": null }))
                 },
             ),
+        )
+        .route(
+            "/api/v1/shares/invites/sent",
+            get(|State(v): State<Shared>| async move { Json(json!({ "invites": v.lock().unwrap().invites })) }),
+        )
+        .route(
+            "/api/v1/shares/folder-links",
+            get(|State(v): State<Shared>| async move { Json(json!({ "links": v.lock().unwrap().links })) }),
         )
         .route(
             "/api/v1/files/folder",
@@ -356,6 +373,44 @@ fn files_named(v: &Vault, name: &str) -> Vec<(String, Option<String>, bool)> {
         .filter(|i| !i.is_folder && name_of(i) == name)
         .map(|i| (i.id.clone(), i.parent.clone(), i.version > 0 && !i.uploading))
         .collect()
+}
+
+/// A folder sealed as `bb mkdir` would seal it, put straight into the vault
+/// (an older one than anything `bb` makes next).
+fn seed_folder(vault: &Shared, parent: Option<&str>, name: &str) -> String {
+    let item = beebeeb_core::item_id::NewItemId::owner(&master()).unwrap();
+    let sealed =
+        beebeeb_core::encrypt::encrypt_name_for_new_item(&master(), &item, name, None, ExpectedChunkFormat::Unrecorded)
+            .unwrap();
+    let mut v = vault.lock().unwrap();
+    v.seq += 1;
+    let id = item.as_str().to_string();
+    let seq = v.seq;
+    v.items.insert(
+        id.clone(),
+        Item {
+            id: id.clone(),
+            parent: parent.map(str::to_string),
+            name_encrypted: sealed,
+            is_folder: true,
+            seq,
+            uploading: false,
+            version: 0,
+            chunk_count: 0,
+        },
+    );
+    id
+}
+
+/// Share `folder` with one person, as the web app's invite would.
+fn share_with_someone(vault: &Shared, folder: &str) {
+    vault.lock().unwrap().invites.push(json!({
+        "id": uuid::Uuid::new_v4(),
+        "file_id": folder,
+        "recipient_email": "friend@beebeeb.io",
+        "status": "approved",
+        "is_folder_share": true,
+    }));
 }
 
 /// The names of the files directly in `parent`.
@@ -641,5 +696,320 @@ async fn rerunning_an_interrupted_folder_push_resumes_into_the_same_folder() {
             assert_eq!(v.abandons, 1, "the old session is abandoned");
             assert_eq!(v.inits, 2, "and the same file is inited again from chunk 0");
         }
+    }
+}
+
+// ── Several same-name folders: the oldest ───────────────────────────────────
+
+/// Guus has two "A House of Dynamite (2025)" folders. A push picks the oldest
+/// (at the `--folder` level too), and says how many there are.
+#[tokio::test(flavor = "multi_thread")]
+async fn of_several_same_name_folders_the_oldest_is_used() {
+    let vault: Shared = Arc::default();
+    let api = start_mock(vault.clone()).await;
+    let home = scratch_home(&api);
+    let movies = seed_folder(&vault, None, "Movies");
+    seed_folder(&vault, None, "Movies");
+    let oldest = seed_folder(&vault, Some(&movies), MOVIE_DIR);
+    let newer = seed_folder(&vault, Some(&movies), MOVIE_DIR);
+    write_file(&home, &format!("{MOVIE_DIR}/{MOVIE}"), b"one movie");
+
+    let out = bb(&home, &["--api", &api, "push", "--folder", "Movies", MOVIE_DIR]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains(&format!("2 folders named {MOVIE_DIR} are here; using the oldest")),
+        "{}",
+        stderr(&out)
+    );
+
+    let v = vault.lock().unwrap();
+    assert_eq!(file_names_in(&v, &oldest), vec![MOVIE.to_string()], "into the oldest");
+    assert!(file_names_in(&v, &newer).is_empty());
+    assert_eq!(folders_named(&v, Some(&movies), MOVIE_DIR).len(), 2, "no third one");
+    assert_eq!(folders_named(&v, None, "Movies").len(), 2, "no third Movies");
+}
+
+// ── A same-name folder that is shared: never reused silently ────────────────
+
+/// Push once, then share the folder the push made with someone.
+async fn pushed_then_shared(vault: &Shared, api: &str, home: &Path) -> (String, String) {
+    write_file(home, &format!("{MOVIE_DIR}/{MOVIE}"), b"one movie");
+    let out = bb(home, &["--api", api, "push", "--folder", "Movies", MOVIE_DIR]).await;
+    assert_eq!(out.status.code(), Some(0), "first push: {}", stderr(&out));
+    let (movies, shared) = {
+        let v = vault.lock().unwrap();
+        let movies = the_folder(&v, None, "Movies");
+        let shared = the_folder(&v, Some(&movies), MOVIE_DIR);
+        (movies, shared)
+    };
+    share_with_someone(vault, &shared);
+    write_file(home, &format!("{MOVIE_DIR}/extras.mkv"), b"extras");
+    (movies, shared)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shared_same_name_folder_is_not_reused_when_no_one_can_answer() {
+    let vault: Shared = Arc::default();
+    let api = start_mock(vault.clone()).await;
+    let home = scratch_home(&api);
+    let (movies, shared) = pushed_then_shared(&vault, &api, &home).await;
+    let inits_before = vault.lock().unwrap().inits;
+
+    let out = bb(
+        &home,
+        &["--api", &api, "push", "--folder", "Movies", "--keep-both", MOVIE_DIR],
+    )
+    .await;
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a question no one can answer: {}",
+        stderr(&out)
+    );
+    let err = stderr(&out);
+    assert!(
+        err.contains(&format!("{MOVIE_DIR} already exists here and is shared with 1 person")),
+        "{err}"
+    );
+    assert!(
+        err.contains("--reuse-shared") && err.contains("stdin is not a terminal"),
+        "{err}"
+    );
+
+    let v = vault.lock().unwrap();
+    assert_eq!(v.inits, inits_before, "nothing is uploaded");
+    assert_eq!(
+        folders_named(&v, Some(&movies), MOVIE_DIR),
+        vec![shared.clone()],
+        "and no folder made"
+    );
+    assert_eq!(
+        file_names_in(&v, &shared),
+        vec![MOVIE.to_string()],
+        "the shared folder is untouched"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reuse_shared_uploads_into_the_shared_folder() {
+    let vault: Shared = Arc::default();
+    let api = start_mock(vault.clone()).await;
+    let home = scratch_home(&api);
+    let (movies, shared) = pushed_then_shared(&vault, &api, &home).await;
+
+    let out = bb(
+        &home,
+        &[
+            "--api",
+            &api,
+            "push",
+            "--folder",
+            "Movies",
+            "--keep-both",
+            "--reuse-shared",
+            MOVIE_DIR,
+        ],
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains(&format!("{MOVIE_DIR} is shared with 1 person; uploading into it")),
+        "{}",
+        stderr(&out)
+    );
+
+    let v = vault.lock().unwrap();
+    assert_eq!(folders_named(&v, Some(&movies), MOVIE_DIR), vec![shared.clone()]);
+    assert!(file_names_in(&v, &shared).contains(&"extras.mkv".to_string()));
+}
+
+/// A subfolder shared on its own is asked about too, even inside a private
+/// top folder: reusing it would show new files to its own members.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_subfolder_shared_on_its_own_is_not_reused_when_no_one_can_answer() {
+    let vault: Shared = Arc::default();
+    let api = start_mock(vault.clone()).await;
+    let home = scratch_home(&api);
+    write_file(&home, "Show/Season 1/e01.mkv", b"episode one");
+    let out = bb(&home, &["--api", &api, "push", "--folder", "Shows", "Show"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let season = folders_named_anywhere(&vault.lock().unwrap(), "Season 1").remove(0);
+    share_with_someone(&vault, &season);
+    write_file(&home, "Show/Season 1/e02.mkv", b"episode two");
+
+    let out = bb(
+        &home,
+        &["--api", &api, "push", "--folder", "Shows", "--keep-both", "Show"],
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("Show/Season 1 already exists here and is shared with 1 person"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(
+        file_names_in(&vault.lock().unwrap(), &season),
+        vec!["e01.mkv".to_string()]
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn at_a_terminal_yes_uploads_into_the_shared_folder() {
+    let vault: Shared = Arc::default();
+    let api = start_mock(vault.clone()).await;
+    let home = scratch_home(&api);
+    let (movies, shared) = pushed_then_shared(&vault, &api, &home).await;
+
+    let run = bb_at_terminal(
+        &home,
+        &["--api", &api, "push", "--folder", "Movies", "--keep-both", MOVIE_DIR],
+        "y",
+    )
+    .await;
+    assert_eq!(run.code, Some(0), "{run:?}");
+    assert!(run.stderr.contains("[y/N]"), "it asked: {run:?}");
+
+    let v = vault.lock().unwrap();
+    assert_eq!(folders_named(&v, Some(&movies), MOVIE_DIR), vec![shared.clone()]);
+    assert!(
+        file_names_in(&v, &shared).contains(&"extras.mkv".to_string()),
+        "{run:?}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn at_a_terminal_no_makes_a_new_folder_and_says_so() {
+    let vault: Shared = Arc::default();
+    let api = start_mock(vault.clone()).await;
+    let home = scratch_home(&api);
+    let (movies, shared) = pushed_then_shared(&vault, &api, &home).await;
+
+    // Enter alone is the default: No.
+    let run = bb_at_terminal(
+        &home,
+        &["--api", &api, "push", "--folder", "Movies", "--keep-both", MOVIE_DIR],
+        "",
+    )
+    .await;
+    assert_eq!(run.code, Some(0), "{run:?}");
+    assert!(
+        run.stderr.contains(&format!(
+            "made a new folder {MOVIE_DIR}; the shared one is left as it was"
+        )),
+        "{run:?}"
+    );
+
+    let v = vault.lock().unwrap();
+    let both = folders_named(&v, Some(&movies), MOVIE_DIR);
+    assert_eq!(both.len(), 2, "the shared one and a new one: {both:?}");
+    let new = both.iter().find(|id| **id != shared).unwrap();
+    assert_eq!(
+        file_names_in(&v, &shared),
+        vec![MOVIE.to_string()],
+        "the shared folder is untouched"
+    );
+    assert_eq!(
+        file_names_in(&v, new),
+        vec![MOVIE.to_string(), "extras.mkv".to_string()],
+        "everything went into the new folder"
+    );
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct TerminalRun {
+    code: Option<i32>,
+    stderr: String,
+}
+
+/// Run `bb <args>` with a pty as its controlling terminal and type `typed` +
+/// Enter into it (`tests/account_email_change.rs` does the same).
+#[cfg(unix)]
+async fn bb_at_terminal(home: &Path, args: &[&str], typed: &str) -> TerminalRun {
+    let (home, args, typed) = (home.to_path_buf(), owned(args), typed.to_string());
+    tokio::task::spawn_blocking(move || run_at_terminal(&home, &args, &typed))
+        .await
+        .unwrap()
+}
+
+#[cfg(unix)]
+fn run_at_terminal(home: &Path, args: &[String], typed: &str) -> TerminalRun {
+    use std::io::{Read, Write};
+    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::unix::process::CommandExt;
+
+    let (mut master, slave) = unsafe {
+        let (mut m, mut s) = (0, 0);
+        let rc = libc::openpty(
+            &mut m,
+            &mut s,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+        assert_eq!(rc, 0, "openpty failed");
+        (std::fs::File::from_raw_fd(m), OwnedFd::from_raw_fd(s))
+    };
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_bb"));
+    cmd.env("BB_REFUSE_NON_LOOPBACK_API", "1");
+    cmd.args(args)
+        .current_dir(home)
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("BB_NO_UPDATE", "1")
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::from(slave))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // Become a session leader and adopt the pty as the controlling terminal.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().expect("spawn bb");
+    drop(cmd);
+    // Drain the terminal, or a session leader's exit blocks on closing it.
+    let mut tty_out = master.try_clone().unwrap();
+    let drain = std::thread::spawn(move || {
+        let mut sink = [0u8; 1024];
+        while matches!(tty_out.read(&mut sink), Ok(n) if n > 0) {}
+    });
+    master.write_all(format!("{typed}\n").as_bytes()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("bb did not exit within 120s (stuck on a question?)");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    child.stdout.take().unwrap().read_to_string(&mut stdout).unwrap();
+    child.stderr.take().unwrap().read_to_string(&mut stderr).unwrap();
+    drop(master);
+    let _ = drain.join();
+    eprintln!(
+        "[bb {} at a terminal, typed {typed:?} -> {:?}]\n--- stdout\n{stdout}--- stderr\n{stderr}",
+        args.join(" "),
+        status.code()
+    );
+    TerminalRun {
+        code: status.code(),
+        stderr,
     }
 }

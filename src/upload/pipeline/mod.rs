@@ -123,6 +123,14 @@ pub async fn stream_encrypt_upload(
         }
         crate::resume::clear(&spec.path);
     }
+    // Task 2334: the server fixes a new file's parent when its upload is inited and keeps it at completion, so a
+    // continued session completes in the folder its FIRST attempt named. A create continues only an upload going
+    // to the folder this write asks for; one going elsewhere is ended (its row, listed and counted in the quota
+    // until then, is deleted with it) and this file starts again here.
+    let pending = match pending {
+        Some(p) if replacing.is_none() => resumable_here(api, &spec, p).await?,
+        other => other,
+    };
     // R4-C: a sidecar record pairs an id with the tag core minted for THAT id.
     // `spec.resume_tag` belongs to `spec.file_id`; a pending id keeps the tag
     // it was recorded with, or (on a mismatch) is abandoned and the current
@@ -283,6 +291,65 @@ pub async fn stream_encrypt_upload(
             Err(e) => return Err(e.into_message().into()),
         }
     }
+}
+
+/// Task 2334: may this create continue `pending`, the interrupted upload of the same local file? Only when the
+/// server's row for it is in the folder this write asks for (`spec.parent_id`): the server set that row's parent
+/// at the first attempt's init and completion keeps it. Otherwise the old upload is ended first, by the one
+/// explicit route (`POST /files/{id}/upload/abandon`), which deletes a never-completed first upload's row; until
+/// then that row is listed in the other folder and counted in the quota. `None`: start this file afresh.
+///
+/// An answer that cannot be read, or an abandon that fails, keeps the record and fails this file for this run:
+/// an upload now would overwrite the record (one per path), and nothing would end the old row.
+async fn resumable_here(
+    api: &ApiClient,
+    spec: &UploadSpec,
+    pending: crate::resume::PendingUpload,
+) -> Result<Option<crate::resume::PendingUpload>, UploadError> {
+    // No login, or a refused one, is said in the words the rest of the CLI uses: the way out is `bb login`.
+    api.require_auth().map_err(|e| UploadError::from(e.message))?;
+    let name = display_name(&spec.file_name);
+    let id = pending.file_id.to_string();
+    let going_to = match api.get_file(&id).await {
+        // `Some(parent)` when the answer names one (`None` = the root).
+        Ok(row) => match row.get("parent_id") {
+            Some(serde_json::Value::Null) => Some(None),
+            Some(serde_json::Value::String(parent)) => Uuid::parse_str(parent).ok().map(Some),
+            _ => None,
+        },
+        // No row: its session is gone too, and the swept-session recovery (task 1589) re-inits the stored id,
+        // which creates the row anew under the parent this write sends. Nothing can complete elsewhere.
+        Err(e) if e.status == 404 => return Ok(Some(pending)),
+        Err(e) if e.status == 401 => return Err(e.message.into()),
+        Err(e) => {
+            return Err(format!(
+                "{name}: could not check which folder the interrupted upload was going to ({}); \
+                 its progress is kept: run the command again",
+                e.message
+            )
+            .into());
+        }
+    };
+    if going_to == Some(spec.parent_id) {
+        return Ok(Some(pending));
+    }
+    match api.upload_abandon(&id).await {
+        Ok(_) => {}
+        Err(e) if e.status == 404 => {}
+        Err(e) => {
+            return Err(format!(
+                "{name}: the interrupted upload was going to another folder and could not be ended ({}); \
+                 it is tried again next run",
+                e.message
+            )
+            .into());
+        }
+    }
+    crate::resume::clear(&spec.path);
+    if !crate::ui::is_quiet() {
+        eprintln!("  {name}: the interrupted upload was going to another folder; starting it again here");
+    }
+    Ok(None)
 }
 
 /// One attempt: build the encryptor for `plan`'s file id, open (or reuse) the
@@ -884,3 +951,7 @@ pub(super) mod rss_regression;
 /// chunk 0 — never PUT to the dead session forever, never loop.
 #[cfg(test)]
 pub(super) mod swept_session_reinit;
+
+/// Task 2334: an interrupted create continues only into the folder this write asks for.
+#[cfg(test)]
+mod resume_destination;
