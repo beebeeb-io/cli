@@ -5,15 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.16.0] - 2026-11-06
+## [0.16.0] - 2026-11-07
 
 ### Added
+- `bb backup add|remove|list|run|status` backs up folders from a Linux machine into your Backups folder (Linux only for now; a systemd user timer is in the README). `run` and `status` exit 0, 3 (finished with something not done) or 4 (a folder turned off because its backup was deleted elsewhere; `bb backup add <folder>` backs it up again); a second `bb backup` at the same time exits 75.
+- Backups are protected on both sides: `bb push` won't add files inside Backups, the Backups folder itself can't be renamed, moved or deleted, and the server refuses the same changes. Deleting a device's backup with `bb rm` always asks first, with the item count; only `--yes` answers that question. `bb mv` and `bb mkdir` follow the same rule, and `bb ls` marks the folder `[Read-only]`.
 - `bb push` shows live numbers on a terminal: a bar, the current speed in Mbps and the time left, updated as the server confirms chunks. `-v` / `--verbose` adds the chunks done and in flight, the average speed, the storage country (Germany or Finland), the direct and API chunk counts, retries and one line per chunk. `--quiet -v` is a usage error.
 - `bb push --json` gains a `transfer` object (totals, `avg_mbps`, `duration_ms`, route counts, retries, and `pools` with the storage country only). Existing keys are unchanged; `total_duration_ms` is still the whole run's wall time.
 - `bb push` of a folder reuses a same-name folder at every level instead of making a second one. A shared folder is reused only after a yes at a terminal or with the new `--reuse-shared` flag; without a terminal it exits 2.
 - A re-pushed file that this machine already uploaded unchanged is skipped and counted (`skipped N already uploaded`, `total_already_uploaded` in `--json`).
 
 ### Changed
+- `bb rm -f` / `--force` now only skip the move-to-trash prompt. `--yes` answers every question.
+- Not covered yet: `bb sync`, `bb mount`, `bb webdav`, `bb repair` and `bb restore` don't check the Backups rule. A later release adds it; until then, don't use them to change files inside Backups.
+- Uses Beebeeb core v0.2.1.
 - Of several same-name folders, `bb push` and `bb push --folder` use the oldest folder that is not shared and say how many there are.
 - Speeds in `bb push` and `bb speedtest` are decimal Mbps with one decimal. Durations read `7m 21s`, not milliseconds, and the end line says `1 file`.
 - Running an unchanged, already completed `bb push` again skips the file and exits 0; it used to refuse with "already exists" and exit 2 without a terminal. A changed file is still a conflict (exit 2).
@@ -21,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dependencies: `libc` 0.2.191, `serde_json` 1.0.154, `regex` 1.13.1; `unicode-width` is now a direct dependency.
 
 ### Fixed
+- `bb backup` refuses a state file that belongs to another account or machine, naming the file to delete, and drops a deleted device folder when a folder is added again.
+- `bb push` stops with a reason when it cannot tell whether its destination is inside Backups, instead of guessing.
 - A resumed upload finishes in the folder the push asked for. An interrupted upload that sits in another folder is ended on the server and the file starts again in the right one; the file is never moved.
 - When the CLI cannot tell who can see a folder, it treats the folder as shared, and with several same-name folders it uploads nothing, also with `--reuse-shared`.
 - A name check that cannot be read, or a possible file-request upload whose keys did not load, fails the file instead of uploading a duplicate.
