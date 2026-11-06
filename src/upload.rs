@@ -64,7 +64,7 @@ use crate::api::{ApiClient, DirectOffer};
 
 mod model;
 use model::*;
-pub use model::{INTERRUPTED, UploadOutcome, UploadSpec};
+pub use model::{INTERRUPTED, ReadRow, UploadOutcome, UploadSpec};
 
 mod error;
 pub use error::UploadError;
@@ -82,4 +82,5 @@ use session::*;
 // ── The streaming upload driver ───────────────────────────────────────────────
 
 mod pipeline;
+pub(crate) use pipeline::row_parent;
 pub use pipeline::{expected_ciphertext_for, stream_encrypt_upload};

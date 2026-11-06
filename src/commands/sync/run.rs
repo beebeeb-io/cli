@@ -818,6 +818,7 @@ pub async fn run(
                         parent_id,
                         concurrency: concurrency as u32,
                         shutdown,
+                        read_row: None,
                     };
                     // Name the file in the error: "upload failed: <server
                     // message>" alone doesn't say which file to look at (flow-6).

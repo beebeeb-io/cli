@@ -123,6 +123,7 @@ async fn upload_peak_heap_is_bounded_at_conc4() {
             parent_id: None,
             concurrency: CONC,
             shutdown: Arc::new(AtomicBool::new(false)),
+            read_row: None,
         };
         stream_encrypt_upload(&api, master_key.clone(), spec, &progress)
     });

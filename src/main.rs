@@ -183,6 +183,10 @@ enum Commands {
         /// When a file with the same name exists: upload with a numeric suffix
         #[arg(long, conflicts_with = "replace")]
         keep_both: bool,
+
+        /// When the pushed folder already exists here and is shared: upload into it without asking
+        #[arg(long)]
+        reuse_shared: bool,
     },
 
     /// Download a file by UUID, short ID, or path
@@ -611,6 +615,7 @@ async fn main() {
             folder,
             replace,
             keep_both,
+            reuse_shared,
         } => {
             let strategy = if replace {
                 commands::push::ConflictStrategy::Replace
@@ -619,7 +624,12 @@ async fn main() {
             } else {
                 commands::push::ConflictStrategy::Prompt
             };
-            commands::push::run(path, parent, folder, strategy).await
+            let shared = if reuse_shared {
+                commands::push_folders::SharedReuse::Allow
+            } else {
+                commands::push_folders::SharedReuse::Ask
+            };
+            commands::push::run(path, parent, folder, strategy, shared).await
         }
         Commands::Pull {
             file_id,

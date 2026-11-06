@@ -50,6 +50,17 @@ pub struct UploadSpec {
     pub concurrency: u32,
     /// Shared cancellation flag (set by the Ctrl-C handler).
     pub shutdown: Arc<AtomicBool>,
+    /// Task 2334: the interrupted upload's row as the caller just read it, so the driver does not read it
+    /// again. `None`: the driver reads it when it needs it.
+    pub read_row: Option<ReadRow>,
+}
+
+/// An upload's row as `GET /files/{id}` answered it moments ago: its id and the folder it is in (`None` = the
+/// root).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReadRow {
+    pub file_id: Uuid,
+    pub parent_id: Option<Uuid>,
 }
 
 /// The pin this upload's writer follows (task 1943; core
@@ -88,6 +99,10 @@ pub struct UploadOutcome {
     pub server_id: Uuid,
     /// Plaintext size (bytes).
     pub plaintext_bytes: u64,
+    /// The version this upload completed, as the completion answer names it (server
+    /// `routes/uploads/complete.rs`). `None` when the answer does not say: the idempotent "already completed"
+    /// answer to a repeated completion carries no version.
+    pub version_number: Option<i64>,
     /// Total ciphertext uploaded (`plaintext + 28 * chunk_count`).
     pub ciphertext_bytes: u64,
     /// How the chunks reached the server (task 2173): `"direct"` (grant -> object storage -> commit) or

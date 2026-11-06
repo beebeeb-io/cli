@@ -540,9 +540,11 @@ async fn a_reinit_records_the_pending_ids_own_resume_tag() {
         .expect("the pending id is recorded with its own tag, not another id's");
 }
 
-/// and no upload starts.
+/// A completed file is never resumed or uploaded again by a plain re-run. Unchanged on both sides, it is this
+/// machine's own finished upload: skipped and counted, exit 0 (task 2334, lead ruling 2026-11-06; until then
+/// this test pinned a refusal). Changed, it is a real name conflict (exit 2). Either way no upload starts.
 #[tokio::test(flavor = "multi_thread")]
-async fn rerunning_a_completed_push_still_refuses() {
+async fn rerunning_a_completed_push_skips_it_unchanged_and_refuses_it_changed() {
     let vault: Shared = Arc::default();
     let api = start_mock(vault.clone()).await;
     let home = scratch_home(&api);
@@ -552,11 +554,24 @@ async fn rerunning_a_completed_push_still_refuses() {
     assert!(out.status.success(), "first push failed: {}", stderr(&out));
 
     let out = bb(&home, &["--api", &api, "push", "big.bin"]).await;
-    assert_eq!(out.status.code(), Some(2), "a completed file is a real conflict");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("skipped 1 already uploaded"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    std::fs::write(home.join("big.bin"), content(2)).unwrap();
+    let out = bb(&home, &["--api", &api, "push", "big.bin"]).await;
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a changed completed file is a real conflict"
+    );
     assert!(stderr(&out).contains("already exists"), "{}", stderr(&out));
     assert!(stderr(&out).contains("--replace"), "{}", stderr(&out));
     let v = vault.lock().unwrap();
-    assert_eq!(v.inits, 1, "the refused re-run starts no upload");
+    assert_eq!(v.inits, 1, "neither re-run starts an upload");
     assert_eq!(v.file.as_ref().unwrap().version, 1);
 }
 

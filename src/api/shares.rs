@@ -82,6 +82,41 @@ impl ApiClient {
         parse_response(resp).await
     }
 
+    /// Every invite this account has sent: `GET /api/v1/shares/invites/sent`,
+    /// `{ "invites": [...] }`. The CLI's one reader of this list. A server
+    /// without the route (404/405/501) answers `Value::Null`, and each caller
+    /// says what that means for its question (no invite to open a key from;
+    /// for a push, nobody it can say is invited, so unknown); any other failure
+    /// is an error, never "no invites".
+    pub async fn list_sent_invites(&self) -> Result<Value, ApiError> {
+        self.get_feature_listing("/api/v1/shares/invites/sent").await
+    }
+
+    /// This account's live folder links, all folders:
+    /// `GET /api/v1/shares/folder-links`, `{ "links": [...] }`. A server without
+    /// folder links, or with shared folders switched off for the account
+    /// (`501 shared_folders_v1`), answers `Value::Null`; any other failure is
+    /// an error, never "no links".
+    pub async fn list_links_to_folders(&self) -> Result<Value, ApiError> {
+        self.get_feature_listing("/api/v1/shares/folder-links").await
+    }
+
+    /// A GET whose route a server may not have: 404/405/501 is `Value::Null`
+    /// (the same reading as [`ApiClient::get_shared_folder`]).
+    async fn get_feature_listing(&self, path: &str) -> Result<Value, ApiError> {
+        let resp = self
+            .client
+            .get(self.url(path))
+            .bearer_auth(self.require_auth()?)
+            .send()
+            .await
+            .map_err(format_request_error)?;
+        if matches!(resp.status().as_u16(), 404 | 405 | 501) {
+            return Ok(Value::Null);
+        }
+        parse_response(resp).await
+    }
+
     // ── File requests ────────────────────────────────────────────────────
     // The inverse of sharing: an account-less link anyone can use to upload an
     // encrypted file *into* the owner's vault. See `commands::request`.

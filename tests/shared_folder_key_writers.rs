@@ -7,7 +7,9 @@
 //! The CLI has no such request. It READS the folder key inventory (`GET /shared-folders/{id}/keys`, and the
 //! legacy invite's `GET /shares/invites/{id}/folder-keys` for a folder that never had custody) and adopts an
 //! owner wrap on `files.owner_wrapped_file_key` (`POST /files/{id}/owner-key`, a column of `files`, not a key
-//! row). Nothing in `src/` publishes, upgrades, re-wraps or links folder keys.
+//! row). A push (task 2334) also reads the invites and folder links this account sent
+//! (`GET /shares/invites/sent`, `GET /shares/folder-links`) to tell whether a same-name folder is shared on its
+//! own. Nothing in `src/` publishes, upgrades, re-wraps or links folder keys.
 //!
 //! That is a claim about the whole source tree, so it is pinned here: every line of `src/` that names a route
 //! family which can write key rows must be one of the reads below. A future CLI writer fails this test on
@@ -34,10 +36,18 @@ const WRITER_ROUTE_FAMILIES: &[&str] = &[
 /// The only lines allowed to name one of those families. Each carries its HTTP method, so turning a read into
 /// a write changes the line and fails the test.
 const SANCTIONED: &[(&str, &str)] = &[
-    ("owned_keys.rs", r#"api.get_json("/api/v1/shares/invites/sent")"#),
     (
         "owned_keys.rs",
         r#".get_json(&format!("/api/v1/shares/invites/{invite_id}/folder-keys"))"#,
+    ),
+    // Task 2334: a push reads which folders are shared on their own (invites and folder links it sent).
+    (
+        "shares.rs",
+        r#"self.get_feature_listing("/api/v1/shares/invites/sent")"#,
+    ),
+    (
+        "shares.rs",
+        r#"self.get_feature_listing("/api/v1/shares/folder-links")"#,
     ),
     ("tree.rs", r#".get(self.url(&format!("/api/v1/shared-folders/{id}")))"#),
     (
