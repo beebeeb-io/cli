@@ -84,8 +84,8 @@ fn is_unfinished_first_upload(row: &serde_json::Value) -> bool {
         && row.get("download_version").is_none_or(serde_json::Value::is_null)
 }
 
-/// The row is still in the folder `finished` went to, not trashed, completed at the version it made, with the
-/// same plaintext size (`size_bytes` is the plaintext size: server `routes/uploads/complete.rs`). A later
+/// The row is still in the folder `finished` went to (which [`existing_upload`] requires to be the folder this
+/// push writes into), not trashed, completed at the version it made, with the same plaintext size (`size_bytes` is the plaintext size: server `routes/uploads/complete.rs`). A later
 /// version (another device replaced it), a move or the trash is not.
 fn completed_as(row: &serde_json::Value, finished: crate::resume::FinishedUpload) -> bool {
     crate::upload::row_parent(row) == Ok(finished.parent_id)

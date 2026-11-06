@@ -265,7 +265,8 @@ async fn resolve_upload_folder(api: &ApiClient, folder: &str) -> Result<String, 
     }
 
     // Task 2334: the same find-or-create as a pushed folder's own name, so the same one of several same-name
-    // folders is chosen. The user named it, so it is reused even when shared.
+    // folders is chosen (the oldest unshared one; a shared one only when every one is shared). The user named
+    // it, so it is reused even when shared.
     let master_key = load_master_key()?;
     let mut folders = crate::commands::push_folders::PushFolders::new(
         api,

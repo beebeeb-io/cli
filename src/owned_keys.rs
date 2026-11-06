@@ -37,6 +37,21 @@ pub const RENAME_UNKNOWN_KEY: &str = "can't rename this item: this device doesn'
 /// turn a renamed request row writable, so it stays read-only and says why.
 pub const REQUEST_KEYS_UNAVAILABLE: &str =
     "can't change this item: this device couldn't load your file-request keys. Try again when it can.";
+/// Task 2334: why a row that may be a file-request upload did not open while the request list did not load.
+const REQUEST_LIST_UNREAD: &str = "this device couldn't load your file-request keys";
+
+/// The rows of a `GET /shares/invites/sent` answer for key resolution (task 2334): `Null` (405/501, no such
+/// route) is no invite; an answer without its `invites` list is a read that did not answer, never "no invite".
+fn sent_invite_rows(sent: &Value) -> Result<Vec<Value>, String> {
+    if sent.is_null() {
+        return Ok(Vec::new());
+    }
+    sent["invites"]
+        .as_array()
+        .cloned()
+        .ok_or_else(|| "the sent-invite list came back without its list".to_string())
+}
+
 pub const OWNER_ONLY_NOTICE: &str = "Only you can open this. Share it from the web or the app.";
 
 /// Print [`OWNER_ONLY_NOTICE`] when `folder_id` sits in a shared folder.
@@ -382,6 +397,9 @@ impl OwnedKeyResolver {
             }
             if self.requests_failed {
                 unverified_request = true;
+                // Task 2334: the request list did not load, so a row that does not open below may still be a
+                // request row this device can open on a later run: "not now", never "never".
+                self.server_failed = true;
             } else if let Some(keys) = self.requests.as_mut().and_then(|r| r.row_keys(master, &canonical)) {
                 let beebeeb_core::owned_keys::RequestRowKeys {
                     content_key,
@@ -425,8 +443,13 @@ impl OwnedKeyResolver {
                 rename_target: None,
             });
         }
-        let resolved = owned_keys::resolve_owned_key(master, id, kind, None, None, &enc, None)
-            .map_err(|_| "can't decrypt item name".to_string())?;
+        let resolved = owned_keys::resolve_owned_key(master, id, kind, None, None, &enc, None).map_err(|_| {
+            if unverified_request {
+                REQUEST_LIST_UNREAD.to_string()
+            } else {
+                "can't decrypt item name".to_string()
+            }
+        })?;
         let read_only = resolved.write_target.is_none() || unverified_request;
         Ok(ResolvedCliKey {
             key: Arc::new(resolved.key),
@@ -598,10 +621,12 @@ impl OwnedKeyResolver {
             // An approved legacy invite permits its sender to read the existing
             // inventory without registering custody (reads must not mutate).
             if self.sent_invites.is_none() {
-                // The one reader of this list (`ApiClient::list_sent_invites`): a server without the route sent
-                // no invite, so there is no legacy copy to open here.
-                let sent = self.served(api.list_sent_invites().await)?;
-                self.sent_invites = Some(sent["invites"].as_array().cloned().unwrap_or_default());
+                // The one reader of this list, with key resolution's rule: only 405/501 say a server without
+                // the route, which sent no invite, so there is no legacy copy to open here; a 404 is a read that
+                // did not answer (task 2334).
+                let sent = self.served(api.list_sent_invites_for_keys().await)?;
+                let rows = sent_invite_rows(&sent).inspect_err(|_| self.server_failed = true)?;
+                self.sent_invites = Some(rows);
             }
             if let Some(invite) = self.sent_invites.as_ref().unwrap().iter().find(|r| {
                 r["file_id"].as_str() == Some(id)
@@ -1048,3 +1073,16 @@ fn open_invite_owner_copy(
 
 #[cfg(test)]
 mod write_check_tests;
+
+/// Task 2334: an answer without its invite list is a read that did not answer, never "no invite".
+#[cfg(test)]
+#[test]
+fn a_sent_invite_answer_without_its_list_is_not_no_invite() {
+    assert_eq!(sent_invite_rows(&Value::Null), Ok(Vec::new()), "405/501: no such route");
+    assert_eq!(
+        sent_invite_rows(&serde_json::json!({ "invites": [{ "id": 1 }] })).map(|rows| rows.len()),
+        Ok(1)
+    );
+    assert!(sent_invite_rows(&serde_json::json!({})).is_err());
+    assert!(sent_invite_rows(&serde_json::json!({ "error": "x" })).is_err());
+}

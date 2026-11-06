@@ -83,13 +83,25 @@ impl ApiClient {
     }
 
     /// Every invite this account has sent: `GET /api/v1/shares/invites/sent`,
-    /// `{ "invites": [...] }`. The CLI's one reader of this list. A server
-    /// without the route (404/405/501) answers `Value::Null`, and each caller
-    /// says what that means for its question (no invite to open a key from;
-    /// for a push, nobody it can say is invited, so unknown); any other failure
-    /// is an error, never "no invites".
+    /// `{ "invites": [...] }`, read for a push's share check. A server without
+    /// the route (404/405/501) answers `Value::Null`, which a push reads as
+    /// "nobody it can say is invited", so unknown; any other failure is an
+    /// error, never "no invites". Key resolution reads the same route through
+    /// [`Self::list_sent_invites_for_keys`], where a 404 is an error.
     pub async fn list_sent_invites(&self) -> Result<Value, ApiError> {
-        self.get_feature_listing("/api/v1/shares/invites/sent").await
+        self.sent_invites(&[404, 405, 501]).await
+    }
+
+    /// [`Self::list_sent_invites`] for key resolution (task 2334): there only 405 or 501 say the route is absent.
+    /// A 404 can come from a proxy or a misrouted node, and reading it as "no invite" would make the rows of a
+    /// legacy-invite folder unopenable for good, so a push would pass over them and make duplicates: it is an
+    /// error, which the resolver counts as a read that did not answer.
+    pub async fn list_sent_invites_for_keys(&self) -> Result<Value, ApiError> {
+        self.sent_invites(&[405, 501]).await
+    }
+
+    async fn sent_invites(&self, absent: &[u16]) -> Result<Value, ApiError> {
+        self.get_feature_listing("/api/v1/shares/invites/sent", absent).await
     }
 
     /// This account's live folder links, all folders:
@@ -98,12 +110,13 @@ impl ApiClient {
     /// (`501 shared_folders_v1`), answers `Value::Null`; any other failure is
     /// an error, never "no links".
     pub async fn list_links_to_folders(&self) -> Result<Value, ApiError> {
-        self.get_feature_listing("/api/v1/shares/folder-links").await
+        self.get_feature_listing("/api/v1/shares/folder-links", &[404, 405, 501])
+            .await
     }
 
-    /// A GET whose route a server may not have: 404/405/501 is `Value::Null`
-    /// (the same reading as [`ApiClient::get_shared_folder`]).
-    async fn get_feature_listing(&self, path: &str) -> Result<Value, ApiError> {
+    /// A GET whose route a server may not have: a status in `absent` (404/405/501 unless the caller says
+    /// otherwise, the same reading as [`ApiClient::get_shared_folder`]) is `Value::Null`.
+    async fn get_feature_listing(&self, path: &str, absent: &[u16]) -> Result<Value, ApiError> {
         let resp = self
             .client
             .get(self.url(path))
@@ -111,7 +124,7 @@ impl ApiClient {
             .send()
             .await
             .map_err(format_request_error)?;
-        if matches!(resp.status().as_u16(), 404 | 405 | 501) {
+        if absent.contains(&resp.status().as_u16()) {
             return Ok(Value::Null);
         }
         parse_response(resp).await

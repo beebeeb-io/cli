@@ -622,6 +622,12 @@ mod billing_invoices_route_tests;
 #[path = "api/tests/error_message_priority_tests.rs"]
 mod error_message_priority_tests;
 
+/// Task 2334, delta review P2-1: a 404 on the sent-invite list is "no route" for a push's share check, but a
+/// read that did not answer for key resolution (only 405/501 say the route is absent there).
+#[cfg(test)]
+#[path = "api/tests/sent_invites_absent_route_tests.rs"]
+mod sent_invites_absent_route_tests;
+
 #[cfg(test)]
 #[path = "api/tests/upload_refusal_account_state_tests.rs"]
 mod upload_refusal_account_state_tests;
