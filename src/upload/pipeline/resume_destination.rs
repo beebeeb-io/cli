@@ -30,6 +30,7 @@ fn spec(path: &std::path::Path, file_id: Uuid, parent_id: Option<Uuid>) -> Uploa
         parent_id,
         concurrency: 1,
         shutdown: Arc::new(AtomicBool::new(false)),
+        read_row: None,
     }
 }
 
@@ -159,7 +160,7 @@ async fn when_the_other_folders_upload_cannot_be_ended_the_record_is_kept_and_no
         .to_string();
 
     assert!(
-        err.contains("could not be ended") && err.contains("tried again next run"),
+        err.contains("could not end the interrupted upload") && err.contains("tried again next run"),
         "{err}"
     );
     let m = state.lock().unwrap();
@@ -246,6 +247,28 @@ async fn a_row_moved_into_this_folder_is_continued_whatever_the_record_says() {
     assert_eq!(out.server_id, stored);
     let m = state.lock().unwrap();
     assert!(m.abandons.is_empty() && m.inits.is_empty(), "{:?}", m.events);
+}
+
+/// Review 2334 #8: a row the caller just read (`bb push` checking the same-name file is its own upload) is not
+/// read again: the driver decides by it. Here the server's read would fail, so asking again would fail the file.
+#[tokio::test]
+async fn a_row_the_caller_just_read_is_not_read_again() {
+    let s = Scratch::new("2334-read-row");
+    let wanted = Uuid::new_v4();
+    let (path, stored, sid, state) = interrupted(&s, Some(wanted));
+    state.lock().unwrap().file_status = Some(503);
+    let mut spec = spec(&path, Uuid::new_v4(), Some(wanted));
+    spec.read_row = Some(crate::upload::ReadRow {
+        file_id: stored,
+        parent_id: Some(wanted),
+    });
+
+    let out = run(&state, spec).await.expect("continued");
+
+    assert_eq!(out.server_id, stored);
+    let m = state.lock().unwrap();
+    assert!(m.abandons.is_empty() && m.inits.is_empty(), "{:?}", m.events);
+    assert_eq!(m.completed, vec![sid.to_string()]);
 }
 
 /// A new upload records the folder it asked for.

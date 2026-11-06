@@ -15,6 +15,7 @@ pub mod passkey;
 pub mod pull;
 pub mod push;
 pub(crate) mod push_folders;
+pub(crate) mod push_repeat;
 pub mod qr;
 pub mod quota;
 pub mod region;

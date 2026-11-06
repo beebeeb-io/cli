@@ -225,6 +225,13 @@ impl PendingUpload {
 /// [`resumable_upload`] for `path` as it is on disk right now (same size and
 /// mtime derivation as the upload driver). `None` if it cannot be stat'ed.
 pub fn resumable_upload_now(path: &Path) -> Option<PendingUpload> {
+    let (size, mtime_ns) = local_signature(path)?;
+    resumable_upload(path, size, mtime_ns)
+}
+
+/// `(size, mtime in ns)` of `path` on disk now: the signature every record here is matched on, as `bb sync`
+/// matches its change detection. `None` if it cannot be stat'ed.
+pub fn local_signature(path: &Path) -> Option<(u64, u128)> {
     let meta = std::fs::metadata(path).ok()?;
     let mtime_ns = meta
         .modified()
@@ -232,7 +239,148 @@ pub fn resumable_upload_now(path: &Path) -> Option<PendingUpload> {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    resumable_upload(path, meta.len(), mtime_ns)
+    Some((meta.len(), mtime_ns))
+}
+
+// ── Finished uploads (task 2334) ────────────────────────────────────────────
+//
+// A re-run of `bb push` reuses the folder it pushed into, so every file the earlier run finished meets its own
+// upload as a same-name file. The CLI writes no content hash a server row carries (the init body,
+// `api/upload.rs`, holds id, sealed name, size, parent and chunk plan), so the proof that a same-name file is
+// this machine's own upload of the same local file is this record: written when `bb push` finishes a file,
+// checked against the server's row by `commands::push_repeat`.
+//
+// An append-only log beside the resume sidecar, one JSON line per finished upload (the newest line for a path
+// wins), so a push of many files never rewrites a growing file per upload. Read once per process; rewritten
+// without its superseded lines when they outnumber the live ones. A line another process appends while this
+// one compacts can be lost: that file then meets the conflict rule again, never a silent skip.
+
+/// One file `bb push` finished: the server id and folder it went to, the version it made, and the local file's
+/// signature at the time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FinishedUpload {
+    pub file_id: Uuid,
+    /// `None`: the root.
+    pub parent_id: Option<Uuid>,
+    pub version: i64,
+    pub size: u64,
+    pub mtime_ns: u128,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FinishedLine {
+    key: String,
+    file_id: Uuid,
+    #[serde(default)]
+    parent_id: Option<Uuid>,
+    version: i64,
+    size: u64,
+    mtime_ns: u128,
+}
+
+/// At most this many paths are remembered; past it the oldest go at the next compaction.
+const FINISHED_MAX: usize = 100_000;
+
+/// The log as this process read it, for the log at that path.
+static FINISHED: Mutex<Option<(PathBuf, HashMap<String, FinishedUpload>)>> = Mutex::new(None);
+
+fn finished_path() -> PathBuf {
+    db_path().with_file_name("finished-uploads.jsonl")
+}
+
+/// Remember that `bb push` finished `path` as `upload`.
+pub fn record_finished(path: &Path, upload: FinishedUpload) {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let key = key(path);
+    let line = FinishedLine {
+        key: key.clone(),
+        file_id: upload.file_id,
+        parent_id: upload.parent_id,
+        version: upload.version,
+        size: upload.size,
+        mtime_ns: upload.mtime_ns,
+    };
+    let log = finished_path();
+    let Ok(mut text) = serde_json::to_string(&line) else {
+        return;
+    };
+    text.push('\n');
+    if let Some(dir) = log.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let appended = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, text.as_bytes()));
+    let mut cache = FINISHED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((cached_for, entries)) = cache.as_mut()
+        && *cached_for == log
+        && appended.is_ok()
+    {
+        entries.insert(key, upload);
+    }
+}
+
+/// What `bb push` last finished for `path`, if this machine remembers it.
+pub fn finished_upload(path: &Path) -> Option<FinishedUpload> {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let log = finished_path();
+    let mut cache = FINISHED.lock().unwrap_or_else(|e| e.into_inner());
+    if cache.as_ref().is_none_or(|(cached_for, _)| *cached_for != log) {
+        *cache = Some((log.clone(), load_finished(&log)));
+    }
+    cache.as_ref().and_then(|(_, entries)| entries.get(&key(path)).copied())
+}
+
+/// Read the log (newest line per path wins) and compact it when its superseded lines outnumber the live ones.
+fn load_finished(log: &Path) -> HashMap<String, FinishedUpload> {
+    let Ok(text) = std::fs::read_to_string(log) else {
+        return HashMap::new();
+    };
+    let mut newest: HashMap<String, (usize, FinishedUpload)> = HashMap::new();
+    let mut lines = 0usize;
+    for (at, line) in text.lines().enumerate() {
+        lines += 1;
+        let Ok(l) = serde_json::from_str::<FinishedLine>(line) else {
+            continue;
+        };
+        let upload = FinishedUpload {
+            file_id: l.file_id,
+            parent_id: l.parent_id,
+            version: l.version,
+            size: l.size,
+            mtime_ns: l.mtime_ns,
+        };
+        newest.insert(l.key, (at, upload));
+    }
+    if newest.len() > FINISHED_MAX || lines > 2 * newest.len() + 1_000 {
+        let mut kept: Vec<(String, (usize, FinishedUpload))> = newest.into_iter().collect();
+        kept.sort_by_key(|(_, (at, _))| *at);
+        let drop = kept.len().saturating_sub(FINISHED_MAX);
+        kept.drain(..drop);
+        let mut out = String::new();
+        for (key, (_, u)) in &kept {
+            let line = FinishedLine {
+                key: key.clone(),
+                file_id: u.file_id,
+                parent_id: u.parent_id,
+                version: u.version,
+                size: u.size,
+                mtime_ns: u.mtime_ns,
+            };
+            if let Ok(text) = serde_json::to_string(&line) {
+                out.push_str(&text);
+                out.push('\n');
+            }
+        }
+        let tmp = log.with_extension("jsonl.tmp");
+        if std::fs::write(&tmp, out).is_ok() {
+            let _ = std::fs::rename(&tmp, log);
+        }
+        return kept.into_iter().map(|(k, (_, u))| (k, u)).collect();
+    }
+    newest.into_iter().map(|(k, (_, u))| (k, u)).collect()
 }
 
 /// Record an in-progress upload so an interrupted run can resume it. Called
@@ -533,6 +681,65 @@ mod tests {
         assert_eq!(resumable_upload_for(&f, 5, 100, Some(row)), None);
         assert!(unresumable_upload(&f, 5, 100, Some(row)).is_some());
 
+        unsafe {
+            std::env::remove_var("BB_PENDING_UPLOADS_PATH");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Task 2334: what `bb push` finished is remembered per path, the newest line winning, across processes; a
+    /// log of mostly superseded lines is rewritten to the live ones.
+    #[test]
+    fn a_finished_upload_is_remembered_newest_first_and_the_log_compacts() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("bb-finished-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // SAFETY: serialised by TEST_ENV_LOCK; no other code reads the var meanwhile.
+        unsafe {
+            std::env::set_var("BB_PENDING_UPLOADS_PATH", dir.join("pending.json"));
+        }
+        let f = dir.join("movie.mkv");
+        std::fs::write(&f, b"one movie").unwrap();
+        let folder = Uuid::new_v4();
+        let upload = |version| FinishedUpload {
+            file_id: Uuid::from_u128(7),
+            parent_id: Some(folder),
+            version,
+            size: 9,
+            mtime_ns: 100,
+        };
+
+        assert_eq!(finished_upload(&f), None);
+        record_finished(&f, upload(1));
+        assert_eq!(finished_upload(&f), Some(upload(1)));
+        record_finished(&f, upload(2));
+        assert_eq!(finished_upload(&f), Some(upload(2)), "the newest wins");
+        *FINISHED.lock().unwrap() = None;
+        assert_eq!(
+            finished_upload(&f),
+            Some(upload(2)),
+            "read back from the log, as a new process does"
+        );
+        assert_eq!(finished_upload(&dir.join("other.mkv")), None);
+
+        for version in 3..1_300 {
+            record_finished(&f, upload(version));
+        }
+        let log = dir.join("finished-uploads.jsonl");
+        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1_299);
+        *FINISHED.lock().unwrap() = None;
+        assert_eq!(finished_upload(&f), Some(upload(1_299)));
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap().lines().count(),
+            1,
+            "compacted to the live line"
+        );
+
+        // A line it cannot read is skipped, never fatal.
+        std::fs::write(&log, "not json\n").unwrap();
+        *FINISHED.lock().unwrap() = None;
+        assert_eq!(finished_upload(&f), None);
+        // SAFETY: as above.
         unsafe {
             std::env::remove_var("BB_PENDING_UPLOADS_PATH");
         }

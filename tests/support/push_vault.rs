@@ -35,6 +35,8 @@ pub struct Item {
     /// 0 until a version completed.
     pub version: i64,
     pub chunk_count: u32,
+    /// Plaintext size of the current version (the server's `size_bytes`).
+    pub size: u64,
 }
 
 pub struct Session {
@@ -42,6 +44,8 @@ pub struct Session {
     pub base: Option<i64>,
     pub chunk_count: u32,
     pub frames: BTreeMap<u32, Vec<u8>>,
+    /// The plaintext size this session declared at init.
+    pub size: u64,
 }
 
 #[derive(Default)]
@@ -69,6 +73,16 @@ pub struct Vault {
     pub folder_links_off: bool,
     /// Listing rows carry `share_count: 0` (otherwise they carry none).
     pub listing_share_count: bool,
+    /// `GET /files/{id}` answers this status instead.
+    pub file_status: Option<u16>,
+    /// `GET /files` listings, by `parent_id` (`None` = the root).
+    pub listings: HashMap<Option<String>, usize>,
+    /// `GET /shares/invites/sent` requests.
+    pub invite_reads: usize,
+    /// `GET /shares/folder-links` requests (only a push's share check reads them).
+    pub link_reads: usize,
+    /// `GET /files/{id}` requests, by id.
+    pub file_reads: HashMap<String, usize>,
 }
 
 pub type Shared = Arc<Mutex<Vault>>;
@@ -85,7 +99,7 @@ pub fn row(i: &Item) -> Value {
         "name_encrypted": i.name_encrypted,
         "is_folder": i.is_folder,
         "is_trashed": false,
-        "size_bytes": 0,
+        "size_bytes": i.size,
         "chunk_count": i.chunk_count,
         "created_at": format!("2026-11-06T10:{:02}:{:02}Z", i.seq / 60, i.seq % 60),
         "is_uploading": i.uploading,
@@ -112,8 +126,9 @@ pub async fn start_mock(vault: Shared) -> String {
             // One folder's children (`parent_id` absent = the root), one page.
             get(
                 |State(v): State<Shared>, Query(q): Query<HashMap<String, String>>| async move {
-                    let v = v.lock().unwrap();
+                    let mut v = v.lock().unwrap();
                     let parent = q.get("parent_id").cloned();
+                    *v.listings.entry(parent.clone()).or_default() += 1;
                     let files: Vec<Value> = v
                         .items
                         .values()
@@ -133,7 +148,8 @@ pub async fn start_mock(vault: Shared) -> String {
         .route(
             "/api/v1/shares/invites/sent",
             get(|State(v): State<Shared>| async move {
-                let v = v.lock().unwrap();
+                let mut v = v.lock().unwrap();
+                v.invite_reads += 1;
                 if v.shares_unsupported {
                     return err(StatusCode::NOT_FOUND, "not_found");
                 }
@@ -146,7 +162,8 @@ pub async fn start_mock(vault: Shared) -> String {
         .route(
             "/api/v1/shares/folder-links",
             get(|State(v): State<Shared>| async move {
-                let v = v.lock().unwrap();
+                let mut v = v.lock().unwrap();
+                v.link_reads += 1;
                 if v.shares_unsupported {
                     return err(StatusCode::NOT_FOUND, "not_found");
                 }
@@ -179,6 +196,7 @@ pub async fn start_mock(vault: Shared) -> String {
                     uploading: false,
                     version: 0,
                     chunk_count: 0,
+                    size: 0,
                 };
                 let answer = row(&item);
                 v.items.insert(id, item);
@@ -206,7 +224,11 @@ pub async fn start_mock(vault: Shared) -> String {
         .route(
             "/api/v1/files/:id",
             get(|State(v): State<Shared>, UrlPath(id): UrlPath<String>| async move {
-                let v = v.lock().unwrap();
+                let mut v = v.lock().unwrap();
+                *v.file_reads.entry(id.clone()).or_default() += 1;
+                if let Some(code) = v.file_status {
+                    return err(StatusCode::from_u16(code).unwrap(), "failed by mock");
+                }
                 match v.items.get(&id) {
                     Some(i) => Json(row(i)).into_response(),
                     None => err(StatusCode::NOT_FOUND, "not_found"),
@@ -246,6 +268,7 @@ pub async fn start_mock(vault: Shared) -> String {
                 let parent = body.get("parent_id").and_then(Value::as_str).map(str::to_string);
                 let chunk_size = body.get("chunk_size_bytes").and_then(Value::as_u64).unwrap_or(0);
                 let chunk_count = body.get("chunk_count").and_then(Value::as_u64).unwrap_or(0) as u32;
+                let size = body.get("file_size_bytes").and_then(Value::as_u64).unwrap_or(0);
                 match v.items.get(&id).map(|i| (i.uploading, i.version, i.is_folder)) {
                     Some((_, _, true)) => return err(StatusCode::CONFLICT, "file id refers to a folder"),
                     Some((true, _, _)) => {
@@ -274,6 +297,7 @@ pub async fn start_mock(vault: Shared) -> String {
                                 uploading: true,
                                 version: 0,
                                 chunk_count,
+                                size,
                             },
                         );
                     }
@@ -286,6 +310,7 @@ pub async fn start_mock(vault: Shared) -> String {
                         base,
                         chunk_count,
                         frames: BTreeMap::new(),
+                        size,
                     },
                 );
                 Json(json!({
@@ -336,6 +361,7 @@ pub async fn start_mock(vault: Shared) -> String {
                 };
                 item.uploading = false;
                 item.version = version;
+                item.size = s.size;
                 Json(json!({ "id": s.file_id, "version_number": version })).into_response()
             }),
         )
@@ -359,7 +385,7 @@ pub fn master() -> beebeeb_core::kdf::MasterKey {
 }
 
 pub fn name_of(i: &Item) -> String {
-    beebeeb_core::encrypt::decrypt_name(&master(), &i.id, &i.name_encrypted).expect("a name this test's bb sealed")
+    beebeeb_core::encrypt::decrypt_name(&master(), &i.id, &i.name_encrypted).unwrap_or_else(|_| "<unreadable>".into())
 }
 
 /// Ids of the folders named `name` directly in `parent` (`None` = the root).
@@ -422,6 +448,41 @@ pub fn seed_folder(vault: &Shared, parent: Option<&str>, name: &str) -> String {
             uploading: false,
             version: 0,
             chunk_count: 0,
+            size: 0,
+        },
+    );
+    id
+}
+
+/// A finished file in `parent` whose name is sealed under ANOTHER account's key: this device cannot read it
+/// without asking the server for the row (`GET /files/{id}`).
+pub fn seed_unreadable_file(vault: &Shared, parent: Option<&str>) -> String {
+    let stranger = beebeeb_core::kdf::MasterKey::from_bytes([9u8; 32]);
+    let item = beebeeb_core::item_id::NewItemId::owner(&stranger).unwrap();
+    let sealed = beebeeb_core::encrypt::encrypt_name_for_new_item(
+        &stranger,
+        &item,
+        "someone else's.txt",
+        None,
+        ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap();
+    let mut v = vault.lock().unwrap();
+    v.seq += 1;
+    let id = item.as_str().to_string();
+    let seq = v.seq;
+    v.items.insert(
+        id.clone(),
+        Item {
+            id: id.clone(),
+            parent: parent.map(str::to_string),
+            name_encrypted: sealed,
+            is_folder: false,
+            seq,
+            uploading: false,
+            version: 1,
+            chunk_count: 1,
+            size: 5,
         },
     );
     id
@@ -584,6 +645,7 @@ pub async fn pushed_then_shared(vault: &Shared, api: &str, home: &Path) -> (Stri
 #[derive(Debug)]
 pub struct TerminalRun {
     pub code: Option<i32>,
+    pub stdout: String,
     pub stderr: String,
 }
 
@@ -672,6 +734,7 @@ pub fn run_at_terminal(home: &Path, args: &[String], typed: &str) -> TerminalRun
     );
     TerminalRun {
         code: status.code(),
+        stdout,
         stderr,
     }
 }

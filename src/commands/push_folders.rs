@@ -1,11 +1,14 @@
 //! The folders a `bb push` writes into: the existing folder of that name, else a new one (task 2334).
 //!
 //! A re-push of a folder reuses the folder of the same name already in the target, at every level, instead of
-//! making a second one. A name matches only when it decrypts, under this account's key, to the same bytes (the
-//! 1022 spec's rule for a client that mirrors a local tree); a plaintext name, which anyone with database access
-//! could have planted, never matches. When several folders of the name exist, the oldest is used (`created_at`,
-//! then the smallest id), so every run picks the same one, and one line says how many there are; for a folder
-//! found implicitly, the oldest one that is not shared on its own comes first (a "no" below stays a no).
+//! making a second one. A name matches only when it decrypts to the same bytes (the 1022 spec's rule for a
+//! client that mirrors a local tree), through the key resolver `bb ls` and the conflict check use, so a folder a
+//! collaborator made inside a shared folder (sealed under that folder's key) matches too; a plaintext name,
+//! which anyone with database access could have planted, never matches. A folder row this device cannot read
+//! fails the lookup when nothing else matches: it may be the one. When several folders of the name exist, the
+//! oldest is used (`created_at`, then the smallest id), so every run picks the same one; for a folder found
+//! implicitly, the oldest one that is not shared on its own comes first, with or without `--reuse-shared` (a
+//! "no" below stays a no). One line, after the choice, says how many there are and which was used.
 //!
 //! A folder found IMPLICITLY (the pushed folder's own name, or one of its subfolders) is reused without a
 //! question only when it is not shared on its own. Before this, a push always made a new, private folder, so
@@ -25,6 +28,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::api::ApiClient;
+use crate::owned_keys::OwnedKeyResolver;
 
 /// What a push does with an implicitly found folder that is shared on its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,21 +48,39 @@ pub(crate) struct Candidate {
     pub share_count: Option<u64>,
 }
 
-/// The folders in a listing whose name decrypts to exactly `wanted`. Rows that are not folders, are trashed,
-/// carry a plaintext name or do not decrypt under this key are not candidates.
-pub(crate) fn same_name_folders(rows: &[Value], master_key: &MasterKey, wanted: &str) -> Vec<Candidate> {
-    rows.iter()
-        .filter(|row| row.get("is_folder").and_then(Value::as_bool) == Some(true))
-        .filter(|row| row.get("is_trashed").and_then(Value::as_bool) != Some(true))
-        .filter_map(|row| {
-            let id_text = row.get("id")?.as_str()?;
-            let id = Uuid::parse_str(id_text).ok()?;
-            let sealed = row.get("name_encrypted")?.as_str()?;
-            if !sealed.starts_with('{') {
-                return None;
+/// The folders of one parent as a push read them: each readable folder with its decrypted name, and the folder
+/// rows this device could not read. Read once per parent per push.
+#[derive(Debug, Default)]
+pub(crate) struct ParentFolders {
+    named: Vec<(Candidate, String)>,
+    /// How many folder rows could not be read, and why the first one could not.
+    unreadable: Option<(usize, String)>,
+}
+
+impl ParentFolders {
+    /// Read the folder rows of a listing with `keys`. Rows that are not folders, are trashed, have no id or carry
+    /// a plaintext name are left out.
+    pub async fn read(keys: &mut OwnedKeyResolver, api: &ApiClient, master_key: &MasterKey, rows: &[Value]) -> Self {
+        keys.seed(rows);
+        let mut folders = ParentFolders::default();
+        for row in rows {
+            if row.get("is_folder").and_then(Value::as_bool) != Some(true)
+                || row.get("is_trashed").and_then(Value::as_bool) == Some(true)
+                || !row
+                    .get("name_encrypted")
+                    .and_then(Value::as_str)
+                    .is_some_and(|n| n.starts_with('{'))
+            {
+                continue;
             }
-            let name = crate::crypto::decrypt_name(master_key, id_text, sealed)?;
-            (name == wanted).then(|| Candidate {
+            let Some(id) = row
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(|t| Uuid::parse_str(t).ok())
+            else {
+                continue;
+            };
+            let candidate = Candidate {
                 id,
                 created_at: row
                     .get("created_at")
@@ -66,9 +88,36 @@ pub(crate) fn same_name_folders(rows: &[Value], master_key: &MasterKey, wanted: 
                     .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
                     .map(|t| t.with_timezone(&Utc)),
                 share_count: row.get("share_count").and_then(Value::as_u64),
-            })
-        })
-        .collect()
+            };
+            match keys.resolve(api, master_key, row).await {
+                Ok(resolved) => folders.named.push((candidate, resolved.name)),
+                Err(e) => {
+                    let (count, _) = folders.unreadable.get_or_insert((0, e));
+                    *count += 1;
+                }
+            }
+        }
+        folders
+    }
+
+    /// The folders named exactly `wanted`, oldest first. None of them while a folder row here could not be read
+    /// is an error, never "none": that row may be the one.
+    pub fn named(&self, wanted: &str, shown: &str) -> Result<Vec<Candidate>, String> {
+        let found: Vec<Candidate> = self
+            .named
+            .iter()
+            .filter(|(_, name)| name == wanted)
+            .map(|(candidate, _)| candidate.clone())
+            .collect();
+        match &self.unreadable {
+            Some((count, why)) if found.is_empty() => Err(format!(
+                "cannot tell whether {shown} already exists: {count} folder{} in the folder it goes into could \
+                 not be read ({why})",
+                if *count == 1 { "" } else { "s" }
+            )),
+            _ => Ok(oldest_first(found)),
+        }
+    }
 }
 
 /// Who a folder is shared with, on its own.
@@ -223,9 +272,15 @@ pub(crate) struct PushFolders<'a> {
     master_key: &'a MasterKey,
     shared: SharedReuse,
     created: HashSet<Uuid>,
-    shares: Option<ShareIndex>,
+    /// Each parent's folders, read once per push (`None` = the root): sibling folders share one listing.
+    parents: HashMap<Option<Uuid>, ParentFolders>,
+    keys: OwnedKeyResolver,
+    /// The share lists, read once per push; a failure is kept too, so it is asked and said once.
+    shares: Option<Result<ShareIndex, String>>,
     /// The first folder reused although shared on its own (after a yes or `--reuse-shared`).
     shared_reused: Option<Uuid>,
+    /// `--reuse-shared` with share lists that could not be read: said once.
+    share_failure_said: bool,
 }
 
 impl<'a> PushFolders<'a> {
@@ -235,68 +290,74 @@ impl<'a> PushFolders<'a> {
             master_key,
             shared,
             created: HashSet::new(),
+            parents: HashMap::new(),
+            keys: OwnedKeyResolver::new(),
             shares: None,
             shared_reused: None,
+            share_failure_said: false,
         }
     }
 
     /// The folder named `name` in `parent` that a push of a local folder writes into, found implicitly. `shown`
     /// is how the folder is named to the user (its path relative to the push).
     ///
-    /// Of several same-name folders the oldest that is not shared on its own is used: a "no" to a shared one
-    /// made a private one next to it, and the next run must write there without asking again. Only when every
-    /// one is shared is the oldest offered.
+    /// Of several same-name folders the oldest that is not shared on its own is used, with or without
+    /// `--reuse-shared`: a "no" to a shared one made a private one next to it, and every later run must write
+    /// there. Only when every one is shared (or this push cannot tell) is the oldest offered: asked at a terminal,
+    /// or taken with `--reuse-shared`.
     pub async fn child(&mut self, parent: Option<Uuid>, name: &str, shown: &str) -> Result<Uuid, String> {
         if parent.is_some_and(|p| self.created.contains(&p)) {
             return self.create(parent, name).await;
         }
         let candidates = self.find(parent, name, shown).await?;
-        let Some(oldest) = candidates.first().cloned() else {
+        if candidates.is_empty() {
             return self.create(parent, name).await;
-        };
-        if self.shared == SharedReuse::Allow {
-            // The user chose to reuse it either way. Who it is shared with is said when it can be read; when it
-            // cannot, the folder may be shared, so the owner-only notice checks it too.
-            match self.exposure(&oldest, shown).await {
-                Ok(exposure) if !exposure.is_shared() => {}
-                Ok(exposure) => {
-                    note(&format!(
-                        "{shown} {}; uploading into it (--reuse-shared)",
-                        exposure.describe()
-                    ));
-                    self.shared_reused.get_or_insert(oldest.id);
-                }
-                Err(e) => {
+        }
+        // `None`: the share lists could not be read, and `--reuse-shared` lets the push go on (said once).
+        let exposures = match self.exposures(&candidates, shown).await {
+            Ok(exposures) => Some(exposures),
+            Err(e) if self.shared == SharedReuse::Allow => {
+                if !self.share_failure_said {
                     note(&format!("{e}; uploading into it (--reuse-shared)"));
-                    self.shared_reused.get_or_insert(oldest.id);
+                    self.share_failure_said = true;
                 }
+                None
             }
-            say_how_many(&candidates, shown, "the oldest");
-            return Ok(oldest.id);
-        }
-        let mut exposures = Vec::with_capacity(candidates.len());
-        for candidate in &candidates {
-            exposures.push(self.exposure(candidate, shown).await?);
-        }
-        if let Some(i) = exposures.iter().position(|e| !e.is_shared()) {
-            say_how_many(
-                &candidates,
-                shown,
-                if i == 0 {
-                    "the oldest"
-                } else {
-                    "the oldest one that is not shared"
-                },
-            );
+            Err(e) => return Err(e),
+        };
+        if let Some(i) = exposures.as_ref().and_then(|e| e.iter().position(|x| !x.is_shared())) {
+            let which = if i == 0 {
+                "the oldest"
+            } else {
+                "the oldest one that is not shared"
+            };
+            say_how_many(&candidates, shown, which);
             return Ok(candidates[i].id);
         }
-        say_how_many(&candidates, shown, "the oldest");
-        if ask_reuse_shared(shown, exposures[0])? {
-            self.shared_reused.get_or_insert(oldest.id);
-            return Ok(oldest.id);
+        let reuse = match exposures.as_ref().map(|e| e[0]) {
+            None => true,
+            Some(exposure) if self.shared == SharedReuse::Allow => {
+                note(&format!(
+                    "{shown} {}; uploading into it (--reuse-shared)",
+                    exposure.describe()
+                ));
+                true
+            }
+            Some(exposure) => ask_reuse_shared(shown, exposure)?,
+        };
+        let oldest = candidates[0].id;
+        if reuse {
+            say_how_many(&candidates, shown, "the oldest");
+            self.shared_reused.get_or_insert(oldest);
+            return Ok(oldest);
         }
         let created = self.create(parent, name).await?;
-        note(&format!("made a new folder {shown}; the shared one is left as it was"));
+        let left = if candidates.len() == 1 {
+            "the shared one is left as it was"
+        } else {
+            "the shared ones are left as they were"
+        };
+        note(&format!("made a new folder {shown}; {left}"));
         Ok(created)
     }
 
@@ -324,7 +385,17 @@ impl<'a> PushFolders<'a> {
     }
 
     /// The folders of this name in `parent`, oldest first.
-    async fn find(&self, parent: Option<Uuid>, name: &str, shown: &str) -> Result<Vec<Candidate>, String> {
+    async fn find(&mut self, parent: Option<Uuid>, name: &str, shown: &str) -> Result<Vec<Candidate>, String> {
+        let folders = match self.parents.remove(&parent) {
+            Some(folders) => folders,
+            None => self.read_parent(parent, shown).await?,
+        };
+        let found = folders.named(name, shown);
+        self.parents.insert(parent, folders);
+        found
+    }
+
+    async fn read_parent(&mut self, parent: Option<Uuid>, shown: &str) -> Result<ParentFolders, String> {
         let parent_text = parent.map(|p| p.to_string());
         let listing = self.api.list_files(parent_text.as_deref()).await?;
         if crate::sync_safety::listing_truncated(&listing) {
@@ -336,24 +407,32 @@ impl<'a> PushFolders<'a> {
             .get("files")
             .and_then(Value::as_array)
             .ok_or("invalid file listing response")?;
-        Ok(oldest_first(same_name_folders(rows, self.master_key, name)))
+        Ok(ParentFolders::read(&mut self.keys, self.api, self.master_key, rows).await)
     }
 
-    async fn exposure(&mut self, candidate: &Candidate, shown: &str) -> Result<Exposure, String> {
-        if let Some(index) = &self.shares {
-            return Ok(index.exposure(candidate));
-        }
+    /// Each candidate's own exposure, from the share lists read once per push.
+    async fn exposures(&mut self, candidates: &[Candidate], shown: &str) -> Result<Vec<Exposure>, String> {
+        let shares = match self.shares.take() {
+            Some(shares) => shares,
+            None => self.read_shares(shown).await,
+        };
+        let exposures = match &shares {
+            Ok(index) => Ok(candidates.iter().map(|c| index.exposure(c)).collect()),
+            Err(e) => Err(e.clone()),
+        };
+        self.shares = Some(shares);
+        exposures
+    }
+
+    async fn read_shares(&self, shown: &str) -> Result<ShareIndex, String> {
         let unknown = |e: String| format!("could not check whether {shown} is shared: {e}");
         let (invites, links) = tokio::join!(self.api.list_sent_invites(), self.api.list_links_to_folders());
-        let index = ShareIndex::from_answers(
+        ShareIndex::from_answers(
             &invites.map_err(|e| unknown(e.to_string()))?,
             &links.map_err(|e| unknown(e.to_string()))?,
             Utc::now(),
         )
-        .map_err(unknown)?;
-        let exposure = index.exposure(candidate);
-        self.shares = Some(index);
-        Ok(exposure)
+        .map_err(unknown)
     }
 
     async fn create(&mut self, parent: Option<Uuid>, name: &str) -> Result<Uuid, String> {
@@ -482,8 +561,8 @@ mod tests {
         })
     }
 
-    #[test]
-    fn only_folders_whose_sealed_name_is_byte_identical_are_candidates() {
+    #[tokio::test]
+    async fn only_folders_whose_sealed_name_is_byte_identical_are_candidates() {
         let master = MasterKey::from_bytes([7u8; 32]);
         let other_key = MasterKey::from_bytes([8u8; 32]);
         let wanted = "A House of Dynamite (2025)";
@@ -502,11 +581,28 @@ mod tests {
             // A plaintext name decrypts "as is", but proves nothing: never adopted.
             json!({ "id": id(4).to_string(), "name_encrypted": wanted, "is_folder": true }),
         ];
-        let found = same_name_folders(&rows, &master, wanted);
+        // The row sealed under another key needs the server to be read, and this one answers nothing.
+        let api = ApiClient::new_for_test("http://127.0.0.1:9".to_string());
+        let read = |rows: Vec<Value>| {
+            let (api, master) = (&api, &master);
+            async move { ParentFolders::read(&mut OwnedKeyResolver::new(), api, master, &rows).await }
+        };
+        let found = read(rows.clone()).await.named(wanted, wanted).unwrap();
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].id.to_string(), mine["id"].as_str().unwrap());
         assert_eq!(found[0].created_at, at("2026-11-06T10:00:00Z"));
         assert_eq!(found[0].share_count, Some(2));
+
+        // Without that match, the unreadable folder may be the one: an error, never "none here".
+        let without_mine: Vec<Value> = rows.into_iter().filter(|r| r["id"] != mine["id"]).collect();
+        let err = read(without_mine).await.named(wanted, wanted).unwrap_err();
+        assert!(
+            err.contains("1 folder in the folder it goes into could not be read"),
+            "{err}"
+        );
+        // And with no unreadable row, an absent name is simply none.
+        let readable = vec![sealed_folder(&master, "Other", "2026-11-06T10:00:00Z")];
+        assert_eq!(read(readable).await.named(wanted, wanted).unwrap(), vec![]);
     }
 
     #[test]

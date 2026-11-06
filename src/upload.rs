@@ -64,7 +64,7 @@ use crate::api::{ApiClient, DirectOffer};
 
 mod model;
 use model::*;
-pub use model::{INTERRUPTED, UploadOutcome, UploadSpec};
+pub use model::{INTERRUPTED, ReadRow, UploadOutcome, UploadSpec};
 
 mod error;
 pub use error::UploadError;

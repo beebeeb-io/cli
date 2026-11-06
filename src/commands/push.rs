@@ -43,6 +43,15 @@ pub enum ConflictStrategy {
     KeepBoth,
 }
 
+/// What a push did with one local file.
+enum Pushed {
+    Uploaded(UploadResult),
+    /// Skipped by the conflict rule (answered "skip").
+    Skipped,
+    /// This machine's own finished upload of it is already there, unchanged on both sides (task 2334).
+    AlreadyUploaded,
+}
+
 /// Outcome of conflict resolution for a single file.
 enum ConflictResolution {
     /// Upload, version over the existing file with this server ID.
@@ -62,7 +71,9 @@ enum ConflictResolution {
 ///
 /// A listing that cannot be read is an error, never "no conflict" (task 2334:
 /// a re-pushed folder is reused, so a missed conflict would put a second file
-/// of the same name beside the first). A row without a readable id is skipped.
+/// of the same name beside the first). So is a row whose name this device
+/// cannot read (its key needs the server, and that read failed) when no other
+/// row matches: it may be the same name. A row without a readable id is skipped.
 pub(crate) async fn find_conflict(
     api: &ApiClient,
     master_key: &beebeeb_core::kdf::MasterKey,
@@ -81,6 +92,7 @@ pub(crate) async fn find_conflict(
 
     let mut keys = crate::owned_keys::OwnedKeyResolver::new();
     keys.seed(files);
+    let mut cannot_read: Option<String> = None;
     for file in files {
         let Some(file_uuid) = file
             .get("id")
@@ -89,41 +101,26 @@ pub(crate) async fn find_conflict(
         else {
             continue;
         };
-        if let Ok(resolved) = keys.resolve(api, master_key, file).await {
-            let decrypted = resolved.name;
-            if decrypted == filename {
-                return Ok(Some(file_uuid));
+        match keys.resolve(api, master_key, file).await {
+            Ok(resolved) if resolved.name == filename => return Ok(Some(file_uuid)),
+            Ok(_) => {}
+            Err(e) => {
+                cannot_read.get_or_insert_with(|| format!("a file here could not be read ({e})"));
             }
         }
     }
-    Ok(None)
-}
-
-/// Is the same-named file `existing_id` this machine's own INTERRUPTED first
-/// upload of `path` (task 1950)? Both sides must say so: the local resume record
-/// for this exact file (same size and mtime) names that file id, and the server
-/// reports the file still uploading with no completed version. Then re-running
-/// the same `bb push` resumes it (the upload driver applies core's resume rule)
-/// instead of refusing the name. A completed file, or the interrupted replace of
-/// one, is a real name conflict and keeps the usual refusal.
-async fn own_unfinished_upload(api: &ApiClient, path: &std::path::Path, existing_id: uuid::Uuid) -> bool {
-    let Some(pending) = crate::resume::resumable_upload_now(path) else {
-        return false;
-    };
-    if pending.file_id != existing_id {
-        return false;
-    }
-    match api.get_file(&existing_id.to_string()).await {
-        Ok(row) => is_unfinished_first_upload(&row),
-        Err(_) => false,
+    match cannot_read {
+        Some(why) => Err(unreadable(why)),
+        None => Ok(None),
     }
 }
 
-/// A `GET /api/v1/files/{id}` row of an upload that never completed: still
-/// uploading, and no completed version to download.
-fn is_unfinished_first_upload(row: &serde_json::Value) -> bool {
-    row.get("is_uploading").and_then(serde_json::Value::as_bool) == Some(true)
-        && row.get("download_version").is_none_or(serde_json::Value::is_null)
+/// The count of files skipped because this machine had already uploaded them, unchanged (task 2334).
+fn say_already_uploaded(count: usize) {
+    println!(
+        "  {}",
+        format!("skipped {count} already uploaded").custom_color(crate::colors::INK_DIM)
+    );
 }
 
 /// Prompt the user interactively for conflict resolution.
@@ -202,7 +199,7 @@ pub async fn run(
     let total_elapsed = total_start.elapsed();
 
     match result {
-        Some(ur) => {
+        Pushed::Uploaded(ur) => {
             if ui::is_json() {
                 let speed = ur.speed_bps();
                 let json = serde_json::json!({
@@ -235,8 +232,9 @@ pub async fn run(
                 );
             }
         }
-        None => {
-            // File was skipped (conflict resolution)
+        skipped => {
+            // File was skipped (conflict resolution, or already uploaded: task 2334)
+            let already = usize::from(matches!(skipped, Pushed::AlreadyUploaded));
             if ui::is_json() {
                 let json = serde_json::json!({
                     "files": [],
@@ -244,8 +242,11 @@ pub async fn run(
                     "total_bytes": 0,
                     "avg_speed_bps": 0,
                     "total_duration_ms": total_elapsed.as_millis() as u64,
+                    "total_skipped": already,
                 });
                 println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            } else if already > 0 && ui::is_rich() {
+                say_already_uploaded(already);
             }
         }
     }
@@ -303,7 +304,7 @@ async fn push_single_file(
     parent_id: Option<String>,
     strategy: ConflictStrategy,
     suppress_output: bool,
-) -> Result<Option<UploadResult>, String> {
+) -> Result<Pushed, String> {
     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
 
     // The streaming uploader stats + reads the file itself in bounded chunks;
@@ -334,13 +335,26 @@ async fn push_single_file(
     // Decrypt existing filenames in the folder and check for a match.
     // If found, ask the user (or apply the strategy flag) how to proceed.
     let mut mint_tag: Option<[u8; 32]> = None;
+    let mut read_row = None;
     let (file_id, upload_name, replace_file_id) = {
         let existing = find_conflict(api, &master_key, &file_name, parent_uuid).await?;
-        // Task 1950: with no explicit --replace / --keep-both, our own
-        // interrupted upload of this very file is not a conflict: resume it.
-        let resumes = match existing {
-            Some(id) if matches!(strategy, ConflictStrategy::Prompt) => own_unfinished_upload(api, path, id).await,
-            _ => false,
+        // Our own upload of this very file is not a conflict (`push_repeat`): an interrupted one resumes
+        // (task 1950, with no explicit --replace / --keep-both), and a finished one, unchanged on both sides, is
+        // skipped (task 2334). --replace always uploads.
+        let found = match existing {
+            Some(id) if strategy != ConflictStrategy::Replace => {
+                let resume = strategy == ConflictStrategy::Prompt;
+                crate::commands::push_repeat::existing_upload(api, path, id, parent_uuid, resume).await
+            }
+            _ => crate::commands::push_repeat::Existing::Other,
+        };
+        let resumes = match found {
+            crate::commands::push_repeat::Existing::AlreadyUploaded => return Ok(Pushed::AlreadyUploaded),
+            crate::commands::push_repeat::Existing::Interrupted(row) => {
+                read_row = row;
+                true
+            }
+            crate::commands::push_repeat::Existing::Other => false,
         };
 
         match existing {
@@ -408,7 +422,7 @@ async fn push_single_file(
                                         file_name.custom_color(crate::colors::INK_DIM),
                                     );
                                 }
-                                return Ok(None);
+                                return Ok(Pushed::Skipped);
                             }
                         }
                     }
@@ -427,7 +441,7 @@ async fn push_single_file(
                         mint_tag = Some(*minted.tag());
                         (minted.id(), filename, None)
                     }
-                    ConflictResolution::Skip => return Ok(None),
+                    ConflictResolution::Skip => return Ok(Pushed::Skipped),
                 }
             }
         }
@@ -527,7 +541,9 @@ async fn push_single_file(
         // bb push uploads one file at a time → full Cli cap (128 MiB).
         concurrency: 1,
         shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        read_row,
     };
+    let signature = crate::resume::local_signature(path);
     let outcome = crate::upload::stream_encrypt_upload(
         api,
         std::sync::Arc::clone(&master_key),
@@ -535,6 +551,22 @@ async fn push_single_file(
         &crate::upload::NoopProgress,
     )
     .await?;
+    // Task 2334: remember this upload, so a re-run of the push skips it while the file stays unchanged. Only
+    // when the file did not change while it was read (same signature before and after, the size uploaded).
+    if let Some((size, mtime_ns)) = signature
+        .filter(|before| crate::resume::local_signature(path) == Some(*before) && before.0 == outcome.plaintext_bytes)
+    {
+        crate::resume::record_finished(
+            path,
+            crate::resume::FinishedUpload {
+                file_id: outcome.server_id,
+                parent_id: parent_uuid,
+                version: base_version_number.map_or(1, |base| i64::from(base) + 1),
+                size,
+                mtime_ns,
+            },
+        );
+    }
     let server_id = outcome.server_id.to_string();
     let file_elapsed = file_start.elapsed();
     let file_name = display_name; // possibly-suffixed name for display
@@ -579,7 +611,7 @@ async fn push_single_file(
         crate::owned_keys::announce_owner_only(api, &master_key, parent_uuid.map(|p| p.to_string()).as_deref()).await;
     }
 
-    Ok(Some(upload_result))
+    Ok(Pushed::Uploaded(upload_result))
 }
 
 async fn push_directory(
@@ -659,6 +691,8 @@ async fn push_directory(
     let mut upload_results: Vec<UploadResult> = Vec::new();
     // (path relative to the pushed folder, error) for every file that failed.
     let mut failures: Vec<(String, String)> = Vec::new();
+    // Files this machine had already uploaded, unchanged (task 2334): skipped, counted.
+    let mut already_uploaded = 0usize;
 
     for (entry_path, is_dir) in &entries {
         let entry_parent = entry_path.parent().unwrap_or(dir_path);
@@ -692,6 +726,14 @@ async fn push_directory(
                 }
             };
 
+            let ur = match ur {
+                Pushed::Uploaded(ur) => Some(ur),
+                Pushed::AlreadyUploaded => {
+                    already_uploaded += 1;
+                    None
+                }
+                Pushed::Skipped => None,
+            };
             if let Some(ur) = ur {
                 if ui::is_rich() {
                     let speed = ur.speed_bps();
@@ -744,6 +786,7 @@ async fn push_directory(
             "avg_speed_bps": avg_speed as u64,
             "total_duration_ms": total_elapsed.as_millis() as u64,
             "total_failed": failures.len(),
+            "total_skipped": already_uploaded,
             "failed": failures
                 .iter()
                 .map(|(path, error)| serde_json::json!({ "path": path, "error": error }))
@@ -777,6 +820,9 @@ async fn push_directory(
             )
             .custom_color(crate::colors::INK_DIM),
         );
+        if already_uploaded > 0 {
+            say_already_uploaded(already_uploaded);
+        }
     }
 
     // L15 = A (P2-11): a directory push into a shared folder says the owner-only
@@ -1011,30 +1057,5 @@ mod check_quota_tests {
         let ended = doc("account.trial_ended.ios");
         let err = check_quota_against(&sub, 0, 10, APP, Some(&ended)).unwrap_err();
         assert!(err.starts_with("Your trial has ended"), "{err}");
-    }
-}
-
-#[cfg(test)]
-mod rerun_resume_tests {
-    use super::is_unfinished_first_upload;
-    use serde_json::json;
-
-    /// Only a row that is still uploading AND has no completed version is our
-    /// interrupted first upload; anything with a downloadable version is a
-    /// real name conflict (task 1950).
-    #[test]
-    fn only_an_uploading_row_without_a_version_is_unfinished() {
-        assert!(is_unfinished_first_upload(
-            &json!({ "is_uploading": true, "download_version": null })
-        ));
-        assert!(is_unfinished_first_upload(&json!({ "is_uploading": true })));
-        assert!(!is_unfinished_first_upload(
-            &json!({ "is_uploading": true, "download_version": { "version_number": 1 } })
-        ));
-        assert!(!is_unfinished_first_upload(
-            &json!({ "is_uploading": false, "download_version": null })
-        ));
-        assert!(!is_unfinished_first_upload(&json!({ "download_version": null })));
-        assert!(!is_unfinished_first_upload(&json!({})));
     }
 }

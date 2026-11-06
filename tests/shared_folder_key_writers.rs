@@ -36,7 +36,6 @@ const WRITER_ROUTE_FAMILIES: &[&str] = &[
 /// The only lines allowed to name one of those families. Each carries its HTTP method, so turning a read into
 /// a write changes the line and fails the test.
 const SANCTIONED: &[(&str, &str)] = &[
-    ("owned_keys.rs", r#"api.get_json("/api/v1/shares/invites/sent")"#),
     (
         "owned_keys.rs",
         r#".get_json(&format!("/api/v1/shares/invites/{invite_id}/folder-keys"))"#,

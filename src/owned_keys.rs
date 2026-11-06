@@ -559,7 +559,9 @@ impl OwnedKeyResolver {
             // An approved legacy invite permits its sender to read the existing
             // inventory without registering custody (reads must not mutate).
             if self.sent_invites.is_none() {
-                let sent = api.get_json("/api/v1/shares/invites/sent").await?;
+                // The one reader of this list (`ApiClient::list_sent_invites`): a server without the route sent
+                // no invite, so there is no legacy copy to open here.
+                let sent = api.list_sent_invites().await?;
                 self.sent_invites = Some(sent["invites"].as_array().cloned().unwrap_or_default());
             }
             if let Some(invite) = self.sent_invites.as_ref().unwrap().iter().find(|r| {

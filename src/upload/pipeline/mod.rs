@@ -98,30 +98,16 @@ pub async fn stream_encrypt_upload(
         // under another identity is another file's session and is only
         // discarded, never abandoned.
         if replacing.is_none_or(|row| stale.file_id == row) {
-            // Abandon BEFORE the record goes, and drop it only once the session
-            // is gone (or never existed). A transient failure keeps the record
-            // and fails this file for this run: an upload now would overwrite
-            // the record (one per path), and nothing would end that session.
-            match api.upload_abandon(&stale.file_id.to_string()).await {
-                Ok(_) => {}
-                Err(e) if e.status == 404 => {}
-                Err(e) => {
-                    return Err(format!(
-                        "{}: could not end the interrupted upload ({}); it is tried again next run",
-                        display_name(&spec.file_name),
-                        e.message
-                    )
-                    .into());
-                }
-            }
-            if !crate::ui::is_quiet() {
-                eprintln!(
-                    "  {}: the interrupted upload cannot be continued by this upload; starting it again",
-                    display_name(&spec.file_name)
-                );
-            }
+            end_interrupted(
+                api,
+                &spec,
+                stale.file_id,
+                "the interrupted upload cannot be continued by this upload; starting it again",
+            )
+            .await?;
+        } else {
+            crate::resume::clear(&spec.path);
         }
-        crate::resume::clear(&spec.path);
     }
     // Task 2334: the server fixes a new file's parent when its upload is inited and keeps it at completion, so a
     // continued session completes in the folder its FIRST attempt named. A create continues only an upload going
@@ -308,19 +294,17 @@ async fn resumable_here(
 ) -> Result<Option<crate::resume::PendingUpload>, UploadError> {
     api.require_auth().map_err(|e| UploadError::from(e.message))?;
     let name = display_name(&spec.file_name);
-    let server_parent: Result<Option<Uuid>, String> = match api.get_file(&pending.file_id.to_string()).await {
-        Ok(row) => match row.get("parent_id") {
-            Some(serde_json::Value::Null) => Ok(None),
-            Some(serde_json::Value::String(parent)) => Uuid::parse_str(parent)
-                .map(Some)
-                .map_err(|_| "the answer's folder id is not an id".to_string()),
-            _ => Err("the answer names no folder".to_string()),
-        },
+    let answer = match spec.read_row.filter(|read| read.file_id == pending.file_id) {
+        // The caller read this row moments ago (`bb push`, checking the same-name file is its own upload).
+        Some(read) => RowAnswer::In(read.parent_id),
+        None => read_row_parent(api, pending.file_id).await?,
+    };
+    let server_parent = match answer {
         // No row: its session is gone too, and the swept-session recovery (task 1589) re-inits the stored id,
         // which creates the row anew under the parent this write sends. Nothing can complete elsewhere.
-        Err(e) if e.status == 404 => return Ok(Some(pending)),
-        Err(e) if e.status == 401 => return Err(e.message.into()),
-        Err(e) => Err(e.message),
+        RowAnswer::Gone => return Ok(Some(pending)),
+        RowAnswer::In(parent) => Ok(parent),
+        RowAnswer::Unknown(why) => Err(why),
     };
     match (server_parent, pending.destination) {
         (Ok(parent), _) if parent == spec.parent_id => Ok(Some(pending)),
@@ -335,23 +319,70 @@ async fn resumable_here(
     }
 }
 
-/// End `pending`, an interrupted upload going to another folder, by the one explicit route
-/// (`POST /files/{id}/upload/abandon`), which deletes a never-completed first upload's row; until then that row
-/// is listed in the other folder and counted in the quota. An abandon that fails keeps the record and fails this
-/// file for this run: an upload now would overwrite the record (one per path), and nothing would end the row.
+/// What `GET /files/{id}` says about an interrupted upload's row.
+enum RowAnswer {
+    /// The folder it is in (`None` = the root).
+    In(Option<Uuid>),
+    /// There is no such row.
+    Gone,
+    /// The answer cannot say where it is.
+    Unknown(String),
+}
+
+/// Ask the server where `file_id`'s row is. A refused login is the one error, in the CLI's usual words.
+async fn read_row_parent(api: &ApiClient, file_id: Uuid) -> Result<RowAnswer, UploadError> {
+    Ok(match api.get_file(&file_id.to_string()).await {
+        Ok(row) => match row.get("parent_id") {
+            Some(serde_json::Value::Null) => RowAnswer::In(None),
+            Some(serde_json::Value::String(parent)) => match Uuid::parse_str(parent) {
+                Ok(parent) => RowAnswer::In(Some(parent)),
+                Err(_) => RowAnswer::Unknown("the answer's folder id is not an id".to_string()),
+            },
+            _ => RowAnswer::Unknown("the answer names no folder".to_string()),
+        },
+        Err(e) if e.status == 404 => RowAnswer::Gone,
+        Err(e) if e.status == 401 => return Err(e.message.into()),
+        Err(e) => RowAnswer::Unknown(e.message),
+    })
+}
+
+/// End `pending`, an interrupted upload going to another folder, so this file starts again in the folder this
+/// write asks for.
 async fn end_elsewhere(
     api: &ApiClient,
     spec: &UploadSpec,
     pending: crate::resume::PendingUpload,
 ) -> Result<Option<crate::resume::PendingUpload>, UploadError> {
+    end_interrupted(
+        api,
+        spec,
+        pending.file_id,
+        "the interrupted upload was going to another folder; starting it again here",
+    )
+    .await?;
+    Ok(None)
+}
+
+/// End the interrupted upload `file_id` of `spec`'s file by the one explicit route
+/// (`POST /files/{id}/upload/abandon`, which deletes a never-completed first upload's row: until then it is listed
+/// and counted in the quota), then drop its record and say `why_again` (unless quiet).
+///
+/// Abandon BEFORE the record goes, and drop it only once the session is gone (or never existed: a 404). A
+/// failure keeps the record and fails this file for this run: an upload now would overwrite the record (one per
+/// path), and nothing would end that session or its row.
+async fn end_interrupted(
+    api: &ApiClient,
+    spec: &UploadSpec,
+    file_id: Uuid,
+    why_again: &str,
+) -> Result<(), UploadError> {
     let name = display_name(&spec.file_name);
-    match api.upload_abandon(&pending.file_id.to_string()).await {
+    match api.upload_abandon(&file_id.to_string()).await {
         Ok(_) => {}
         Err(e) if e.status == 404 => {}
         Err(e) => {
             return Err(format!(
-                "{name}: the interrupted upload was going to another folder and could not be ended ({}); \
-                 it is tried again next run",
+                "{name}: could not end the interrupted upload ({}); it is tried again next run",
                 e.message
             )
             .into());
@@ -359,9 +390,9 @@ async fn end_elsewhere(
     }
     crate::resume::clear(&spec.path);
     if !crate::ui::is_quiet() {
-        eprintln!("  {name}: the interrupted upload was going to another folder; starting it again here");
+        eprintln!("  {name}: {why_again}");
     }
-    Ok(None)
+    Ok(())
 }
 
 /// One attempt: build the encryptor for `plan`'s file id, open (or reuse) the

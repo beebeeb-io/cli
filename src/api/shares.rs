@@ -83,8 +83,11 @@ impl ApiClient {
     }
 
     /// Every invite this account has sent: `GET /api/v1/shares/invites/sent`,
-    /// `{ "invites": [...] }`. A server without invites (404/405/501) answers
-    /// `Value::Null`; any other failure is an error, never "no invites".
+    /// `{ "invites": [...] }`. The CLI's one reader of this list. A server
+    /// without the route (404/405/501) answers `Value::Null`, and each caller
+    /// says what that means for its question (no invite to open a key from;
+    /// for a push, nobody it can say is invited, so unknown); any other failure
+    /// is an error, never "no invites".
     pub async fn list_sent_invites(&self) -> Result<Value, ApiError> {
         self.get_feature_listing("/api/v1/shares/invites/sent").await
     }
