@@ -818,7 +818,7 @@ pub async fn run(
                         parent_id,
                         concurrency: concurrency as u32,
                         unrecorded_resume_concurrency: concurrency as u32,
-                        chunks_in_flight: 1,
+                        chunks_in_flight: crate::upload::CHUNKS_IN_FLIGHT_PER_FILE,
                         limits: crate::upload::limits::ChunkLimits::single(),
                         interrupt: None,
                         shutdown,

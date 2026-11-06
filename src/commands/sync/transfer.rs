@@ -480,7 +480,7 @@ pub(super) async fn do_upload(
             parent_id,
             concurrency: 1,
             unrecorded_resume_concurrency: 1,
-            chunks_in_flight: 1,
+            chunks_in_flight: crate::upload::CHUNKS_IN_FLIGHT_PER_FILE,
             limits: crate::upload::limits::ChunkLimits::single(),
             interrupt: None,
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -691,7 +691,7 @@ pub(super) fn new_file_spec(
         // Single in-flight file in this watch-loop wrapper → full Cli cap.
         concurrency: 1,
         unrecorded_resume_concurrency: 1,
-        chunks_in_flight: 1,
+        chunks_in_flight: crate::upload::CHUNKS_IN_FLIGHT_PER_FILE,
         limits: crate::upload::limits::ChunkLimits::single(),
         interrupt: None,
         shutdown: Arc::new(AtomicBool::new(false)),

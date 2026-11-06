@@ -204,9 +204,14 @@ enum Commands {
         #[arg(short = 'v', long)]
         verbose: bool,
 
-        /// How many chunks to send at once, 1 to 8 [default: 4]. A file whose chunks do not fit the 640 MiB
-        /// upload buffer gets fewer; the output says so.
-        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=8), default_value_t = 4)]
+        #[arg(
+            long,
+            value_parser = clap::value_parser!(u32).range(1..=8),
+            default_value_t = 4,
+            hide_default_value = true,
+            help = "How many chunks to send at once, 1 to 8 [default: 4]. A file whose chunks do not fit the 640 MiB \
+                    upload buffer gets fewer; the output says so."
+        )]
         parallel: u32,
     },
 

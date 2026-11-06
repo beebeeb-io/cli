@@ -27,6 +27,7 @@ the command and pasting its output, not by compiling. The CLI gate needs Linux (
 src/main.rs               clap commands; commands/*.rs = one file per command (push, pull, sync, share, request, region, twofa, ...)
 src/api.rs, api/          ApiClient: every endpoint, provenance headers (X-Beebeeb-Client: cli + version), 300 s timeout
 src/upload.rs             shared streaming driver stream_encrypt_upload (push, sync, webdav, mount, repair) on the v2 /uploads/* route
+src/upload/limits.rs, upload/pipeline/parallel.rs, api/pause.rs, interrupt.rs   bb push --parallel: the 640 MiB byte budget, up to N chunks of a file at once, the shared 429/503 pause, the push's one Ctrl-C interrupt
 src/download.rs           stream_download_decrypt (pull, sync); direct_download.rs / direct_upload.rs = S3 grant transfer; transport.rs
 src/resume.rs, item_id.rs resume records; L13 own-ids rule (client proposes, server must echo)
 src/safe_path.rs          the ONLY way a server-provided name becomes a local path

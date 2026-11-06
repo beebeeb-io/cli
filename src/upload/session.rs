@@ -62,8 +62,12 @@ pub(super) enum AttemptErr {
     InitRefused { message: String, fresh_file_id: Uuid },
     /// Spec §5.2: a resumed session finished in another folder (or its file is gone), so this file is uploaded
     /// again under a fresh id, in the folder asked for. The record is already cleared and the line already
-    /// printed; the driver inits `fresh_file_id` from chunk 0.
-    RestartFresh { fresh_file_id: Uuid },
+    /// printed; the driver inits `fresh_file_id` from chunk 0, with the tag it was minted with (`None` for a
+    /// replace, which keeps the listed row's id).
+    RestartFresh {
+        fresh_file_id: Uuid,
+        resume_tag: Option<[u8; 32]>,
+    },
     /// Task 2173: the session was opened as a direct upload and cannot finish as one (the server turned
     /// the direction off, a node has no direct routes, a link was refused, storage kept failing). Its
     /// transport cannot change, so the driver abandons it and inits again WITHOUT the capability token,

@@ -44,7 +44,7 @@ pub(crate) async fn existing_upload(
     let mut existing_row = None;
     if resume_interrupted && crate::resume::resumable_upload_now(path).is_some_and(|p| p.file_id == existing_id) {
         if let Ok(row) = api.get_file(&existing_id.to_string()).await {
-            if is_unfinished_first_upload(&row) {
+            if is_unfinished_first_upload(&row) || finished_behind_the_record(&row) {
                 let read = crate::upload::row_parent(&row)
                     .ok()
                     .map(|parent_id| crate::upload::ReadRow {
@@ -75,6 +75,17 @@ pub(crate) async fn existing_upload(
     } else {
         Existing::Other
     }
+}
+
+/// A `GET /api/v1/files/{id}` row this machine's resume record names, completed (not uploading, a version to
+/// download, not trashed): its session finished out from under an interrupted run (a Ctrl-C or a kill while
+/// `complete` was in flight, `--parallel` spec §5.2). The driver resumes the recorded session, meets the server's
+/// "completed" answer and finishes the file (clearing the record), so the same command neither refuses the row
+/// as a conflict nor uploads it twice.
+fn finished_behind_the_record(row: &serde_json::Value) -> bool {
+    row.get("is_uploading").and_then(serde_json::Value::as_bool) != Some(true)
+        && row.get("download_version").is_some_and(serde_json::Value::is_object)
+        && row.get("is_trashed").and_then(serde_json::Value::as_bool) != Some(true)
 }
 
 /// A `GET /api/v1/files/{id}` row of an upload that never completed: still uploading, and no completed version

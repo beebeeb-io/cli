@@ -50,9 +50,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use bytes::Bytes;
-
-use beebeeb_core::chunk_stream::{ChunkEncryptor, EncryptedChunk, ExpectedChunkFormat, SessionResume};
+use beebeeb_core::chunk_stream::{ChunkEncryptor, ExpectedChunkFormat, SessionResume};
 use beebeeb_core::kdf::MasterKey;
 use beebeeb_types::ChunkProfile;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -76,9 +74,7 @@ mod progress;
 #[cfg(test)]
 pub(crate) use progress::recording::Recording;
 use progress::*;
-pub use progress::{
-    BarProgress, ChunkProgress, FileProgress, Held, InFlight, NoopProgress, PoolLabel, Route, Stream, Tally,
-};
+pub use progress::{BarProgress, ChunkProgress, FileProgress, Held, NoopProgress, PoolLabel, Stream, Tally};
 
 mod session;
 use session::*;
@@ -92,4 +88,4 @@ pub(crate) use pipeline::CHUNKS_IN_FLIGHT_PER_FILE;
 #[cfg(test)]
 pub(crate) use pipeline::request_log_tests;
 pub(crate) use pipeline::row_parent;
-pub use pipeline::{expected_chunks_for, expected_ciphertext_for, stream_encrypt_upload};
+pub use pipeline::{expected_at_chunk_size, expected_ciphertext_for, planned_chunk_size, stream_encrypt_upload};

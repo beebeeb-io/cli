@@ -17,7 +17,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 pub(crate) const UPLOAD_BUFFER_BUDGET: u64 = 640 * 1024 * 1024;
 
 /// Core's smallest chunk: a smaller (or empty) file's chunk counts as this.
-const MIN_CHUNK: u64 = 4 * 1024 * 1024;
+pub(crate) const MIN_CHUNK: u64 = 4 * 1024 * 1024;
 
 /// The read buffer and one seal (2 chunks) sit beside the chunks in flight, so the next chunk can be sealed
 /// while every worker is busy.
@@ -76,12 +76,14 @@ impl ChunkLimits {
         }
     }
 
-    /// The bytes every live share holds now.
+    /// The bytes every live share holds now (a test instrument).
+    #[cfg(test)]
     pub(crate) fn held_bytes(&self) -> u64 {
         self.held.load(Ordering::SeqCst)
     }
 
-    /// The most [`held_bytes`](Self::held_bytes) ever was.
+    /// The most [`held_bytes`](Self::held_bytes) ever was (a test instrument).
+    #[cfg(test)]
     pub(crate) fn peak_held_bytes(&self) -> u64 {
         self.peak.load(Ordering::SeqCst)
     }

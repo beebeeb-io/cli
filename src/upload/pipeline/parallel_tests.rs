@@ -15,7 +15,7 @@ use crate::api::ApiClient;
 use crate::interrupt::Interrupt;
 use crate::test_server::{ChunkHold, Mock, Scratch, Shared, shared, spawn};
 use crate::upload::limits::ChunkLimits;
-use crate::upload::{ChunkProgress, Recording, UploadError};
+use crate::upload::{Recording, UploadError};
 
 const MIB: u64 = 1024 * 1024;
 
@@ -340,4 +340,42 @@ async fn out_of_order_completion_resumes_only_missing() {
         "peak within used, was {}",
         rec.peak()
     );
+}
+
+/// Review P1: `bb sync` has no interrupt, only its shutdown flag. With the flag set while a PUT is in flight,
+/// and that PUT then finishing, nothing is in flight and nothing may be taken: the file ends as interrupted. It
+/// must not leave every `select!` arm disabled (a tokio panic that took the whole sync down).
+#[tokio::test]
+async fn shutdown_flag_without_an_interrupt_ends_the_file() {
+    let s = Scratch::new("parallel-shutdown-flag");
+    let (path, _, _) = s.file(16 * MIB as usize); // 4 chunks of 4 MiB
+    let hold = Arc::new(ChunkHold::default());
+    let state = shared(Mock {
+        hold_chunk_puts: Some(Arc::clone(&hold)),
+        ..Mock::default()
+    });
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let mut spec = spec(&path, Uuid::new_v4(), 1, ChunkLimits::single(), &Interrupt::new());
+    spec.interrupt = None;
+    spec.shutdown = Arc::clone(&shutdown);
+    let base = spawn(state).await;
+    let task = tokio::spawn(async move {
+        let api = ApiClient::new_for_test(base);
+        let mk = Arc::new(MasterKey::from_bytes([9u8; 32]));
+        stream_encrypt_upload(&api, mk, spec, &Recording::default()).await
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while hold.held() < 1 {
+        assert!(tokio::time::Instant::now() < deadline, "no PUT parked");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    shutdown.store(true, Ordering::SeqCst);
+    hold.release();
+
+    let out = tokio::time::timeout(Duration::from_secs(20), task)
+        .await
+        .expect("the pipeline returns")
+        .expect("the task joined: no panic");
+    assert!(out.unwrap_err().is_interrupted(), "ended as interrupted, not failed");
 }

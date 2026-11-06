@@ -148,18 +148,37 @@ pub struct Mock {
     pub chunk_stored_fresh: Vec<u32>,
 }
 
-/// A gate the mock's held chunk PUTs park on (never released; the test drops the client PUTs instead).
+/// A gate the mock's held chunk PUTs park on: until the test drops the client PUTs (an interrupt), or until it
+/// [`release`](Self::release)s them to go on to their normal answer.
 #[derive(Default)]
 pub struct ChunkHold {
     held: std::sync::atomic::AtomicUsize,
-    /// Never notified: `notified()` then waits until the client cancels the request.
-    forever: tokio::sync::Notify,
+    released: std::sync::atomic::AtomicBool,
+    gate: tokio::sync::Notify,
 }
 
 impl ChunkHold {
-    /// How many chunk PUTs are parked now.
+    /// How many chunk PUTs were parked (so far).
     pub fn held(&self) -> usize {
         self.held.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Let every parked PUT, and every later one, go on to its normal answer.
+    pub fn release(&self) {
+        self.released.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.gate.notify_waiters();
+    }
+
+    /// Park until released (registered before the flag is read, so a release in between is never missed).
+    async fn park(&self) {
+        self.held.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let notified = self.gate.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if self.released.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        notified.await;
     }
 }
 
@@ -269,12 +288,11 @@ fn router(state: Shared) -> Router {
                         }
                         m.hold_chunk_puts.clone()
                     };
-                    // Park forever: the body is received (so the client holds the frame in flight), but no answer
-                    // comes until the client cancels the PUT (an interrupt or a sibling's final error).
+                    // Park: the body is received (so the client holds the frame in flight), and no answer comes
+                    // until the client cancels the PUT (an interrupt, a sibling's final error) or the test releases
+                    // the hold, after which the PUT is answered as any other.
                     if let Some(hold) = hold {
-                        hold.held.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        hold.forever.notified().await;
-                        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                        hold.park().await;
                     }
                     let mut m = st.lock().unwrap();
                     if m.completed_sessions.contains(&sid) {

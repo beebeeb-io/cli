@@ -13,7 +13,7 @@ use uuid::Uuid;
 use super::{ReadRow, UploadOutcome, UploadSpec, stream_encrypt_upload};
 use crate::api::ApiClient;
 use crate::test_server::{Gone, Mock, Scratch, Shared, shared, spawn};
-use crate::upload::{ChunkProgress, Recording, UploadError};
+use crate::upload::{Recording, UploadError};
 
 /// A `bb push` spec at one chunk at a time (the completed-session path does not depend on `--parallel`), carrying
 /// the row the caller read (so `resumable_here` keeps the session instead of re-reading).
@@ -150,7 +150,8 @@ async fn completed_session_on_resume_gone_starts_again() {
     let state = shared(mock);
     let rec = Recording::default();
 
-    run(&state, spec(&path, file_id, read_root(file_id)), &rec)
+    // Push's shape: the run's own id IS the finished one (a row found by name is resumed under its id).
+    let out = run(&state, spec(&path, file_id, read_root(file_id)), &rec)
         .await
         .expect("the file is uploaded again");
 
@@ -160,6 +161,13 @@ async fn completed_session_on_resume_gone_starts_again() {
         "{:?}",
         rec.of("note")
     );
+    assert_ne!(
+        out.server_id, file_id,
+        "a fresh id was minted, never the finished row's"
+    );
+    let m = state.lock().unwrap();
+    assert_eq!(m.inits.len(), 1);
+    assert_ne!(m.inits[0], file_id.to_string(), "the init carried the fresh id");
 }
 
 /// The server cannot say where the finished upload is (500): the record is kept and the file fails for this run.

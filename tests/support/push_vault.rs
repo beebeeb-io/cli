@@ -59,6 +59,12 @@ pub struct Vault {
     pub stall: bool,
     /// Every chunk PUT waits while this is set (a test changes the source file meanwhile), then goes on.
     pub hold_chunks: bool,
+    /// `--parallel`: `complete` commits the version, then holds its answer while this is set (a Ctrl-C lands
+    /// while `complete` is in flight).
+    pub hold_complete: bool,
+    /// `--parallel`: sessions that completed (sid -> file id). A chunk PUT to one answers `400 ... not
+    /// writable: completed`; `complete` on one answers `already_completed`, as the server does.
+    pub completed_sessions: HashMap<String, String>,
     /// `(n, status)`: every upload init after the first `n` answers `status`.
     pub init_status_after: Option<(usize, u16)>,
     /// The current version of every completed file: its plaintext chunk size and its frames, in order, as
@@ -553,6 +559,9 @@ pub async fn start_mock(vault: Shared) -> String {
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
                     let mut v = v.lock().unwrap();
+                    if v.completed_sessions.contains_key(&sid) {
+                        return err(StatusCode::BAD_REQUEST, "upload session is not writable: completed");
+                    }
                     let Some(s) = v.sessions.get_mut(&sid) else {
                         return err(StatusCode::NOT_FOUND, "not_found");
                     };
@@ -570,26 +579,39 @@ pub async fn start_mock(vault: Shared) -> String {
             // As on the server: the version completes in the row init created;
             // its parent is NOT taken from this request (there is none).
             post(|State(v): State<Shared>, UrlPath(sid): UrlPath<String>| async move {
-                let mut v = v.lock().unwrap();
-                let Some(s) = v.sessions.remove(&sid) else {
-                    return err(StatusCode::NOT_FOUND, "not_found");
+                let (file_id, version) = {
+                    let mut v = v.lock().unwrap();
+                    if let Some(file_id) = v.completed_sessions.get(&sid).cloned() {
+                        return Json(json!({ "id": file_id, "status": "completed", "already_completed": true }))
+                            .into_response();
+                    }
+                    let Some(s) = v.sessions.remove(&sid) else {
+                        return err(StatusCode::NOT_FOUND, "not_found");
+                    };
+                    if s.frames.len() as u32 != s.chunk_count {
+                        return err(StatusCode::BAD_REQUEST, "missing chunks");
+                    }
+                    let version = s.base.map_or(1, |b| b + 1);
+                    let Some(item) = v.items.get_mut(&s.file_id) else {
+                        return err(StatusCode::NOT_FOUND, "not_found");
+                    };
+                    item.uploading = false;
+                    item.version = version;
+                    item.size = s.size;
+                    item.chunk_count = s.chunk_count;
+                    let file_id = s.file_id.clone();
+                    v.contents.insert(
+                        file_id.clone(),
+                        (s.chunk_size, s.frames.into_values().flatten().collect()),
+                    );
+                    v.completed_sessions.insert(sid.clone(), file_id.clone());
+                    (file_id, version)
                 };
-                if s.frames.len() as u32 != s.chunk_count {
-                    return err(StatusCode::BAD_REQUEST, "missing chunks");
+                // The version is committed; the answer is held while a test asks (a Ctrl-C mid-`complete`).
+                while v.lock().unwrap().hold_complete {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-                let version = s.base.map_or(1, |b| b + 1);
-                let Some(item) = v.items.get_mut(&s.file_id) else {
-                    return err(StatusCode::NOT_FOUND, "not_found");
-                };
-                item.uploading = false;
-                item.version = version;
-                item.size = s.size;
-                item.chunk_count = s.chunk_count;
-                v.contents.insert(
-                    s.file_id.clone(),
-                    (s.chunk_size, s.frames.into_values().flatten().collect()),
-                );
-                Json(json!({ "id": s.file_id, "version_number": version })).into_response()
+                Json(json!({ "id": file_id, "version_number": version })).into_response()
             }),
         )
         .fallback(|| async { err(StatusCode::NOT_FOUND, "not_found") })
@@ -831,6 +853,24 @@ pub async fn bb_env(home: &Path, args: &[&str], env: &[(&str, String)]) -> Outpu
 
 pub fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// Start `bb <args>` in the scratch `home` with its output piped, and hand back the child: a test that must
+/// signal the process by its pid (`--parallel`: Ctrl-C) and read what it printed.
+pub fn spawn_bb_piped(home: &Path, args: &[&str]) -> std::process::Child {
+    spawn_bb(home, &owned(args), Stdio::piped(), Stdio::piped())
+}
+
+/// Whether the resume sidecar in `home` names an in-progress upload (either config dir the harness writes).
+pub fn record_exists(home: &Path) -> bool {
+    [
+        home.join(".config/beebeeb/pending-uploads.json"),
+        home.join("Library/Application Support/beebeeb/pending-uploads.json"),
+    ]
+    .iter()
+    .filter_map(|p| std::fs::read_to_string(p).ok())
+    .filter_map(|text| serde_json::from_str::<Value>(&text).ok())
+    .any(|db| db["uploads"].as_object().is_some_and(|m| !m.is_empty()))
 }
 
 /// Run `bb <args>` with chunk PUTs stalled until the server holds chunk 0 of a

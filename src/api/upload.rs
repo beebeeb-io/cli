@@ -125,7 +125,10 @@ impl ApiClient {
             "base_version_number": base_version_number,
         });
         for _ in 0..3 {
-            pace_if_needed(&self.base_url).await;
+            // After a Ctrl-C no session is opened (a request the run would then abandon).
+            if !pace_if_needed(&self.base_url).await {
+                return Err(crate::upload::INTERRUPTED.to_string().into());
+            }
             let mut request = self
                 .client
                 .post(self.url("/api/v1/uploads/init"))

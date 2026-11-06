@@ -7,7 +7,6 @@
 //! 2 GiB + 1 MiB file gives the table's chunk sizes with no disk I/O.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use beebeeb_core::kdf::MasterKey;
@@ -99,11 +98,25 @@ async fn real_peak_child() {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        tokio::time::sleep(Duration::from_millis(300)).await;
-
-        let measured_mib = (crate::test_alloc::peak().saturating_sub(baseline)) as u64 / MIB;
+        // Wait for the worst moment itself: the real heap peak reaching the table's lower bound. The shares peak
+        // when the producer ACQUIRES its 2 C, before the seal allocates the copy and the frame, so they are no
+        // signal for the allocation; a fixed sleep is no signal on a loaded host. A mock that drained at once
+        // (the prescribed mutant c) never gets here and fails at the deadline, the lower bound's red.
         let expected = expected_peak_mib(asked);
         let half_c = (chunk_size / MIB) / 2;
+        while (crate::test_alloc::peak().saturating_sub(baseline) as u64) < (expected - half_c) * MIB {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "N={asked}: the real peak reached only {} MiB, never the lower bound {}",
+                crate::test_alloc::peak().saturating_sub(baseline) as u64 / MIB,
+                expected - half_c
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // A beat for anything that would overshoot (what the upper bound is there to catch).
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let measured_mib = (crate::test_alloc::peak().saturating_sub(baseline)) as u64 / MIB;
         println!("real_peak N={asked}: measured {measured_mib} MiB, expected {expected} MiB (± {half_c})");
         assert!(
             measured_mib + half_c >= expected && measured_mib <= expected + half_c,

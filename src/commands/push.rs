@@ -16,6 +16,73 @@ use crate::transfer_view::LiveProgress;
 use crate::ui;
 use crate::upload::{ChunkProgress, Stream};
 
+use crate::interrupt::Interrupt;
+use crate::transfer_stats::Summary;
+use crate::upload::limits::ChunkLimits;
+
+/// What one `bb push` run shares across its files (spec §5.1, §8): the `--parallel` asked, the one 640 MiB
+/// buffer budget every chunk-sized buffer is charged to, and the one interrupt a Ctrl-C sets.
+struct PushCtl {
+    parallel: u32,
+    limits: std::sync::Arc<ChunkLimits>,
+    interrupt: Interrupt,
+}
+
+impl PushCtl {
+    /// One per run: the interrupt is bound to this API's pause gate (so a Ctrl-C ends a rate-limit pause at
+    /// once) and its handler installed, `bb sync`'s pattern: the first Ctrl-C sets it (no new chunk or file
+    /// starts, the chunks in flight are dropped, the record stays); a second exits at once.
+    fn new(parallel: u32, api: &ApiClient) -> Self {
+        let interrupt = Interrupt::new();
+        crate::api::pause::bind_interrupt(api.pause_origin(), interrupt.clone());
+        {
+            let interrupt = interrupt.clone();
+            tokio::spawn(async move {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    interrupt.set();
+                }
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    std::process::exit(crate::exit::INTERRUPTED);
+                }
+            });
+        }
+        Self {
+            parallel,
+            limits: ChunkLimits::new(parallel),
+            interrupt,
+        }
+    }
+
+    /// The `transfer` object of `--json` (2333's keys, every one kept) plus, additive: `parallel_asked` (the
+    /// flag's value) and `pauses` (how many pauses the shared gate had this run, spec §6.1).
+    fn transfer_json(&self, transfer: &Summary, api: &ApiClient) -> serde_json::Value {
+        let mut json = transfer.to_json();
+        json["parallel_asked"] = serde_json::json!(self.parallel);
+        json["pauses"] = serde_json::json!(crate::api::pause::pauses(api.pause_origin()));
+        json
+    }
+
+    /// After a Ctrl-C: the one interrupt line (spec §5.1), unless quiet, then exit 130. `k` counts the chunks
+    /// this run saw confirmed (stored or `skipped`) of `name`, so it never overstates what is on the server.
+    fn exit_interrupted(&self, transfer: &Summary, name: &str) -> ! {
+        use std::io::Write;
+        if !ui::is_quiet() {
+            eprintln!(
+                "Interrupted: {} of {} chunks of {name} confirmed in this run. Run the same command to continue.",
+                transfer.chunks_done, transfer.chunks_total
+            );
+        }
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stderr().flush();
+        std::process::exit(crate::exit::INTERRUPTED)
+    }
+}
+
+/// `true` for the error an interrupted upload returns (`upload::INTERRUPTED` reaching the string boundary).
+fn was_interrupted(e: &str) -> bool {
+    e == crate::upload::INTERRUPTED
+}
+
 // Chunk size is now computed dynamically via beebeeb_types::plan_chunks().
 // See the adaptive chunk-size ladder in beebeeb-types/src/chunk.rs.
 
@@ -162,14 +229,13 @@ pub async fn run(
     verbose: bool,
     parallel: u32,
 ) -> Result<(), String> {
-    // Wired into the upload (chunks at once, the budget, the interrupt) in the next commit.
-    let _ = parallel;
     if !path.exists() {
         return Err(format!("file not found: {}", path.display()));
     }
 
     let api = ApiClient::from_config();
     api.require_auth()?;
+    let ctl = PushCtl::new(parallel, &api);
 
     // ── Quota pre-check ────────────────────────────────────────────────────
     // Compute total size of the upload, then check against the user's quota.
@@ -192,7 +258,7 @@ pub async fn run(
     depths.check_create_in(&api, parent_id.as_deref()).await?;
 
     if path.is_dir() {
-        return push_directory(&api, &path, parent_id, depths, strategy, shared, verbose).await;
+        return push_directory(&api, &path, parent_id, depths, strategy, shared, verbose, &ctl).await;
     }
 
     // ── Resolve line (single file) ──────────────────────────────────────────
@@ -201,8 +267,8 @@ pub async fn run(
         push_report::print_resolve_line(1, file_size);
     }
 
-    let plan = FilePlan::of_size(file_size);
-    let progress = push_report::start([plan], verbose);
+    let plan = FilePlan::of_path(&path, ctl.parallel);
+    let progress = push_report::start([plan], verbose, &ctl.limits);
     let total_start = std::time::Instant::now();
     // For the owner-only sentence after the upload: the key loaded and the parent id normalised now, as the upload
     // itself does (an invalid id fails the upload first), so a push that went up cannot fail afterwards.
@@ -211,10 +277,19 @@ pub async fn run(
         .as_deref()
         .and_then(|p| p.parse::<uuid::Uuid>().ok())
         .map(|p| p.to_string());
-    let result = push_single_file(&api, &path, parent_id, strategy, false, &progress, plan).await?;
+    let result = push_single_file(&api, &path, parent_id, strategy, false, &progress, plan, &ctl).await;
     let total_elapsed = total_start.elapsed();
     // The live lines are cleared here: everything below prints under them.
     let transfer = progress.summary();
+    // Ctrl-C (spec §5.1): the file was left undone; say how far it got and exit 130. A file that finished in
+    // spite of it (its `complete` was in flight and waited for) takes the normal path below.
+    let result = match result {
+        Err(e) if was_interrupted(&e) && ctl.interrupt.is_set() => {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+            ctl.exit_interrupted(&transfer, name);
+        }
+        other => other?,
+    };
 
     match result {
         Pushed::Uploaded(ur) => {
@@ -238,7 +313,7 @@ pub async fn run(
                     "total_bytes": ur.encrypted_bytes,
                     "avg_speed_bps": speed as u64,
                     "total_duration_ms": total_elapsed.as_millis() as u64,
-                    "transfer": transfer.to_json(),
+                    "transfer": ctl.transfer_json(&transfer, &api),
                 });
                 println!("{}", serde_json::to_string_pretty(&json).unwrap());
             } else if ui::is_rich() {
@@ -256,7 +331,7 @@ pub async fn run(
                     "avg_speed_bps": 0,
                     "total_duration_ms": total_elapsed.as_millis() as u64,
                     "total_already_uploaded": already,
-                    "transfer": transfer.to_json(),
+                    "transfer": ctl.transfer_json(&transfer, &api),
                 });
                 println!("{}", serde_json::to_string_pretty(&json).unwrap());
             } else if already > 0 && ui::is_rich() {
@@ -335,9 +410,10 @@ async fn push_single_file(
     in_folder: bool,
     progress: &LiveProgress,
     plan: FilePlan,
+    ctl: &PushCtl,
 ) -> Result<Pushed, String> {
     plan.announce(progress);
-    let pushed = upload_one(api, path, parent_id, strategy, in_folder, progress).await;
+    let pushed = upload_one(api, path, parent_id, strategy, in_folder, progress, ctl).await;
     progress.end_file(match &pushed {
         Ok(Pushed::Uploaded(_)) => FileEnd::Uploaded,
         Ok(Pushed::AlreadyUploaded | Pushed::Skipped) => FileEnd::NotSent,
@@ -346,6 +422,7 @@ async fn push_single_file(
     pushed
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn upload_one(
     api: &ApiClient,
     path: &std::path::Path,
@@ -353,6 +430,7 @@ async fn upload_one(
     strategy: ConflictStrategy,
     in_folder: bool,
     progress: &LiveProgress,
+    ctl: &PushCtl,
 ) -> Result<Pushed, String> {
     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
 
@@ -595,13 +673,15 @@ async fn upload_one(
         replace_pin,
         replace_file_key,
         parent_id: parent_uuid,
-        // bb push uploads one file at a time → full Cli cap (128 MiB).
-        concurrency: 1,
+        // `--parallel` chunks of this file at once, planned at that concurrency (spec §4.2); a record from
+        // before `--parallel` resumes as the push planned then, at 1 (spec §4.3). The run's one budget and one
+        // interrupt, whose flag is the shutdown the producer and the direct route read.
+        concurrency: ctl.parallel,
         unrecorded_resume_concurrency: 1,
-        chunks_in_flight: 1,
-        limits: crate::upload::limits::ChunkLimits::single(),
-        interrupt: None,
-        shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        chunks_in_flight: ctl.parallel,
+        limits: std::sync::Arc::clone(&ctl.limits),
+        interrupt: Some(ctl.interrupt.clone()),
+        shutdown: std::sync::Arc::clone(ctl.interrupt.flag()),
         read_row,
     };
     let signature = crate::resume::local_signature(path);
@@ -667,6 +747,7 @@ async fn push_directory(
     strategy: ConflictStrategy,
     shared: crate::commands::push_folders::SharedReuse,
     verbose: bool,
+    ctl: &PushCtl,
 ) -> Result<(), String> {
     let master_key = load_master_key()?;
     let dir_name = dir_path
@@ -736,9 +817,9 @@ async fn push_directory(
     let plans: Vec<FilePlan> = entries
         .iter()
         .filter(|(_, is_dir)| !*is_dir)
-        .map(|(p, _)| FilePlan::of_path(p))
+        .map(|(p, _)| FilePlan::of_path(p, ctl.parallel))
         .collect();
-    let progress = push_report::start(plans.iter().copied(), verbose);
+    let progress = push_report::start(plans.iter().copied(), verbose, &ctl.limits);
     let mut plans = plans.into_iter();
 
     let total_start = std::time::Instant::now();
@@ -747,6 +828,8 @@ async fn push_directory(
     let mut failures: Vec<(String, String)> = Vec::new();
     // Files this machine had already uploaded, unchanged (task 2334): skipped, counted.
     let mut already_uploaded = 0usize;
+    // Ctrl-C (spec §5.1): the file in flight when it came; the files after it are never inited.
+    let mut interrupted_at: Option<String> = None;
 
     for (entry_path, is_dir) in &entries {
         let entry_parent = entry_path.parent().unwrap_or(dir_path);
@@ -755,13 +838,16 @@ async fn push_directory(
         if *is_dir {
             continue;
         } else {
+            if ctl.interrupt.is_set() {
+                break;
+            }
             // One file failing (a server reject, a read error, a network blip)
             // must not abandon the rest of the folder: record it with its path,
             // carry on, and fail the command at the end (flow-6: a 0-byte file
             // used to stop the push, so later siblings were never uploaded).
-            let plan = plans.next().unwrap_or(FilePlan::of_size(0));
+            let plan = plans.next().unwrap_or(FilePlan::of_size(0, ctl.parallel));
             let parent = Some(entry_parent_id.to_string());
-            let ur = match push_single_file(api, entry_path, parent, strategy, true, &progress, plan).await {
+            let ur = match push_single_file(api, entry_path, parent, strategy, true, &progress, plan, ctl).await {
                 Ok(ur) => ur,
                 Err(e) => {
                     let rel = entry_path
@@ -769,6 +855,11 @@ async fn push_directory(
                         .unwrap_or(entry_path)
                         .display()
                         .to_string();
+                    // An interrupted file is left undone, not failed: the whole push stops here.
+                    if was_interrupted(&e) && ctl.interrupt.is_set() {
+                        interrupted_at = Some(rel);
+                        break;
+                    }
                     if !ui::is_json() {
                         progress.note(
                             &format!(
@@ -805,6 +896,9 @@ async fn push_directory(
     let uploaded_count = upload_results.len();
     // The live lines are cleared here: everything below prints under them.
     let transfer = progress.summary();
+    if let Some(name) = interrupted_at.or_else(|| ctl.interrupt.is_set().then(|| dir_name.clone())) {
+        ctl.exit_interrupted(&transfer, &name);
+    }
 
     // ── Summary ─────────────────────────────────────────────────────────────
     if ui::is_json() {
@@ -838,7 +932,7 @@ async fn push_directory(
                 .iter()
                 .map(|(path, error)| serde_json::json!({ "path": path, "error": error }))
                 .collect::<Vec<_>>(),
-            "transfer": transfer.to_json(),
+            "transfer": ctl.transfer_json(&transfer, api),
         });
         println!("{}", serde_json::to_string_pretty(&json).unwrap());
     } else if ui::is_rich() {

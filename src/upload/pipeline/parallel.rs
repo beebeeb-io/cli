@@ -22,8 +22,8 @@ use crate::api::ApiClient;
 use crate::interrupt::Interrupt;
 use crate::upload::INTERRUPTED;
 use crate::upload::limits::{BufferShare, ChunkLimits};
-use crate::upload::progress::{FileProgress, Held, InFlight, Route, Tally};
 use crate::upload::session::AttemptErr;
+use crate::upload::{FileProgress, Held, InFlight, Route, Tally};
 
 /// Distinct producer failure causes, kept separate so the driver can surface an
 /// honest reason rather than a generic "upload failed".
@@ -235,6 +235,12 @@ pub(super) async fn run_pipeline(
         let may_take =
             !sealing_done && in_flight.len() < used && !shutdown.load(Ordering::Relaxed) && interrupt_clear(interrupt);
         if sealing_done && in_flight.is_empty() {
+            break;
+        }
+        // Nothing in flight and nothing may be taken: the run is stopping (the shutdown flag of `bb sync`, which
+        // has no interrupt arm to fire). Without this every `select!` arm is disabled and tokio panics.
+        if in_flight.is_empty() && !may_take {
+            consumer_err = Some(AttemptErr::Other(INTERRUPTED.to_string()));
             break;
         }
         tokio::select! {

@@ -134,10 +134,12 @@ async fn parallel_1_matches_main_request_log_api_429() {
     let printed = record.lock().unwrap().clone();
     // The lock keeps the other capturing test off the slot, but a non-capturing test's 429/503 may still print
     // into this sink under the parallel suite, so assert today's line is PRESENT, not that it is the only line.
+    // `contains`, not `==`: `colored`'s override is process-global and a sibling test sets it; the line's exact
+    // bytes are pinned by `api::pause::tests::the_429_line_is_todays_and_the_503_line_has_no_glyph_or_colour`.
     assert!(
         printed
             .iter()
-            .any(|l| l == "err:  \u{23F8} rate limited \u{2014} pausing 1s"),
+            .any(|l| l.starts_with("err:") && l.contains("rate limited \u{2014} pausing 1s")),
         "today's 429 line, through the sink, on stderr: {printed:?}"
     );
     check_golden("push_parallel1_api_429", &log);

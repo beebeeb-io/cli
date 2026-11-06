@@ -397,7 +397,11 @@ impl ApiClient {
         let Ok(token) = self.require_auth() else {
             return Seen::no_answer();
         };
-        super::pace_if_needed(&self.base_url).await;
+        // After a Ctrl-C no grant is asked for (a link the run would then drop); the chunk's loop reads the
+        // shutdown flag at its top and ends as interrupted.
+        if !super::pace_if_needed(&self.base_url).await {
+            return Seen::no_answer();
+        }
         let sent = self
             .client
             .post(self.url(path))

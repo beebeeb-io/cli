@@ -121,11 +121,15 @@ pub async fn stream_encrypt_upload(
             crate::resume::clear(&spec.path);
         }
     }
-    // `--parallel` (spec §4.3): a record whose chunk size is above core's Cli cap was written by no CLI (a
-    // damaged or edited record); framing against it would send bodies no session of this CLI accepts. Ended
+    // `--parallel` (spec §4.3): a record whose chunk size is outside core's ladder (above the Cli cap, under the
+    // 4 MiB floor, or 0) was written by no CLI (a damaged or edited record); framing against it would send bodies
+    // no session of this CLI accepts, or fail the encryptor on every run with the record never cleared. Ended
     // like a record this upload cannot continue; the file starts again.
     let pending = match pending {
-        Some(p) if p.chunk_size_bytes.is_some_and(|c| c > ChunkProfile::Cli.static_cap()) => {
+        Some(p)
+            if p.chunk_size_bytes
+                .is_some_and(|c| !(crate::upload::limits::MIN_CHUNK..=ChunkProfile::Cli.static_cap()).contains(&c)) =>
+        {
             end_interrupted(
                 api,
                 &spec,
@@ -231,6 +235,8 @@ pub async fn stream_encrypt_upload(
     // Every attempt's sent chunks, for the file's speed: a chunk re-sent after a failed attempt crossed the
     // wire twice (spec §4.3: progress is net of rollbacks, speed is not).
     let mut transferred: u64 = 0;
+    // The lowered-N line (spec §4.4) is said once per file, whatever the attempts.
+    let mut lowered_noted = false;
     loop {
         match upload_attempt(
             api,
@@ -242,6 +248,7 @@ pub async fn stream_encrypt_upload(
             direct_given_up,
             progress,
             &mut transferred,
+            &mut lowered_noted,
         )
         .await
         {
@@ -337,12 +344,15 @@ pub async fn stream_encrypt_upload(
             // Spec §5.2: the resumed session finished elsewhere or is gone; upload this file again here under a
             // fresh id, from chunk 0 (the record was already cleared, the line already printed). Once per file:
             // the new session is not a resume, so it never comes back to this arm.
-            Err(AttemptErr::RestartFresh { fresh_file_id }) => {
+            Err(AttemptErr::RestartFresh {
+                fresh_file_id,
+                resume_tag,
+            }) => {
                 plan = SessionPlan::Init {
                     file_id: fresh_file_id,
                     fallback_file_id: None,
                     is_recovery: false,
-                    resume_tag: spec.resume_tag,
+                    resume_tag,
                 };
             }
             Err(e) => return Err(e.into_message().into()),
@@ -495,6 +505,7 @@ pub(super) async fn upload_attempt(
     direct_given_up: bool,
     progress: &dyn ChunkProgress,
     transferred: &mut u64,
+    lowered_noted: &mut bool,
 ) -> Result<UploadOutcome, AttemptErr> {
     let (file_id, resumed_session, resumed_direct, record_resume_tag) = match plan {
         SessionPlan::Resume {
@@ -535,7 +546,8 @@ pub(super) async fn upload_attempt(
     // the 640 MiB budget (spec §4.2). A lowered value says so, once, at the file's start (spec §4.4).
     let used = used_in_flight(spec.chunks_in_flight, chunk_size);
     progress.set_limit(used);
-    if used < spec.chunks_in_flight.max(1) && !crate::ui::is_quiet() {
+    if used < spec.chunks_in_flight.max(1) && !crate::ui::is_quiet() && !*lowered_noted {
+        *lowered_noted = true;
         // Binary MiB, to match the "640 MiB upload buffer" it is weighed against (spec §4.4), not `human_size`'s
         // decimal MB.
         progress.note(
@@ -813,7 +825,7 @@ pub(super) async fn upload_attempt(
         // Spec §5.2: a resumed session the server reports already completed is finished, not failed. `complete`
         // answers `already_completed` and the file id; the server's row decides whether the file is done here,
         // done in another folder (upload it again here, leaving the finished one), or gone (upload it again).
-        Err(AttemptErr::SessionCompleted { .. }) => {
+        Err(AttemptErr::SessionCompleted { confirmed }) => {
             let name = display_name(&spec.file_name);
             let completed = match api.upload_complete_typed(&upload_session_id).await {
                 Ok(v) => v,
@@ -865,14 +877,28 @@ pub(super) async fn upload_attempt(
                 }
             };
             // The finished file is left as it is (never abandoned, never moved); the record goes and this file
-            // starts again under this run's own fresh id, in the folder asked for.
+            // starts again under this run's own fresh id, in the folder asked for. What this attempt counted done
+            // is taken back first: the new attempt counts from chunk 0 (as a swept session's retry does).
+            if confirmed.chunks > 0 {
+                progress.rollback_tally(&spec.file_name, confirmed);
+            }
             crate::resume::clear(&spec.path);
             if !crate::ui::is_quiet() {
                 progress.note(&format!("  {name}: {here_or_restart}"), Stream::Stderr);
             }
             file_prog.finish(false);
+            // A push that resumes a row it found by name passes that row's id as its own, with no tag
+            // (`commands::push`): then the fresh id is minted here, with its tag, as a new file's is. Otherwise
+            // the run's own minted id is free to use.
+            let (fresh_file_id, resume_tag) = if spec.file_id == file_id {
+                let minted = crate::item_id::mint_owner(master_key).map_err(|e| AttemptErr::Other(e.to_string()))?;
+                (minted.id(), Some(*minted.tag()))
+            } else {
+                (spec.file_id, spec.resume_tag)
+            };
             return Err(AttemptErr::RestartFresh {
-                fresh_file_id: spec.file_id,
+                fresh_file_id,
+                resume_tag,
             });
         }
         Err(e) => {
@@ -1055,6 +1081,14 @@ fn chunk_size_for(
     }
 }
 
+/// The ciphertext and chunk count of a file of `size` framed at `chunk_size` (an empty file is one empty chunk):
+/// what the driver sends for a session of that geometry, so a command's totals match a resumed file's
+/// (`planned_chunk_size`), not only a fresh plan's.
+pub fn expected_at_chunk_size(size: u64, chunk_size: u64) -> (u64, u32) {
+    let chunks = if size == 0 { 1 } else { size.div_ceil(chunk_size.max(1)) };
+    (size + CHUNK_OVERHEAD * chunks, chunks as u32)
+}
+
 /// Expected ciphertext for a file of `size` under `ChunkProfile::Cli` at the
 /// given upload `concurrency`: `size + 28 · chunk_count`. Used by callers to
 /// size the overall progress bar without opening the file — matches the
@@ -1065,7 +1099,9 @@ pub fn expected_ciphertext_for(size: u64, concurrency: u32) -> u64 {
 }
 
 /// The chunk count the upload driver emits for a file of `size` at `concurrency`: the same plan as
-/// [`expected_ciphertext_for`], so a command can plan a run's chunks before any file is opened (task 2333).
+/// [`expected_ciphertext_for`]. Since `--parallel` the push plans through `planned_chunk_size`; this states a
+/// test's premise ("16 chunks of 4 MiB").
+#[cfg(test)]
 pub fn expected_chunks_for(size: u64, concurrency: u32) -> u32 {
     beebeeb_types::plan_chunks_concurrent(size, ChunkProfile::Cli, concurrency.max(1)).chunk_count as u32
 }
