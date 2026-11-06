@@ -295,22 +295,23 @@ pub async fn stream_encrypt_upload(
 
 /// Task 2334: may this create continue `pending`, the interrupted upload of the same local file? Only when the
 /// server's row for it is in the folder this write asks for (`spec.parent_id`): the server set that row's parent
-/// at the first attempt's init and completion keeps it. Otherwise the old upload is ended first, by the one
-/// explicit route (`POST /files/{id}/upload/abandon`), which deletes a never-completed first upload's row; until
-/// then that row is listed in the other folder and counted in the quota. `None`: start this file afresh.
+/// at the first attempt's init and completion keeps it. A record that says it was going elsewhere is ended at
+/// once; otherwise the server is asked (a record from before 2334 says nothing, and a row may have been moved
+/// in the web app since). `None`: start this file afresh.
 ///
-/// An answer that cannot be read, or an abandon that fails, keeps the record and fails this file for this run:
-/// an upload now would overwrite the record (one per path), and nothing would end the old row.
+/// No login, or a refused one, is said in the words the rest of the CLI uses. Any other answer that cannot be
+/// read keeps the record and fails this file for this run.
 async fn resumable_here(
     api: &ApiClient,
     spec: &UploadSpec,
     pending: crate::resume::PendingUpload,
 ) -> Result<Option<crate::resume::PendingUpload>, UploadError> {
-    // No login, or a refused one, is said in the words the rest of the CLI uses: the way out is `bb login`.
     api.require_auth().map_err(|e| UploadError::from(e.message))?;
+    if pending.destination.is_some_and(|recorded| recorded != spec.parent_id) {
+        return end_elsewhere(api, spec, pending).await;
+    }
     let name = display_name(&spec.file_name);
-    let id = pending.file_id.to_string();
-    let going_to = match api.get_file(&id).await {
+    let going_to = match api.get_file(&pending.file_id.to_string()).await {
         // `Some(parent)` when the answer names one (`None` = the root).
         Ok(row) => match row.get("parent_id") {
             Some(serde_json::Value::Null) => Some(None),
@@ -333,7 +334,20 @@ async fn resumable_here(
     if going_to == Some(spec.parent_id) {
         return Ok(Some(pending));
     }
-    match api.upload_abandon(&id).await {
+    end_elsewhere(api, spec, pending).await
+}
+
+/// End `pending`, an interrupted upload going to another folder, by the one explicit route
+/// (`POST /files/{id}/upload/abandon`), which deletes a never-completed first upload's row; until then that row
+/// is listed in the other folder and counted in the quota. An abandon that fails keeps the record and fails this
+/// file for this run: an upload now would overwrite the record (one per path), and nothing would end the row.
+async fn end_elsewhere(
+    api: &ApiClient,
+    spec: &UploadSpec,
+    pending: crate::resume::PendingUpload,
+) -> Result<Option<crate::resume::PendingUpload>, UploadError> {
+    let name = display_name(&spec.file_name);
+    match api.upload_abandon(&pending.file_id.to_string()).await {
         Ok(_) => {}
         Err(e) if e.status == 404 => {}
         Err(e) => {
@@ -593,7 +607,7 @@ pub(super) async fn upload_attempt(
         // next run can pick up.
         let session_direct = init.is_direct();
         if let Ok(sid) = init.upload_session_id.parse::<Uuid>() {
-            crate::resume::record_with_transport(
+            crate::resume::record_upload(
                 &spec.path,
                 proposed(spec, file_id),
                 record_resume_tag,
@@ -602,6 +616,7 @@ pub(super) async fn upload_attempt(
                 size,
                 mtime_ns,
                 session_direct,
+                spec.parent_id,
             );
         }
         let direct = if session_direct { offer } else { None };

@@ -80,6 +80,10 @@ struct Vault {
     conflict_status: Option<u16>,
     /// `GET /shares/invites/sent` answers this status instead.
     invites_status: Option<u16>,
+    /// A server without the invite and folder-link routes (both 404).
+    shares_unsupported: bool,
+    /// Listing rows carry `share_count: 0` (otherwise they carry none).
+    listing_share_count: bool,
 }
 
 type Shared = Arc<Mutex<Vault>>;
@@ -125,7 +129,18 @@ async fn start_mock(vault: Shared) -> String {
                 |State(v): State<Shared>, Query(q): Query<HashMap<String, String>>| async move {
                     let v = v.lock().unwrap();
                     let parent = q.get("parent_id").cloned();
-                    let files: Vec<Value> = v.items.values().filter(|i| i.parent == parent).map(row).collect();
+                    let files: Vec<Value> = v
+                        .items
+                        .values()
+                        .filter(|i| i.parent == parent)
+                        .map(|i| {
+                            let mut r = row(i);
+                            if v.listing_share_count {
+                                r["share_count"] = json!(0);
+                            }
+                            r
+                        })
+                        .collect();
                     Json(json!({ "files": files, "next_cursor": null }))
                 },
             ),
@@ -134,6 +149,9 @@ async fn start_mock(vault: Shared) -> String {
             "/api/v1/shares/invites/sent",
             get(|State(v): State<Shared>| async move {
                 let v = v.lock().unwrap();
+                if v.shares_unsupported {
+                    return err(StatusCode::NOT_FOUND, "not_found");
+                }
                 match v.invites_status {
                     Some(code) => err(StatusCode::from_u16(code).unwrap(), "failed by mock"),
                     None => Json(json!({ "invites": v.invites })).into_response(),
@@ -142,7 +160,13 @@ async fn start_mock(vault: Shared) -> String {
         )
         .route(
             "/api/v1/shares/folder-links",
-            get(|State(v): State<Shared>| async move { Json(json!({ "links": v.lock().unwrap().links })) }),
+            get(|State(v): State<Shared>| async move {
+                let v = v.lock().unwrap();
+                if v.shares_unsupported {
+                    return err(StatusCode::NOT_FOUND, "not_found");
+                }
+                Json(json!({ "links": v.links })).into_response()
+            }),
         )
         .route(
             "/api/v1/files/folder",
@@ -1212,4 +1236,84 @@ async fn a_subfolder_name_that_is_not_utf8_never_merges_into_an_existing_one() {
     );
     let folders = folders_named(&v, Some(&album), "folder");
     assert_eq!(folders.len(), 2, "the push made its own: {folders:?}");
+}
+
+/// "Not supported" is unknown, never private (lead ruling, 2026-11-06): a
+/// server with no invite or folder-link route, whose listing carries no
+/// `share_count`, cannot say who sees a folder, so it counts as shared.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_folder_the_server_cannot_say_is_private_counts_as_shared() {
+    let vault: Shared = Arc::default();
+    let api = start_mock(vault.clone()).await;
+    let home = scratch_home(&api);
+    write_file(&home, &format!("{MOVIE_DIR}/{MOVIE}"), b"one movie");
+    let out = bb(&home, &["--api", &api, "push", "--folder", "Movies", MOVIE_DIR]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    vault.lock().unwrap().shares_unsupported = true;
+    write_file(&home, &format!("{MOVIE_DIR}/extras.mkv"), b"extras");
+    let inits_before = vault.lock().unwrap().inits;
+
+    let out = bb(
+        &home,
+        &["--api", &api, "push", "--folder", "Movies", "--keep-both", MOVIE_DIR],
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains(&format!(
+            "{MOVIE_DIR} already exists here and may be shared: this server does not say with whom"
+        )),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(vault.lock().unwrap().inits, inits_before, "nothing is uploaded");
+
+    let out = bb(
+        &home,
+        &[
+            "--api",
+            &api,
+            "push",
+            "--folder",
+            "Movies",
+            "--keep-both",
+            "--reuse-shared",
+            MOVIE_DIR,
+        ],
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let v = vault.lock().unwrap();
+    let movies = the_folder(&v, None, "Movies");
+    let folder = the_folder(&v, Some(&movies), MOVIE_DIR);
+    assert!(file_names_in(&v, &folder).contains(&"extras.mkv".to_string()));
+}
+
+/// The same server, but its listing carries `share_count`: that decides, and
+/// 0 means the folder is reused without a question.
+#[tokio::test(flavor = "multi_thread")]
+async fn without_share_routes_the_listings_share_count_decides() {
+    let vault: Shared = Arc::default();
+    let api = start_mock(vault.clone()).await;
+    let home = scratch_home(&api);
+    write_file(&home, &format!("{MOVIE_DIR}/{MOVIE}"), b"one movie");
+    let out = bb(&home, &["--api", &api, "push", "--folder", "Movies", MOVIE_DIR]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    {
+        let mut v = vault.lock().unwrap();
+        v.shares_unsupported = true;
+        v.listing_share_count = true;
+    }
+    write_file(&home, &format!("{MOVIE_DIR}/extras.mkv"), b"extras");
+
+    let out = bb(
+        &home,
+        &["--api", &api, "push", "--folder", "Movies", "--keep-both", MOVIE_DIR],
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let v = vault.lock().unwrap();
+    let movies = the_folder(&v, None, "Movies");
+    let folder = the_folder(&v, Some(&movies), MOVIE_DIR);
+    assert!(file_names_in(&v, &folder).contains(&"extras.mkv".to_string()));
 }

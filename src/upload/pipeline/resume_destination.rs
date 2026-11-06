@@ -167,3 +167,98 @@ async fn when_the_other_folders_upload_cannot_be_ended_the_record_is_kept_and_no
     let record = crate::resume::resumable_upload_now(&path).expect("the record is kept");
     assert_eq!(record.file_id, stored, "so the next run ends it");
 }
+
+/// A record written since 2334 says where its upload was going: another folder is ended at once, without
+/// asking the server (whose answer here would fail the file).
+#[tokio::test]
+async fn a_recorded_destination_elsewhere_restarts_here_without_asking_the_server() {
+    let s = Scratch::new("2334-recorded-elsewhere");
+    let (elsewhere, wanted) = (Uuid::new_v4(), Uuid::new_v4());
+    let (path, stored, sid, state) = interrupted(&s, Some(elsewhere));
+    let (size, mtime) = size_and_mtime(&path);
+    crate::resume::record_upload(
+        &path,
+        crate::item_id::Proposed::Minted(stored),
+        None,
+        sid,
+        ChunkFormat::V1Legacy,
+        size,
+        mtime,
+        false,
+        Some(elsewhere),
+    );
+    state.lock().unwrap().file_status = Some(503);
+    let fresh = Uuid::new_v4();
+
+    run(&state, spec(&path, fresh, Some(wanted)))
+        .await
+        .expect("the upload starts again here");
+
+    let m = state.lock().unwrap();
+    assert_eq!(m.abandons, vec![stored.to_string()]);
+    assert_eq!(m.inits, vec![fresh.to_string()]);
+    assert_eq!(m.init_bodies[0]["parent_id"], json!(wanted));
+}
+
+/// A record that says "this folder" is still checked against the server: the row may have been moved in the
+/// web app since.
+#[tokio::test]
+async fn a_recorded_destination_that_matches_is_still_checked_against_the_server() {
+    let s = Scratch::new("2334-recorded-moved");
+    let (moved_to, wanted) = (Uuid::new_v4(), Uuid::new_v4());
+    let (path, stored, sid, state) = interrupted(&s, Some(moved_to));
+    let (size, mtime) = size_and_mtime(&path);
+    crate::resume::record_upload(
+        &path,
+        crate::item_id::Proposed::Minted(stored),
+        None,
+        sid,
+        ChunkFormat::V1Legacy,
+        size,
+        mtime,
+        false,
+        Some(wanted),
+    );
+
+    run(&state, spec(&path, Uuid::new_v4(), Some(wanted)))
+        .await
+        .expect("the upload starts again here");
+
+    let m = state.lock().unwrap();
+    assert_eq!(
+        m.abandons,
+        vec![stored.to_string()],
+        "the row now lives elsewhere: ended"
+    );
+    assert_eq!(m.init_bodies[0]["parent_id"], json!(wanted));
+}
+
+/// A new upload records the folder it asked for.
+#[tokio::test]
+async fn a_new_upload_records_the_folder_it_asked_for() {
+    let s = Scratch::new("2334-records");
+    let (path, _, _) = s.file(300 * 1024);
+    let wanted = Uuid::new_v4();
+    let state: Shared = Arc::new(Mutex::new(Mock {
+        // Every chunk PUT is refused, so the record survives the failed attempt.
+        gone: Some(crate::test_server::Gone::BadRequestExpired),
+        kill_new_sessions: true,
+        ..Default::default()
+    }));
+
+    let _ = run(&state, spec(&path, Uuid::new_v4(), Some(wanted))).await;
+
+    let record = crate::resume::resumable_upload_now(&path).expect("the interrupted upload is recorded");
+    assert_eq!(record.destination, Some(Some(wanted)));
+}
+
+fn size_and_mtime(path: &std::path::Path) -> (u64, u128) {
+    let meta = std::fs::metadata(path).unwrap();
+    let mtime = meta
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    (meta.len(), mtime)
+}

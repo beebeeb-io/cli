@@ -79,8 +79,18 @@ struct PendingEntry {
     /// transport it began on. Absent on records from an older CLI, which only had the API route.
     #[serde(default)]
     direct: bool,
+    /// Task 2334: the folder this write asked for when its session was opened (`parent_id: null` = the root).
+    /// Absent on records written before 2334; the upload driver then asks the server where the row is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    destination: Option<Destination>,
     size: u64,
     mtime_ns: u128,
+}
+
+/// Where a recorded upload's row was created: its parent folder, `None` for the root.
+#[derive(Serialize, Deserialize, Clone, Copy)]
+struct Destination {
+    parent_id: Option<Uuid>,
 }
 
 /// A resumable in-progress upload: see [`resumable_upload`].
@@ -97,6 +107,9 @@ pub struct PendingUpload {
     /// has one. The driver re-proves the id with `NewItemId::resume` before
     /// continuing such a session.
     pub resume_tag: Option<[u8; 32]>,
+    /// Task 2334: the folder the upload was going to (`Some(None)` = the root);
+    /// `None` when the record does not say (written before 2334).
+    pub destination: Option<Option<Uuid>>,
 }
 
 fn db_path() -> PathBuf {
@@ -204,6 +217,7 @@ impl PendingUpload {
             chunk_format: e.chunk_format.and_then(|c| ChunkFormat::from_u8(c).ok()),
             direct: e.direct,
             resume_tag: e.resume_tag.as_deref().and_then(|b| <[u8; 32]>::try_from(b).ok()),
+            destination: e.destination.map(|d| d.parent_id),
         })
     }
 }
@@ -248,9 +262,9 @@ pub fn record(
 
 /// [`record`] for the write `proposed` names (a create's minted id, or the row a
 /// replace lists: L13 marks only the first as self-minted), saying whether the
-/// session is a direct upload (task 2173).
-// The sidecar record has this many independent facts; grouping them would only
-// move the same fields into a struct at every call site.
+/// session is a direct upload (task 2173). Records no destination: the shape a
+/// CLI before task 2334 wrote, which the driver must still read.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn record_with_transport(
     path: &Path,
@@ -261,6 +275,61 @@ pub fn record_with_transport(
     size: u64,
     mtime_ns: u128,
     direct: bool,
+) {
+    write_record(
+        path,
+        proposed,
+        resume_tag,
+        upload_session_id,
+        chunk_format,
+        size,
+        mtime_ns,
+        direct,
+        None,
+    );
+}
+
+/// Record an in-progress upload (see [`record`]) with the folder its write asked
+/// for, `parent_id` (`None` = the root): task 2334, so a later write into
+/// another folder knows without asking that it may not continue this session.
+// The sidecar record has this many independent facts; grouping them would only
+// move the same fields into a struct at every call site.
+#[allow(clippy::too_many_arguments)]
+pub fn record_upload(
+    path: &Path,
+    proposed: crate::item_id::Proposed,
+    resume_tag: Option<[u8; 32]>,
+    upload_session_id: Uuid,
+    chunk_format: ChunkFormat,
+    size: u64,
+    mtime_ns: u128,
+    direct: bool,
+    parent_id: Option<Uuid>,
+) {
+    write_record(
+        path,
+        proposed,
+        resume_tag,
+        upload_session_id,
+        chunk_format,
+        size,
+        mtime_ns,
+        direct,
+        Some(Destination { parent_id }),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_record(
+    path: &Path,
+    proposed: crate::item_id::Proposed,
+    resume_tag: Option<[u8; 32]>,
+    upload_session_id: Uuid,
+    chunk_format: ChunkFormat,
+    size: u64,
+    mtime_ns: u128,
+    direct: bool,
+    destination: Option<Destination>,
 ) {
     use crate::item_id::Proposed;
     let file_id = proposed.id();
@@ -276,6 +345,7 @@ pub fn record_with_transport(
             upload_session_id: Some(upload_session_id),
             chunk_format: Some(chunk_format.as_u8()),
             direct,
+            destination,
             size,
             mtime_ns,
         },
@@ -327,6 +397,7 @@ mod tests {
             chunk_format,
             direct: false,
             resume_tag: None,
+            destination: None,
         };
         record(&f, id, sid, ChunkFormat::V1Legacy, 5, 100);
         assert_eq!(
@@ -353,7 +424,26 @@ mod tests {
             })
         );
         // (The older-record case, with no `direct` field at all, is the raw-JSON loop below: it reads as an API session.)
+
+        // Task 2334: a new record says which folder its write asked for, the root
+        // included; one written without it (`record`, as before 2334) does not.
+        let folder = Uuid::new_v4();
+        for asked in [Some(folder), None] {
+            record_upload(
+                &f,
+                crate::item_id::Proposed::Minted(id),
+                None,
+                sid,
+                ChunkFormat::V1Legacy,
+                5,
+                100,
+                false,
+                asked,
+            );
+            assert_eq!(resumable_upload(&f, 5, 100).map(|p| p.destination), Some(Some(asked)));
+        }
         record(&f, id, sid, ChunkFormat::V1Legacy, 5, 100);
+        assert_eq!(resumable_upload(&f, 5, 100).map(|p| p.destination), Some(None));
 
         // A changed size or mtime must NOT resume onto stale chunks.
         assert_eq!(resumable_upload(&f, 6, 100), None);

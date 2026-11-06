@@ -40,8 +40,8 @@ pub enum SharedReuse {
 pub(crate) struct Candidate {
     pub id: Uuid,
     pub created_at: Option<DateTime<Utc>>,
-    /// Active file-style links on the folder itself (the listing's `share_count`).
-    pub share_count: u64,
+    /// Active file-style links on the folder itself (the listing's `share_count`; `None` when the row has none).
+    pub share_count: Option<u64>,
 }
 
 /// The folders in a listing whose name decrypts to exactly `wanted`. Rows that are not folders, are trashed,
@@ -65,41 +65,54 @@ pub(crate) fn same_name_folders(rows: &[Value], master_key: &MasterKey, wanted: 
                     .and_then(Value::as_str)
                     .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
                     .map(|t| t.with_timezone(&Utc)),
-                share_count: row.get("share_count").and_then(Value::as_u64).unwrap_or(0),
+                share_count: row.get("share_count").and_then(Value::as_u64),
             })
         })
         .collect()
 }
 
 /// Who a folder is shared with, on its own.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Exposure {
-    pub people: usize,
-    pub links: u64,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Exposure {
+    Known {
+        people: usize,
+        links: u64,
+    },
+    /// The server does not say: a share list has no route here and the row carries no `share_count`. Treated
+    /// as shared (lead ruling, 2026-11-06: "not supported" is unknown, never private).
+    Unknown,
 }
 
 impl Exposure {
     pub fn is_shared(self) -> bool {
-        self.people > 0 || self.links > 0
+        match self {
+            Exposure::Known { people, links } => people > 0 || links > 0,
+            Exposure::Unknown => true,
+        }
     }
 
-    /// "2 people and 1 link", "1 person", "3 links".
+    /// What follows the folder's name: "is shared with 2 people and 1 link", "may be shared: …".
     pub fn describe(self) -> String {
-        let people = match self.people {
+        let (people, links) = match self {
+            Exposure::Unknown => return "may be shared: this server does not say with whom".to_string(),
+            Exposure::Known { people, links } => (people, links),
+        };
+        let people = match people {
             0 => None,
             1 => Some("1 person".to_string()),
             n => Some(format!("{n} people")),
         };
-        let links = match self.links {
+        let links = match links {
             0 => None,
             1 => Some("1 link".to_string()),
             n => Some(format!("{n} links")),
         };
-        match (people, links) {
+        let with = match (people, links) {
             (Some(p), Some(l)) => format!("{p} and {l}"),
             (Some(one), None) | (None, Some(one)) => one,
             (None, None) => "no one".to_string(),
-        }
+        };
+        format!("is shared with {with}")
     }
 }
 
@@ -107,8 +120,10 @@ impl Exposure {
 /// candidate needs it.
 #[derive(Debug, Default)]
 pub(crate) struct ShareIndex {
-    people: HashMap<Uuid, BTreeSet<String>>,
-    links: HashMap<Uuid, u64>,
+    /// `None`: the server has no invite route, so it cannot say.
+    people: Option<HashMap<Uuid, BTreeSet<String>>>,
+    /// `None`: the server has no folder-link route, so it cannot say.
+    links: Option<HashMap<Uuid, u64>>,
 }
 
 impl ShareIndex {
@@ -122,7 +137,7 @@ impl ShareIndex {
                 .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
                 .is_none_or(|t| t.with_timezone(&Utc) > now)
         };
-        let mut index = ShareIndex::default();
+        let mut people: HashMap<Uuid, BTreeSet<String>> = HashMap::new();
         for invite in invites.get("invites").and_then(Value::as_array).into_iter().flatten() {
             let granting = matches!(
                 invite.get("status").and_then(Value::as_str),
@@ -140,8 +155,9 @@ impl ShareIndex {
             ) else {
                 continue;
             };
-            index.people.entry(folder).or_default().insert(email.to_lowercase());
+            people.entry(folder).or_default().insert(email.to_lowercase());
         }
+        let mut link_counts: HashMap<Uuid, u64> = HashMap::new();
         for link in links.get("links").and_then(Value::as_array).into_iter().flatten() {
             let revoked = link.get("revoked_at").is_some_and(|v| !v.is_null());
             let Some(folder) = link
@@ -152,17 +168,33 @@ impl ShareIndex {
                 continue;
             };
             if !revoked && live(link) {
-                *index.links.entry(folder).or_default() += 1;
+                *link_counts.entry(folder).or_default() += 1;
             }
         }
-        index
+        ShareIndex {
+            people: (!invites.is_null()).then_some(people),
+            links: (!links.is_null()).then_some(link_counts),
+        }
     }
 
-    /// The candidate's own people and links.
+    /// The candidate's own people and links. When the server has no route for one of the two lists, the row's
+    /// `share_count` decides; with no `share_count` either, it is [`Exposure::Unknown`].
     pub fn exposure(&self, candidate: &Candidate) -> Exposure {
-        Exposure {
-            people: self.people.get(&candidate.id).map_or(0, BTreeSet::len),
-            links: self.links.get(&candidate.id).copied().unwrap_or(0) + candidate.share_count,
+        let people = self
+            .people
+            .as_ref()
+            .map(|p| p.get(&candidate.id).map_or(0, BTreeSet::len));
+        let links = self.links.as_ref().map(|l| l.get(&candidate.id).copied().unwrap_or(0));
+        match (people, links, candidate.share_count) {
+            (Some(people), Some(links), share_count) => Exposure::Known {
+                people,
+                links: links + share_count.unwrap_or(0),
+            },
+            (people, links, Some(share_count)) => Exposure::Known {
+                people: people.unwrap_or(0),
+                links: links.unwrap_or(0) + share_count,
+            },
+            (_, _, None) => Exposure::Unknown,
         }
     }
 }
@@ -211,7 +243,7 @@ impl<'a> PushFolders<'a> {
                 && exposure.is_shared()
             {
                 note(&format!(
-                    "{shown} is shared with {}; uploading into it (--reuse-shared)",
+                    "{shown} {}; uploading into it (--reuse-shared)",
                     exposure.describe()
                 ));
                 self.shared_reused.get_or_insert(oldest.id);
@@ -294,7 +326,10 @@ impl<'a> PushFolders<'a> {
                 Utc::now(),
             ));
         }
-        Ok(self.shares.as_ref().map(|s| s.exposure(candidate)).unwrap_or_default())
+        Ok(self
+            .shares
+            .as_ref()
+            .map_or(Exposure::Unknown, |s| s.exposure(candidate)))
     }
 
     async fn create(&mut self, parent: Option<Uuid>, name: &str) -> Result<Uuid, String> {
@@ -331,7 +366,7 @@ fn note(line: &str) {
 
 /// Ask whether to upload into the shared folder `shown`; `Err` when no one can answer.
 fn ask_reuse_shared(shown: &str, exposure: Exposure) -> Result<bool, String> {
-    let shared = format!("{shown} already exists here and is shared with {}", exposure.describe());
+    let shared = format!("{shown} already exists here and {}", exposure.describe());
     let no_one_to_ask = if crate::ui::is_json() || crate::ui::is_quiet() {
         Some("--json and --quiet ask no questions")
     } else if !crate::exit::stdin_is_interactive() {
@@ -375,7 +410,7 @@ mod tests {
         Candidate {
             id: id(n),
             created_at,
-            share_count: 0,
+            share_count: Some(0),
         }
     }
 
@@ -447,7 +482,7 @@ mod tests {
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].id.to_string(), mine["id"].as_str().unwrap());
         assert_eq!(found[0].created_at, at("2026-11-06T10:00:00Z"));
-        assert_eq!(found[0].share_count, 2);
+        assert_eq!(found[0].share_count, Some(2));
     }
 
     #[test]
@@ -477,25 +512,48 @@ mod tests {
         ]});
         let index = ShareIndex::from_answers(&invites, &links, now);
         let mut c = candidate(1, None);
-        c.share_count = 1;
+        c.share_count = Some(1);
         let exposure = index.exposure(&c);
         assert_eq!(
             exposure,
-            Exposure { people: 2, links: 3 },
+            Exposure::Known { people: 2, links: 3 },
             "a@ (twice, any case) and b@; 2 live links + 1"
         );
-        assert_eq!(exposure.describe(), "2 people and 3 links");
+        assert_eq!(exposure.describe(), "is shared with 2 people and 3 links");
         assert!(exposure.is_shared());
 
         let private = index.exposure(&candidate(3, None));
         assert!(!private.is_shared());
-        // A server without the routes answers Null: nothing is shared.
-        assert!(
-            !ShareIndex::from_answers(&Value::Null, &Value::Null, now)
-                .exposure(&candidate(1, None))
-                .is_shared()
+
+        // "Not supported" (404/405/501, read as Null) is unknown, never private: the row's share_count decides,
+        // and with none the folder counts as shared.
+        let unsupported = ShareIndex::from_answers(&Value::Null, &Value::Null, now);
+        let mut row = candidate(1, None);
+        row.share_count = None;
+        assert_eq!(unsupported.exposure(&row), Exposure::Unknown);
+        assert!(Exposure::Unknown.is_shared());
+        assert_eq!(
+            Exposure::Unknown.describe(),
+            "may be shared: this server does not say with whom"
         );
-        assert_eq!(Exposure { people: 1, links: 0 }.describe(), "1 person");
-        assert_eq!(Exposure { people: 0, links: 1 }.describe(), "1 link");
+        row.share_count = Some(0);
+        assert!(!unsupported.exposure(&row).is_shared());
+        row.share_count = Some(2);
+        assert_eq!(unsupported.exposure(&row), Exposure::Known { people: 0, links: 2 });
+        // One list supported, the other not: what is known counts, the row's share_count fills in.
+        let invites_only = ShareIndex::from_answers(&invites, &Value::Null, now);
+        row.share_count = Some(0);
+        assert_eq!(invites_only.exposure(&row), Exposure::Known { people: 2, links: 0 });
+        row.share_count = None;
+        assert_eq!(invites_only.exposure(&row), Exposure::Unknown);
+
+        assert_eq!(
+            Exposure::Known { people: 1, links: 0 }.describe(),
+            "is shared with 1 person"
+        );
+        assert_eq!(
+            Exposure::Known { people: 0, links: 1 }.describe(),
+            "is shared with 1 link"
+        );
     }
 }
