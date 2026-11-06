@@ -268,3 +268,23 @@ fn concurrent_events_commute() {
         assert!(s.peak <= INC_THREADS, "peak {}", s.peak);
     }
 }
+
+/// Spec §6.7: a run that ends in an error (the sink dropped without a summary) leaves its last lines on screen,
+/// above the error, so they show where it stopped; a summary clears them first.
+#[test]
+fn an_error_leaves_the_last_lines_on_screen() {
+    let (p, record) = LiveProgress::for_terminal_test();
+    p.plan_file(10, 1);
+    p.seal_plan();
+    drop(p);
+    let marks = record.lock().unwrap().clone();
+    assert!(marks.contains(&"draw:left".to_string()), "{marks:?}");
+    assert!(!marks.contains(&"draw:cleared".to_string()), "{marks:?}");
+
+    let (p, record) = LiveProgress::for_terminal_test();
+    let _ = p.summary();
+    drop(p);
+    let marks = record.lock().unwrap().clone();
+    assert!(marks.contains(&"draw:cleared".to_string()), "{marks:?}");
+    assert!(!marks.contains(&"draw:left".to_string()), "{marks:?}");
+}

@@ -16,6 +16,7 @@ pub mod pull;
 pub mod push;
 pub(crate) mod push_folders;
 pub(crate) mod push_repeat;
+pub(crate) mod push_report;
 pub mod qr;
 pub mod quota;
 pub mod region;

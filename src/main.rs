@@ -131,6 +131,13 @@ struct Cli {
     command: Commands,
 }
 
+impl Commands {
+    /// The command's own `-v, --verbose` (task 2333), where it has one.
+    fn verbose(&self) -> bool {
+        matches!(self, Commands::Push { verbose: true, .. })
+    }
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Update bb to the latest release
@@ -189,6 +196,10 @@ enum Commands {
         /// When the pushed folder already exists here and is shared: upload into it without asking
         #[arg(long)]
         reuse_shared: bool,
+
+        /// Show transfer details: speed, chunks, chunks in flight, pool and route. No effect with --json
+        #[arg(short = 'v', long)]
+        verbose: bool,
     },
 
     /// Download a file by UUID, short ID, or path
@@ -583,6 +594,15 @@ async fn main() {
     };
     ui::init(output_mode, color);
     transport::init(cli.transport);
+    // Spec §6.2 (task 2333): checked here, before anything is sent, not with clap's `conflicts_with`: `--quiet`
+    // is global, and `bb --quiet push -v` parses it before the subcommand, where a subcommand's conflict may
+    // not see it.
+    if cli.quiet && cli.command.verbose() {
+        fail(exit::with_code(
+            exit::USAGE,
+            "--verbose cannot be combined with --quiet",
+        ));
+    }
 
     // Explicit updates bypass automatic opt-out/cooldown and report errors.
     if !matches!(cli.command, Commands::Update) {
@@ -618,6 +638,7 @@ async fn main() {
             replace,
             keep_both,
             reuse_shared,
+            verbose,
         } => {
             let strategy = if replace {
                 commands::push::ConflictStrategy::Replace
@@ -631,7 +652,7 @@ async fn main() {
             } else {
                 commands::push_folders::SharedReuse::Ask
             };
-            commands::push::run(path, parent, folder, strategy, shared).await
+            commands::push::run(path, parent, folder, strategy, shared, verbose).await
         }
         Commands::Pull {
             file_id,
@@ -872,19 +893,24 @@ async fn main() {
     };
 
     if let Err(e) = result {
-        let line = format!(
-            "  {} {}",
-            "error:".custom_color(crate::colors::RED_ERR),
-            e.custom_color(crate::colors::INK),
-        );
-        let code = exit::code();
-        exit::report_then_disarm(
-            &mut std::io::stderr(),
-            &mut std::io::stdout(),
-            &line,
-            code,
-            daemon::disarm_launchagent_if_managed,
-        );
-        std::process::exit(code);
+        fail(e);
     }
+}
+
+/// Print a failed command's error and exit with its recorded code.
+fn fail(e: String) -> ! {
+    let line = format!(
+        "  {} {}",
+        "error:".custom_color(crate::colors::RED_ERR),
+        e.custom_color(crate::colors::INK),
+    );
+    let code = exit::code();
+    exit::report_then_disarm(
+        &mut std::io::stderr(),
+        &mut std::io::stdout(),
+        &line,
+        code,
+        daemon::disarm_launchagent_if_managed,
+    );
+    std::process::exit(code);
 }

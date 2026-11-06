@@ -226,14 +226,16 @@ fn push_file_fields(name: &str, size: u64, transferred: u64, wall_ms: u64, colum
     ]
 }
 
-/// `  ✓ {name}  {size}  {speed}  {time}`: the name never touches the size (spec §6.5).
-pub(crate) fn push_file_line(name: &str, size: u64, transferred: u64, wall_ms: u64, columns: u16) -> String {
-    let [n, s, v, t] = push_file_fields(name, size, transferred, wall_ms, columns);
-    format!("  \u{2713} {n}  {s}  {v}  {t}")
-}
-
-/// [`push_file_line`] in today's colours: the mark and the speed green, the name ink, the rest dim.
-pub(crate) fn paint_push_file_line(name: &str, size: u64, transferred: u64, wall_ms: u64, columns: u16) -> String {
+/// `  ✓ {name}  {size}  {speed}  {time}` (the name never touches the size, spec §6.5), each field given to `paint`
+/// with its role after it was fitted, so colour never changes a width.
+fn push_file_line_with(
+    paint: impl Fn(&str, Role) -> String,
+    name: &str,
+    size: u64,
+    transferred: u64,
+    wall_ms: u64,
+    columns: u16,
+) -> String {
     let [n, s, v, t] = push_file_fields(name, size, transferred, wall_ms, columns);
     format!(
         "  {} {}  {}  {}  {}",
@@ -243,6 +245,17 @@ pub(crate) fn paint_push_file_line(name: &str, size: u64, transferred: u64, wall
         paint(&v, Role::Ok),
         paint(&t, Role::Dim)
     )
+}
+
+/// The end line in today's colours: the mark and the speed green, the name ink, the rest dim.
+pub(crate) fn paint_push_file_line(name: &str, size: u64, transferred: u64, wall_ms: u64, columns: u16) -> String {
+    push_file_line_with(paint, name, size, transferred, wall_ms, columns)
+}
+
+/// Tests: the same line, uncoloured.
+#[cfg(test)]
+pub(crate) fn push_file_line(name: &str, size: u64, transferred: u64, wall_ms: u64, columns: u16) -> String {
+    push_file_line_with(|text, _| text.to_string(), name, size, transferred, wall_ms, columns)
 }
 
 /// `{n} file[s] {verb}[ · {k} {label}] · {size} · avg {avg} · {time} total`, without the mark (spec §6.5).

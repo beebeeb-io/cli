@@ -85,6 +85,15 @@ impl ViewOptions {
 type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 type Record = Arc<Mutex<Vec<String>>>;
 
+/// The terminal's width now, or [`FALLBACK_COLUMNS`] when it cannot say (a pipe, a container answering 0).
+pub(crate) fn terminal_columns() -> u16 {
+    crossterm::terminal::size()
+        .ok()
+        .map(|(c, _)| c)
+        .filter(|c| *c > 0)
+        .unwrap_or(FALLBACK_COLUMNS)
+}
+
 /// A poisoned lock still holds consistent numbers (every update is one call); keep going.
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -112,13 +121,7 @@ impl Shared {
     }
 
     fn columns(&self) -> u16 {
-        self.columns.unwrap_or_else(|| {
-            crossterm::terminal::size()
-                .ok()
-                .map(|(c, _)| c)
-                .filter(|c| *c > 0)
-                .unwrap_or(FALLBACK_COLUMNS)
-        })
+        self.columns.unwrap_or_else(terminal_columns)
     }
 
     /// Copy the numbers out; the model's lock is released before anything is drawn.
@@ -214,6 +217,26 @@ impl Shared {
         }
         if let Some(mp) = &self.mp {
             let _ = mp.clear();
+            self.mark("draw:cleared");
+        }
+    }
+
+    /// The lines stay as last drawn (a run ended by an error, spec §6.7): drawn once more, then left.
+    fn leave(&self) {
+        self.draw();
+        let mut bars = lock(&self.bars);
+        for bar in bars.drain(..) {
+            bar.abandon();
+        }
+        if self.mp.is_some() {
+            self.mark("draw:left");
+        }
+    }
+
+    /// Tests: what happened to the drawn lines at the end (only a sink that draws through indicatif has any).
+    fn mark(&self, what: &str) {
+        if let Some(record) = &self.record {
+            lock(record).push(what.to_string());
         }
     }
 }
@@ -228,6 +251,8 @@ impl super::notice::Notices for Shared {
 pub(crate) struct LiveProgress {
     shared: Arc<Shared>,
     ticker: Mutex<Option<JoinHandle<()>>>,
+    /// `finish_all` ran: the lines are cleared, so dropping the sink leaves nothing behind.
+    ended: AtomicBool,
 }
 
 impl LiveProgress {
@@ -240,6 +265,16 @@ impl LiveProgress {
             p.register_notices();
         }
         p
+    }
+
+    /// Stops and joins the ticker, and lets go of the notices. Idempotent.
+    fn stop_ticker(&self) {
+        super::notice::unregister(&self.notices());
+        self.shared.stop.store(true, Ordering::SeqCst);
+        let handle = lock(&self.ticker).take();
+        if let Some(handle) = handle {
+            let _ = handle.join();
+        }
     }
 
     /// Lines printed by code that holds no sink (`notice::stderr`) go around this sink's lines.
@@ -287,6 +322,7 @@ impl LiveProgress {
         Self {
             shared,
             ticker: Mutex::new(ticker),
+            ended: AtomicBool::new(false),
         }
     }
 
@@ -372,6 +408,27 @@ impl LiveProgress {
         )
     }
 
+    /// Tests: the Terminal path on a hidden draw target, without a ticker, recording what happens to its lines.
+    #[cfg(test)]
+    pub(crate) fn for_terminal_test() -> (Self, Record) {
+        let mp = MultiProgress::with_draw_target(indicatif::ProgressDrawTarget::hidden());
+        let options = ViewOptions {
+            level: Level::Default,
+            draw: Draw::Terminal,
+        };
+        let record: Record = Arc::new(Mutex::new(Vec::new()));
+        let p = Self::build(
+            Direction::Upload,
+            options,
+            Arc::new(|| 0),
+            Some(80),
+            Some(mp),
+            Some(Arc::clone(&record)),
+            None,
+        );
+        (p, record)
+    }
+
     /// Tests: the live lines now, recorded as `live:` entries.
     #[cfg(test)]
     pub(crate) fn render_now(&self) -> Vec<String> {
@@ -394,9 +451,14 @@ impl LiveProgress {
     }
 }
 
+/// Dropped without a summary, the run ended in an error: the ticker stops and the last lines stay on screen above
+/// the error message (spec §6.7). After a summary the lines are already cleared.
 impl Drop for LiveProgress {
     fn drop(&mut self) {
-        self.finish_all();
+        if !self.ended.load(Ordering::SeqCst) {
+            self.stop_ticker();
+            self.shared.leave();
+        }
     }
 }
 
@@ -422,13 +484,9 @@ impl ChunkProgress for LiveProgress {
 
     /// Stops and joins the ticker, then clears the lines. Idempotent.
     fn finish_all(&self) {
-        super::notice::unregister(&self.notices());
-        self.shared.stop.store(true, Ordering::SeqCst);
-        let handle = lock(&self.ticker).take();
-        if let Some(handle) = handle {
-            let _ = handle.join();
-        }
+        self.stop_ticker();
         self.shared.clear();
+        self.ended.store(true, Ordering::SeqCst);
     }
 
     fn rollback(&self, ciphertext_bytes: u64) {

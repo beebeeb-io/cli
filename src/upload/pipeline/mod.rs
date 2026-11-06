@@ -1071,6 +1071,12 @@ pub fn expected_ciphertext_for(size: u64, concurrency: u32) -> u64 {
     size + CHUNK_OVERHEAD * plan.chunk_count
 }
 
+/// The chunk count the upload driver emits for a file of `size` at `concurrency`: the same plan as
+/// [`expected_ciphertext_for`], so a command can plan a run's chunks before any file is opened (task 2333).
+pub fn expected_chunks_for(size: u64, concurrency: u32) -> u32 {
+    beebeeb_types::plan_chunks_concurrent(size, ChunkProfile::Cli, concurrency.max(1)).chunk_count as u32
+}
+
 #[cfg(test)]
 pub(super) mod rss_regression;
 

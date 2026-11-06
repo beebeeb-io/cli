@@ -79,6 +79,11 @@ async fn push_sends_one_chunk_at_a_time() {
     let s = Scratch::new("2333-one-at-a-time");
     let (path, size, _) = s.file(9 * MIB);
     assert_eq!(chunks_of(size), 3, "premise: 3 chunks of 4 MiB");
+    assert_eq!(
+        super::expected_chunks_for(size, 1),
+        3,
+        "a command plans what the driver sends"
+    );
     let state = shared(Mock::default());
     let rec = Recording::default();
 

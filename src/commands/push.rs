@@ -8,8 +8,11 @@ use std::path::PathBuf;
 use zeroize::Zeroizing;
 
 use crate::api::ApiClient;
+use crate::commands::push_report::{self, FilePlan};
 use crate::config::load_config;
+use crate::transfer_view::LiveProgress;
 use crate::ui;
+use crate::upload::{ChunkProgress, Stream};
 
 // Chunk size is now computed dynamically via beebeeb_types::plan_chunks().
 // See the adaptive chunk-size ladder in beebeeb-types/src/chunk.rs.
@@ -154,6 +157,7 @@ pub async fn run(
     folder: Option<String>,
     strategy: ConflictStrategy,
     shared: crate::commands::push_folders::SharedReuse,
+    verbose: bool,
 ) -> Result<(), String> {
     if !path.exists() {
         return Err(format!("file not found: {}", path.display()));
@@ -179,28 +183,32 @@ pub async fn run(
     };
 
     if path.is_dir() {
-        return push_directory(&api, &path, parent_id, strategy, shared).await;
+        return push_directory(&api, &path, parent_id, strategy, shared, verbose).await;
     }
 
     // ── Resolve line (single file) ──────────────────────────────────────────
     let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     if ui::is_rich() {
-        println!(
-            "  {}",
-            format!(
-                "1 file \u{00B7} {} \u{00B7} encrypting with AES-256-GCM",
-                ui::human_size(file_size),
-            )
-            .custom_color(crate::colors::INK_DIM),
-        );
+        push_report::print_resolve_line(1, file_size);
     }
 
+    let plan = FilePlan::of_size(file_size);
+    let progress = push_report::start([plan], verbose);
     let total_start = std::time::Instant::now();
-    let result = push_single_file(&api, &path, parent_id, strategy, false).await?;
+    let parent_for_notice = parent_id.clone();
+    let result = push_single_file(&api, &path, parent_id, strategy, false, &progress, plan).await?;
     let total_elapsed = total_start.elapsed();
+    // The live lines are cleared here: everything below prints under them.
+    let transfer = progress.summary();
 
     match result {
         Pushed::Uploaded(ur) => {
+            // L15 = A: the CLI never publishes an owner key. A write into a shared
+            // folder stays owner-only until the owner shares it from web or mobile.
+            if !ui::is_json() {
+                let master_key = load_master_key()?;
+                crate::owned_keys::announce_owner_only(&api, &master_key, parent_for_notice.as_deref()).await;
+            }
             if ui::is_json() {
                 let speed = ur.speed_bps();
                 let json = serde_json::json!({
@@ -216,21 +224,11 @@ pub async fn run(
                     "total_bytes": ur.encrypted_bytes,
                     "avg_speed_bps": speed as u64,
                     "total_duration_ms": total_elapsed.as_millis() as u64,
+                    "transfer": transfer.to_json(),
                 });
                 println!("{}", serde_json::to_string_pretty(&json).unwrap());
             } else if ui::is_rich() {
-                let speed = ur.speed_bps();
-                println!(
-                    "  {} {}",
-                    "\u{2713}".custom_color(crate::colors::GREEN_OK),
-                    format!(
-                        "1 file uploaded \u{00B7} {} \u{00B7} avg {} \u{00B7} {:.1}s total",
-                        ui::human_size(ur.encrypted_bytes),
-                        ui::human_speed(speed),
-                        total_elapsed.as_secs_f64(),
-                    )
-                    .custom_color(crate::colors::INK_DIM),
-                );
+                push_report::print_summary(&transfer, 1, 0, ur.encrypted_bytes, verbose);
             }
         }
         skipped => {
@@ -244,6 +242,7 @@ pub async fn run(
                     "avg_speed_bps": 0,
                     "total_duration_ms": total_elapsed.as_millis() as u64,
                     "total_already_uploaded": already,
+                    "transfer": transfer.to_json(),
                 });
                 println!("{}", serde_json::to_string_pretty(&json).unwrap());
             } else if already > 0 && ui::is_rich() {
@@ -285,6 +284,8 @@ struct UploadResult {
     /// `"direct"` or `"api"` (additive `--json` key `transport`, as for `bb pull`).
     transport: &'static str,
     duration: std::time::Duration,
+    /// What crossed the wire for it, every attempt (a re-sent chunk counts each time): its end line's speed.
+    transferred_bytes: u64,
 }
 
 impl UploadResult {
@@ -298,14 +299,33 @@ impl UploadResult {
     }
 }
 
-/// Upload a single file. When `suppress_output` is true, no per-file line is
-/// printed (the caller handles display — used by `push_directory`).
+/// Upload a single file, counted in `progress` under `plan` (what the run planned for it). A file that is not
+/// uploaded (a skip, or already uploaded) takes its plan back out of the run; a failed one keeps it, so the run
+/// ends short of its total. `in_folder`: part of a folder push, which prints no `resuming` line (as before).
 async fn push_single_file(
     api: &ApiClient,
     path: &std::path::Path,
     parent_id: Option<String>,
     strategy: ConflictStrategy,
-    suppress_output: bool,
+    in_folder: bool,
+    progress: &LiveProgress,
+    plan: FilePlan,
+) -> Result<Pushed, String> {
+    let pushed = upload_one(api, path, parent_id, strategy, in_folder, progress, plan).await?;
+    if !matches!(pushed, Pushed::Uploaded(_)) {
+        plan.take_from(progress);
+    }
+    Ok(pushed)
+}
+
+async fn upload_one(
+    api: &ApiClient,
+    path: &std::path::Path,
+    parent_id: Option<String>,
+    strategy: ConflictStrategy,
+    in_folder: bool,
+    progress: &LiveProgress,
+    plan: FilePlan,
 ) -> Result<Pushed, String> {
     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
 
@@ -368,11 +388,14 @@ async fn push_single_file(
                 (minted.id(), file_name.clone(), None)
             }
             Some(existing_id) if resumes => {
-                if !suppress_output && !ui::is_quiet() && !ui::is_json() {
-                    println!(
-                        "  {} {}",
-                        "resuming".custom_color(crate::colors::INK_DIM),
-                        format!("{file_name} (the interrupted upload)").custom_color(crate::colors::INK),
+                if !in_folder && !ui::is_quiet() && !ui::is_json() {
+                    progress.note(
+                        &format!(
+                            "  {} {}",
+                            "resuming".custom_color(crate::colors::INK_DIM),
+                            format!("{file_name} (the interrupted upload)").custom_color(crate::colors::INK),
+                        ),
+                        Stream::Stdout,
                     );
                 }
                 // The same id as a new file: the driver finds the resume record
@@ -403,7 +426,9 @@ async fn push_single_file(
                                 ),
                             ));
                         }
-                        let r = prompt_conflict(&file_name);
+                        // The prompt reads stdin with the live lines hidden (spec §6.7).
+                        let mut r = ConflictResolution::Skip;
+                        progress.suspend(&mut || r = prompt_conflict(&file_name));
                         // If user chose Replace, inject the actual existing_id
                         match r {
                             ConflictResolution::Replace { .. } => ConflictResolution::Replace { existing_id },
@@ -418,10 +443,13 @@ async fn push_single_file(
                             }
                             ConflictResolution::Skip => {
                                 if ui::is_rich() {
-                                    println!(
-                                        "  {} {}",
-                                        "skip".custom_color(crate::colors::INK_DIM),
-                                        file_name.custom_color(crate::colors::INK_DIM),
+                                    progress.note(
+                                        &format!(
+                                            "  {} {}",
+                                            "skip".custom_color(crate::colors::INK_DIM),
+                                            file_name.custom_color(crate::colors::INK_DIM),
+                                        ),
+                                        Stream::Stdout,
                                     );
                                 }
                                 return Ok(Pushed::Skipped);
@@ -530,6 +558,14 @@ async fn push_single_file(
         None => None,
     };
 
+    // The run planned this file at its size then; if it has changed since (before its upload starts), the run's
+    // totals follow it, so done never passes total (spec §4.6, I1). The driver reads the size once more itself.
+    let now = FilePlan::of_path(path);
+    if now != plan {
+        plan.take_from(progress);
+        now.add_to(progress);
+    }
+
     let file_start = std::time::Instant::now();
     let spec = crate::upload::UploadSpec {
         path: path.to_path_buf(),
@@ -546,13 +582,7 @@ async fn push_single_file(
         read_row,
     };
     let signature = crate::resume::local_signature(path);
-    let outcome = crate::upload::stream_encrypt_upload(
-        api,
-        std::sync::Arc::clone(&master_key),
-        spec,
-        &crate::upload::NoopProgress,
-    )
-    .await?;
+    let outcome = crate::upload::stream_encrypt_upload(api, std::sync::Arc::clone(&master_key), spec, progress).await?;
     // Task 2334: remember this upload, so a re-run of the push skips it while the file stays unchanged. Only
     // when the file did not change while it was read (same signature before and after, the size uploaded) and
     // the server named the version it completed.
@@ -585,33 +615,22 @@ async fn push_single_file(
         encrypted_bytes: outcome.ciphertext_bytes,
         transport: outcome.transport,
         duration: file_elapsed,
+        transferred_bytes: outcome.transferred_bytes,
     };
 
-    // ── Per-file output (only when not suppressed by directory caller) ────
-    if !suppress_output {
-        if ui::is_quiet() {
-            println!("{}", server_id);
-        } else if ui::is_rich() {
-            let speed = upload_result.speed_bps();
-            println!(
-                "  {} {:<36}{:>8}  {:>10}  {}",
-                "\u{2713}".custom_color(crate::colors::GREEN_OK),
-                file_name.custom_color(crate::colors::INK),
-                ui::human_size(upload_result.encrypted_bytes).custom_color(crate::colors::INK_DIM),
-                ui::human_speed(speed).custom_color(crate::colors::GREEN_OK),
-                format!("{}ms", file_elapsed.as_millis()).custom_color(crate::colors::INK_DIM),
-            );
-        }
-        // JSON mode: no per-file output; caller collects results
-    } else if ui::is_quiet() {
-        // Even in directory mode, quiet still prints IDs
+    // ── Per-file output ─────────────────────────────────────────────────────
+    // Quiet prints the id (no live lines are drawn then); rich prints the end line around the live lines. JSON:
+    // the caller collects the results. The owner-only sentence (L15) is the caller's, once the lines are cleared.
+    if ui::is_quiet() {
         println!("{}", server_id);
-    }
-
-    // L15 = A: the CLI never publishes an owner key. A write into a shared
-    // folder stays owner-only until the owner shares it from web or mobile.
-    if !suppress_output && !ui::is_json() {
-        crate::owned_keys::announce_owner_only(api, &master_key, parent_uuid.map(|p| p.to_string()).as_deref()).await;
+    } else if ui::is_rich() {
+        let line = push_report::file_line(
+            &file_name,
+            upload_result.encrypted_bytes,
+            upload_result.transferred_bytes,
+            file_elapsed,
+        );
+        progress.note(&line, Stream::Stdout);
     }
 
     Ok(Pushed::Uploaded(upload_result))
@@ -623,6 +642,7 @@ async fn push_directory(
     parent_id: Option<String>,
     strategy: ConflictStrategy,
     shared: crate::commands::push_folders::SharedReuse,
+    verbose: bool,
 ) -> Result<(), String> {
     let master_key = load_master_key()?;
     let dir_name = dir_path
@@ -645,14 +665,7 @@ async fn push_directory(
 
     // ── Resolve line ────────────────────────────────────────────────────────
     if ui::is_rich() {
-        println!(
-            "  {}",
-            format!(
-                "{file_count} files \u{00B7} {} \u{00B7} encrypting with AES-256-GCM",
-                ui::human_size(total_file_size),
-            )
-            .custom_color(crate::colors::INK_DIM),
-        );
+        push_report::print_resolve_line(file_count, total_file_size);
     }
 
     let parent_uuid = parent_id
@@ -690,6 +703,15 @@ async fn push_directory(
         folder_map.insert(entry_path.clone(), folder_id);
     }
 
+    // Every file planned before the first one goes up (its size now): the run's totals and ETA.
+    let plans: Vec<FilePlan> = entries
+        .iter()
+        .filter(|(_, is_dir)| !*is_dir)
+        .map(|(p, _)| FilePlan::of_path(p))
+        .collect();
+    let progress = push_report::start(plans.iter().copied(), verbose);
+    let mut plans = plans.into_iter();
+
     let total_start = std::time::Instant::now();
     let mut upload_results: Vec<UploadResult> = Vec::new();
     // (path relative to the pushed folder, error) for every file that failed.
@@ -708,7 +730,9 @@ async fn push_directory(
             // must not abandon the rest of the folder: record it with its path,
             // carry on, and fail the command at the end (flow-6: a 0-byte file
             // used to stop the push, so later siblings were never uploaded).
-            let ur = match push_single_file(api, entry_path, Some(entry_parent_id.to_string()), strategy, true).await {
+            let plan = plans.next().unwrap_or(FilePlan::of_size(0));
+            let parent = Some(entry_parent_id.to_string());
+            let ur = match push_single_file(api, entry_path, parent, strategy, true, &progress, plan).await {
                 Ok(ur) => ur,
                 Err(e) => {
                     let rel = entry_path
@@ -717,11 +741,14 @@ async fn push_directory(
                         .display()
                         .to_string();
                     if !ui::is_json() {
-                        eprintln!(
-                            "  {} {}: {}",
-                            "!".custom_color(crate::colors::RED_ERR),
-                            rel.custom_color(crate::colors::INK),
-                            e,
+                        progress.note(
+                            &format!(
+                                "  {} {}: {}",
+                                "!".custom_color(crate::colors::RED_ERR),
+                                rel.custom_color(crate::colors::INK),
+                                e,
+                            ),
+                            Stream::Stderr,
                         );
                     }
                     failures.push((rel, e));
@@ -737,22 +764,8 @@ async fn push_directory(
                 }
                 Pushed::Skipped => None,
             };
+            // Its end line (rich) or id (quiet) was printed by push_single_file.
             if let Some(ur) = ur {
-                if ui::is_rich() {
-                    let speed = ur.speed_bps();
-                    let name = &ur.name;
-                    let elapsed = ur.duration;
-                    let enc_size = ur.encrypted_bytes;
-                    println!(
-                        "  {} {:<36}{:>8}  {:>10}  {}",
-                        "\u{2713}".custom_color(crate::colors::GREEN_OK),
-                        name.custom_color(crate::colors::INK),
-                        ui::human_size(enc_size).custom_color(crate::colors::INK_DIM),
-                        ui::human_speed(speed).custom_color(crate::colors::GREEN_OK),
-                        format!("{}ms", elapsed.as_millis()).custom_color(crate::colors::INK_DIM),
-                    );
-                }
-                // quiet mode: push_single_file already printed the ID
                 upload_results.push(ur);
             }
         }
@@ -761,6 +774,8 @@ async fn push_directory(
     let total_elapsed = total_start.elapsed();
     let total_bytes: u64 = upload_results.iter().map(|r| r.encrypted_bytes).sum();
     let uploaded_count = upload_results.len();
+    // The live lines are cleared here: everything below prints under them.
+    let transfer = progress.summary();
 
     // ── Summary ─────────────────────────────────────────────────────────────
     if ui::is_json() {
@@ -794,35 +809,11 @@ async fn push_directory(
                 .iter()
                 .map(|(path, error)| serde_json::json!({ "path": path, "error": error }))
                 .collect::<Vec<_>>(),
+            "transfer": transfer.to_json(),
         });
         println!("{}", serde_json::to_string_pretty(&json).unwrap());
     } else if ui::is_rich() {
-        let avg_speed = if total_elapsed.as_secs_f64() > 0.0 {
-            total_bytes as f64 / total_elapsed.as_secs_f64()
-        } else {
-            0.0
-        };
-        let mark = if failures.is_empty() {
-            "\u{2713}".custom_color(crate::colors::GREEN_OK)
-        } else {
-            "!".custom_color(crate::colors::AMBER)
-        };
-        let failed_part = if failures.is_empty() {
-            String::new()
-        } else {
-            format!(" \u{00B7} {} failed", failures.len())
-        };
-        println!(
-            "  {} {}",
-            mark,
-            format!(
-                "{uploaded_count} files uploaded{failed_part} \u{00B7} {} \u{00B7} avg {} \u{00B7} {:.1}s total",
-                ui::human_size(total_bytes),
-                ui::human_speed(avg_speed),
-                total_elapsed.as_secs_f64(),
-            )
-            .custom_color(crate::colors::INK_DIM),
-        );
+        push_report::print_summary(&transfer, uploaded_count, failures.len(), total_bytes, verbose);
         if already_uploaded > 0 {
             say_already_uploaded(already_uploaded);
         }
