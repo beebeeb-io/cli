@@ -347,7 +347,7 @@ mod tests {
         // No creation time sorts last.
         let unknown = candidate(0, None);
         assert_eq!(choose_existing_folder(&[unknown.clone(), newer.clone()]), Some(&newer));
-        assert_eq!(choose_existing_folder(&[unknown.clone()]), Some(&unknown));
+        assert_eq!(choose_existing_folder(std::slice::from_ref(&unknown)), Some(&unknown));
         assert_eq!(choose_existing_folder(&[]), None);
     }
 
