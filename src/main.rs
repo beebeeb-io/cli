@@ -3,6 +3,8 @@
 
 mod account_state;
 mod api;
+mod backup;
+mod backup_guard;
 mod cli_args;
 use cli_args::*;
 mod cli_help;
@@ -273,6 +275,12 @@ enum Commands {
         paths: Vec<String>,
     },
 
+    /// Back up folders of this machine into Backups (one pass per `run`)
+    Backup {
+        #[command(subcommand)]
+        cmd: BackupCmd,
+    },
+
     /// Move files/folders to the trash (reversible with `bb restore`)
     Rm {
         /// One or more vault paths or UUIDs to trash
@@ -288,9 +296,16 @@ enum Commands {
         #[arg(long = "permanent")]
         permanent: bool,
 
-        /// Skip the (soft-trash) confirmation prompt. Does not bypass the
+        /// Skip the (soft-trash) confirmation prompt. Does not answer
+        /// "Delete <device>'s backup?" (only --yes does), and does not bypass
+        /// the step-up required by --permanent.
+        #[arg(short = 'f', long = "force")]
+        force: bool,
+
+        /// Answer yes to every question: the soft-trash confirmation and
+        /// "Delete <device>'s backup?" (for scripts). Does not bypass the
         /// step-up required by --permanent.
-        #[arg(short = 'f', long = "yes", visible_alias = "force")]
+        #[arg(long = "yes")]
         yes: bool,
     },
 
@@ -701,6 +716,7 @@ async fn main() {
             targets,
             recursive,
             permanent,
+            force,
             yes,
         } => {
             commands::rm::run(
@@ -708,11 +724,19 @@ async fn main() {
                 commands::rm::RmOptions {
                     recursive,
                     permanent,
-                    yes,
+                    skip_confirm: force || yes,
+                    answer_backup_question: yes,
                 },
             )
             .await
         }
+        Commands::Backup { cmd } => match cmd {
+            BackupCmd::Add { folder } => commands::backup::add(folder).await,
+            BackupCmd::Remove { folder } => commands::backup::remove(folder).await,
+            BackupCmd::List => commands::backup::list().await,
+            BackupCmd::Run => commands::backup::run().await,
+            BackupCmd::Status => commands::backup::status().await,
+        },
         Commands::Restore { target } => commands::restore::run(target).await,
         Commands::Trash { cmd } => match cmd {
             TrashCmd::List => commands::trash::list().await,

@@ -7,11 +7,18 @@
 //!
 //! Filenames are encrypted client-side. The file's UUID does not change on
 //! move or rename, so the file key stays identical — no chunk re-encryption.
+//!
+//! LD-0113: core's app rule decides first under the Backups root: the moved
+//! row is checked for `Move` / `Rename`, the folder it goes into for `Create`,
+//! all before anything moves. A server `409 protected_folder` prints core's
+//! words too.
 
+use beebeeb_core::backup::{BackupPosition, Mutation};
 use colored::Colorize;
 use uuid::Uuid;
 
 use crate::api::ApiClient;
+use crate::backup_guard;
 use crate::colors;
 use crate::commands::push::load_master_key;
 use crate::path;
@@ -49,13 +56,15 @@ async fn move_bulk(
         ));
     }
     let dst_id = destination_parent(&resolved_dst)?;
+    // LD-0113: nothing new goes into the Backups tree.
+    backup_guard::check(resolved_dst.backup_position(), Mutation::Create)?;
 
     // Resolve every source first so a typo doesn't half-finish the move.
     let mut src_keys = crate::owned_keys::OwnedKeyResolver::new();
     let mut resolved_srcs: Vec<(String, String, Option<String>, bool)> = Vec::with_capacity(srcs.len());
     for s in srcs {
         let r = path::resolve_path_with_keys(api, master_key, s, &mut src_keys).await?;
-        let Some(id) = r.file_id else {
+        let Some(id) = r.file_id.clone() else {
             return Err(format!("cannot move the vault root ({s})"));
         };
         // A folder cannot move into its own descendant.
@@ -63,6 +72,9 @@ async fn move_bulk(
         let d_norm = format!("/{}", dst.trim_matches('/'));
         if r.is_folder && (d_norm == s_norm || d_norm.starts_with(&format!("{s_norm}/"))) {
             return Err(format!("cannot move {s} into {dst} (would create a cycle)"));
+        }
+        if r.parent_id != dst_id {
+            backup_guard::check(r.backup_position(), Mutation::Move)?;
         }
         resolved_srcs.push((s.clone(), id, r.parent_id.map(|p| p.to_string()), r.is_folder));
     }
@@ -80,7 +92,7 @@ async fn move_bulk(
         }
         match api.move_file(&id, None, Some(dst_id)).await {
             Ok(_) => ok += 1,
-            Err(e) => failures.push((input, e.to_string())),
+            Err(e) => failures.push((input, backup_guard::server_refusal(e, Mutation::Move))),
         }
     }
 
@@ -152,10 +164,13 @@ async fn move_single(
     // Resolve dst — three branches.
     let dst_existing = path::resolve_path_if_exists(api, master_key, dst_arg).await?;
 
-    let (new_parent_id, new_name): (Option<Uuid>, Option<String>) = if let Some(d) = dst_existing {
+    // The third value: where the folder the row would go into is in the
+    // Backups tree (LD-0113).
+    let (new_parent_id, new_name, into): (Option<Uuid>, Option<String>, BackupPosition) = if let Some(d) = dst_existing
+    {
         if d.is_folder {
             // Case 1: dst is an existing folder → move into it, keep the name.
-            (destination_parent(&d)?, None)
+            (destination_parent(&d)?, None, d.backup_position())
         } else {
             // Case 3: dst is an existing file → refuse to overwrite.
             return Err(format!(
@@ -165,18 +180,29 @@ async fn move_single(
     } else {
         // Case 2: dst does not exist → resolve its parent and split off the leaf.
         let (parent_path, leaf) = split_dst(dst_arg)?;
-        let parent_id = match parent_path.as_deref() {
+        let (parent_id, into) = match parent_path.as_deref() {
             Some(p) => {
                 let parent = path::resolve_path(api, master_key, p).await?;
                 if !parent.is_folder {
                     return Err(format!("{p} is a file, not a folder"));
                 }
-                destination_parent(&parent)?
+                (destination_parent(&parent)?, parent.backup_position())
             }
-            None => None,
+            None => (None, BackupPosition::Outside),
         };
-        (parent_id, Some(leaf))
+        (parent_id, Some(leaf), into)
     };
+
+    // LD-0113: core's app rule, before any check that reads more and before
+    // anything moves: the row for its move and its rename, the folder it goes
+    // into for a new item.
+    if src.parent_id != new_parent_id {
+        backup_guard::check(src.backup_position(), Mutation::Move)?;
+        backup_guard::check(into, Mutation::Create)?;
+    }
+    if new_name.as_deref().is_some_and(|n| n != src.name) {
+        backup_guard::check(src.backup_position(), Mutation::Rename)?;
+    }
 
     // SF-0002: a row sealed by the old iOS File Provider is read-only: a move
     // is fine (it re-encrypts nothing), a rename would rewrite its name under a
@@ -256,8 +282,14 @@ async fn move_single(
         .adopt_before_move(api, master_key, &src_id, src_parent.as_deref(), src.is_folder)
         .await?;
 
+    let mutation = if new_parent_send.is_some() {
+        Mutation::Move
+    } else {
+        Mutation::Rename
+    };
     api.move_file(&src_id, new_name_encrypted.as_deref(), new_parent_send)
-        .await?;
+        .await
+        .map_err(|e| backup_guard::server_refusal(e, mutation))?;
     path::invalidate_cache();
 
     if ui::is_json() {
@@ -343,6 +375,7 @@ mod parent_target_tests {
             read_only: false,
             size_bytes: None,
             chunk_count: 1,
+            backup_depth: None,
         }
     }
 

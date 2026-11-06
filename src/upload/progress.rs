@@ -28,6 +28,14 @@ pub trait ChunkProgress: Send + Sync {
     /// confirmations on top of them make the run-wide total exceed the
     /// run-wide plan. No-op by default (also correct for [`NoopProgress`]).
     fn rollback(&self, _ciphertext_bytes: u64) {}
+    /// Called once every chunk of a file is confirmed, just before its version
+    /// is completed. An `Err` stops the upload there instead: its session is
+    /// abandoned, so nothing lands, and the error is the caller's (LD-0113: a
+    /// backup reads the person's file in place and never completes a copy of a
+    /// file that changed while it was read). `Ok` by default.
+    fn before_complete(&self, _path: &std::path::Path) -> Result<(), String> {
+        Ok(())
+    }
 
     // ── Task 2333 (spec §6.8): every method below has a default, so a sink that
     //    implements only the byte methods above behaves byte for byte as before. ──
