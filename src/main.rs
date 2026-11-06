@@ -296,9 +296,16 @@ enum Commands {
         #[arg(long = "permanent")]
         permanent: bool,
 
-        /// Skip the (soft-trash) confirmation prompt. Does not bypass the
+        /// Skip the (soft-trash) confirmation prompt. Does not answer
+        /// "Delete <device>'s backup?" (only --yes does), and does not bypass
+        /// the step-up required by --permanent.
+        #[arg(short = 'f', long = "force")]
+        force: bool,
+
+        /// Answer yes to every question: the soft-trash confirmation and
+        /// "Delete <device>'s backup?" (for scripts). Does not bypass the
         /// step-up required by --permanent.
-        #[arg(short = 'f', long = "yes", visible_alias = "force")]
+        #[arg(long = "yes")]
         yes: bool,
     },
 
@@ -709,6 +716,7 @@ async fn main() {
             targets,
             recursive,
             permanent,
+            force,
             yes,
         } => {
             commands::rm::run(
@@ -716,7 +724,8 @@ async fn main() {
                 commands::rm::RmOptions {
                     recursive,
                     permanent,
-                    yes,
+                    skip_confirm: force || yes,
+                    answer_backup_question: yes,
                 },
             )
             .await

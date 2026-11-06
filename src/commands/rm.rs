@@ -3,7 +3,7 @@
 //!
 //! Resolves each vault path (or raw UUID), refuses a folder unless `-r` is
 //! given, asks for confirmation on an interactive terminal (skipped with
-//! `-f`/`--yes`, `--json` or `--quiet`; with stdin not a terminal and none of
+//! `-f`/`--force`/`--yes`, `--json` or `--quiet`; with stdin not a terminal and none of
 //! those, it refuses with exit 2 instead of prompting), then trashes everything in
 //! one or more `POST /api/v1/files/trash` batches (max 500 ids each). The
 //! server cascades the trashed flag to folder contents, so trashing a folder
@@ -13,7 +13,7 @@
 //! LD-0113: under the Backups root core's app rule decides first. The root
 //! and a device's manifest are refused with core's words; a device or
 //! category folder asks "Delete <device>'s backup?" with its item count
-//! (`--yes` answers it for scripts); a server `409 protected_folder` prints
+//! (only `--yes` answers it for scripts, never `-f`); a server `409 protected_folder` prints
 //! core's words too.
 
 use std::io::Write;
@@ -37,16 +37,19 @@ struct Target {
     position: BackupPosition,
 }
 
-/// The three destructive-behaviour flags `bb rm` carries, grouped so the call
-/// site reads as the question being asked.
+/// The destructive-behaviour flags `bb rm` carries, grouped so the call site
+/// reads as the question being asked.
 pub struct RmOptions {
     /// Allow trashing folders (mirrors `rm -r`).
     pub recursive: bool,
     /// Permanently delete instead of soft-trashing; still needs a step-up
-    /// password, which `--yes` cannot bypass.
+    /// password, which no flag bypasses.
     pub permanent: bool,
-    /// Skip the soft-trash confirmation prompt (`-f`/`--yes`).
-    pub yes: bool,
+    /// Skip the soft-trash confirmation prompt (`-f`/`--force`/`--yes`).
+    pub skip_confirm: bool,
+    /// Answer "Delete <device>'s backup?" (`--yes` only: the habitual `rm -rf`
+    /// must not delete a device's backup unasked).
+    pub answer_backup_question: bool,
 }
 
 /// Entry point for `bb rm`.
@@ -54,7 +57,8 @@ pub async fn run(targets: Vec<String>, options: RmOptions) -> Result<(), String>
     let RmOptions {
         recursive,
         permanent,
-        yes,
+        skip_confirm,
+        answer_backup_question,
     } = options;
     if targets.is_empty() {
         return Err("at least one target required".to_string());
@@ -100,7 +104,7 @@ pub async fn run(targets: Vec<String>, options: RmOptions) -> Result<(), String>
 
     // LD-0113: deleting a device's backup (or one of its folders) is the large,
     // real loss, so it is asked about on its own, with the item count.
-    let Some(only_backups) = confirm_backup_deletes(&api, &master_key, &resolved, yes).await? else {
+    let Some(only_backups) = confirm_backup_deletes(&api, &master_key, &resolved, answer_backup_question).await? else {
         if !ui::is_quiet() {
             println!("  {}", "cancelled".custom_color(colors::INK_DIM));
         }
@@ -115,14 +119,14 @@ pub async fn run(targets: Vec<String>, options: RmOptions) -> Result<(), String>
     // answer the prompt, refuse loudly (exit 2) rather than reading EOF as
     // "no" and exiting 0 with nothing trashed (flow-6).
     let folder_count = resolved.iter().filter(|t| t.is_folder).count();
-    if !yes && ui::is_rich() && !crate::exit::stdin_is_interactive() {
+    if !skip_confirm && ui::is_rich() && !crate::exit::stdin_is_interactive() {
         return Err(crate::exit::with_code(
             crate::exit::USAGE,
             "refusing to trash without -f in non-interactive mode (stdin is not a terminal) \u{2014} \
              re-run with -f to confirm",
         ));
     }
-    if !yes && !only_backups && ui::is_rich() && !confirm(&resolved, folder_count)? {
+    if !skip_confirm && !only_backups && ui::is_rich() && !confirm(&resolved, folder_count)? {
         if !ui::is_quiet() {
             println!("  {}", "cancelled".custom_color(colors::INK_DIM));
         }

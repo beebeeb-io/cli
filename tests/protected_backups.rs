@@ -252,6 +252,37 @@ async fn rm_of_a_device_folder_asks_and_yes_answers_for_scripts() {
     assert!(v.trashed.contains(&tree.device));
 }
 
+/// Review #7: `-f`/`--force` skips the soft-trash prompt only; it never answers "Delete <device>'s backup?", so
+/// the habitual `bb rm -rf Backups/<device>` stops and asks for `--yes`. Outside Backups `-f` and `--force` still
+/// trash without a prompt, as before, and `--yes` answers both.
+#[tokio::test(flavor = "multi_thread")]
+async fn rm_force_skips_the_trash_prompt_but_never_answers_the_backup_question() {
+    let (vault, api, home, tree) = vault_with_backups().await;
+    for flags in [&["-rf"][..], &["-r", "-f"], &["-r", "--force"]] {
+        let args = [&["--api", api.as_str(), "rm"][..], flags, &["Backups/GLegion"]].concat();
+        let out = bb(&home, &args).await;
+        assert_eq!(out.status.code(), Some(2), "{flags:?}: {}", stderr(&out));
+        assert!(stderr(&out).contains("--yes"), "{flags:?}: {}", stderr(&out));
+    }
+    assert_eq!(vault.lock().unwrap().trash_calls, 0, "no backup trashed");
+
+    let docs = the_folder(&vault.lock().unwrap(), None, "Docs");
+    let two = seed_file(&vault, &docs, "two.txt");
+    let three = seed_file(&vault, &docs, "three.txt");
+    for (flag, name, id) in [
+        ("-f", "Docs/report.txt", None),
+        ("--force", "Docs/two.txt", Some(&two)),
+        ("--yes", "Docs/three.txt", Some(&three)),
+    ] {
+        let out = bb(&home, &["--api", &api, "rm", flag, name]).await;
+        assert_eq!(out.status.code(), Some(0), "{flag} {name}: {}", stderr(&out));
+        if let Some(id) = id {
+            assert!(vault.lock().unwrap().trashed.contains(id), "{name} trashed");
+        }
+    }
+    assert!(!vault.lock().unwrap().trashed.contains(&tree.device));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn ls_shows_the_read_only_badge_and_never_the_manifest() {
     let (_vault, api, home, _) = vault_with_backups().await;
