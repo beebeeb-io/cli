@@ -239,3 +239,271 @@ async fn a_folder_deleted_elsewhere_turns_off_and_is_never_uploaded_again_by_its
     assert_ne!(live[0], data, "a new category folder");
     assert_eq!(file_names_in(&v, &live[0]), vec!["a.txt".to_string()]);
 }
+
+/// This machine's `backup.json`, somewhere under the scratch home's state dir.
+fn settings_file(home: &Path) -> PathBuf {
+    fn find(dir: &Path) -> Option<PathBuf> {
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(found) = find(&path) {
+                    return Some(found);
+                }
+            } else if path.file_name().is_some_and(|n| n == "backup.json") {
+                return Some(path);
+            }
+        }
+        None
+    }
+    find(home).expect("backup.json under the scratch home")
+}
+
+fn settings(home: &Path) -> Value {
+    serde_json::from_slice(&std::fs::read(settings_file(home)).unwrap()).unwrap()
+}
+
+/// Rewrite `backup.json` through `change`.
+fn change_settings(home: &Path, change: impl FnOnce(&mut Value)) {
+    let mut value = settings(home);
+    change(&mut value);
+    std::fs::write(settings_file(home), serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+}
+
+/// The live (not trashed) folders named `name` in `parent`.
+fn live_folders(v: &Vault, parent: &str, name: &str) -> Vec<String> {
+    folders_named(v, Some(parent), name)
+        .into_iter()
+        .filter(|id| !v.trashed.contains(id))
+        .collect()
+}
+
+/// Review #8 (spec §4.3): a file that changes after its upload began is abandoned before it completes, never
+/// stored half old, half new; the run counts it as waiting for the next run, not as failed, and the next run
+/// backs up what the file is now.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_changed_while_it_is_read_is_abandoned_and_waits_for_the_next_run() {
+    let (vault, api, home, env) = setup().await;
+    let file = write_file(&home, "solo/c.txt", b"before");
+    let out = backup(&home, &api, &env, &["add", "solo"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+
+    vault.lock().unwrap().hold_chunks = true;
+    let run = {
+        let (home, api, env) = (home.clone(), api.clone(), env.clone());
+        tokio::spawn(async move { backup(&home, &api, &env, &["run"]).await })
+    };
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while vault.lock().unwrap().sessions.is_empty() {
+        assert!(Instant::now() < deadline, "the upload never started");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    std::fs::write(&file, b"after, and longer").unwrap();
+    vault.lock().unwrap().hold_chunks = false;
+    let out = run.await.unwrap();
+
+    assert_eq!(out.status.code(), Some(0), "changed, not failed: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(
+        text.contains("0 uploaded \u{b7} 0 failed") && text.contains("1 waiting for the next run"),
+        "{text}"
+    );
+    {
+        let v = vault.lock().unwrap();
+        assert_eq!(v.abandons, 1, "the session was abandoned");
+        assert!(
+            !files_named(&v, "c.txt").iter().any(|(_, _, done)| *done),
+            "c.txt never completed"
+        );
+    }
+
+    let out = backup(&home, &api, &env, &["run"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(stdout(&out).contains("1 uploaded \u{b7} 0 failed"), "{}", stdout(&out));
+    let v = vault.lock().unwrap();
+    let done: Vec<_> = files_named(&v, "c.txt").into_iter().filter(|(_, _, d)| *d).collect();
+    assert_eq!(done.len(), 1, "c.txt backed up on the next run");
+    assert_eq!(v.items[&done[0].0].size, b"after, and longer".len() as u64);
+}
+
+/// Review #2: a copied configuration (a cloned VM image, a copied home) carries another machine's device
+/// folder. This machine never writes into it: the run stops and says why.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_copied_configuration_never_backs_up_into_the_other_machines_folder() {
+    let (vault, api, home, env) = setup().await;
+    backup(&home, &api, &env, &["add", "data"]).await;
+    let out = backup(&home, &api, &env, &["run"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let inits = vault.lock().unwrap().inits;
+
+    // The same home on another machine.
+    std::fs::write(home.join("machine-id"), "fedcba9876543210fedcba9876543210\n").unwrap();
+    write_file(&home, "data/new.txt", b"new");
+    let out = backup(&home, &api, &env, &["run"]).await;
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(stderr(&out).contains("made on another machine"), "{}", stderr(&out));
+    assert_eq!(
+        vault.lock().unwrap().inits,
+        inits,
+        "nothing written into the other machine's folder"
+    );
+}
+
+/// A `backup.json` written before the device binding names no device id: it is bound when the device folder's
+/// own manifest names this machine, and refused when it names another.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_store_without_a_device_id_is_checked_against_the_device_manifest() {
+    let (vault, api, home, env) = setup().await;
+    backup(&home, &api, &env, &["add", "data"]).await;
+    let out = backup(&home, &api, &env, &["run"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let bound = settings(&home)["device_id"].clone();
+    assert!(bound.is_string(), "the run binds the store: {bound}");
+
+    change_settings(&home, |s| {
+        s.as_object_mut().unwrap().remove("device_id");
+    });
+    let out = backup(&home, &api, &env, &["run"]).await;
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the manifest names this machine: {}",
+        stderr(&out)
+    );
+    assert_eq!(settings(&home)["device_id"], bound, "bound again");
+
+    change_settings(&home, |s| {
+        s.as_object_mut().unwrap().remove("device_id");
+    });
+    std::fs::write(home.join("machine-id"), "fedcba9876543210fedcba9876543210\n").unwrap();
+    write_file(&home, "data/new.txt", b"new");
+    let inits = vault.lock().unwrap().inits;
+    let out = backup(&home, &api, &env, &["run"]).await;
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(stderr(&out).contains("made on another machine"), "{}", stderr(&out));
+    assert_eq!(vault.lock().unwrap().inits, inits, "nothing written");
+}
+
+/// Review #4: "back up again" of a folder that turned off for another reason, after the device folder died,
+/// backs up into a new device folder, instead of turning off again on the dead one.
+#[tokio::test(flavor = "multi_thread")]
+async fn back_up_again_after_the_device_folder_died_takes_a_new_device_folder() {
+    let (vault, api, home, env) = setup().await;
+    write_file(&home, "pics/p.jpg", b"picture");
+    backup(&home, &api, &env, &["add", "data"]).await;
+    backup(&home, &api, &env, &["add", "pics"]).await;
+    let out = backup(&home, &api, &env, &["run"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let (root, device) = {
+        let mut v = vault.lock().unwrap();
+        let (root, device, _) = tree_ids(&v);
+        let pics = the_folder(&v, Some(&device), "pics");
+        for id in subtree(&v, &pics) {
+            v.trashed.insert(id);
+        }
+        (root, device)
+    };
+    let out = backup(&home, &api, &env, &["run"]).await;
+    assert_eq!(out.status.code(), Some(4), "pics is off: {}", stderr(&out));
+    {
+        let mut v = vault.lock().unwrap();
+        for id in subtree(&v, &device) {
+            v.trashed.insert(id);
+        }
+    }
+    let out = backup(&home, &api, &env, &["run"]).await;
+    assert_eq!(out.status.code(), Some(4), "data is off: {}", stderr(&out));
+
+    let out = backup(&home, &api, &env, &["add", "pics"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let out = backup(&home, &api, &env, &["run"]).await;
+    assert_eq!(out.status.code(), Some(0), "pics backs up again: {}", stdout(&out));
+    let v = vault.lock().unwrap();
+    let devices = live_folders(&v, &root, "nas01");
+    assert_eq!(devices.len(), 1, "{devices:?}");
+    assert_ne!(devices[0], device, "a new device folder");
+    let pics = the_folder(&v, Some(&devices[0]), "pics");
+    assert_eq!(file_names_in(&v, &pics), vec!["p.jpg".to_string()]);
+}
+
+/// Review #5: adding a folder while another is still off because an OLD device folder died keeps the live
+/// device folder a later "back up again" made: every folder of this machine stays in one device folder.
+#[tokio::test(flavor = "multi_thread")]
+async fn adding_a_folder_keeps_the_live_device_folder() {
+    let (vault, api, home, env) = setup().await;
+    write_file(&home, "pics/p.jpg", b"picture");
+    write_file(&home, "other/o.txt", b"other");
+    backup(&home, &api, &env, &["add", "data"]).await;
+    backup(&home, &api, &env, &["add", "pics"]).await;
+    backup(&home, &api, &env, &["run"]).await;
+    let (root, old) = {
+        let mut v = vault.lock().unwrap();
+        let (root, device, _) = tree_ids(&v);
+        for id in subtree(&v, &device) {
+            v.trashed.insert(id);
+        }
+        (root, device)
+    };
+    let out = backup(&home, &api, &env, &["run"]).await;
+    assert_eq!(out.status.code(), Some(4), "both off: {}", stderr(&out));
+    backup(&home, &api, &env, &["add", "data"]).await;
+    let out = backup(&home, &api, &env, &["run"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let live = {
+        let v = vault.lock().unwrap();
+        let devices = live_folders(&v, &root, "nas01");
+        assert_eq!(devices.len(), 1, "{devices:?}");
+        assert_ne!(devices[0], old);
+        devices[0].clone()
+    };
+    assert_eq!(settings(&home)["device_folder_id"], json!(live));
+
+    // pics is still off (its device folder died); adding another folder keeps the live one.
+    let out = backup(&home, &api, &env, &["add", "other"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        settings(&home)["device_folder_id"],
+        json!(live),
+        "the live device folder is kept"
+    );
+    let out = backup(&home, &api, &env, &["run"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let v = vault.lock().unwrap();
+    assert_eq!(
+        live_folders(&v, &root, "nas01"),
+        vec![live.clone()],
+        "no third device folder"
+    );
+    let other = the_folder(&v, Some(&live), "other");
+    assert_eq!(file_names_in(&v, &other), vec!["o.txt".to_string()]);
+}
+
+/// Review #6: a `.device.json` write that fails after the folders ran keeps their report, says so on a line
+/// of its own, and exits 3 (something was not done; tried again next run).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_manifest_write_keeps_the_report_and_exits_incomplete() {
+    let (vault, api, home, env) = setup().await;
+    backup(&home, &api, &env, &["add", "data"]).await;
+    // Two files go up; the manifest's upload is refused.
+    vault.lock().unwrap().init_status_after = Some((2, 400));
+    let out = backup(&home, &api, &env, &["run"]).await;
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    let text = format!("{}{}", stdout(&out), stderr(&out));
+    assert!(
+        text.contains("2 uploaded \u{b7} 0 failed"),
+        "the folder's report: {text}"
+    );
+    assert!(
+        text.contains("could not write this machine's .device.json"),
+        "the manifest's own line: {text}"
+    );
+    let out = backup(&home, &api, &env, &["--json", "run"]).await;
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    let json: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", stdout(&out)));
+    assert_eq!(json["ok"], false);
+    assert!(json["manifest_error"].is_string(), "{json}");
+
+    vault.lock().unwrap().init_status_after = None;
+    let out = backup(&home, &api, &env, &["run"]).await;
+    assert_eq!(out.status.code(), Some(0), "written on the next run: {}", stderr(&out));
+    assert_eq!(files_named(&vault.lock().unwrap(), ".device.json").len(), 1);
+}

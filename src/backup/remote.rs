@@ -129,6 +129,28 @@ async fn live_in(api: &ApiClient, id: Uuid, parent: Uuid) -> Result<bool, String
     }
 }
 
+/// Whether the device folder `id` is live: there, not trashed, and directly
+/// under the flagged Backups root.
+pub(crate) async fn device_folder_live(api: &ApiClient, id: Uuid) -> Result<bool, String> {
+    let row = match api.get_file(id.to_string()).await {
+        Ok(row) => row,
+        Err(e) if e.status == 404 => return Ok(false),
+        Err(e) => return Err(e.message),
+    };
+    let Some(parent) = row
+        .get("parent_id")
+        .and_then(Value::as_str)
+        .filter(|_| !is_trashed(&row))
+    else {
+        return Ok(false);
+    };
+    match api.get_file(parent).await {
+        Ok(parent) => Ok(!is_trashed(&parent) && crate::backup_guard::is_backups_root(&parent)),
+        Err(e) if e.status == 404 => Ok(false),
+        Err(e) => Err(e.message),
+    }
+}
+
 /// Where this machine backs up into.
 pub(crate) enum DeviceFolder {
     Live(Uuid),
@@ -180,6 +202,23 @@ pub(crate) async fn device_folder(
             let id = crate::item_id::create_owned_folder(api, master_key, &name, Some(root)).await?;
             Ok((DeviceFolder::Live(id), true))
         }
+    }
+}
+
+/// The device id a device folder's own manifest names (`None`: it has no
+/// manifest, or one that names no device).
+pub(crate) async fn manifest_device_id(
+    api: &ApiClient,
+    master_key: &Arc<MasterKey>,
+    device: Uuid,
+) -> Result<Option<String>, String> {
+    match read_manifest(api, master_key, device).await {
+        FolderManifest::Parsed(manifest) => Ok(manifest.device_id),
+        FolderManifest::Absent => Ok(None),
+        FolderManifest::Unreadable => Err(
+            "cannot tell which machine this backup belongs to: its .device.json could not be read; run again"
+                .to_string(),
+        ),
     }
 }
 

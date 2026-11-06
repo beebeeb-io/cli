@@ -44,6 +44,8 @@ pub struct Session {
     pub base: Option<i64>,
     pub chunk_count: u32,
     pub frames: BTreeMap<u32, Vec<u8>>,
+    /// The plaintext chunk size the init declared.
+    pub chunk_size: u64,
     /// The plaintext size this session declared at init.
     pub size: u64,
 }
@@ -55,6 +57,13 @@ pub struct Vault {
     pub seq: u64,
     /// While set, every chunk PUT past index 0 hangs (the test then kills `bb`).
     pub stall: bool,
+    /// Every chunk PUT waits while this is set (a test changes the source file meanwhile), then goes on.
+    pub hold_chunks: bool,
+    /// `(n, status)`: every upload init after the first `n` answers `status`.
+    pub init_status_after: Option<(usize, u16)>,
+    /// The current version of every completed file: its plaintext chunk size and its frames, in order, as
+    /// `GET /files/{id}/download` serves them.
+    pub contents: HashMap<String, (u64, Vec<u8>)>,
     pub inits: usize,
     pub abandons: usize,
     /// Chunk PUTs answered `skipped` (the session already held that index).
@@ -421,6 +430,25 @@ pub async fn start_mock(vault: Shared) -> String {
             ),
         )
         .route(
+            "/api/v1/files/:id/download",
+            // The current version's frames, as the server streams them.
+            get(|State(v): State<Shared>, UrlPath(id): UrlPath<String>| async move {
+                let v = v.lock().unwrap();
+                match (v.items.get(&id), v.contents.get(&id)) {
+                    (Some(item), Some((chunk_size, body))) => (
+                        [
+                            ("content-type", "application/octet-stream".to_string()),
+                            ("x-chunk-size", chunk_size.to_string()),
+                            ("x-original-size", item.size.to_string()),
+                        ],
+                        body.clone(),
+                    )
+                        .into_response(),
+                    _ => err(StatusCode::NOT_FOUND, "not_found"),
+                }
+            }),
+        )
+        .route(
             "/api/v1/files/:id/upload/abandon",
             // As on the server: end the sessions; a never-completed first
             // upload's row goes with them.
@@ -448,6 +476,11 @@ pub async fn start_mock(vault: Shared) -> String {
             post(|State(v): State<Shared>, Json(body): Json<Value>| async move {
                 let mut v = v.lock().unwrap();
                 v.inits += 1;
+                if let Some((n, code)) = v.init_status_after
+                    && v.inits > n
+                {
+                    return err(StatusCode::from_u16(code).unwrap(), "refused by mock");
+                }
                 let id = body.get("file_id").and_then(Value::as_str).unwrap_or("").to_string();
                 let base = body.get("base_version_number").and_then(Value::as_i64);
                 let parent = body.get("parent_id").and_then(Value::as_str).map(str::to_string);
@@ -495,6 +528,7 @@ pub async fn start_mock(vault: Shared) -> String {
                         base,
                         chunk_count,
                         frames: BTreeMap::new(),
+                        chunk_size,
                         size,
                     },
                 );
@@ -514,6 +548,9 @@ pub async fn start_mock(vault: Shared) -> String {
                     let stall = v.lock().unwrap().stall && idx > 0;
                     if stall {
                         std::future::pending::<()>().await;
+                    }
+                    while v.lock().unwrap().hold_chunks {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
                     }
                     let mut v = v.lock().unwrap();
                     let Some(s) = v.sessions.get_mut(&sid) else {
@@ -547,6 +584,11 @@ pub async fn start_mock(vault: Shared) -> String {
                 item.uploading = false;
                 item.version = version;
                 item.size = s.size;
+                item.chunk_count = s.chunk_count;
+                v.contents.insert(
+                    s.file_id.clone(),
+                    (s.chunk_size, s.frames.into_values().flatten().collect()),
+                );
                 Json(json!({ "id": s.file_id, "version_number": version })).into_response()
             }),
         )

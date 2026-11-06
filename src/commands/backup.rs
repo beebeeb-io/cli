@@ -97,9 +97,9 @@ pub async fn add(folder: PathBuf) -> Result<(), String> {
     let mut store = open_mine(&dir, &account)?;
 
     if let Some(i) = store.settings.sources.iter().position(|s| s.path == path) {
-        let Some(off) = store.settings.sources[i].off.clone() else {
+        if store.settings.sources[i].off.is_none() {
             return Err(format!("{} is already backed up", path.display()));
-        };
+        }
         // "Back up again" (spec §4.2 rule 11): a first backup, from nothing.
         let records_file = store.fresh_records_file()?;
         store.forget_records(store.settings.sources[i].records_file);
@@ -108,10 +108,7 @@ pub async fn add(folder: PathBuf) -> Result<(), String> {
         source.category_folder_id = None;
         source.off = None;
         source.last_pass = None;
-        if off.reason == OffReason::DeviceDeleted {
-            store.settings.device_folder_id = None;
-            store.settings.manifest_folders.clear();
-        }
+        forget_dead_device_folder(&api, &mut store).await?;
         store.save()?;
         say(&format!(
             "backing up {} again, as a first backup \u{00b7} run `bb backup run` to start",
@@ -149,16 +146,7 @@ pub async fn add(folder: PathBuf) -> Result<(), String> {
             .unwrap_or_default();
         category = Category::Custom(beebeeb_core::backup::custom_category_name(&raw, &taken));
     }
-    if store
-        .settings
-        .sources
-        .iter()
-        .any(|s| s.off.as_ref().is_some_and(|o| o.reason == OffReason::DeviceDeleted))
-    {
-        // The device folder is gone: a new folder is backed up into a new one.
-        store.settings.device_folder_id = None;
-        store.settings.manifest_folders.clear();
-    }
+    forget_dead_device_folder(&api, &mut store).await?;
     let records_file = store.fresh_records_file()?;
     store.settings.sources.push(Source {
         path: path.clone(),
@@ -180,6 +168,20 @@ pub async fn add(folder: PathBuf) -> Result<(), String> {
             path.display(),
             category_folder_name(&category)
         ));
+    }
+    Ok(())
+}
+
+/// Forget the stored device folder when it is dead (deleted, trashed, or moved
+/// out of Backups), so the next run finds or makes this machine's folder; a
+/// live one is kept, whatever the off folders say (reviews #4 and #5).
+async fn forget_dead_device_folder(api: &ApiClient, store: &mut Store) -> Result<(), String> {
+    let Some(id) = store.settings.device_folder_id else {
+        return Ok(());
+    };
+    if !remote::device_folder_live(api, id).await? {
+        store.settings.device_folder_id = None;
+        store.settings.manifest_folders.clear();
     }
     Ok(())
 }
@@ -284,10 +286,15 @@ pub async fn run() -> Result<(), String> {
         platform: Platform::Cli,
     };
     let root = remote::backups_root(&api, &master_key).await?;
-    let (device, fresh) = remote::device_folder(&api, &master_key, root, &me, store.settings.device_folder_id).await?;
+    let known = store.settings.device_folder_id;
+    let (device, fresh) = remote::device_folder(&api, &master_key, root, &me, known).await?;
     let device_id = match device {
         DeviceFolder::Live(id) => {
+            if known == Some(id) {
+                check_same_machine(&api, &master_key, &store, &me, id, &dir).await?;
+            }
             store.settings.device_folder_id = Some(id);
+            store.settings.device_id = Some(me.device_id.clone());
             Some(id)
         }
         DeviceFolder::Deleted => None,
@@ -325,6 +332,9 @@ pub async fn run() -> Result<(), String> {
         }));
     }
 
+    // A manifest that cannot be written loses neither the folders' report nor
+    // their exit code (review #6): it is said on its own line after them.
+    let mut manifest_error = None;
     if let Some(device) = device_id {
         let folders: Vec<FolderState> = store
             .settings
@@ -347,13 +357,45 @@ pub async fn run() -> Result<(), String> {
             .manifest_written_ms
             .is_none_or(|at| now_ms() - at > MANIFEST_REFRESH_MS);
         if fresh || stale || listed != store.settings.manifest_folders {
-            remote::write_manifest(&api, &master_key, device, &me, folders).await?;
-            store.settings.manifest_folders = listed;
-            store.settings.manifest_written_ms = Some(now_ms());
-            store.save()?;
+            match remote::write_manifest(&api, &master_key, device, &me, folders).await {
+                Ok(()) => {
+                    store.settings.manifest_folders = listed;
+                    store.settings.manifest_written_ms = Some(now_ms());
+                    store.save()?;
+                }
+                // Not marked written: the next run writes it again.
+                Err(e) => manifest_error = Some(e),
+            }
         }
     }
-    report(&me.name, &runs)
+    report(&me.name, &runs, manifest_error.as_deref())
+}
+
+/// The stored device folder `folder` is this machine's only when the store was
+/// bound to this machine's device id; a store from before the binding (no id)
+/// only when the folder's own manifest names this machine. Anything else is a
+/// copied configuration or disk image (review #2): nothing is written.
+async fn check_same_machine(
+    api: &ApiClient,
+    master_key: &Arc<beebeeb_core::kdf::MasterKey>,
+    store: &Store,
+    me: &DeviceSelf,
+    folder: uuid::Uuid,
+    dir: &Path,
+) -> Result<(), String> {
+    let mine = match &store.settings.device_id {
+        Some(id) => *id == me.device_id,
+        None => remote::manifest_device_id(api, master_key, folder).await?.as_deref() == Some(me.device_id.as_str()),
+    };
+    if mine {
+        return Ok(());
+    }
+    Err(format!(
+        "the backup settings on this machine were made on another machine (a copy of its configuration or disk \
+         image): backing up would write into that machine's backup. Delete {} to back this machine up as a new \
+         device.",
+        dir.join("backup.json").display()
+    ))
 }
 
 /// One folder's pass, then its uploads. Returns the category folder id to keep.
@@ -429,7 +471,10 @@ fn counts(last: &LastPass) -> String {
     )
 }
 
-fn report(device: &str, runs: &[FolderRun]) -> Result<(), String> {
+/// What a run did, per folder, then a manifest that could not be written. The
+/// exit code: 4 when a folder turned off (the person must act), else 3 when a
+/// file or the manifest failed (tried again next run), else 0.
+fn report(device: &str, runs: &[FolderRun], manifest_error: Option<&str>) -> Result<(), String> {
     let off = runs.iter().any(|r| r.turned_off.is_some());
     let failed = runs.iter().any(|r| r.error.is_some() || r.last.failed > 0);
     if ui::is_json() {
@@ -449,7 +494,14 @@ fn report(device: &str, runs: &[FolderRun]) -> Result<(), String> {
                 })
             })
             .collect();
-        println!("{}", serde_json::json!({ "ok": !off && !failed, "folders": rows }));
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": !off && !failed && manifest_error.is_none(),
+                "folders": rows,
+                "manifest_error": manifest_error,
+            })
+        );
     } else if !ui::is_quiet() {
         for r in runs {
             if let Some(why) = r.turned_off {
@@ -470,6 +522,13 @@ fn report(device: &str, runs: &[FolderRun]) -> Result<(), String> {
                 );
             }
         }
+        if let Some(e) = manifest_error {
+            println!(
+                "  {} {}",
+                "error \u{00b7}".custom_color(colors::RED_ERR),
+                manifest_words(e).custom_color(colors::INK),
+            );
+        }
     }
     if off {
         return Err(crate::exit::with_code(
@@ -483,7 +542,14 @@ fn report(device: &str, runs: &[FolderRun]) -> Result<(), String> {
             "some files could not be backed up; they are tried again on the next run",
         ));
     }
+    if let Some(e) = manifest_error {
+        return Err(crate::exit::with_code(crate::exit::INCOMPLETE, manifest_words(e)));
+    }
     Ok(())
+}
+
+fn manifest_words(e: &str) -> String {
+    format!("could not write this machine's .device.json ({e}); it is written again on the next run")
 }
 
 // ── status ──────────────────────────────────────────────────────────────────

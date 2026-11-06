@@ -29,6 +29,12 @@ pub(crate) struct Settings {
     /// This machine's folder under the Backups root, once found or made.
     #[serde(default)]
     pub device_folder_id: Option<Uuid>,
+    /// The device id (core's, from this machine's machine id) the device
+    /// folder was bound to, so a copied configuration or disk image never
+    /// writes into another machine's folder. `None`: a store from before the
+    /// binding, checked against the device folder's manifest.
+    #[serde(default)]
+    pub device_id: Option<String>,
     /// When `.device.json` was last written (ms since the epoch), and the
     /// folder list it was written with, so it is rewritten only on a change.
     #[serde(default)]
