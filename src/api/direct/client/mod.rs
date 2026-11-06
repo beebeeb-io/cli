@@ -387,7 +387,7 @@ impl ApiClient {
         let Ok(token) = self.require_auth() else {
             return Seen::no_answer();
         };
-        super::pace_if_needed().await;
+        super::pace_if_needed(&self.base_url).await;
         let sent = self
             .client
             .post(self.url(path))

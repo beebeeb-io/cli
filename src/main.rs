@@ -19,6 +19,7 @@ mod direct_upload;
 mod download;
 mod env_detect;
 mod exit;
+mod interrupt;
 mod item_id;
 mod loopback;
 mod owned_keys;

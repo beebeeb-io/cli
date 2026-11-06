@@ -83,6 +83,8 @@ pub use progress::{
 mod session;
 use session::*;
 
+pub(crate) mod limits;
+
 // ── The streaming upload driver ───────────────────────────────────────────────
 
 mod pipeline;

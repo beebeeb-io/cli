@@ -46,16 +46,21 @@ fn update_rate_state(headers: &reqwest::header::HeaderMap) {
     }
 }
 
-async fn pace_if_needed() {
+/// Wait out the shared pause (a 429 or 503 anywhere in this process), then pace by the rate-limit headers.
+/// `false`: the push's interrupt fired while the gate was closed, so the request must not be sent.
+async fn pace_if_needed(origin: &str) -> bool {
+    if !pause::wait_open(origin).await {
+        return false;
+    }
     let remaining = RATE_REMAINING.load(Ordering::Relaxed);
     let limit = RATE_LIMIT.load(Ordering::Relaxed);
     let reset = RATE_RESET.load(Ordering::Relaxed);
     if remaining < 0 || limit <= 0 {
-        return;
+        return true;
     }
     let ratio = remaining as f64 / limit as f64;
     if ratio > 0.2 {
-        return;
+        return true;
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -67,6 +72,7 @@ async fn pace_if_needed() {
     if pace_ms > 50 {
         tokio::time::sleep(std::time::Duration::from_millis(pace_ms)).await;
     }
+    true
 }
 
 /// Shown for any 401 the server answers with its generic `unauthorized` body
@@ -298,6 +304,7 @@ fn build_client(timeout: std::time::Duration) -> Client {
 
 mod client;
 mod id;
+pub(crate) mod pause;
 mod shares;
 mod tree;
 mod upload;
@@ -487,19 +494,22 @@ async fn parse_response_typed(resp: reqwest::Response) -> Result<Value, ApiError
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<u64>().ok());
 
-        if !crate::ui::is_quiet() {
-            use colored::Colorize;
-            // Through the live transfer lines when a run draws them (task 2333, spec §6.7): any request
-            // of a push, pull or sync can meet a 429.
-            crate::transfer_view::notice::stderr(&format!(
-                "  {} rate limited — pausing {}s{}",
-                "⏸".custom_color(crate::colors::AMBER),
-                retry_after,
-                remaining.map_or(String::new(), |r| format!(" ({r} requests remaining)")),
-            ));
+        // One pause for every request of this process (spec §6.1): the gate prints the notice when this
+        // begins a pause, and this call waits on the gate (not on a sleep of its own), so the workers of a push
+        // stop and come back together. Any request of a push, pull or sync can meet a 429.
+        let origin = pause::origin_of(resp.url().as_str());
+        pause::extend(
+            &origin,
+            std::time::Duration::from_secs(retry_after),
+            pause::PauseReason::RateLimited { remaining },
+        );
+        if !pause::wait_open(&origin).await {
+            return Err(ApiError {
+                code: None,
+                message: crate::upload::INTERRUPTED.to_string(),
+                status: status.as_u16(),
+            });
         }
-
-        tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
         // `parse_response`'s callers retry-loop on this exact sentinel
         // string (`e.message == RATE_LIMITED_MESSAGE`) — `.map_err(|e| e.message)`
         // above preserves it byte-for-byte, so none of those call sites
