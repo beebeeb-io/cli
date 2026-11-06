@@ -287,7 +287,9 @@ pub const RATE_LIMITED_MESSAGE: &str = "__rate_limited__";
 /// Builds the shared `reqwest::Client` with the writer-provenance headers set
 /// as `default_headers`, so every request made through it — real traffic and
 /// tests alike — carries them without each call site adding them by hand.
-fn build_client(timeout: std::time::Duration) -> Client {
+/// With `origin`, every API request also carries `X-Beebeeb-Origin: <origin>` (LD-0113: `backup` for a backup pass's client, spec Amendment
+/// 8). Storage requests never use this client, so they never carry it.
+fn build_client_with_origin(timeout: std::time::Duration, origin: Option<&'static str>) -> Client {
     use reqwest::header::{HeaderMap, HeaderValue};
     let mut headers = HeaderMap::new();
     headers.insert(CLIENT_HEADER_NAME, HeaderValue::from_static(CLIENT_HEADER_VALUE));
@@ -295,6 +297,9 @@ fn build_client(timeout: std::time::Duration) -> Client {
         CLIENT_VERSION_HEADER_NAME,
         HeaderValue::from_static(CLIENT_VERSION_HEADER_VALUE),
     );
+    if let Some(origin) = origin {
+        headers.insert(beebeeb_types::backup::ORIGIN_HEADER, HeaderValue::from_static(origin));
+    }
     Client::builder()
         .timeout(timeout)
         .default_headers(headers)
@@ -309,6 +314,7 @@ impl ApiClient {
     }
 }
 
+mod backups;
 mod client;
 mod id;
 pub(crate) mod pause;

@@ -1,4 +1,8 @@
 //! `bb ls`: list a folder, decrypting names locally, with sort and long options.
+//!
+//! LD-0113: the flagged Backups root shows core's badge (`MSG_BADGE`,
+//! "Read-only"), and a device's `.device.json` is never listed
+//! (`is_hidden_backup_item`).
 
 use colored::Colorize;
 
@@ -66,6 +70,9 @@ struct DecryptedFile {
     modified: String,
     created: String,
     trashed: bool,
+    /// LD-0113: the row's depth below the flagged Backups root (`Some(0)`: the
+    /// root itself), `None` outside it.
+    backup_depth: Option<usize>,
 }
 
 pub async fn run(path: Option<String>, opts: LsOpts) -> Result<(), String> {
@@ -76,7 +83,7 @@ pub async fn run(path: Option<String>, opts: LsOpts) -> Result<(), String> {
     let mut keys = crate::owned_keys::OwnedKeyResolver::new();
 
     // Resolve the start folder (UUID passthrough or path walk).
-    let parent_id = match &path {
+    let (parent_id, parent_depth) = match &path {
         Some(p) if uuid::Uuid::parse_str(p).is_err() => {
             let resolved = crate::path::resolve_path_with_keys(&api, &master_key, p, &mut keys).await?;
             if !resolved.is_folder {
@@ -85,18 +92,18 @@ pub async fn run(path: Option<String>, opts: LsOpts) -> Result<(), String> {
                     resolved.name
                 ));
             }
-            resolved.file_id
+            (resolved.file_id, resolved.backup_depth)
         }
-        Some(p) => Some(p.clone()),
-        None => None,
+        Some(p) => (Some(p.clone()), crate::backup_guard::depth_of(&api, p).await?),
+        None => (None, None),
     };
 
-    let mut listing = decrypt_listing(&api, &master_key, parent_id.as_deref(), false, &mut keys).await?;
+    let mut listing = decrypt_listing(&api, &master_key, parent_id.as_deref(), parent_depth, false, &mut keys).await?;
 
     // `-a/--all`: append trashed entries (flat — the trash listing is not
     // per-folder), flagged so they're visually distinct.
     if opts.all {
-        let mut trashed = decrypt_listing(&api, &master_key, None, true, &mut keys).await?;
+        let mut trashed = decrypt_listing(&api, &master_key, None, None, true, &mut keys).await?;
         listing.append(&mut trashed);
     }
 
@@ -160,7 +167,7 @@ async fn print_recursive(
     opts: &LsOpts,
     keys: &mut crate::owned_keys::OwnedKeyResolver,
 ) -> Result<(), String> {
-    let mut children = decrypt_listing(api, master_key, Some(&folder.id), false, keys).await?;
+    let mut children = decrypt_listing(api, master_key, Some(&folder.id), folder.backup_depth, false, keys).await?;
     if children.is_empty() {
         return Ok(());
     }
@@ -186,10 +193,13 @@ async fn print_recursive(
 }
 
 /// Fetch + decrypt one folder's children (or the flat trash listing).
+/// `parent_depth`: the folder's depth below the Backups root, so a device's
+/// manifest is left out and the root is known (LD-0113).
 async fn decrypt_listing(
     api: &ApiClient,
     master_key: &beebeeb_core::kdf::MasterKey,
     parent_id: Option<&str>,
+    parent_depth: Option<usize>,
     trashed: bool,
     keys: &mut crate::owned_keys::OwnedKeyResolver,
 ) -> Result<Vec<DecryptedFile>, String> {
@@ -213,6 +223,10 @@ async fn decrypt_listing(
             .await
             .map(|r| r.name)
             .unwrap_or_else(|_| crate::owned_keys::UNREADABLE.to_string());
+        let backup_depth = crate::backup_guard::child_depth(parent_depth, file);
+        if beebeeb_core::backup::is_hidden_backup_item(backup_depth, &name) {
+            continue;
+        }
 
         out.push(DecryptedFile {
             id: file_id.to_string(),
@@ -235,6 +249,7 @@ async fn decrypt_listing(
                 .unwrap_or("")
                 .to_string(),
             trashed,
+            backup_depth,
         });
     }
     Ok(out)
@@ -292,6 +307,12 @@ fn print_row(f: &DecryptedFile, indent: usize, opts: &LsOpts) {
     if f.trashed {
         name = format!("{name} {}", "[trashed]".custom_color(colors::AMBER));
     }
+    if is_root(f) {
+        name = format!(
+            "{name} {}",
+            format!("[{}]", beebeeb_core::backup::MSG_BADGE).custom_color(colors::INK_DIM)
+        );
+    }
     let size_str = if f.is_folder {
         "\u{2014}".to_string()
     } else {
@@ -332,7 +353,7 @@ async fn print_json(
     keys: &mut crate::owned_keys::OwnedKeyResolver,
 ) -> Result<(), String> {
     fn to_json(f: &DecryptedFile) -> serde_json::Value {
-        serde_json::json!({
+        let mut row = serde_json::json!({
             "id": f.id,
             "name": f.decrypted_name,
             "is_folder": f.is_folder,
@@ -340,26 +361,32 @@ async fn print_json(
             "modified": f.modified,
             "created": f.created,
             "trashed": f.trashed,
-        })
+        });
+        // LD-0113, additive keys: the root's role and core's badge.
+        if is_root(f) {
+            row["system_role"] = serde_json::json!(beebeeb_types::backup::SystemRole::BackupsRoot.as_str());
+            row["badge"] = serde_json::json!(beebeeb_core::backup::MSG_BADGE);
+        }
+        row
     }
 
     let mut json_files: Vec<serde_json::Value> = listing.iter().map(to_json).collect();
 
     // Recursive JSON: flatten descendants with a `parent` pointer for context.
     if opts.recursive && opts.depth > 0 {
-        let mut stack: Vec<(String, usize)> = listing
+        let mut stack: Vec<(String, usize, Option<usize>)> = listing
             .iter()
             .filter(|f| f.is_folder && !f.trashed)
-            .map(|f| (f.id.clone(), 1usize))
+            .map(|f| (f.id.clone(), 1usize, f.backup_depth))
             .collect();
-        while let Some((fid, d)) = stack.pop() {
-            let children = decrypt_listing(api, master_key, Some(&fid), false, keys).await?;
+        while let Some((fid, d, backup_depth)) = stack.pop() {
+            let children = decrypt_listing(api, master_key, Some(&fid), backup_depth, false, keys).await?;
             for c in &children {
                 let mut row = to_json(c);
                 row["parent"] = serde_json::json!(fid);
                 json_files.push(row);
                 if c.is_folder && d < opts.depth {
-                    stack.push((c.id.clone(), d + 1));
+                    stack.push((c.id.clone(), d + 1, c.backup_depth));
                 }
             }
         }
@@ -377,4 +404,9 @@ async fn print_json(
         .unwrap()
     );
     Ok(())
+}
+
+/// The flagged Backups root (never a trashed row: the root cannot be in Trash).
+fn is_root(f: &DecryptedFile) -> bool {
+    !f.trashed && f.backup_depth == Some(0)
 }

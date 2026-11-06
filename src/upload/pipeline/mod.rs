@@ -881,6 +881,15 @@ pub(super) async fn upload_attempt(
         }
     };
 
+    // 6b. LD-0113: the caller may stop a file that changed while it was read;
+    //     its session is abandoned before anything completes.
+    if let Err(why) = progress.before_complete(&spec.path) {
+        let _ = api.upload_abandon(&file_id_str).await;
+        crate::resume::clear(&spec.path);
+        file_prog.finish(false);
+        return Err(AttemptErr::Other(why));
+    }
+
     // 7. Finalise the version.
     let completed = match api.upload_complete_typed(&upload_session_id).await {
         Ok(v) => v,

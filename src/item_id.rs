@@ -67,10 +67,8 @@ impl MintedOwner {
 
     /// Seal a new row's name through core's new-item writer, the only writer a
     /// create may use (`{"name":..,"mime_type":..}` under the key derived from
-    /// this core-minted id). Only the mount creates rows through it today, so it
-    /// is compiled with the `fuse` feature (and for the tests that drive that
-    /// path without a mount).
-    #[cfg(any(feature = "fuse", test))]
+    /// this core-minted id). The mount creates rows through it, and `bb backup`
+    /// the Backups root (LD-0113).
     pub fn seal_name(
         &self,
         master_key: &beebeeb_core::kdf::MasterKey,

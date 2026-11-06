@@ -270,12 +270,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "beebeeb-backup"
+version = "0.2.1"
+source = "git+https://github.com/beebeeb-io/core?rev=a5413d2049f5a27f9392b3d323cd279643e8d24e#a5413d2049f5a27f9392b3d323cd279643e8d24e"
+dependencies = [
+ "beebeeb-core",
+ "beebeeb-types",
+ "tokio",
+ "unicode-normalization",
+ "uuid",
+]
+
+[[package]]
 name = "beebeeb-cli"
 version = "0.15.0"
 dependencies = [
  "aes-gcm",
  "axum",
  "base64",
+ "beebeeb-backup",
  "beebeeb-core",
  "beebeeb-types",
  "bytes",
@@ -320,8 +333,8 @@ dependencies = [
 
 [[package]]
 name = "beebeeb-core"
-version = "0.1.0"
-source = "git+https://github.com/beebeeb-io/core?rev=d3b40e336acbbbbe34e0e793c840834fdb7f683b#d3b40e336acbbbbe34e0e793c840834fdb7f683b"
+version = "0.2.1"
+source = "git+https://github.com/beebeeb-io/core?rev=a5413d2049f5a27f9392b3d323cd279643e8d24e#a5413d2049f5a27f9392b3d323cd279643e8d24e"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -357,8 +370,8 @@ dependencies = [
 
 [[package]]
 name = "beebeeb-types"
-version = "0.1.0"
-source = "git+https://github.com/beebeeb-io/core?rev=d3b40e336acbbbbe34e0e793c840834fdb7f683b#d3b40e336acbbbbe34e0e793c840834fdb7f683b"
+version = "0.2.1"
+source = "git+https://github.com/beebeeb-io/core?rev=a5413d2049f5a27f9392b3d323cd279643e8d24e#a5413d2049f5a27f9392b3d323cd279643e8d24e"
 dependencies = [
  "serde",
 ]
