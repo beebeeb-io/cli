@@ -63,7 +63,7 @@ Account-less links for uploads into your vault; crypto via core's `file_request`
 
 `bb update` — explicit check/install of the latest CLI release; bypasses the automatic-check cooldown and `BB_NO_UPDATE`, while automatic startup updates keep honoring that opt-out; Homebrew/Scoop installs stay package-manager managed.
 
-`bb speedtest` / `bb repair [--dry-run]` (re-encrypt legacy binary-UUID derivation files as a new version of the same file id; never trashes the original) / `bb completions <shell>`.
+`bb speedtest` (speeds in Mbps through `ui::human_speed_network`, the CLI's one speed rule since task 2333: decimal, one decimal, never rescaled to Gbps, so `1200.0 Mbps` where it printed `1.2 Gbps`) / `bb repair [--dry-run]` (re-encrypt legacy binary-UUID derivation files as a new version of the same file id; never trashes the original) / `bb completions <shell>`.
 
 ## Upload pipeline (`src/upload.rs`)
 

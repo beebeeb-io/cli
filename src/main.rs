@@ -30,6 +30,7 @@ mod shared_folder_index;
 mod sync_safety;
 mod thumbnail;
 mod transfer_stats;
+mod transfer_view;
 mod transport;
 mod tui;
 mod ui;

@@ -239,25 +239,21 @@ pub fn human_speed(bytes_per_sec: f64) -> String {
     }
 }
 
-/// Format bytes-per-second as a network speed in bits: "515.2 Mbps".
-/// Use for network upload/download where Mbps (megabits) is conventional.
+/// Format bytes-per-second as a network speed: "515.2 Mbps".
+///
+/// The one Mbps rule for every speed the CLI prints (task 2333, spec §5, PR #554 D9): megabits per
+/// second, decimal (10^6 bit/s), one decimal, never rescaled to Kbps or Gbps, so a live number
+/// never jumps between units and `bb speedtest` and `bb push` agree. Above 0 and under 0.05 Mbps it
+/// reads `<0.1 Mbps`; zero, negative or not a number reads `—`.
 pub fn human_speed_network(bytes_per_sec: f64) -> String {
-    if bytes_per_sec <= 0.0 {
+    if !(bytes_per_sec.is_finite() && bytes_per_sec > 0.0) {
         return "\u{2014}".to_string(); // —
     }
-    let bits = bytes_per_sec * 8.0;
-    const KBIT: f64 = 1_000.0;
-    const MBIT: f64 = 1_000_000.0;
-    const GBIT: f64 = 1_000_000_000.0;
-    if bits < KBIT {
-        format!("{:.0} bps", bits)
-    } else if bits < MBIT {
-        format!("{:.1} Kbps", bits / KBIT)
-    } else if bits < GBIT {
-        format!("{:.1} Mbps", bits / MBIT)
-    } else {
-        format!("{:.1} Gbps", bits / GBIT)
+    let mbps = bytes_per_sec * 8.0 / 1_000_000.0;
+    if mbps < 0.05 {
+        return "<0.1 Mbps".to_string();
     }
+    format!("{mbps:.1} Mbps")
 }
 
 // ── Progress bars ────────────────────────────────────────────────────────────
