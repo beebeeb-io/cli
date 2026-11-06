@@ -32,6 +32,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::api::ApiClient;
+use crate::backup_guard::BackupDepths;
 use crate::owned_keys::OwnedKeyResolver;
 
 /// What a push does with an implicitly found folder that is shared on its own.
@@ -286,10 +287,13 @@ pub(crate) struct PushFolders<'a> {
     shared_reused: Option<Uuid>,
     /// `--reuse-shared` with share lists that could not be read: said once.
     share_failure_said: bool,
+    /// Where the folders this push listed or made are relative to the Backups tree (LD-0113), learnt from those
+    /// same listings and creates, so the rule reads no folder this push already knows.
+    depths: BackupDepths,
 }
 
 impl<'a> PushFolders<'a> {
-    pub fn new(api: &'a ApiClient, master_key: &'a MasterKey, shared: SharedReuse) -> Self {
+    pub fn new(api: &'a ApiClient, master_key: &'a MasterKey, shared: SharedReuse, depths: BackupDepths) -> Self {
         Self {
             api,
             master_key,
@@ -300,7 +304,18 @@ impl<'a> PushFolders<'a> {
             shares: None,
             shared_reused: None,
             share_failure_said: false,
+            depths,
         }
+    }
+
+    /// The Backups depths this push knows so far, for the rule's check.
+    pub fn backup_depths(&mut self) -> &mut BackupDepths {
+        &mut self.depths
+    }
+
+    /// The Backups depths this push learnt, for the rest of the command.
+    pub fn into_backup_depths(self) -> BackupDepths {
+        self.depths
     }
 
     /// The folder named `name` in `parent` that a push of a local folder writes into, found implicitly. `shown`
@@ -436,6 +451,9 @@ impl<'a> PushFolders<'a> {
             .get("files")
             .and_then(Value::as_array)
             .ok_or("invalid file listing response")?;
+        for row in rows {
+            self.depths.listed(parent_text.as_deref(), row);
+        }
         Ok(ParentFolders::read(&mut self.keys, self.api, self.master_key, rows).await)
     }
 
@@ -467,6 +485,8 @@ impl<'a> PushFolders<'a> {
     async fn create(&mut self, parent: Option<Uuid>, name: &str) -> Result<Uuid, String> {
         // L13 (SF-0001): the client's own id, echoed unchanged by the answer.
         let id = crate::item_id::create_owned_folder(self.api, self.master_key, name, parent).await?;
+        self.depths
+            .created(&id.to_string(), parent.map(|p| p.to_string()).as_deref());
         self.created.insert(id);
         Ok(id)
     }

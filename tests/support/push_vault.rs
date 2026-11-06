@@ -75,6 +75,8 @@ pub struct Vault {
     pub listing_share_count: bool,
     /// `GET /files/{id}` answers this status instead.
     pub file_status: Option<u16>,
+    /// `GET /files/{id}` answers this status for these ids only.
+    pub file_status_for: HashMap<String, u16>,
     /// `GET /files` listings, by `parent_id` (`None` = the root).
     pub listings: HashMap<Option<String>, usize>,
     /// `GET /shares/invites/sent` requests.
@@ -379,7 +381,7 @@ pub async fn start_mock(vault: Shared) -> String {
             get(|State(v): State<Shared>, UrlPath(id): UrlPath<String>| async move {
                 let mut v = v.lock().unwrap();
                 *v.file_reads.entry(id.clone()).or_default() += 1;
-                if let Some(code) = v.file_status {
+                if let Some(code) = v.file_status.or_else(|| v.file_status_for.get(&id).copied()) {
                     return err(StatusCode::from_u16(code).unwrap(), "failed by mock");
                 }
                 match v.items.get(&id) {

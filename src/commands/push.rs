@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use zeroize::Zeroizing;
 
 use crate::api::ApiClient;
+use crate::backup_guard::BackupDepths;
 use crate::commands::push_report::{self, FilePlan};
 use crate::config::load_config;
 use crate::transfer_stats::FileEnd;
@@ -176,17 +177,19 @@ pub async fn run(
     };
     check_quota(&api, upload_size).await?;
 
+    // LD-0113: where each folder this command meets is relative to the Backups tree, read at most once.
+    let mut depths = BackupDepths::default();
     let parent_id = match (parent_id, folder) {
         (Some(parent_id), None) => Some(parent_id),
-        (None, Some(folder)) => Some(resolve_upload_folder(&api, &folder).await?),
+        (None, Some(folder)) => Some(resolve_upload_folder(&api, &folder, &mut depths).await?),
         (None, None) => None,
         (Some(_), Some(_)) => return Err("use either --parent or --folder, not both".to_string()),
     };
     // LD-0113: nothing new goes into the Backups tree (core's app rule).
-    crate::backup_guard::check_create_in(&api, parent_id.as_deref()).await?;
+    depths.check_create_in(&api, parent_id.as_deref()).await?;
 
     if path.is_dir() {
-        return push_directory(&api, &path, parent_id, strategy, shared, verbose).await;
+        return push_directory(&api, &path, parent_id, depths, strategy, shared, verbose).await;
     }
 
     // ── Resolve line (single file) ──────────────────────────────────────────
@@ -262,7 +265,8 @@ pub async fn run(
     Ok(())
 }
 
-async fn resolve_upload_folder(api: &ApiClient, folder: &str) -> Result<String, String> {
+/// The folder `--folder` names; `depths` learns where the folders it lists or makes are (LD-0113).
+async fn resolve_upload_folder(api: &ApiClient, folder: &str, depths: &mut BackupDepths) -> Result<String, String> {
     if folder.trim().is_empty() {
         return Err("--folder must not be empty".to_string());
     }
@@ -279,8 +283,11 @@ async fn resolve_upload_folder(api: &ApiClient, folder: &str) -> Result<String, 
         api,
         &master_key,
         crate::commands::push_folders::SharedReuse::Allow,
+        std::mem::take(depths),
     );
-    Ok(folders.named(folder).await?.to_string())
+    let found = folders.named(folder).await?;
+    *depths = folders.into_backup_depths();
+    Ok(found.to_string())
 }
 
 /// Result data from a single file upload, used for summary + JSON output.
@@ -649,6 +656,7 @@ async fn push_directory(
     api: &ApiClient,
     dir_path: &std::path::Path,
     parent_id: Option<String>,
+    depths: BackupDepths,
     strategy: ConflictStrategy,
     shared: crate::commands::push_folders::SharedReuse,
     verbose: bool,
@@ -685,7 +693,7 @@ async fn push_directory(
 
     // Task 2334: a re-push writes into the folder of this name already there (at every level below too),
     // never into a second one; one it finds that is shared on its own needs a yes first (`push_folders`).
-    let mut folders = crate::commands::push_folders::PushFolders::new(api, &master_key, shared);
+    let mut folders = crate::commands::push_folders::PushFolders::new(api, &master_key, shared, depths);
     // A local name that is not UTF-8 is stored as "folder" (as before): it gets a new folder and never matches
     // an unrelated existing one.
     let root_id = match dir_path.file_name().and_then(|n| n.to_str()) {
@@ -693,7 +701,9 @@ async fn push_directory(
         None => folders.new_folder(parent_uuid, &dir_name).await?,
     };
     // LD-0113: a folder named like the Backups root at the vault root is reused above; it takes nothing new.
-    crate::backup_guard::check_create_in(api, Some(&root_id.to_string())).await?;
+    // Found in the listing just read, or made just now: known, so this reads nothing.
+    let root_text = root_id.to_string();
+    folders.backup_depths().check_create_in(api, Some(&root_text)).await?;
 
     let mut folder_map: std::collections::HashMap<PathBuf, uuid::Uuid> = std::collections::HashMap::new();
     folder_map.insert(dir_path.to_path_buf(), root_id);

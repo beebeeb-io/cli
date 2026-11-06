@@ -17,6 +17,7 @@
 use beebeeb_core::backup::{BackupPosition, Mutation, check_app_mutation};
 use beebeeb_types::backup::{PROTECTED_FOLDER_ERROR, SystemRole};
 use serde_json::Value;
+use std::collections::HashMap;
 
 use crate::api::{ApiClient, ApiError};
 
@@ -80,37 +81,94 @@ pub(crate) fn server_refusal(e: ApiError, m: Mutation) -> String {
 /// The depth below the flagged root of the row `id`, read through its parents
 /// (`GET /files/{id}`, one per level). `None`: the row is not in the tree.
 pub(crate) async fn depth_of(api: &ApiClient, id: &str) -> Result<Option<usize>, String> {
-    let mut current = id.to_string();
-    for steps in 0..MAX_ANCESTORS {
-        let row = match api.get_file(current.as_str()).await {
-            Ok(row) => row,
-            // Above a folder shared with this account sits the sharer's own
-            // folder, which this account cannot read: the shared tree is not
-            // this account's Backups tree (its root has no parent).
-            Err(e) if steps > 0 && matches!(e.status, 403 | 404) => return Ok(None),
-            Err(e) => return Err(e.message),
-        };
-        if is_backups_root(&row) {
-            return Ok(Some(steps));
-        }
-        match row.get("parent_id").and_then(Value::as_str) {
-            Some(parent) => current = parent.to_string(),
-            None => return Ok(None),
-        }
-    }
-    Err("cannot tell where this item is: its folders are nested too deeply".to_string())
+    BackupDepths::default().depth_of(api, id).await
 }
 
-/// Refuse a new item in folder `parent` (`None`: the vault root) when it is in
-/// the Backups tree.
-pub(crate) async fn check_create_in(api: &ApiClient, parent: Option<&str>) -> Result<(), String> {
-    let Some(parent) = parent else {
-        return Ok(());
-    };
-    // A parent is a folder, so at depth 2 it is a category folder, never a
-    // manifest: the name is not needed.
-    let depth = depth_of(api, parent).await?;
-    check(BackupPosition::at_depth(depth, ""), Mutation::Create)
+/// The depths below the flagged root that one command already knows, so a `bb push` reads each folder at most
+/// once and the folders it listed or made not at all. A folder's depth follows from its parent's: a row listed
+/// in a folder of known depth, or a folder made in one, needs no read (the vault root is outside the tree).
+#[derive(Debug, Default)]
+pub(crate) struct BackupDepths {
+    /// By id, in the server's form (`None`: outside the tree).
+    known: HashMap<String, Option<usize>>,
+}
+
+impl BackupDepths {
+    /// `row`, as the listing of `parent` showed it (`None`: the vault root).
+    pub(crate) fn listed(&mut self, parent: Option<&str>, row: &Value) {
+        if let (Some(id), Some(parent_depth)) = (row.get("id").and_then(Value::as_str), self.known(parent)) {
+            self.known.insert(canonical(id), child_depth(parent_depth, row));
+        }
+    }
+
+    /// The folder `id` this command made in `parent` (`None`: the vault root).
+    pub(crate) fn created(&mut self, id: &str, parent: Option<&str>) {
+        if let Some(parent_depth) = self.known(parent) {
+            self.known.insert(canonical(id), parent_depth.map(|d| d + 1));
+        }
+    }
+
+    fn known(&self, id: Option<&str>) -> Option<Option<usize>> {
+        match id {
+            None => Some(None),
+            Some(id) => self.known.get(&canonical(id)).copied(),
+        }
+    }
+
+    /// [`depth_of`], reading only the folders whose depth is not known yet, and keeping every depth it learns.
+    pub(crate) async fn depth_of(&mut self, api: &ApiClient, id: &str) -> Result<Option<usize>, String> {
+        // The rows read, each the parent of the one before: their depths follow from where the walk ends.
+        let mut below: Vec<String> = Vec::new();
+        let mut current = canonical(id);
+        let mut depth = loop {
+            if let Some(depth) = self.known.get(&current) {
+                break *depth;
+            }
+            if below.len() == MAX_ANCESTORS {
+                return Err("cannot tell where this item is: its folders are nested too deeply".to_string());
+            }
+            let row = match api.get_file(current.as_str()).await {
+                Ok(row) => row,
+                // Above a folder shared with this account sits the sharer's own
+                // folder, which this account cannot read: the shared tree is not
+                // this account's Backups tree (its root has no parent).
+                Err(e) if !below.is_empty() && matches!(e.status, 403 | 404) => break None,
+                Err(e) => return Err(e.message),
+            };
+            if is_backups_root(&row) {
+                break Some(0);
+            }
+            match row.get("parent_id").and_then(Value::as_str) {
+                Some(parent) => below.push(std::mem::replace(&mut current, canonical(parent))),
+                None => break None,
+            }
+        };
+        self.known.insert(current, depth);
+        while let Some(child) = below.pop() {
+            depth = depth.map(|d| d + 1);
+            self.known.insert(child, depth);
+        }
+        Ok(depth)
+    }
+
+    /// Refuse a new item in folder `parent` (`None`: the vault root) when it is in the Backups tree, or when
+    /// where `parent` is cannot be told (fail closed).
+    pub(crate) async fn check_create_in(&mut self, api: &ApiClient, parent: Option<&str>) -> Result<(), String> {
+        let Some(parent) = parent else {
+            return Ok(());
+        };
+        let depth = self.depth_of(api, parent).await.map_err(|e| {
+            format!("could not check whether the destination folder is inside Backups, so the push stops: {e}")
+        })?;
+        // A parent is a folder, so at depth 2 it is a category folder, never a
+        // manifest: the name is not needed.
+        check(BackupPosition::at_depth(depth, ""), Mutation::Create)
+    }
+}
+
+/// One spelling per id (a user's `--parent` may differ in case from the server's rows).
+fn canonical(id: &str) -> String {
+    uuid::Uuid::parse_str(id).map_or_else(|_| id.to_string(), |u| u.to_string())
 }
 
 /// The most folders [`count_items`] lists before it reports a lower bound.

@@ -305,3 +305,67 @@ async fn a_folder_shared_with_me_whose_parent_i_cannot_read_is_outside_the_tree(
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert_eq!(vault.lock().unwrap().inits, 1);
 }
+
+/// Fail closed: when the CLI cannot read the folders above the destination, it cannot tell whether the
+/// destination is in the Backups tree, so the push stops with that reason and sends nothing (a 5xx is not a
+/// share boundary, unlike the 403/404 above a folder shared with this account).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_push_whose_destination_cannot_be_placed_is_refused_and_uploads_nothing() {
+    let (vault, api, home, _) = vault_with_backups().await;
+    let docs = the_folder(&vault.lock().unwrap(), None, "Docs");
+    let inner = seed_folder(&vault, Some(&docs), "Inner");
+    vault.lock().unwrap().file_status_for.insert(docs.clone(), 503);
+    write_file(&home, "note.txt", b"note");
+    write_file(&home, "photos/a.jpg", b"a");
+
+    for (what, dest) in [("the destination", &docs), ("the destination's parent", &inner)] {
+        for local in ["note.txt", "photos"] {
+            let out = bb(&home, &["--api", &api, "push", local, "--parent", dest]).await;
+            let err = stderr(&out);
+            assert_eq!(out.status.code(), Some(1), "{what} unreadable, {local}: {err}");
+            assert!(
+                err.contains(
+                    "error: could not check whether the destination folder is inside Backups, so the push stops: \
+                     failed by mock"
+                ),
+                "{what} unreadable, {local}: {err}"
+            );
+        }
+    }
+    let v = vault.lock().unwrap();
+    assert_eq!((v.inits, v.folder_creates), (0, 0), "nothing uploaded, no folder made");
+}
+
+/// The rule reads only what the push does not already know: nothing for a folder found in a listing the push
+/// read or made by the push itself, and each folder above a `--parent` once per run. `--json`: the owner-only
+/// notice, which reads the destination's folders after the upload, is left out, so every read counted is the rule's.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_backups_check_reads_each_unknown_folder_once_and_known_ones_never() {
+    let (vault, api, home, _) = vault_with_backups().await;
+    let docs = the_folder(&vault.lock().unwrap(), None, "Docs");
+    let inner = seed_folder(&vault, Some(&docs), "Inner");
+    write_file(&home, "photos/a.jpg", b"a");
+    write_file(&home, "photos/2026/b.jpg", b"b");
+
+    for args in [
+        vec!["--json", "push", "photos"],
+        vec!["--json", "push", "photos", "--folder", "Docs"],
+        vec!["--json", "push", "photos", "--folder", "New"],
+    ] {
+        vault.lock().unwrap().file_reads.clear();
+        let out = bb(&home, &[&["--api", api.as_str()][..], &args[..]].concat()).await;
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {}", stderr(&out));
+        let reads = vault.lock().unwrap().file_reads.clone();
+        assert!(reads.is_empty(), "{args:?}: no folder row read, got {reads:?}");
+    }
+
+    vault.lock().unwrap().file_reads.clear();
+    let out = bb(&home, &["--api", &api, "--json", "push", "photos", "--parent", &inner]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let reads = vault.lock().unwrap().file_reads.clone();
+    assert_eq!(
+        reads,
+        HashMap::from([(inner.clone(), 1), (docs.clone(), 1)]),
+        "Inner and Docs read once each, nothing below them"
+    );
+}
