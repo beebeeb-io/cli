@@ -314,8 +314,10 @@ impl ApiClient {
 pub(crate) enum UploadCall<T> {
     /// A good answer, validated by core.
     Ok(T),
-    /// The classifier's verdict on a failure. A 2xx whose body broke the contract is `ApiForThisFile`.
-    Failed(dt::Outcome),
+    /// The classifier's verdict on a failure, and the HTTP status it was given (0: no answer). A 2xx whose
+    /// body broke the contract is `ApiForThisFile`. The status is what the pause (`api::pause`) reads: core's
+    /// outcome does not keep it (a 429 and a 5xx with a stated wait are one `Backoff`).
+    Failed { outcome: dt::Outcome, status: u16 },
     /// The upload session is gone (a JSON 404, or a 400 "not writable: expired"): the caller's own
     /// session recovery re-inits it, exactly as for a proxy chunk PUT.
     SessionGone(String),
@@ -354,7 +356,10 @@ impl ApiClient {
                 Ok(grant) => UploadCall::Ok(grant),
                 // The answer broke the contract (a link to a host nobody listed, a header we must not
                 // send): this session cannot go direct.
-                Err(_) => UploadCall::Failed(dt::Outcome::ApiForThisFile),
+                Err(_) => UploadCall::Failed {
+                    outcome: dt::Outcome::ApiForThisFile,
+                    status: seen.answer.status,
+                },
             },
             other => failed_upload_call(&seen, other),
         }
@@ -377,7 +382,10 @@ impl ApiClient {
         match dt::classify(dt::Call::UploadCommit, &seen.answer) {
             dt::Outcome::Proceed => match dt::UploadCommitted::from_answer(&seen.body, index, size) {
                 Ok(done) => UploadCall::Ok(done),
-                Err(_) => UploadCall::Failed(dt::Outcome::ApiForThisFile),
+                Err(_) => UploadCall::Failed {
+                    outcome: dt::Outcome::ApiForThisFile,
+                    status: seen.answer.status,
+                },
             },
             other => failed_upload_call(&seen, other),
         }
@@ -430,7 +438,10 @@ pub(super) fn failed_upload_call<T>(seen: &Seen, outcome: dt::Outcome) -> Upload
     if upload_session_gone(seen) {
         return UploadCall::SessionGone(format!("upload session is gone (HTTP {})", seen.answer.status));
     }
-    UploadCall::Failed(outcome)
+    UploadCall::Failed {
+        outcome,
+        status: seen.answer.status,
+    }
 }
 
 #[cfg(test)]

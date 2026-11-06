@@ -273,6 +273,9 @@ async fn pool_label_from_init_and_complete() {
 /// never past it; once the run's sink is done, such a line goes straight to stderr again.
 #[tokio::test]
 async fn rate_limit_pause_prints_through_the_live_sink() {
+    let _notices = crate::transfer_view::notice::TEST_SINK_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let s = Scratch::new("2333-pause-line");
     let (path, _, _) = s.file(9 * MIB);
     let mut mock = Mock::default();

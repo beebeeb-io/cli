@@ -20,6 +20,11 @@ fn slot() -> MutexGuard<'static, Option<Weak<dyn Notices>>> {
     LIVE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Test-only: the notice slot ([`register`]) is process-global, so a test that asserts what a sink recorded must
+/// hold this while it is the registered one, or a sibling test's sink steals or clears the registration.
+#[cfg(test)]
+pub(crate) static TEST_SINK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Print `line` on stderr, around the live lines when a sink is drawing them.
 pub(crate) fn stderr(line: &str) {
     let live = slot().as_ref().and_then(Weak::upgrade);

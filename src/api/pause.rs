@@ -47,9 +47,11 @@ struct Gate {
 
 static GATES: LazyLock<Mutex<HashMap<String, Gate>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Every entry keys by [`origin_of`], so an API base (with or without a trailing slash) and a request URL under
+/// it name one gate.
 fn with_gate<T>(origin: &str, f: impl FnOnce(&mut Gate) -> T) -> T {
     let mut gates = GATES.lock().unwrap_or_else(|e| e.into_inner());
-    f(gates.entry(origin.to_string()).or_default())
+    f(gates.entry(origin_of(origin)).or_default())
 }
 
 /// The gate key of a URL: its origin, so an API base and every request URL under it name one gate.
@@ -136,5 +138,19 @@ pub(crate) fn pauses(origin: &str) -> u32 {
     with_gate(origin, |gate| gate.pauses)
 }
 
+/// The reason a chunk-route answer pauses the process (spec §6.1), by its status: a 429 (any route) or a 503
+/// (the chunk routes). `None`: the answer is the caller's own to retry or fail.
+pub(crate) fn reason_for(status: u16) -> Option<PauseReason> {
+    match status {
+        429 => Some(PauseReason::RateLimited { remaining: None }),
+        503 => Some(PauseReason::Busy503),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests;
+
+/// The pause through the real requests, against the loopback mock.
+#[cfg(test)]
+mod requests_tests;

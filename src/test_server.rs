@@ -118,8 +118,15 @@ pub struct Mock {
     /// Task 2333: the FIRST PUT of each of these indexes answers 429 with
     /// `Retry-After: 0` (a transient refusal the client retries).
     pub chunk_rate_limited_once: HashSet<u32>,
-    /// `--parallel` Task 1: the `Retry-After` of those 429s, in seconds (0 unless a test needs a real pause).
-    pub rate_limit_retry_after: u64,
+    /// `--parallel`: the `Retry-After` (seconds) of every 429 and 503 the mock answers (0 unless a test needs a
+    /// real pause).
+    pub retry_after_secs: u64,
+    /// `--parallel` Task 4: the FIRST PUT of each of these indexes answers 503 (the storage pool is briefly
+    /// unavailable), with `retry_after_secs`.
+    pub chunk_busy_once: HashSet<u32>,
+    /// `--parallel` Task 4: the first `GET /files/{id}` answers 429 with `retry_after_secs` (an unpaced
+    /// caller meeting a rate limit).
+    pub file_rate_limited_once: bool,
     /// `--parallel` Task 1: when set, every request the mock answers is logged here, in order (the recorder
     /// buffers each body, so a test that aborts a body must not set it).
     pub requests: Option<RequestLog>,
@@ -227,8 +234,16 @@ fn router(state: Shared) -> Router {
                     if m.chunk_rate_limited_once.remove(&idx) {
                         return (
                             StatusCode::TOO_MANY_REQUESTS,
-                            [("retry-after", m.rate_limit_retry_after.to_string())],
+                            [("retry-after", m.retry_after_secs.to_string())],
                             Json(json!({ "error": "rate_limited" })),
+                        )
+                            .into_response();
+                    }
+                    if m.chunk_busy_once.remove(&idx) {
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            [("retry-after", m.retry_after_secs.to_string())],
+                            Json(json!({ "error": "storage_unavailable" })),
                         )
                             .into_response();
                     }
@@ -329,7 +344,15 @@ fn router(state: Shared) -> Router {
         .route(
             "/api/v1/files/:id",
             get(|State(st): State<Shared>, Path(fid): Path<String>| async move {
-                let m = st.lock().unwrap();
+                let mut m = st.lock().unwrap();
+                if std::mem::take(&mut m.file_rate_limited_once) {
+                    return (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        [("retry-after", m.retry_after_secs.to_string())],
+                        Json(json!({ "error": "rate_limited" })),
+                    )
+                        .into_response();
+                }
                 if let Some(code) = m.file_status {
                     let status = StatusCode::from_u16(code).unwrap();
                     return (status, Json(json!({ "error": "failed by mock" }))).into_response();
@@ -383,6 +406,9 @@ pub struct LoggedRequest {
     /// The path with every id replaced by what it is (`{session}`, `{file}`, `{id}`); never a query string.
     pub path: String,
     pub status: u16,
+    /// When the request arrived, in milliseconds since the log was made (the pause tests read it; a golden
+    /// line does not carry it).
+    pub at_ms: u64,
     /// `None` for the init: its body carries the sealed name, whose JSON array encoding varies in length with
     /// the nonce's digits (core `seal_name_envelope`), so there is nothing stable to pin.
     pub body_len: Option<u64>,
@@ -397,12 +423,29 @@ impl LoggedRequest {
 }
 
 /// The requests a mock answered, in the order they were answered.
-#[derive(Clone, Default)]
-pub struct RequestLog(Arc<Mutex<Vec<LoggedRequest>>>);
+#[derive(Clone)]
+pub struct RequestLog {
+    entries: Arc<Mutex<Vec<LoggedRequest>>>,
+    made: std::time::Instant,
+}
+
+impl Default for RequestLog {
+    fn default() -> Self {
+        Self {
+            entries: Arc::new(Mutex::new(Vec::new())),
+            made: std::time::Instant::now(),
+        }
+    }
+}
 
 impl RequestLog {
     pub fn entries(&self) -> Vec<LoggedRequest> {
-        self.0.lock().unwrap().clone()
+        self.entries.lock().unwrap().clone()
+    }
+
+    /// Milliseconds since the log was made: the clock `at_ms` is on.
+    pub fn now_ms(&self) -> u64 {
+        self.made.elapsed().as_millis() as u64
     }
 
     pub fn lines(&self) -> Vec<String> {
@@ -444,6 +487,7 @@ async fn record(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
+    let at_ms = log.now_ms();
     let (parts, body) = request.into_parts();
     let method = parts.method.to_string();
     let path = placeholders(parts.uri.path());
@@ -452,10 +496,11 @@ async fn record(
     let response = next
         .run(axum::extract::Request::from_parts(parts, Body::from(bytes)))
         .await;
-    log.0.lock().unwrap().push(LoggedRequest {
+    log.entries.lock().unwrap().push(LoggedRequest {
         method,
         path,
         status: response.status().as_u16(),
+        at_ms,
         body_len,
     });
     response

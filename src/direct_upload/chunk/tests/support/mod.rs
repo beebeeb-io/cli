@@ -3,6 +3,7 @@ mod direct_session;
 mod fallback;
 mod hold;
 mod live_stats;
+mod pause;
 mod request_log;
 mod resume;
 mod retry;

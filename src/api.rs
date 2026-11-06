@@ -302,6 +302,13 @@ fn build_client(timeout: std::time::Duration) -> Client {
         .unwrap_or_else(|_| Client::new())
 }
 
+impl ApiClient {
+    /// The key of this API's pause gate (`api::pause`): its base URL, normalised to an origin by the gate.
+    pub(crate) fn pause_origin(&self) -> &str {
+        &self.base_url
+    }
+}
+
 mod client;
 mod id;
 pub(crate) mod pause;

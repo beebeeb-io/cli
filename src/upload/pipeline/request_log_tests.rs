@@ -115,9 +115,12 @@ async fn parallel_1_matches_main_request_log_api_large() {
 async fn parallel_1_matches_main_request_log_api_429() {
     let s = Scratch::new("golden-api-429");
     let (path, _, _) = s.file(SMALL as usize);
+    let _notices = crate::transfer_view::notice::TEST_SINK_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let mut mock = Mock::default();
     mock.chunk_rate_limited_once.insert(1);
-    mock.rate_limit_retry_after = 1;
+    mock.retry_after_secs = 1;
     colored::control::set_override(false);
     let (live, record) = LiveProgress::for_test(Direction::Upload, Level::Default, 80, Arc::new(AtomicU64::new(0)));
     live.register_notices_for_test();
@@ -126,10 +129,12 @@ async fn parallel_1_matches_main_request_log_api_429() {
 
     let _ = live.summary();
     let printed = record.lock().unwrap().clone();
-    let pauses: Vec<&String> = printed.iter().filter(|l| l.contains("pausing")).collect();
-    assert_eq!(
-        pauses,
-        ["err:  \u{23F8} rate limited \u{2014} pausing 1s"],
+    // The lock keeps the other capturing test off the slot, but a non-capturing test's 429/503 may still print
+    // into this sink under the parallel suite, so assert today's line is PRESENT, not that it is the only line.
+    assert!(
+        printed
+            .iter()
+            .any(|l| l == "err:  \u{23F8} rate limited \u{2014} pausing 1s"),
         "today's 429 line, through the sink, on stderr: {printed:?}"
     );
     check_golden("push_parallel1_api_429", &log);

@@ -10,6 +10,7 @@
 //! against a scripted API and a storage server.
 
 use super::*;
+use crate::api::pause;
 
 /// How often a waiting chunk looks at the shutdown flag.
 pub(super) const WAIT_SLICE: Duration = Duration::from_millis(250);
@@ -51,7 +52,8 @@ pub(crate) async fn upload_chunk(
         if shutdown.load(Ordering::Relaxed) {
             return Err(DirectUploadError::Interrupted);
         }
-        let failure = match call {
+        // The failure core's policy answers, and the HTTP status behind it (what decides a shared pause).
+        let (failure, status) = match call {
             dt::Call::UploadGrant => match api.upload_grant(session.as_str(), index, size, discovery).await {
                 UploadCall::Ok(dt::UploadGrant::Skipped) => {
                     return Ok(if put_stored {
@@ -68,14 +70,14 @@ pub(crate) async fn upload_chunk(
                         call = dt::Call::UploadCommit;
                         continue;
                     }
-                    dt::UploadFailure::Put { status }
+                    (dt::UploadFailure::Put { status }, status)
                 }
-                UploadCall::Failed(outcome) => dt::UploadFailure::Grant(outcome),
+                UploadCall::Failed { outcome, status } => (dt::UploadFailure::Grant(outcome), status),
                 UploadCall::SessionGone(message) => return Err(DirectUploadError::SessionGone(message)),
             },
             dt::Call::UploadCommit => match api.upload_commit(session.as_str(), index, size).await {
                 UploadCall::Ok(_) => return Ok(Held::Transferred),
-                UploadCall::Failed(outcome) => dt::UploadFailure::Commit(outcome),
+                UploadCall::Failed { outcome, status } => (dt::UploadFailure::Commit(outcome), status),
                 UploadCall::SessionGone(message) => return Err(DirectUploadError::SessionGone(message)),
             },
             // The policy only ever names these two calls.
@@ -84,7 +86,18 @@ pub(crate) async fn upload_chunk(
         match state.failed(&failure) {
             dt::UploadNext::Retry { after, call: next } => {
                 prog.chunk_retried(index);
-                if !wait(after, shutdown).await {
+                // A 429 (any route) or a 503 (grant, storage PUT, commit) pauses every request of the process
+                // for the wait the policy ordered (spec §6.1), and the wait ends with the push's interrupt. Any
+                // other failure keeps this chunk's own jittered wait, so chunks that fail together do not retry
+                // together. Either way the try is spent: the policy's bounds hold.
+                let went_on = match pause::reason_for(status) {
+                    Some(why) => {
+                        pause::extend(api.pause_origin(), after, why);
+                        pause::wait_open(api.pause_origin()).await
+                    }
+                    None => wait(after, shutdown).await,
+                };
+                if !went_on {
                     return Err(DirectUploadError::Interrupted);
                 }
                 call = next;
