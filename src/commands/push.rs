@@ -59,28 +59,44 @@ enum ConflictResolution {
 /// Uses the shared `crypto::decrypt_name` which handles all server formats
 /// (Rust EncryptedBlob, web-app base64 blob, plaintext) and both UUID key
 /// derivations (binary and string).
+///
+/// A listing that cannot be read is an error, never "no conflict" (task 2334:
+/// a re-pushed folder is reused, so a missed conflict would put a second file
+/// of the same name beside the first). A row without a readable id is skipped.
 pub(crate) async fn find_conflict(
     api: &ApiClient,
     master_key: &beebeeb_core::kdf::MasterKey,
     filename: &str,
     parent_uuid: Option<uuid::Uuid>,
-) -> Option<uuid::Uuid> {
-    let resp = api.check_conflict(parent_uuid).await.ok()?;
-    let files = resp.get("files")?.as_array()?;
+) -> Result<Option<uuid::Uuid>, String> {
+    let unreadable = |why: String| format!("could not check whether {filename} already exists: {why}");
+    let resp = api
+        .check_conflict(parent_uuid)
+        .await
+        .map_err(|e| unreadable(e.message))?;
+    let files = resp
+        .get("files")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| unreadable("the answer has no file list".to_string()))?;
 
     let mut keys = crate::owned_keys::OwnedKeyResolver::new();
     keys.seed(files);
     for file in files {
-        let id_str = file.get("id")?.as_str()?;
-        let file_uuid: uuid::Uuid = id_str.parse().ok()?;
+        let Some(file_uuid) = file
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|id| id.parse::<uuid::Uuid>().ok())
+        else {
+            continue;
+        };
         if let Ok(resolved) = keys.resolve(api, master_key, file).await {
             let decrypted = resolved.name;
             if decrypted == filename {
-                return Some(file_uuid);
+                return Ok(Some(file_uuid));
             }
         }
     }
-    None
+    Ok(None)
 }
 
 /// Is the same-named file `existing_id` this machine's own INTERRUPTED first
@@ -319,7 +335,7 @@ async fn push_single_file(
     // If found, ask the user (or apply the strategy flag) how to proceed.
     let mut mint_tag: Option<[u8; 32]> = None;
     let (file_id, upload_name, replace_file_id) = {
-        let existing = find_conflict(api, &master_key, &file_name, parent_uuid).await;
+        let existing = find_conflict(api, &master_key, &file_name, parent_uuid).await?;
         // Task 1950: with no explicit --replace / --keep-both, our own
         // interrupted upload of this very file is not a conflict: resume it.
         let resumes = match existing {
@@ -613,10 +629,31 @@ async fn push_directory(
     // Task 2334: a re-push writes into the folder of this name already there (at every level below too),
     // never into a second one; one it finds that is shared on its own needs a yes first (`push_folders`).
     let mut folders = crate::commands::push_folders::PushFolders::new(api, &master_key, shared);
-    let root_id = folders.child(parent_uuid, &dir_name, &dir_name).await?;
+    // A local name that is not UTF-8 is stored as "folder" (as before): it gets a new folder and never matches
+    // an unrelated existing one.
+    let root_id = match dir_path.file_name().and_then(|n| n.to_str()) {
+        Some(name) => folders.child(parent_uuid, name, &dir_name).await?,
+        None => folders.new_folder(parent_uuid, &dir_name).await?,
+    };
 
     let mut folder_map: std::collections::HashMap<PathBuf, uuid::Uuid> = std::collections::HashMap::new();
     folder_map.insert(dir_path.to_path_buf(), root_id);
+    // Every folder first, found or made (entries are in pre-order: a folder
+    // before what it holds), so a question or a refusal about a shared one
+    // comes before any file is uploaded (task 2334).
+    for (entry_path, _) in entries.iter().filter(|(_, is_dir)| *is_dir) {
+        let entry_parent = entry_path.parent().unwrap_or(dir_path);
+        let entry_parent_id = folder_map.get(entry_parent).copied().unwrap_or(root_id);
+        let shown = std::path::Path::new(&dir_name)
+            .join(entry_path.strip_prefix(dir_path).unwrap_or(entry_path))
+            .display()
+            .to_string();
+        let folder_id = match entry_path.file_name().and_then(|n| n.to_str()) {
+            Some(name) => folders.child(Some(entry_parent_id), name, &shown).await?,
+            None => folders.new_folder(Some(entry_parent_id), "folder").await?,
+        };
+        folder_map.insert(entry_path.clone(), folder_id);
+    }
 
     let total_start = std::time::Instant::now();
     let mut upload_results: Vec<UploadResult> = Vec::new();
@@ -628,14 +665,7 @@ async fn push_directory(
         let entry_parent_id = folder_map.get(entry_parent).copied().unwrap_or(root_id);
 
         if *is_dir {
-            let name = entry_path.file_name().and_then(|n| n.to_str()).unwrap_or("folder");
-            let shown = std::path::Path::new(&dir_name)
-                .join(entry_path.strip_prefix(dir_path).unwrap_or(entry_path))
-                .display()
-                .to_string();
-            let folder_id = folders.child(Some(entry_parent_id), name, &shown).await?;
-
-            folder_map.insert(entry_path.clone(), folder_id);
+            continue;
         } else {
             // One file failing (a server reject, a read error, a network blip)
             // must not abandon the rest of the folder: record it with its path,
@@ -752,10 +782,12 @@ async fn push_directory(
     // L15 = A (P2-11): a directory push into a shared folder says the owner-only
     // sentence ONCE for the command (the per-file line is suppressed here).
     if uploaded_count > 0 && !ui::is_json() {
-        // The folder the batch landed in decides. Since task 2334 that folder
-        // may be an existing, shared one; the walk up from it also finds a
-        // shared parent.
-        crate::owned_keys::announce_owner_only(api, &master_key, Some(&root_id.to_string())).await;
+        // The folder the batch landed IN decides; when the push is the folder
+        // itself, its parent is the shared one. Since task 2334 the push may
+        // also write into an existing folder shared on its own (after a yes or
+        // `--reuse-shared`, at any level): that one decides then.
+        let target = folders.shared_reused().or(parent_uuid).unwrap_or(root_id).to_string();
+        crate::owned_keys::announce_owner_only(api, &master_key, Some(&target)).await;
     }
     if !failures.is_empty() {
         let names: Vec<&str> = failures.iter().map(|(path, _)| path.as_str()).collect();

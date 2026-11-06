@@ -4,7 +4,8 @@
 //! making a second one. A name matches only when it decrypts, under this account's key, to the same bytes (the
 //! 1022 spec's rule for a client that mirrors a local tree); a plaintext name, which anyone with database access
 //! could have planted, never matches. When several folders of the name exist, the oldest is used (`created_at`,
-//! then the smallest id), so every run picks the same one, and one line says how many there are.
+//! then the smallest id), so every run picks the same one, and one line says how many there are; for a folder
+//! found implicitly, the oldest one that is not shared on its own comes first (a "no" below stays a no).
 //!
 //! A folder found IMPLICITLY (the pushed folder's own name, or one of its subfolders) is reused without a
 //! question only when it is not shared on its own. Before this, a push always made a new, private folder, so
@@ -41,14 +42,6 @@ pub(crate) struct Candidate {
     pub created_at: Option<DateTime<Utc>>,
     /// Active file-style links on the folder itself (the listing's `share_count`).
     pub share_count: u64,
-}
-
-/// The folder to reuse among same-name `candidates`: the oldest by `created_at`, then the smallest id. One
-/// without a creation time sorts after every one that has it.
-pub(crate) fn choose_existing_folder(candidates: &[Candidate]) -> Option<&Candidate> {
-    candidates
-        .iter()
-        .min_by_key(|c| (c.created_at.is_none(), c.created_at, c.id))
 }
 
 /// The folders in a listing whose name decrypts to exactly `wanted`. Rows that are not folders, are trashed,
@@ -182,6 +175,8 @@ pub(crate) struct PushFolders<'a> {
     shared: SharedReuse,
     created: HashSet<Uuid>,
     shares: Option<ShareIndex>,
+    /// The first folder reused although shared on its own (after a yes or `--reuse-shared`).
+    shared_reused: Option<Uuid>,
 }
 
 impl<'a> PushFolders<'a> {
@@ -192,31 +187,58 @@ impl<'a> PushFolders<'a> {
             shared,
             created: HashSet::new(),
             shares: None,
+            shared_reused: None,
         }
     }
 
     /// The folder named `name` in `parent` that a push of a local folder writes into, found implicitly. `shown`
     /// is how the folder is named to the user (its path relative to the push).
+    ///
+    /// Of several same-name folders the oldest that is not shared on its own is used: a "no" to a shared one
+    /// made a private one next to it, and the next run must write there without asking again. Only when every
+    /// one is shared is the oldest offered.
     pub async fn child(&mut self, parent: Option<Uuid>, name: &str, shown: &str) -> Result<Uuid, String> {
         if parent.is_some_and(|p| self.created.contains(&p)) {
             return self.create(parent, name).await;
         }
-        let Some(found) = self.find(parent, name, shown).await? else {
+        let candidates = self.find(parent, name, shown).await?;
+        let Some(oldest) = candidates.first().cloned() else {
             return self.create(parent, name).await;
         };
-        let exposure = self.exposure(&found).await?;
-        if !exposure.is_shared() {
-            return Ok(found.id);
-        }
         if self.shared == SharedReuse::Allow {
-            note(&format!(
-                "{shown} is shared with {}; uploading into it (--reuse-shared)",
-                exposure.describe()
-            ));
-            return Ok(found.id);
+            // The user chose to reuse it either way: who it is shared with is said when it can be read.
+            if let Ok(exposure) = self.exposure(&oldest, shown).await
+                && exposure.is_shared()
+            {
+                note(&format!(
+                    "{shown} is shared with {}; uploading into it (--reuse-shared)",
+                    exposure.describe()
+                ));
+                self.shared_reused.get_or_insert(oldest.id);
+            }
+            say_how_many(&candidates, shown, "the oldest");
+            return Ok(oldest.id);
         }
-        if ask_reuse_shared(shown, exposure)? {
-            return Ok(found.id);
+        let mut exposures = Vec::with_capacity(candidates.len());
+        for candidate in &candidates {
+            exposures.push(self.exposure(candidate, shown).await?);
+        }
+        if let Some(i) = exposures.iter().position(|e| !e.is_shared()) {
+            say_how_many(
+                &candidates,
+                shown,
+                if i == 0 {
+                    "the oldest"
+                } else {
+                    "the oldest one that is not shared"
+                },
+            );
+            return Ok(candidates[i].id);
+        }
+        say_how_many(&candidates, shown, "the oldest");
+        if ask_reuse_shared(shown, exposures[0])? {
+            self.shared_reused.get_or_insert(oldest.id);
+            return Ok(oldest.id);
         }
         let created = self.create(parent, name).await?;
         note(&format!("made a new folder {shown}; the shared one is left as it was"));
@@ -225,14 +247,29 @@ impl<'a> PushFolders<'a> {
 
     /// The root-level folder `--folder` names: the user's explicit choice, reused even when shared.
     pub async fn named(&mut self, name: &str) -> Result<Uuid, String> {
-        match self.find(None, name, name).await? {
-            Some(found) => Ok(found.id),
+        let candidates = self.find(None, name, name).await?;
+        match candidates.first() {
+            Some(oldest) => {
+                say_how_many(&candidates, name, "the oldest");
+                Ok(oldest.id)
+            }
             None => self.create(None, name).await,
         }
     }
 
-    /// The folder of this name to reuse in `parent`, if any.
-    async fn find(&self, parent: Option<Uuid>, name: &str, shown: &str) -> Result<Option<Candidate>, String> {
+    /// A new folder, never a lookup: for a local name that is not UTF-8, which the push stores under a stand-in
+    /// name that must not match (and merge into) an unrelated folder of that name.
+    pub async fn new_folder(&mut self, parent: Option<Uuid>, name: &str) -> Result<Uuid, String> {
+        self.create(parent, name).await
+    }
+
+    /// The first folder this push reused although it is shared on its own, if any.
+    pub fn shared_reused(&self) -> Option<Uuid> {
+        self.shared_reused
+    }
+
+    /// The folders of this name in `parent`, oldest first.
+    async fn find(&self, parent: Option<Uuid>, name: &str, shown: &str) -> Result<Vec<Candidate>, String> {
         let parent_text = parent.map(|p| p.to_string());
         let listing = self.api.list_files(parent_text.as_deref()).await?;
         if crate::sync_safety::listing_truncated(&listing) {
@@ -244,19 +281,12 @@ impl<'a> PushFolders<'a> {
             .get("files")
             .and_then(Value::as_array)
             .ok_or("invalid file listing response")?;
-        let candidates = same_name_folders(rows, self.master_key, name);
-        if candidates.len() > 1 {
-            note(&format!(
-                "{} folders named {shown} are here; using the oldest",
-                candidates.len()
-            ));
-        }
-        Ok(choose_existing_folder(&candidates).cloned())
+        Ok(oldest_first(same_name_folders(rows, self.master_key, name)))
     }
 
-    async fn exposure(&mut self, candidate: &Candidate) -> Result<Exposure, String> {
+    async fn exposure(&mut self, candidate: &Candidate, shown: &str) -> Result<Exposure, String> {
         if self.shares.is_none() {
-            let unknown = |e: crate::api::ApiError| format!("could not check whether the folder is shared: {e}");
+            let unknown = |e: crate::api::ApiError| format!("could not check whether {shown} is shared: {e}");
             let (invites, links) = tokio::join!(self.api.list_sent_invites(), self.api.list_folder_links());
             self.shares = Some(ShareIndex::from_answers(
                 &invites.map_err(unknown)?,
@@ -272,6 +302,23 @@ impl<'a> PushFolders<'a> {
         let id = crate::item_id::create_owned_folder(self.api, self.master_key, name, parent).await?;
         self.created.insert(id);
         Ok(id)
+    }
+}
+
+/// `candidates` in the order a push considers them: the oldest by `created_at`, then the smallest id. One
+/// without a creation time sorts after every one that has it.
+pub(crate) fn oldest_first(mut candidates: Vec<Candidate>) -> Vec<Candidate> {
+    candidates.sort_by_key(|c| (c.created_at.is_none(), c.created_at, c.id));
+    candidates
+}
+
+/// "2 folders named X are here; using the oldest", when there is more than one.
+fn say_how_many(candidates: &[Candidate], shown: &str, which: &str) {
+    if candidates.len() > 1 {
+        note(&format!(
+            "{} folders named {shown} are here; using {which}",
+            candidates.len()
+        ));
     }
 }
 
@@ -333,22 +380,26 @@ mod tests {
     }
 
     #[test]
-    fn the_oldest_same_name_folder_is_chosen_then_the_smallest_id() {
+    fn the_oldest_same_name_folder_comes_first_then_the_smallest_id() {
+        let first = |c: Vec<Candidate>| oldest_first(c).first().cloned();
         let newer = candidate(1, at("2026-11-06T10:00:00Z"));
         let older = candidate(9, at("2026-11-05T10:00:00+00:00"));
-        assert_eq!(choose_existing_folder(&[newer.clone(), older.clone()]), Some(&older));
-        assert_eq!(choose_existing_folder(&[older.clone(), newer.clone()]), Some(&older));
+        assert_eq!(first(vec![newer.clone(), older.clone()]), Some(older.clone()));
+        assert_eq!(first(vec![older.clone(), newer.clone()]), Some(older.clone()));
 
         // Equal times: the smallest id, whatever the listing order.
         let a = candidate(2, at("2026-11-05T10:00:00Z"));
         let b = candidate(3, at("2026-11-05T10:00:00.000Z"));
-        assert_eq!(choose_existing_folder(&[b.clone(), a.clone()]), Some(&a));
+        assert_eq!(first(vec![b.clone(), a.clone()]), Some(a.clone()));
 
         // No creation time sorts last.
         let unknown = candidate(0, None);
-        assert_eq!(choose_existing_folder(&[unknown.clone(), newer.clone()]), Some(&newer));
-        assert_eq!(choose_existing_folder(std::slice::from_ref(&unknown)), Some(&unknown));
-        assert_eq!(choose_existing_folder(&[]), None);
+        assert_eq!(
+            oldest_first(vec![unknown.clone(), newer.clone(), older.clone()]),
+            vec![older, newer, unknown.clone()]
+        );
+        assert_eq!(first(vec![unknown.clone()]), Some(unknown));
+        assert_eq!(first(vec![]), None);
     }
 
     /// A sealed folder row, as `bb mkdir` would make it.
