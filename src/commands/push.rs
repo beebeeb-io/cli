@@ -177,6 +177,8 @@ pub async fn run(
         (None, None) => None,
         (Some(_), Some(_)) => return Err("use either --parent or --folder, not both".to_string()),
     };
+    // LD-0113: nothing new goes into the Backups tree (core's app rule).
+    crate::backup_guard::check_create_in(&api, parent_id.as_deref()).await?;
 
     if path.is_dir() {
         return push_directory(&api, &path, parent_id, strategy, shared).await;
@@ -670,6 +672,8 @@ async fn push_directory(
         Some(name) => folders.child(parent_uuid, name, &dir_name).await?,
         None => folders.new_folder(parent_uuid, &dir_name).await?,
     };
+    // LD-0113: a folder named like the Backups root at the vault root is reused above; it takes nothing new.
+    crate::backup_guard::check_create_in(api, Some(&root_id.to_string())).await?;
 
     let mut folder_map: std::collections::HashMap<PathBuf, uuid::Uuid> = std::collections::HashMap::new();
     folder_map.insert(dir_path.to_path_buf(), root_id);

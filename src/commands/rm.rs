@@ -9,14 +9,22 @@
 //! server cascades the trashed flag to folder contents, so trashing a folder
 //! id trashes its whole subtree — no client-side walk. Renders the
 //! `{trashed, already_trashed, missing}` counts the endpoint returns.
+//!
+//! LD-0113: under the Backups root core's app rule decides first. The root
+//! and a device's manifest are refused with core's words; a device or
+//! category folder asks "Delete <device>'s backup?" with its item count
+//! (`--yes` answers it for scripts); a server `409 protected_folder` prints
+//! core's words too.
 
 use std::io::Write;
 
 use colored::Colorize;
 
+use beebeeb_core::backup::{BackupPosition, Mutation};
+
 use crate::api::ApiClient;
 use crate::commands::push::load_master_key;
-use crate::{colors, path, ui};
+use crate::{backup_guard, colors, path, ui};
 
 /// Server batch cap for `POST /files/trash`.
 const BULK_TRASH_BATCH: usize = 500;
@@ -25,6 +33,8 @@ struct Target {
     id: String,
     display: String,
     is_folder: bool,
+    /// LD-0113: where the row is in the Backups tree.
+    position: BackupPosition,
 }
 
 /// The three destructive-behaviour flags `bb rm` carries, grouped so the call
@@ -57,18 +67,25 @@ pub async fn run(targets: Vec<String>, options: RmOptions) -> Result<(), String>
     // (A trashed entry no longer resolves by path — permanently deleting one
     // means passing its UUID from `bb trash list`; active paths resolve normally.)
     let mut resolved: Vec<Target> = Vec::with_capacity(targets.len());
+    let mutation = if permanent {
+        Mutation::DeletePermanently
+    } else {
+        Mutation::Trash
+    };
     for t in &targets {
-        let (id, is_folder) = if uuid::Uuid::parse_str(t).is_ok() {
+        let (id, is_folder, position) = if uuid::Uuid::parse_str(t).is_ok() {
             let meta = api.get_file(t).await?;
-            (
-                t.clone(),
-                meta.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false),
-            )
+            let is_folder = meta.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
+            let position = position_by_id(&api, &master_key, t, &meta, is_folder).await?;
+            (t.clone(), is_folder, position)
         } else {
             let r = path::resolve_path(&api, &master_key, t).await?;
+            let position = r.backup_position();
             let id = r.file_id.ok_or("cannot remove the vault root")?;
-            (id, r.is_folder)
+            (id, r.is_folder, position)
         };
+        // LD-0113: core's app rule, before anything is removed.
+        backup_guard::check(position, mutation)?;
         if is_folder && !recursive {
             let verb = if permanent { "permanently delete" } else { "trash" };
             return Err(format!("'{t}' is a folder. Use -r to {verb} it and its contents."));
@@ -77,8 +94,18 @@ pub async fn run(targets: Vec<String>, options: RmOptions) -> Result<(), String>
             id,
             display: t.clone(),
             is_folder,
+            position,
         });
     }
+
+    // LD-0113: deleting a device's backup (or one of its folders) is the large,
+    // real loss, so it is asked about on its own, with the item count.
+    let Some(only_backups) = confirm_backup_deletes(&api, &master_key, &resolved, yes).await? else {
+        if !ui::is_quiet() {
+            println!("  {}", "cancelled".custom_color(colors::INK_DIM));
+        }
+        return Ok(());
+    };
 
     if permanent {
         return permanent_delete_flow(&api, &resolved).await;
@@ -95,7 +122,7 @@ pub async fn run(targets: Vec<String>, options: RmOptions) -> Result<(), String>
              re-run with -f to confirm",
         ));
     }
-    if !yes && ui::is_rich() && !confirm(&resolved, folder_count)? {
+    if !yes && !only_backups && ui::is_rich() && !confirm(&resolved, folder_count)? {
         if !ui::is_quiet() {
             println!("  {}", "cancelled".custom_color(colors::INK_DIM));
         }
@@ -108,7 +135,10 @@ pub async fn run(targets: Vec<String>, options: RmOptions) -> Result<(), String>
     let mut already = 0u64;
     let mut missing = 0u64;
     for chunk in ids.chunks(BULK_TRASH_BATCH) {
-        let resp = api.bulk_trash(chunk).await?;
+        let resp = api
+            .bulk_trash(chunk)
+            .await
+            .map_err(|e| backup_guard::server_refusal(e, Mutation::Trash))?;
         trashed += count(&resp, "trashed");
         already += count(&resp, "already_trashed");
         missing += count(&resp, "missing");
@@ -175,8 +205,13 @@ async fn permanent_delete_flow(api: &ApiClient, targets: &[Target]) -> Result<()
     // already-trashed items. Move them to trash first (idempotent, reversible),
     // then erase the batch with the one confirm token. Net effect: "delete
     // forever, skipping the trash step" — but through the owned+trashed gate.
-    api.bulk_trash(&ids).await?;
-    let resp = api.bulk_permanent_delete(&ids, &confirm_token).await?;
+    api.bulk_trash(&ids)
+        .await
+        .map_err(|e| backup_guard::server_refusal(e, Mutation::DeletePermanently))?;
+    let resp = api
+        .bulk_permanent_delete(&ids, &confirm_token)
+        .await
+        .map_err(|e| backup_guard::server_refusal(e, Mutation::DeletePermanently))?;
     path::invalidate_cache();
 
     let deleted = count(&resp, "deleted");
@@ -209,6 +244,96 @@ async fn permanent_delete_flow(api: &ApiClient, targets: &[Target]) -> Result<()
         );
     }
     Ok(())
+}
+
+/// The Backups position of a target given by id: its depth through its
+/// parents, and (for a file two levels down, where a device's manifest sits)
+/// its name. A file there whose name cannot be read is treated as the
+/// manifest: refused, never guessed deletable.
+async fn position_by_id(
+    api: &ApiClient,
+    master_key: &beebeeb_core::kdf::MasterKey,
+    id: &str,
+    row: &serde_json::Value,
+    is_folder: bool,
+) -> Result<BackupPosition, String> {
+    let depth = backup_guard::depth_of(api, id).await?;
+    let name = if depth == Some(2) && !is_folder {
+        decrypted_name(api, master_key, row)
+            .await
+            .unwrap_or_else(|| beebeeb_core::backup::MANIFEST_NAME.to_string())
+    } else {
+        String::new()
+    };
+    Ok(BackupPosition::at_depth(depth, &name))
+}
+
+async fn decrypted_name(
+    api: &ApiClient,
+    master_key: &beebeeb_core::kdf::MasterKey,
+    row: &serde_json::Value,
+) -> Option<String> {
+    crate::owned_keys::OwnedKeyResolver::new()
+        .resolve(api, master_key, row)
+        .await
+        .ok()
+        .map(|r| r.name)
+}
+
+/// Ask "Delete <device>'s backup?" for each device or category folder among
+/// `targets` (spec §8, Amendment 8). `Some(true)`: every target is such a
+/// folder and each was confirmed (no second question follows); `Some(false)`:
+/// confirmed, or none of them is one; `None`: the person said no. `--yes`
+/// answers for scripts; without it a run that cannot ask (not a terminal,
+/// `--json`, `--quiet`) is refused with exit 2, never read as yes.
+async fn confirm_backup_deletes(
+    api: &ApiClient,
+    master_key: &beebeeb_core::kdf::MasterKey,
+    targets: &[Target],
+    yes: bool,
+) -> Result<Option<bool>, String> {
+    let backups: Vec<&Target> = targets
+        .iter()
+        .filter(|t| matches!(t.position, BackupPosition::DeviceFolder | BackupPosition::CategoryFolder))
+        .collect();
+    if backups.is_empty() {
+        return Ok(Some(false));
+    }
+    if yes {
+        return Ok(Some(backups.len() == targets.len()));
+    }
+    if !ui::is_rich() || !crate::exit::stdin_is_interactive() {
+        return Err(crate::exit::with_code(
+            crate::exit::USAGE,
+            "this deletes a device's backup \u{2014} re-run with --yes to confirm (there is no terminal to ask)",
+        ));
+    }
+    for t in backups.iter().copied() {
+        let row = api.get_file(t.id.as_str()).await?;
+        let own = decrypted_name(api, master_key, &row).await.unwrap_or_else(|| t.display.clone());
+        let (device, folder) = if t.position == BackupPosition::DeviceFolder {
+            (own, None)
+        } else {
+            let parent = row.get("parent_id").and_then(|v| v.as_str()).unwrap_or_default();
+            let parent_row = api.get_file(parent).await?;
+            let device = decrypted_name(api, master_key, &parent_row).await.unwrap_or_default();
+            (device, Some(own))
+        };
+        let (items, exact) = backup_guard::count_items(api, &t.id).await?;
+        let question = backup_guard::delete_backup_question(&device, folder.as_deref(), items, exact);
+        if !ask(&question)? {
+            return Ok(None);
+        }
+    }
+    Ok(Some(backups.len() == targets.len()))
+}
+
+fn ask(question: &str) -> Result<bool, String> {
+    print!("  {} {question} [y/N] ", "?".custom_color(colors::AMBER));
+    std::io::stdout().flush().map_err(|e| e.to_string())?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).map_err(|e| e.to_string())?;
+    Ok(matches!(line.trim(), "y" | "Y" | "yes" | "YES"))
 }
 
 fn count(resp: &serde_json::Value, key: &str) -> u64 {

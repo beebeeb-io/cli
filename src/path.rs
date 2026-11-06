@@ -127,6 +127,18 @@ pub struct ResolvedPath {
     pub size_bytes: Option<u64>,
     /// The row's chunk count from the listing (`1` when it did not say).
     pub chunk_count: u32,
+    /// LD-0113: how many folders below the flagged Backups root this row is
+    /// (`Some(0)` is the root itself), `None` outside the tree. Known only from
+    /// a walk down from the vault root ([`resolve_path`]); see
+    /// [`crate::backup_guard::child_depth`].
+    pub backup_depth: Option<usize>,
+}
+
+impl ResolvedPath {
+    /// Where this row is in the Backups tree (core's `BackupPosition`).
+    pub fn backup_position(&self) -> beebeeb_core::backup::BackupPosition {
+        beebeeb_core::backup::BackupPosition::at_depth(self.backup_depth, &self.name)
+    }
 }
 
 /// Resolve a human-readable slash-separated path to an encrypted file entry.
@@ -177,6 +189,7 @@ async fn lookup_path(
             read_only: false,
             size_bytes: None,
             chunk_count: 1,
+            backup_depth: None,
         }));
     }
 
@@ -190,6 +203,7 @@ async fn lookup_path(
         read_only: false,
         size_bytes: None,
         chunk_count: 1,
+        backup_depth: None,
     };
 
     for segment in &segments {
@@ -230,6 +244,7 @@ async fn lookup_path(
                     read_only,
                     size_bytes: entry.get("size_bytes").and_then(|v| v.as_u64()),
                     chunk_count: entry.get("chunk_count").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
+                    backup_depth: crate::backup_guard::child_depth(current.backup_depth, entry),
                 };
                 found = true;
                 break;
@@ -247,11 +262,13 @@ async fn lookup_path(
 /// Look up an immediate child by plaintext name. Used by `mkdir` to detect a
 /// pre-existing folder or file before POSTing. Returns `None` when there is no
 /// match; returns an error only if the listing itself fails. Matching is
-/// case-insensitive, consistent with `resolve_path`.
+/// case-insensitive, consistent with `resolve_path`. `parent_depth` is the
+/// parent's [`ResolvedPath::backup_depth`], so the child's is known too.
 pub async fn find_child_by_name(
     api: &ApiClient,
     master_key: &MasterKey,
     parent_id: Option<&str>,
+    parent_depth: Option<usize>,
     name: &str,
 ) -> Result<Option<ResolvedPath>, String> {
     let listing = list_files_cached(api, parent_id).await?;
@@ -280,6 +297,7 @@ pub async fn find_child_by_name(
                 read_only,
                 size_bytes: entry.get("size_bytes").and_then(|v| v.as_u64()),
                 chunk_count: entry.get("chunk_count").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
+                backup_depth: crate::backup_guard::child_depth(parent_depth, entry),
             }));
         }
     }

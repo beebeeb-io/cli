@@ -3,6 +3,7 @@
 
 mod account_state;
 mod api;
+mod backup_guard;
 mod cli_args;
 use cli_args::*;
 mod cli_help;

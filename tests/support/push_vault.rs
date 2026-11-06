@@ -2,7 +2,7 @@
 //!
 //! Like the server, the mock keeps folders by parent, creates a file's row (with its parent) at init, never
 //! changes that parent at completion, and lists a folder's children. Scratch `HOME`, loopback only.
-#![allow(dead_code)]
+#![allow(dead_code, unused_imports)]
 
 pub use std::collections::{BTreeMap, HashMap};
 pub use std::path::{Path, PathBuf};
@@ -87,6 +87,20 @@ pub struct Vault {
     pub request_rows: std::collections::HashSet<String>,
     /// `GET /file-requests` answers this status instead (otherwise: no requests).
     pub file_requests_status: Option<u16>,
+    /// LD-0113: `system_role` by row id (the Backups root is `"backups_root"`).
+    pub roles: HashMap<String, String>,
+    /// LD-0113: listings and rows leave `system_role` out (a server from before LD-0113's wire field), while
+    /// the server still refuses a change to the root.
+    pub hide_roles: bool,
+    /// Trashed rows: listings leave them out, `GET /files/{id}` says `is_trashed`.
+    pub trashed: std::collections::HashSet<String>,
+    /// Every request: method, path and its `X-Beebeeb-Origin` header.
+    pub requests: Vec<(String, String, Option<String>)>,
+    /// `POST /files/trash` and `PATCH /files/{id}` requests, refused ones included.
+    pub trash_calls: usize,
+    pub patch_calls: usize,
+    /// `POST /files/folder` requests.
+    pub folder_creates: usize,
 }
 
 pub type Shared = Arc<Mutex<Vault>>;
@@ -115,6 +129,54 @@ pub fn row(i: &Item) -> Value {
     })
 }
 
+/// `row(i)` with what the server adds per row: `system_role` and `is_trashed` (LD-0113).
+pub fn row_in(v: &Vault, i: &Item) -> Value {
+    let mut r = row(i);
+    if !v.hide_roles {
+        r["system_role"] = v.roles.get(&i.id).map_or(Value::Null, |role| json!(role));
+    }
+    r["is_trashed"] = json!(v.trashed.contains(&i.id));
+    r
+}
+
+/// The server's `409 protected_folder` (core's words are the CLI's to print; the server's text is its own).
+pub fn protected() -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({ "error": "protected_folder", "message": "refused by the mock server" })),
+    )
+        .into_response()
+}
+
+/// `id` and every row under it.
+pub fn subtree(v: &Vault, id: &str) -> Vec<String> {
+    let mut out = vec![id.to_string()];
+    let mut i = 0;
+    while i < out.len() {
+        let parent = out[i].clone();
+        out.extend(v.items.values().filter(|c| c.parent.as_deref() == Some(&parent)).map(|c| c.id.clone()));
+        i += 1;
+    }
+    out
+}
+
+async fn record_request(
+    State(v): State<Shared>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let origin = req
+        .headers()
+        .get("x-beebeeb-origin")
+        .and_then(|h| h.to_str().ok())
+        .map(str::to_string);
+    v.lock()
+        .unwrap()
+        .requests
+        .push((req.method().to_string(), req.uri().path().to_string(), origin));
+    next.run(req).await
+}
+
 pub fn parent_is_live_folder(v: &Vault, parent: Option<&str>) -> bool {
     parent.is_none_or(|p| v.items.get(p).is_some_and(|i| i.is_folder))
 }
@@ -136,9 +198,9 @@ pub async fn start_mock(vault: Shared) -> String {
                     let files: Vec<Value> = v
                         .items
                         .values()
-                        .filter(|i| i.parent == parent)
+                        .filter(|i| i.parent == parent && !v.trashed.contains(&i.id))
                         .map(|i| {
-                            let mut r = row(i);
+                            let mut r = row_in(&v, i);
                             if v.listing_share_count {
                                 r["share_count"] = json!(0);
                             }
@@ -200,6 +262,7 @@ pub async fn start_mock(vault: Shared) -> String {
                     .and_then(Value::as_str)
                     .map(str::to_string)
                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                v.folder_creates += 1;
                 v.seq += 1;
                 let item = Item {
                     id: id.clone(),
@@ -236,6 +299,77 @@ pub async fn start_mock(vault: Shared) -> String {
             }),
         )
         .route(
+            "/api/v1/auth/me",
+            get(|| async { Json(json!({ "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" })) }),
+        )
+        .route(
+            "/api/v1/backups/root",
+            // As on the server (`routes/backups_root.rs`): the flagged root, else claim the named live root-level
+            // folder, else create one with the client's id and sealed name.
+            put(|State(v): State<Shared>, Json(body): Json<Value>| async move {
+                let mut v = v.lock().unwrap();
+                if let Some((id, _)) = v.roles.iter().find(|(_, r)| *r == "backups_root") {
+                    return Json(json!({ "id": id, "outcome": "existing" })).into_response();
+                }
+                let id = body["folder_id"].as_str().unwrap_or_default().to_string();
+                let claimable = v
+                    .items
+                    .get(&id)
+                    .is_some_and(|i| i.is_folder && i.parent.is_none() && !v.trashed.contains(&id));
+                if claimable {
+                    v.roles.insert(id.clone(), "backups_root".into());
+                    return Json(json!({ "id": id, "outcome": "claimed" })).into_response();
+                }
+                let Some(name) = body.get("name_encrypted").and_then(Value::as_str) else {
+                    return err(StatusCode::CONFLICT, "backups_root_unclaimable");
+                };
+                v.seq += 1;
+                let seq = v.seq;
+                v.items.insert(
+                    id.clone(),
+                    Item {
+                        id: id.clone(),
+                        parent: None,
+                        name_encrypted: name.to_string(),
+                        is_folder: true,
+                        seq,
+                        uploading: false,
+                        version: 0,
+                        chunk_count: 0,
+                        size: 0,
+                    },
+                );
+                v.roles.insert(id.clone(), "backups_root".into());
+                Json(json!({ "id": id, "outcome": "created" })).into_response()
+            }),
+        )
+        .route(
+            "/api/v1/files/trash",
+            post(|State(v): State<Shared>, Json(body): Json<Value>| async move {
+                let mut v = v.lock().unwrap();
+                v.trash_calls += 1;
+                let ids: Vec<String> = body["ids"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                    .unwrap_or_default();
+                if ids.iter().any(|id| v.roles.contains_key(id)) {
+                    return protected();
+                }
+                let (mut trashed, mut missing) = (Vec::new(), Vec::new());
+                for id in ids {
+                    if v.items.contains_key(&id) {
+                        for row in subtree(&v, &id) {
+                            v.trashed.insert(row);
+                        }
+                        trashed.push(id);
+                    } else {
+                        missing.push(id);
+                    }
+                }
+                Json(json!({ "trashed": trashed, "already_trashed": [], "missing": missing })).into_response()
+            }),
+        )
+        .route(
             "/api/v1/files/:id",
             get(|State(v): State<Shared>, UrlPath(id): UrlPath<String>| async move {
                 let mut v = v.lock().unwrap();
@@ -245,7 +379,7 @@ pub async fn start_mock(vault: Shared) -> String {
                 }
                 match v.items.get(&id) {
                     Some(i) => {
-                        let mut r = row(i);
+                        let mut r = row_in(&v, i);
                         if v.request_rows.contains(&id) {
                             r["file_request_id"] = json!(uuid::Uuid::from_u128(77));
                             r["sender_ephemeral_pubkey"] = json!("AAAA");
@@ -255,6 +389,28 @@ pub async fn start_mock(vault: Shared) -> String {
                     }
                     None => err(StatusCode::NOT_FOUND, "not_found"),
                 }
+            })
+            // A move and/or rename (`PATCH /files/{id}`); the root is refused, as on the server (§5.3 row 5).
+            .patch(|State(v): State<Shared>, UrlPath(id): UrlPath<String>, Json(body): Json<Value>| async move {
+                let mut v = v.lock().unwrap();
+                v.patch_calls += 1;
+                if v.roles.contains_key(&id) {
+                    return protected();
+                }
+                let parent = body
+                    .get("parent_id")
+                    .map(|p| p.as_str().map(str::to_string));
+                let Some(item) = v.items.get_mut(&id) else {
+                    return err(StatusCode::NOT_FOUND, "not_found");
+                };
+                if let Some(parent) = parent {
+                    item.parent = parent;
+                }
+                if let Some(name) = body.get("name_encrypted").and_then(Value::as_str) {
+                    item.name_encrypted = name.to_string();
+                }
+                let answer = row(item);
+                Json(answer).into_response()
             }),
         )
         .route(
@@ -390,6 +546,7 @@ pub async fn start_mock(vault: Shared) -> String {
         .fallback(|| async { err(StatusCode::NOT_FOUND, "not_found") })
         // A 4 MiB chunk frame exceeds axum's 2 MB default body limit.
         .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024))
+        .layer(axum::middleware::from_fn_with_state(vault.clone(), record_request))
         .with_state(vault);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -557,8 +714,20 @@ pub fn scratch_home(api: &str) -> PathBuf {
 /// the running child, never the `Command`, so no caller in another file can drop the guard
 /// (`tests/api_guard.rs`).
 fn spawn_bb(home: &Path, args: &[String], stdout: Stdio, stderr: Stdio) -> std::process::Child {
+    spawn_bb_env(home, args, &[], stdout, stderr)
+}
+
+/// [`spawn_bb`] with extra environment (LD-0113: the backup's machine-id test seams).
+fn spawn_bb_env(
+    home: &Path,
+    args: &[String],
+    env: &[(&str, String)],
+    stdout: Stdio,
+    stderr: Stdio,
+) -> std::process::Child {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_bb"));
     cmd.env("BB_REFUSE_NON_LOOPBACK_API", "1");
+    cmd.envs(env.iter().map(|(k, v)| (*k, v.as_str())));
     cmd.args(args)
         .current_dir(home)
         .env("HOME", home)
@@ -578,6 +747,23 @@ pub fn owned(args: &[&str]) -> Vec<String> {
 
 pub async fn bb(home: &Path, args: &[&str]) -> Output {
     let child = spawn_bb(home, &owned(args), Stdio::piped(), Stdio::piped());
+    let shown = args.join(" ");
+    let out = tokio::task::spawn_blocking(move || child.wait_with_output().expect("run bb"))
+        .await
+        .unwrap();
+    eprintln!(
+        "[bb {} -> {:?}]\n--- stdout\n{}--- stderr\n{}",
+        shown,
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out
+}
+
+/// [`bb`] with extra environment.
+pub async fn bb_env(home: &Path, args: &[&str], env: &[(&str, String)]) -> Output {
+    let child = spawn_bb_env(home, &owned(args), env, Stdio::piped(), Stdio::piped());
     let shown = args.join(" ");
     let out = tokio::task::spawn_blocking(move || child.wait_with_output().expect("run bb"))
         .await
