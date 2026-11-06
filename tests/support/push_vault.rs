@@ -531,7 +531,10 @@ pub fn scratch_home(api: &str) -> PathBuf {
     home
 }
 
-pub fn bb_command(home: &Path, args: &[String]) -> Command {
+/// Start `bb <args>` in the scratch `home`, loopback API only, its output to `stdout` / `stderr`. It hands back
+/// the running child, never the `Command`, so no caller in another file can drop the guard
+/// (`tests/api_guard.rs`).
+fn spawn_bb(home: &Path, args: &[String], stdout: Stdio, stderr: Stdio) -> std::process::Child {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_bb"));
     cmd.env("BB_REFUSE_NON_LOOPBACK_API", "1");
     cmd.args(args)
@@ -540,8 +543,11 @@ pub fn bb_command(home: &Path, args: &[String]) -> Command {
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("BB_NO_UPDATE", "1")
         .env("NO_COLOR", "1")
-        .stdin(Stdio::null());
-    cmd
+        .stdin(Stdio::null())
+        .stdout(stdout)
+        .stderr(stderr)
+        .spawn()
+        .expect("spawn bb")
 }
 
 pub fn owned(args: &[&str]) -> Vec<String> {
@@ -549,16 +555,11 @@ pub fn owned(args: &[&str]) -> Vec<String> {
 }
 
 pub async fn bb(home: &Path, args: &[&str]) -> Output {
-    let mut cmd = bb_command(home, &owned(args));
+    let child = spawn_bb(home, &owned(args), Stdio::piped(), Stdio::piped());
     let shown = args.join(" ");
-    let out = tokio::task::spawn_blocking(move || {
-        cmd.stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .expect("run bb")
-    })
-    .await
-    .unwrap();
+    let out = tokio::task::spawn_blocking(move || child.wait_with_output().expect("run bb"))
+        .await
+        .unwrap();
     eprintln!(
         "[bb {} -> {:?}]\n--- stdout\n{}--- stderr\n{}",
         shown,
@@ -577,11 +578,7 @@ pub fn stderr(out: &Output) -> String {
 /// session that needs more, then SIGKILL it: an interrupted push.
 pub async fn push_and_kill(vault: &Shared, home: &Path, args: &[&str]) {
     vault.lock().unwrap().stall = true;
-    let mut child = bb_command(home, &owned(args))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn bb");
+    let mut child = spawn_bb(home, &owned(args), Stdio::null(), Stdio::null());
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let started = vault
