@@ -152,6 +152,16 @@ fn records_path(dir: &Path, n: u32) -> PathBuf {
     dir.join(format!("backup-records-{n}.jsonl"))
 }
 
+/// Whether the journal at `path` ends inside a line (a run died mid-write).
+fn ends_mid_line(path: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut last = [0u8; 1];
+    file.seek(SeekFrom::End(-1)).is_ok() && file.read_exact(&mut last).is_ok() && last[0] != b'\n'
+}
+
 /// Write `bytes` to `path` through a private temp file and a rename, so a
 /// crash leaves the old file or the new one, never half of one.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -218,6 +228,18 @@ impl Store {
             .unwrap_or(1)
     }
 
+    /// [`Self::next_records_file`] with nothing left at that number: records an earlier store left there
+    /// (another account's, after only `backup.json` was deleted, or one a failed removal kept) are never loaded
+    /// as a new source's own, where core would take every unchanged file as removed elsewhere and upload none.
+    pub(crate) fn fresh_records_file(&self) -> Result<u32, String> {
+        let n = self.next_records_file();
+        match std::fs::remove_file(records_path(&self.dir, n)) {
+            Ok(()) => Ok(n),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(n),
+            Err(e) => Err(format!("cannot clear old backup records: {e}")),
+        }
+    }
+
     /// Drop a source's records file.
     pub(crate) fn forget_records(&self, n: u32) {
         let _ = std::fs::remove_file(records_path(&self.dir, n));
@@ -272,6 +294,14 @@ impl Records {
         self.by_key.len()
     }
 
+    /// The records whose copy is in the backup: one removed elsewhere is not.
+    pub(crate) fn backed_up(&self) -> usize {
+        self.by_key
+            .values()
+            .filter(|r| r.state == RecordState::BackedUp)
+            .count()
+    }
+
     pub(crate) fn get(&self, key: &str) -> Option<&BackupRecord> {
         self.by_key.get(key)
     }
@@ -294,7 +324,12 @@ impl Records {
         let mut file = options
             .open(&self.path)
             .map_err(|e| format!("cannot write the backup records: {e}"))?;
-        let mut text = String::new();
+        // After a torn last line, start a new one: glued onto the fragment, this record would be lost with it.
+        let mut text = if ends_mid_line(&self.path) {
+            String::from("\n")
+        } else {
+            String::new()
+        };
         for line in lines {
             text.push_str(&serde_json::to_string(line).map_err(|e| e.to_string())?);
             text.push('\n');
@@ -389,6 +424,50 @@ mod tests {
             .unwrap();
         f.write_all(b"{\"op\":\"put\",\"key\":\"b.t").unwrap();
         assert_eq!(Records::load(records_path(&dir, 1)).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_record_appended_after_a_torn_line_is_kept() {
+        let dir = scratch();
+        let mut records = Records::load(records_path(&dir, 1)).unwrap();
+        records.put(record("a.txt", 1)).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(records_path(&dir, 1))
+            .unwrap();
+        f.write_all(b"{\"op\":\"put\",\"key\":\"b.t").unwrap();
+        let mut records = Records::load(records_path(&dir, 1)).unwrap();
+        records.put(record("c.txt", 3)).unwrap();
+        let again = Records::load(records_path(&dir, 1)).unwrap();
+        assert_eq!(again.all(), vec![record("a.txt", 1), record("c.txt", 3)]);
+    }
+
+    #[test]
+    fn a_new_source_never_loads_records_left_at_its_number() {
+        let dir = scratch();
+        // Account A's records; then only backup.json was deleted, and account B adds a folder.
+        let mut left = Records::load(records_path(&dir, 1)).unwrap();
+        left.put(record("a.txt", 1)).unwrap();
+        let Opened::Mine(store) = Store::open(&dir, "user-b").unwrap() else {
+            panic!("a new store is mine");
+        };
+        let n = store.fresh_records_file().unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(store.records(n).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn a_record_removed_elsewhere_is_not_counted_as_backed_up() {
+        let dir = scratch();
+        let mut records = Records::load(records_path(&dir, 1)).unwrap();
+        records.put(record("a.txt", 1)).unwrap();
+        records
+            .put(BackupRecord {
+                state: RecordState::RemovedElsewhere,
+                ..record("b.txt", 2)
+            })
+            .unwrap();
+        assert_eq!((records.len(), records.backed_up()), (2, 1));
     }
 
     #[test]

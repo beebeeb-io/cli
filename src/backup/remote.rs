@@ -209,10 +209,11 @@ async fn read_manifest(api: &ApiClient, master_key: &Arc<MasterKey>, device: Uui
         return FolderManifest::Unreadable;
     };
     let chunk_count = row.get("chunk_count").and_then(Value::as_u64).unwrap_or(1) as u32;
-    let dir = std::env::temp_dir().join(format!("bb-backup-manifest-{}", Uuid::new_v4()));
+    let Ok(dir) = private_temp_dir() else {
+        return FolderManifest::Unreadable;
+    };
     let out = dir.join("manifest.json");
     let read = async {
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         crate::download::stream_download_decrypt(
             api,
             master_key,
@@ -235,6 +236,20 @@ async fn read_manifest(api: &ApiClient, master_key: &Arc<MasterKey>, device: Uui
     }
 }
 
+/// A new folder in the temp dir that only this user can open (0700 on Unix): a manifest in it is plaintext
+/// (the device name and the custom folder names).
+fn private_temp_dir() -> std::io::Result<std::path::PathBuf> {
+    let dir = std::env::temp_dir().join(format!("bb-backup-manifest-{}", Uuid::new_v4()));
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(&dir)?;
+    Ok(dir)
+}
+
 /// Write this machine's manifest into its device folder: a new file the first
 /// time, a new version after.
 pub(crate) async fn write_manifest(
@@ -253,8 +268,7 @@ pub(crate) async fn write_manifest(
         other: serde_json::Map::new(),
     };
     let existing = manifest_row(api, master_key, device).await?.and_then(|r| id_of(&r));
-    let dir = std::env::temp_dir().join(format!("bb-backup-manifest-{}", Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot write the device manifest: {e}"))?;
+    let dir = private_temp_dir().map_err(|e| format!("cannot write the device manifest: {e}"))?;
     let path = dir.join(MANIFEST_NAME);
     let result = async {
         std::fs::write(&path, serialize_manifest(&manifest))
@@ -428,4 +442,19 @@ pub(crate) async fn upload(
         .await
         .map_err(|e| e.to_string())?;
     Ok(Uploaded::Done { id: outcome.server_id })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn the_plaintext_manifest_folder_is_this_users_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = private_temp_dir().unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        std::fs::remove_dir(&dir).unwrap();
+        assert_eq!(mode, 0o700, "{mode:o}");
+    }
 }

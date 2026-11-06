@@ -76,6 +76,12 @@ fn canonical(folder: &Path) -> Result<PathBuf, String> {
     std::fs::canonicalize(folder).map_err(|e| format!("{}: {e}", folder.display()))
 }
 
+/// The path `folder` was added as, for `remove`: canonical while it exists; a folder gone locally is matched
+/// by its absolute path (a relative one never equals the stored canonical path).
+fn added_path(folder: &Path) -> PathBuf {
+    canonical(folder).unwrap_or_else(|_| std::path::absolute(folder).unwrap_or_else(|_| folder.to_path_buf()))
+}
+
 // ── add / remove / list ─────────────────────────────────────────────────────
 
 pub async fn add(folder: PathBuf) -> Result<(), String> {
@@ -95,7 +101,7 @@ pub async fn add(folder: PathBuf) -> Result<(), String> {
             return Err(format!("{} is already backed up", path.display()));
         };
         // "Back up again" (spec §4.2 rule 11): a first backup, from nothing.
-        let records_file = store.next_records_file();
+        let records_file = store.fresh_records_file()?;
         store.forget_records(store.settings.sources[i].records_file);
         let source = &mut store.settings.sources[i];
         source.records_file = records_file;
@@ -153,7 +159,7 @@ pub async fn add(folder: PathBuf) -> Result<(), String> {
         store.settings.device_folder_id = None;
         store.settings.manifest_folders.clear();
     }
-    let records_file = store.next_records_file();
+    let records_file = store.fresh_records_file()?;
     store.settings.sources.push(Source {
         path: path.clone(),
         category: category.key(),
@@ -184,8 +190,7 @@ pub async fn remove(folder: PathBuf) -> Result<(), String> {
     let dir = state_dir();
     let _lock = lock(&dir)?;
     let mut store = open_mine(&dir, &account)?;
-    // A folder that is gone locally is removed by the path it was added as.
-    let path = canonical(&folder).unwrap_or_else(|_| folder.clone());
+    let path = added_path(&folder);
     let Some(i) = store.settings.sources.iter().position(|s| s.path == path) else {
         return Err(format!("{} is not backed up (see `bb backup list`)", path.display()));
     };
@@ -329,7 +334,7 @@ pub async fn run() -> Result<(), String> {
                 category: s.category.clone(),
                 enabled: s.off.is_none(),
                 last_pass_at_ms: s.last_pass.as_ref().map(|p| p.at_ms),
-                items: store.records(s.records_file).map_or(0, |r| r.len() as u64),
+                items: store.records(s.records_file).map_or(0, |r| r.backed_up() as u64),
                 other: serde_json::Map::new(),
             })
             .collect();
@@ -496,7 +501,7 @@ fn status_of(store: &Store) -> Result<(), String> {
     let mut rows = Vec::new();
     for s in &store.settings.sources {
         let folder = category_of(s).map(|c| category_folder_name(&c)).unwrap_or_default();
-        let backed_up = store.records(s.records_file).map(|r| r.len()).unwrap_or(0);
+        let backed_up = store.records(s.records_file).map(|r| r.backed_up()).unwrap_or(0);
         let off = s.off.as_ref().map(|o| stop_words(&device, &folder, o.reason));
         any_off |= off.is_some();
         rows.push((s, folder, backed_up, off));
@@ -569,5 +574,16 @@ fn say(line: &str) {
             "ok \u{00b7}".custom_color(colors::GREEN_OK),
             line.custom_color(colors::INK)
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_folder_gone_locally_is_matched_by_its_absolute_path() {
+        let gone = PathBuf::from(format!("cli-backup-gone-{}", uuid::Uuid::new_v4()));
+        assert_eq!(added_path(&gone), std::env::current_dir().unwrap().join(&gone));
     }
 }

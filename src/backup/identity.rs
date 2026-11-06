@@ -89,9 +89,35 @@ fn beebeeb_mounts(mounts: &str) -> Vec<PathBuf> {
         .filter_map(|line| {
             let mut fields = line.split_whitespace();
             let (source, target, fstype) = (fields.next()?, fields.next()?, fields.next()?);
-            (source == "beebeeb" || fstype == "fuse.beebeeb").then(|| PathBuf::from(target.replace("\\040", " ")))
+            (source == "beebeeb" || fstype == "fuse.beebeeb").then(|| unescape_mount_field(target))
         })
         .collect()
+}
+
+/// A `/proc/self/mounts` field with the kernel's octal escapes (`\040` space, `\011` tab, `\012` newline,
+/// `\134` backslash) turned back into their bytes.
+fn unescape_mount_field(field: &str) -> PathBuf {
+    let bytes = field.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let escaped = (bytes[i] == b'\\')
+            .then(|| bytes.get(i + 1..i + 4))
+            .flatten()
+            .and_then(|digits| std::str::from_utf8(digits).ok())
+            .and_then(|digits| u8::from_str_radix(digits, 8).ok());
+        match escaped {
+            Some(byte) => {
+                out.push(byte);
+                i += 4;
+            }
+            None => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    PathBuf::from(String::from_utf8_lossy(&out).into_owned())
 }
 
 fn canonical_or_same(p: &Path) -> PathBuf {
@@ -170,6 +196,8 @@ mod tests {
     fn only_beebeeb_mounts_are_excluded() {
         let mounts = "beebeeb /home/g/Vault\\040Drive fuse.beebeeb rw 0 0\n/dev/sda1 / ext4 rw 0 0\n";
         assert_eq!(beebeeb_mounts(mounts), vec![PathBuf::from("/home/g/Vault Drive")]);
+        let odd = "beebeeb /home/g/a\\011b\\134c\\012d fuse.beebeeb rw 0 0\n";
+        assert_eq!(beebeeb_mounts(odd), vec![PathBuf::from("/home/g/a\tb\\c\nd")]);
     }
 
     #[test]
