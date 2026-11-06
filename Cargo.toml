@@ -84,5 +84,10 @@ fuse = ["dep:fuser"]
 inherits = "release"
 lto = "thin"
 
+# Test builds compile the dependencies optimised, the crate itself not: the `--parallel` goldens and memory test
+# seal 2 GiB fixtures, and unoptimised AES does about 9 MB/s (the five goldens took 497 s; at opt-level 2, 29 s).
+[profile.test.package."*"]
+opt-level = 2
+
 # NOTE: local-dev path override for beebeeb-core/types lives in the gitignored
 # .cargo/config.toml (NOT committed). CI builds against the git dependency above.
