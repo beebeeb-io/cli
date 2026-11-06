@@ -17,6 +17,8 @@ mod pool;
 mod window;
 
 pub use pool::PoolLabel;
+#[cfg(test)]
+pub(crate) use pool::absent;
 use window::{Entry, Taken, Window};
 
 /// The current rate looks back at least this far (spec §4.5).

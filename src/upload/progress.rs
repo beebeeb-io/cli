@@ -390,3 +390,7 @@ mod existing_sinks {
         assert_eq!(sink.rolled_back.load(Ordering::SeqCst), 5);
     }
 }
+
+/// Task 2333: a sink that records every driver event as a line (the driver tests).
+#[cfg(test)]
+pub(crate) mod recording;

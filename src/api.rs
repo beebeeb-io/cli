@@ -207,6 +207,9 @@ pub struct UploadInit {
     /// The `transport` field of the 201 body (task 2173): `object-upload-v1` when the server
     /// opened a direct session, absent otherwise (today's chunk PUT route).
     pub transport: Option<String>,
+    /// Task 2333: the pool the server placed this upload in, as far as the client may show it (its id and
+    /// country, never a datacenter code or a city: `PoolLabel::from_answer`). `None` when the answer names none.
+    pub pool: Option<crate::transfer_stats::PoolLabel>,
 }
 
 impl UploadInit {
@@ -237,6 +240,7 @@ impl UploadInit {
             chunk_size_bytes,
             chunk_count,
             transport,
+            pool: crate::transfer_stats::PoolLabel::from_answer(v),
         })
     }
 }

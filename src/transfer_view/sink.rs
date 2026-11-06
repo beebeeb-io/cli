@@ -14,7 +14,7 @@
 //! Tests: `sink_tests.rs` in this directory.
 
 use std::io::IsTerminal;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -293,7 +293,12 @@ impl LiveProgress {
     /// Tests: a Terminal-level sink with a fixed width and clock, recording every
     /// line it would draw (on [`render_now`](Self::render_now)) or print. No ticker.
     #[cfg(test)]
-    pub(crate) fn for_test(direction: Direction, level: Level, columns: u16, clock: Arc<AtomicU64>) -> (Self, Record) {
+    pub(crate) fn for_test(
+        direction: Direction,
+        level: Level,
+        columns: u16,
+        clock: Arc<std::sync::atomic::AtomicU64>,
+    ) -> (Self, Record) {
         let record: Record = Arc::new(Mutex::new(Vec::new()));
         let options = ViewOptions {
             level,
@@ -427,7 +432,7 @@ impl ChunkProgress for LiveProgress {
         match &self.shared.mp {
             Some(mp) => {
                 self.shared.suspended.store(true, Ordering::SeqCst);
-                mp.suspend(|| f());
+                mp.suspend(f);
                 self.shared.suspended.store(false, Ordering::SeqCst);
             }
             None => f(),

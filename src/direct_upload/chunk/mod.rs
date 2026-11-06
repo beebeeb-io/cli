@@ -29,7 +29,10 @@ pub(super) async fn wait(total: Duration, shutdown: &AtomicBool) -> bool {
 }
 
 /// Send one chunk through grant -> PUT -> commit, following the core policy after every failure.
-/// `Ok(())` means the server holds the chunk (committed now, or already: `skipped`).
+/// `Ok` means the server holds the chunk: [`Held::Transferred`] once a PUT of it was stored (committed now,
+/// or `skipped` on a later grant because that PUT landed), [`Held::AlreadyStored`] when the grant said
+/// `skipped` before any PUT of it was stored (a resumed session already held it). Every retry the policy
+/// orders is reported to `prog` (task 2333).
 pub(crate) async fn upload_chunk(
     api: &ApiClient,
     discovery: &dt::Discovery,
@@ -37,22 +40,31 @@ pub(crate) async fn upload_chunk(
     index: u32,
     data: Bytes,
     shutdown: &Arc<AtomicBool>,
-) -> Result<(), DirectUploadError> {
+    prog: &dyn FileProgress,
+) -> Result<Held, DirectUploadError> {
     let size = data.len() as u64;
     // One random seed per chunk: the equal jitter of its backoff, so chunks that fail together do not retry together.
     let mut state = dt::UploadChunkState::with_seed(dt::UploadChunkPolicy::default(), rand::random());
     let mut call = dt::Call::UploadGrant;
+    let mut put_stored = false;
     loop {
         if shutdown.load(Ordering::Relaxed) {
             return Err(DirectUploadError::Interrupted);
         }
         let failure = match call {
             dt::Call::UploadGrant => match api.upload_grant(session.as_str(), index, size, discovery).await {
-                UploadCall::Ok(dt::UploadGrant::Skipped) => return Ok(()),
+                UploadCall::Ok(dt::UploadGrant::Skipped) => {
+                    return Ok(if put_stored {
+                        Held::Transferred
+                    } else {
+                        Held::AlreadyStored
+                    });
+                }
                 UploadCall::Ok(dt::UploadGrant::Link(link)) => {
                     state.link_issued();
                     let status = api.put_to_storage(&link, data.clone()).await;
                     if dt::put_stored(status) {
+                        put_stored = true;
                         call = dt::Call::UploadCommit;
                         continue;
                     }
@@ -62,7 +74,7 @@ pub(crate) async fn upload_chunk(
                 UploadCall::SessionGone(message) => return Err(DirectUploadError::SessionGone(message)),
             },
             dt::Call::UploadCommit => match api.upload_commit(session.as_str(), index, size).await {
-                UploadCall::Ok(_) => return Ok(()),
+                UploadCall::Ok(_) => return Ok(Held::Transferred),
                 UploadCall::Failed(outcome) => dt::UploadFailure::Commit(outcome),
                 UploadCall::SessionGone(message) => return Err(DirectUploadError::SessionGone(message)),
             },
@@ -71,6 +83,7 @@ pub(crate) async fn upload_chunk(
         };
         match state.failed(&failure) {
             dt::UploadNext::Retry { after, call: next } => {
+                prog.chunk_retried(index);
                 if !wait(after, shutdown).await {
                     return Err(DirectUploadError::Interrupted);
                 }

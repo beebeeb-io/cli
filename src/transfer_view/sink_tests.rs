@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use super::sink::*;
 use crate::transfer_stats::{Direction, Held, PoolLabel, Route, Tally};
-use crate::upload::{ChunkProgress, FileProgress, Stream};
+use crate::upload::{ChunkProgress, Stream};
 
 const GUUS: &str = "A House of Dynamite (2025) (2160p NF WEB-DL Hybrid H265 DV HDR DDP Atmos 5.1 English - HONE).mkv";
 const TOTAL: u64 = 17_480_003_668;

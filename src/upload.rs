@@ -73,6 +73,8 @@ pub use error::UploadError;
 // ── indicatif progress (rich + TTY only) ──────────────────────────────────────
 
 mod progress;
+#[cfg(test)]
+pub(crate) use progress::recording::Recording;
 use progress::*;
 pub use progress::{
     BarProgress, ChunkProgress, FileProgress, Held, InFlight, NoopProgress, PoolLabel, Route, Stream, Tally,

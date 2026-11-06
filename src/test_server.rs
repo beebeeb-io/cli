@@ -109,6 +109,15 @@ pub struct Mock {
     /// `chunk:<session>:<index>`, `complete:<session>`, `abandon:<id>`,
     /// `trash:<id>`, `folder:<id>`, `move:<id>` (a successful PATCH).
     pub events: Vec<String>,
+    /// Task 2333: merged into every init answer (a pool id, a location, ...).
+    pub init_extra: Option<serde_json::Value>,
+    /// Task 2333: merged into every complete answer.
+    pub complete_extra: Option<serde_json::Value>,
+    /// Task 2333: the chunk PUT of this index answers this status, every time.
+    pub chunk_status: HashMap<u32, u16>,
+    /// Task 2333: the FIRST PUT of each of these indexes answers 429 with
+    /// `Retry-After: 0` (a transient refusal the client retries).
+    pub chunk_rate_limited_once: HashSet<u32>,
 }
 
 pub type Shared = Arc<Mutex<Mock>>;
@@ -127,6 +136,16 @@ fn gone_response(g: Option<Gone>) -> Response {
         )
             .into_response(),
     }
+}
+
+/// `answer` with every field of `extra` (an object) set on it.
+fn merged(mut answer: serde_json::Value, extra: &Option<serde_json::Value>) -> serde_json::Value {
+    if let (Some(fields), Some(serde_json::Value::Object(more))) = (answer.as_object_mut(), extra) {
+        for (k, v) in more {
+            fields.insert(k.clone(), v.clone());
+        }
+    }
+    answer
 }
 
 fn not_found() -> Response {
@@ -170,13 +189,13 @@ fn router(state: Shared) -> Router {
                     // misbehaving server only answers a different one.
                     m.session_file.insert(sid.clone(), file_id.clone());
                     let echoed = m.init_echo.clone().unwrap_or_else(|| file_id.clone());
-                    Json(json!({
+                    let answer = json!({
                         "upload_session_id": sid,
                         "file_id": echoed,
                         "chunk_size_bytes": body.get("chunk_size_bytes").and_then(|v| v.as_u64()).unwrap_or(0),
                         "chunk_count": body.get("chunk_count").and_then(|v| v.as_u64()).unwrap_or(0),
-                    }))
-                    .into_response()
+                    });
+                    Json(merged(answer, &m.init_extra)).into_response()
                 },
             ),
         )
@@ -194,6 +213,18 @@ fn router(state: Shared) -> Router {
                     m.chunk_puts.push((sid.clone(), idx));
                     m.events.push(format!("chunk:{sid}:{idx}"));
                     m.chunk_bodies.insert((sid.clone(), idx), data);
+                    if m.chunk_rate_limited_once.remove(&idx) {
+                        return (
+                            StatusCode::TOO_MANY_REQUESTS,
+                            [("retry-after", "0")],
+                            Json(json!({ "error": "rate_limited" })),
+                        )
+                            .into_response();
+                    }
+                    if let Some(&code) = m.chunk_status.get(&idx) {
+                        let status = StatusCode::from_u16(code).unwrap();
+                        return (status, Json(json!({ "error": "failed by mock" }))).into_response();
+                    }
                     if !m.live.contains(&sid) {
                         return gone_response(m.gone);
                     }
@@ -246,7 +277,11 @@ fn router(state: Shared) -> Router {
                     .clone()
                     .or_else(|| m.session_file.get(&sid).cloned())
                     .unwrap_or_default();
-                Json(json!({ "id": fid, "size_bytes": 0, "chunk_count": 0 })).into_response()
+                Json(merged(
+                    json!({ "id": fid, "size_bytes": 0, "chunk_count": 0 }),
+                    &m.complete_extra,
+                ))
+                .into_response()
             }),
         )
         .route(

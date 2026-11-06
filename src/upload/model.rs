@@ -109,4 +109,5 @@ pub struct UploadOutcome {
     /// `"api"` (the chunk PUT route). A direct session that was given up reports the route that finished
     /// the file, `"api"`.
     pub transport: &'static str,
+    pub transferred_bytes: u64,
 }
