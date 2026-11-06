@@ -118,9 +118,7 @@ async fn parallel_1_matches_main_request_log_api_large() {
 async fn parallel_1_matches_main_request_log_api_429() {
     let s = Scratch::new("golden-api-429");
     let (path, _, _) = s.file(SMALL as usize);
-    let _notices = crate::transfer_view::notice::TEST_SINK_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _notices = crate::transfer_view::notice::TEST_SINK_LOCK.lock().await;
     let mut mock = Mock::default();
     mock.chunk_rate_limited_once.insert(1);
     mock.retry_after_secs = 1;

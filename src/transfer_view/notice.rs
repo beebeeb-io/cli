@@ -21,9 +21,11 @@ fn slot() -> MutexGuard<'static, Option<Weak<dyn Notices>>> {
 }
 
 /// Test-only: the notice slot ([`register`]) is process-global, so a test that asserts what a sink recorded must
-/// hold this while it is the registered one, or a sibling test's sink steals or clears the registration.
+/// hold this while it is the registered one, or a sibling test's sink steals or clears the registration. An
+/// async-aware lock: the guard is held across the test's awaits (a std guard across an await is
+/// `clippy::await_holding_lock`, and would block the runtime's thread).
 #[cfg(test)]
-pub(crate) static TEST_SINK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static TEST_SINK_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Print `line` on stderr, around the live lines when a sink is drawing them.
 pub(crate) fn stderr(line: &str) {
