@@ -730,15 +730,17 @@ fn spawn_bb_env(
     stdout: Stdio,
     stderr: Stdio,
 ) -> std::process::Child {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_bb"));
-    cmd.env("BB_REFUSE_NON_LOOPBACK_API", "1");
-    cmd.envs(env.iter().map(|(k, v)| (*k, v.as_str())));
-    cmd.args(args)
+    // The caller's `env` goes on first and the guard last, so nothing in `env` can switch the guard off or move the
+    // scratch `HOME` (`tests/api_guard.rs` fails on an `.envs(` after the guard).
+    Command::new(env!("CARGO_BIN_EXE_bb"))
+        .args(args)
         .current_dir(home)
+        .envs(env.iter().map(|(k, v)| (*k, v.as_str())))
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("BB_NO_UPDATE", "1")
         .env("NO_COLOR", "1")
+        .env("BB_REFUSE_NON_LOOPBACK_API", "1")
         .stdin(Stdio::null())
         .stdout(stdout)
         .stderr(stderr)
