@@ -568,11 +568,6 @@ impl FileProgress for LiveFile {
         self.done(|m, now| m.chunk_done(slot, index, bytes, held, now));
     }
 
-    fn body_done(&self, chunks: u32, bytes: u64, route: Route) {
-        let slot = self.slot;
-        self.done(|m, now| m.body_done(slot, chunks, bytes, route, now));
-    }
-
     fn chunk_settled(&self, index: u32) {
         let now = self.shared.now();
         lock(&self.shared.model).chunk_settled(self.slot, index, now);
