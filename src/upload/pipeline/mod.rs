@@ -978,11 +978,6 @@ pub(super) async fn upload_attempt(
     })
 }
 
-/// The producer/consumer core. Returns what it confirmed only when every
-/// planned chunk was emitted, server-confirmed, and the byte totals reconcile.
-/// Adds the bytes of every chunk it SENT (not one the server already held) to
-/// `transferred`.
-
 /// Generate + encrypt + upload a thumbnail for image files, best-effort. Does
 /// exactly one extra bounded read of the source; never holds key material in
 /// the CLI beyond the derived per-file key.

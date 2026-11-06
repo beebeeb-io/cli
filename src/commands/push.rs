@@ -402,6 +402,7 @@ impl UploadResult {
 /// takes its share back out of the run. A failed one keeps it, so the run ends short of its total, and gives up what
 /// it did not send, so the ETA does not wait for it. `in_folder`: part of a folder push, which prints no `resuming`
 /// line (as before).
+#[allow(clippy::too_many_arguments)]
 async fn push_single_file(
     api: &ApiClient,
     path: &std::path::Path,
@@ -739,6 +740,7 @@ async fn upload_one(
     Ok(Pushed::Uploaded(upload_result))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn push_directory(
     api: &ApiClient,
     dir_path: &std::path::Path,
