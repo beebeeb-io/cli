@@ -42,18 +42,20 @@ Every endpoint is a method on `ApiClient`; the command never builds a request it
 
 ## Add a progress report
 
-Progress is a sink: the upload and download loops report bytes, the sink decides what to draw.
+Progress is a sink: the upload and download loops report chunks, the sink decides what to draw.
+The numbers live in a pure model (`src/transfer_stats/`), the lines in `src/transfer_view/` (task 2333).
 
-- Files: `src/upload/progress.rs`, `src/upload.rs`, `src/commands/pull/run.rs`
-- Pattern: `ChunkProgress` in `src/upload/progress.rs`, `BarProgress` in `src/upload/progress.rs`, `NoopProgress` in `src/upload/progress.rs`
+- Files: `src/upload/progress.rs`, `src/upload.rs`, `src/transfer_stats/mod.rs`, `src/transfer_view/sink.rs`, `src/transfer_view/line.rs`
+- Pattern: `ChunkProgress` in `src/upload/progress.rs`, `LiveProgress` in `src/transfer_view/sink.rs`, `NoopProgress` in `src/upload/progress.rs`
 - Steps:
-  1. Report from the loop through `ChunkProgress` / `FileProgress`; call `chunk_confirmed` only
-     after the server's 200, so the bar counts on-the-wire bytes.
-  2. Draw in the sink (`src/upload/progress.rs`), not in the command: `BarProgress` for the bars,
-     `NoopProgress` for `--json`, `--quiet` and pipes.
-  3. Pick the sink where the run starts (`crate::ui::is_rich() && stdout().is_terminal()`), and pass
-     it down as `&dyn ChunkProgress`.
-  4. A retry that restarts a file calls `rollback` with the failed attempt's bytes, or the overall
-     total drifts past the plan.
+  1. Report from the loop through `ChunkProgress` / `FileProgress`: `InFlight::start` around each
+     chunk's transfer, `chunk_retried` per retry, `chunk_done` only after the server's answer (an
+     upload) or a decrypted frame (a download), so every number counts held bytes.
+  2. Draw in the sink, never in the command: `LiveProgress` with `ViewOptions::for_command(verbose)`
+     decides the live lines (rich, stdout and stderr terminals), the plain lines and `--quiet`/`--json`.
+  3. Create the sink where the run starts, plan every file (`plan_file`, `seal_plan`, `set_limit`), and
+     pass it down as `&dyn ChunkProgress`; print through `note` and prompt inside `suspend`.
+  4. A retry that restarts a file calls `rollback_tally` with the failed attempt's bytes and chunks,
+     or the totals drift past the plan.
   5. Re-export a new public sink from `src/upload.rs`; nothing else names `progress::` directly.
 - Check: `cargo check --all-targets`

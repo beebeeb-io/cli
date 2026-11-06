@@ -74,7 +74,9 @@ pub use error::UploadError;
 
 mod progress;
 use progress::*;
-pub use progress::{BarProgress, ChunkProgress, FileProgress, NoopProgress};
+pub use progress::{
+    BarProgress, ChunkProgress, FileProgress, Held, InFlight, NoopProgress, PoolLabel, Route, Stream, Tally,
+};
 
 mod session;
 use session::*;

@@ -16,7 +16,7 @@ use std::collections::HashMap;
 mod pool;
 mod window;
 
-pub(crate) use pool::PoolLabel;
+pub use pool::PoolLabel;
 use window::{Entry, Taken, Window};
 
 /// The current rate looks back at least this far (spec §4.5).
@@ -51,14 +51,14 @@ impl Direction {
 
 /// How a chunk's bytes travelled: straight to or from object storage, or through the API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Route {
+pub enum Route {
     Direct,
     Api,
 }
 
 /// How a confirmed chunk came to be held: this run moved it, or the server already had it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Held {
+pub enum Held {
     Transferred,
     AlreadyStored,
 }
@@ -69,10 +69,10 @@ pub(crate) struct FileSlot(u32);
 
 /// What a failed attempt had counted, to be taken back (spec §4.3).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct Tally {
-    pub(crate) bytes: u64,
-    pub(crate) chunks: u32,
-    pub(crate) already_stored: u32,
+pub struct Tally {
+    pub bytes: u64,
+    pub chunks: u32,
+    pub already_stored: u32,
 }
 
 /// The current speed, or why there is none.
@@ -404,6 +404,11 @@ impl TransferStats {
             self.files_done += 1;
         }
         self.files[f.0 as usize].finished_ok = Some(ok);
+    }
+
+    /// Files planned for the run (cheap; the sink asks it per chunk).
+    pub(crate) fn files_total(&self) -> u32 {
+        self.files_total
     }
 
     pub(crate) fn snapshot(&self, now_ms: u64) -> Snapshot {

@@ -5,10 +5,10 @@
 /// The pool of one file. Every field is optional: an older server, or a
 /// download (whose file rows carry no pool id), answers with less.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PoolLabel {
-    pub(crate) id: Option<uuid::Uuid>,
-    pub(crate) country: Option<String>,
-    pub(crate) country_code: Option<String>,
+pub struct PoolLabel {
+    pub id: Option<uuid::Uuid>,
+    pub country: Option<String>,
+    pub country_code: Option<String>,
 }
 
 impl PoolLabel {
