@@ -474,6 +474,10 @@ pub(crate) async fn upload(
         replace_file_key: key,
         parent_id: Some(parent),
         concurrency: 1,
+        unrecorded_resume_concurrency: 1,
+        chunks_in_flight: 1,
+        limits: crate::upload::limits::ChunkLimits::single(),
+        interrupt: None,
         shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         read_row: None,
     };
