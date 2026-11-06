@@ -8,6 +8,7 @@
 //! Tests: `bar_progress_rollback_race` at the bottom of this file.
 
 use super::*;
+pub use crate::transfer_stats::{Held, PoolLabel, Route, Tally};
 
 /// Progress sink. One instance per sync/push run; [`begin_file`] is called once
 /// per file and returns a per-file handle.
@@ -27,6 +28,47 @@ pub trait ChunkProgress: Send + Sync {
     /// confirmations on top of them make the run-wide total exceed the
     /// run-wide plan. No-op by default (also correct for [`NoopProgress`]).
     fn rollback(&self, _ciphertext_bytes: u64) {}
+
+    // ── Task 2333 (spec §6.8): every method below has a default, so a sink that
+    //    implements only the byte methods above behaves byte for byte as before. ──
+
+    /// [`begin_file`](Self::begin_file), knowing the file's chunk plan (for the
+    /// verbose per-chunk lines). Defaults to `begin_file`.
+    fn begin_file_chunks(
+        &self,
+        file_name: &str,
+        expected_ciphertext: u64,
+        _chunk_count: u32,
+        _chunk_size: u64,
+    ) -> Box<dyn FileProgress> {
+        self.begin_file(file_name, expected_ciphertext)
+    }
+    /// [`rollback`](Self::rollback) with the chunks too, naming the file whose
+    /// failed attempt is taken back. Defaults to `rollback(tally.bytes)`.
+    fn rollback_tally(&self, _file_name: &str, tally: Tally) {
+        self.rollback(tally.bytes)
+    }
+    /// The most chunks that may be in flight now (spec §1.3). No-op by default.
+    fn set_limit(&self, _max_in_flight: u32) {}
+    /// Print a line the run produced (a notice, a per-file line) without tearing
+    /// any live lines. Defaults to a plain `println!` / `eprintln!`.
+    fn note(&self, line: &str, to: Stream) {
+        match to {
+            Stream::Stdout => println!("{line}"),
+            Stream::Stderr => eprintln!("{line}"),
+        }
+    }
+    /// Run `f` (a prompt) with any live lines hidden. Defaults to calling `f`.
+    fn suspend(&self, f: &mut dyn FnMut()) {
+        f()
+    }
+}
+
+/// Where a [`ChunkProgress::note`] goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stream {
+    Stdout,
+    Stderr,
 }
 
 /// Per-file progress handle. `Sync` so a `&dyn FileProgress` can be held across
@@ -38,6 +80,43 @@ pub trait FileProgress: Send + Sync {
     /// File finished; clears the transient per-file bar and, on success,
     /// advances the overall file counter.
     fn finish(self: Box<Self>, success: bool);
+
+    // ── Task 2333 (spec §6.8): defaults keep every existing sink as it was. ──
+
+    /// Chunk `index` is about to cross the wire by `route` (use [`InFlight`]).
+    fn chunk_started(&self, _index: u32, _route: Route) {}
+    /// Chunk `index` is being tried again.
+    fn chunk_retried(&self, _index: u32) {}
+    /// Chunk `index` is held: confirmed by the server (upload) or decrypted
+    /// (download), `held` saying whether this run moved it. Defaults to
+    /// `chunk_confirmed(bytes)`.
+    fn chunk_done(&self, _index: u32, bytes: u64, _held: Held) {
+        self.chunk_confirmed(bytes)
+    }
+    /// Chunk `index` left the wire: done, failed, interrupted or dropped.
+    fn chunk_settled(&self, _index: u32) {}
+    /// The storage pool this file's bytes go to (spec §4.4).
+    fn pool(&self, _label: PoolLabel) {}
+}
+
+/// A chunk in flight: [`FileProgress::chunk_started`] when made,
+/// [`FileProgress::chunk_settled`] when dropped, whichever way the transfer ends.
+pub struct InFlight<'a> {
+    prog: &'a dyn FileProgress,
+    index: u32,
+}
+
+impl<'a> InFlight<'a> {
+    pub fn start(prog: &'a dyn FileProgress, index: u32, route: Route) -> Self {
+        prog.chunk_started(index, route);
+        Self { prog, index }
+    }
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.prog.chunk_settled(self.index);
+    }
 }
 
 /// Progress sink that does nothing — the caller keeps its plain `println!`
@@ -247,3 +326,65 @@ mod bar_progress_rollback_race {
         }
     }
 }
+
+/// Task 2333: the new sink methods default to the old byte methods, so a sink
+/// that implements only `chunk_confirmed` and `rollback` sees exactly the bytes
+/// it saw before (spec §6.8).
+#[cfg(test)]
+mod existing_sinks {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::{ChunkProgress, FileProgress, Held, InFlight, Route, Tally};
+
+    #[derive(Default)]
+    struct Bytes {
+        confirmed: Arc<AtomicU64>,
+        rolled_back: Arc<AtomicU64>,
+    }
+    struct OneFile(Arc<AtomicU64>);
+    impl FileProgress for OneFile {
+        fn chunk_confirmed(&self, n: u64) {
+            self.0.fetch_add(n, Ordering::SeqCst);
+        }
+        fn finish(self: Box<Self>, _: bool) {}
+    }
+    impl ChunkProgress for Bytes {
+        fn begin_file(&self, _: &str, _: u64) -> Box<dyn FileProgress> {
+            Box::new(OneFile(Arc::clone(&self.confirmed)))
+        }
+        fn rollback(&self, n: u64) {
+            self.rolled_back.fetch_add(n, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn existing_sinks_keep_their_bytes() {
+        let sink = Bytes::default();
+        let f = sink.begin_file_chunks("a", 30, 3, 10);
+        {
+            let _flight = InFlight::start(f.as_ref(), 0, Route::Api);
+            f.chunk_retried(0);
+            f.chunk_done(0, 10, Held::Transferred);
+        }
+        f.chunk_done(1, 7, Held::AlreadyStored);
+        sink.rollback_tally(
+            "a",
+            Tally {
+                bytes: 5,
+                chunks: 1,
+                already_stored: 0,
+            },
+        );
+        sink.set_limit(4);
+        let mut called = false;
+        sink.suspend(&mut || called = true);
+        assert!(called);
+        assert_eq!(sink.confirmed.load(Ordering::SeqCst), 17);
+        assert_eq!(sink.rolled_back.load(Ordering::SeqCst), 5);
+    }
+}
+
+/// Task 2333: a sink that records every driver event as a line (the driver tests).
+#[cfg(test)]
+pub(crate) mod recording;

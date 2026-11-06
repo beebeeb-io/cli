@@ -20,6 +20,7 @@ use beebeeb_core::direct_transfer as dt;
 use bytes::Bytes;
 
 use crate::api::{ApiClient, UploadCall};
+use crate::upload::{FileProgress, Held};
 
 mod error;
 pub(crate) use error::DirectUploadError;

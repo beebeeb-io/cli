@@ -24,6 +24,13 @@ pub(super) const MAX_THUMBNAIL_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
 /// Per-chunk AEAD overhead on the wire: `nonce(12) + tag(16)`.
 pub(super) const CHUNK_OVERHEAD: u64 = 28;
 
+/// Chunks of ONE file on the wire at once. The consumer loop in [`run_pipeline`] awaits each chunk's
+/// transfer before it takes the next one off the channel (`rx.recv()`), so a file sends one chunk at a
+/// time while the producer encrypts the next (`CHANNEL_CAP`). `bb sync` runs `concurrency` files at once:
+/// its run-wide limit is `concurrency × CHUNKS_IN_FLIGHT_PER_FILE`. Test `push_sends_one_chunk_at_a_time`
+/// measures the peak through the real loop, so a change to the loop has to change this constant.
+pub(crate) const CHUNKS_IN_FLIGHT_PER_FILE: u32 = 1;
+
 /// Encrypt and upload one file with constant memory and honest progress.
 ///
 /// Shared by `bb sync` (called inside the `buffer_unordered` closure, so files
@@ -101,6 +108,7 @@ pub async fn stream_encrypt_upload(
             end_interrupted(
                 api,
                 &spec,
+                progress,
                 stale.file_id,
                 "the interrupted upload cannot be continued by this upload; starting it again",
             )
@@ -114,7 +122,7 @@ pub async fn stream_encrypt_upload(
     // to the folder this write asks for; one going elsewhere is ended (its row, listed and counted in the quota
     // until then, is deleted with it) and this file starts again here.
     let pending = match pending {
-        Some(p) if replacing.is_none() => resumable_here(api, &spec, p).await?,
+        Some(p) if replacing.is_none() => resumable_here(api, &spec, progress, p).await?,
         other => other,
     };
     // R4-C: a sidecar record pairs an id with the tag core minted for THAT id.
@@ -157,16 +165,22 @@ pub async fn stream_encrypt_upload(
                     {
                         // The init below then meets the live lease (409) and fails:
                         // a later run retries. Never falls back to the old session.
-                        eprintln!(
-                            "  {}: could not abandon the interrupted upload ({})",
-                            display_name(&spec.file_name),
-                            e.message
+                        progress.note(
+                            &format!(
+                                "  {}: could not abandon the interrupted upload ({})",
+                                display_name(&spec.file_name),
+                                e.message
+                            ),
+                            Stream::Stderr,
                         );
                     }
                     if !crate::ui::is_quiet() {
-                        eprintln!(
-                            "  {}: the interrupted upload cannot be continued in this chunk format; starting it again",
-                            display_name(&spec.file_name)
+                        progress.note(
+                            &format!(
+                                "  {}: the interrupted upload cannot be continued in this chunk format; starting it again",
+                                display_name(&spec.file_name)
+                            ),
+                            Stream::Stderr,
                         );
                     }
                     // R4-C: a mismatched tag proves nothing about the pending
@@ -192,12 +206,27 @@ pub async fn stream_encrypt_upload(
     // `note_direct_upload_failed` remembers the same fact for every LATER file for the trust period, but a
     // memory with an expiry cannot be what bounds this loop, so the file keeps its own bit.
     let mut direct_given_up = false;
+    // Every attempt's sent chunks, for the file's speed: a chunk re-sent after a failed attempt crossed the
+    // wire twice (spec §4.3: progress is net of rollbacks, speed is not).
+    let mut transferred: u64 = 0;
     loop {
-        match upload_attempt(api, &master_key, &spec, size, mtime_ns, plan, direct_given_up, progress).await {
+        match upload_attempt(
+            api,
+            &master_key,
+            &spec,
+            size,
+            mtime_ns,
+            plan,
+            direct_given_up,
+            progress,
+            &mut transferred,
+        )
+        .await
+        {
             Ok(outcome) => return Ok(outcome),
             Err(AttemptErr::SessionGone {
                 message: msg,
-                bytes_confirmed,
+                confirmed,
             }) => {
                 // Only a RESUMED session is re-inited, and a re-init always
                 // yields an `Init` plan — so this arm runs at most once per
@@ -206,22 +235,25 @@ pub async fn stream_encrypt_upload(
                 let SessionPlan::Resume { file_id, .. } = plan else {
                     return Err(msg.into());
                 };
-                // The dead attempt's chunk_confirmed reports must not survive
+                // The dead attempt's chunk_done reports must not survive
                 // into the retry's own count (Codex thread #2): the retry gets
-                // a BRAND NEW `FileProgress` from `begin_file` and re-sends
+                // a BRAND NEW `FileProgress` from `begin_file_chunks` and re-sends
                 // every chunk from 0, so anything left on the shared/overall
                 // counter from this failed attempt would be double-counted
                 // once the retry's own confirmations land on top of it.
-                if bytes_confirmed > 0 {
-                    progress.rollback(bytes_confirmed);
+                if confirmed.chunks > 0 {
+                    progress.rollback_tally(&spec.file_name, confirmed);
                 }
                 // The recorded session is dead: drop it so neither this run nor
                 // a later one ever PUTs to it again.
                 crate::resume::clear(&spec.path);
                 if !crate::ui::is_quiet() {
-                    eprintln!(
-                        "  {}: the interrupted upload expired on the server; starting it again",
-                        display_name(&spec.file_name)
+                    progress.note(
+                        &format!(
+                            "  {}: the interrupted upload expired on the server; starting it again",
+                            display_name(&spec.file_name)
+                        ),
+                        Stream::Stderr,
                     );
                 }
                 plan = SessionPlan::Init {
@@ -231,7 +263,7 @@ pub async fn stream_encrypt_upload(
                     resume_tag: tag_for(file_id),
                 };
             }
-            Err(AttemptErr::DirectUnavailable { bytes_confirmed }) => {
+            Err(AttemptErr::DirectUnavailable { confirmed }) => {
                 // The direct session takes no proxy PUT, and the init below would meet its live lease: end
                 // it first, like a session that cannot be continued (`RestartWithFreshSession`). Once per
                 // file per run: `direct_given_up` keeps this file's re-init off the direct route, and
@@ -239,24 +271,30 @@ pub async fn stream_encrypt_upload(
                 let (SessionPlan::Resume { file_id, .. } | SessionPlan::Init { file_id, .. }) = plan;
                 direct_given_up = true;
                 api.note_direct_upload_failed();
-                if bytes_confirmed > 0 {
-                    progress.rollback(bytes_confirmed);
+                if confirmed.chunks > 0 {
+                    progress.rollback_tally(&spec.file_name, confirmed);
                 }
                 crate::resume::clear(&spec.path);
                 if let Err(e) = api.upload_abandon(&file_id.to_string()).await
                     && e.status != 404
                     && !crate::ui::is_quiet()
                 {
-                    eprintln!(
-                        "  {}: could not end the direct upload session ({})",
-                        display_name(&spec.file_name),
-                        e.message
+                    progress.note(
+                        &format!(
+                            "  {}: could not end the direct upload session ({})",
+                            display_name(&spec.file_name),
+                            e.message
+                        ),
+                        Stream::Stderr,
                     );
                 }
                 if !crate::ui::is_quiet() {
-                    eprintln!(
-                        "  {}: the direct upload is unavailable for this file; sending it through the API",
-                        display_name(&spec.file_name)
+                    progress.note(
+                        &format!(
+                            "  {}: the direct upload is unavailable for this file; sending it through the API",
+                            display_name(&spec.file_name)
+                        ),
+                        Stream::Stderr,
                     );
                 }
                 plan = SessionPlan::Init {
@@ -290,6 +328,7 @@ pub async fn stream_encrypt_upload(
 async fn resumable_here(
     api: &ApiClient,
     spec: &UploadSpec,
+    progress: &dyn ChunkProgress,
     pending: crate::resume::PendingUpload,
 ) -> Result<Option<crate::resume::PendingUpload>, UploadError> {
     api.require_auth().map_err(|e| UploadError::from(e.message))?;
@@ -308,9 +347,9 @@ async fn resumable_here(
     };
     match (server_parent, pending.destination) {
         (Ok(parent), _) if parent == spec.parent_id => Ok(Some(pending)),
-        (Ok(_), _) => end_elsewhere(api, spec, pending).await,
+        (Ok(_), _) => end_elsewhere(api, spec, progress, pending).await,
         (Err(_), Some(recorded)) if recorded == spec.parent_id => Ok(Some(pending)),
-        (Err(_), Some(_)) => end_elsewhere(api, spec, pending).await,
+        (Err(_), Some(_)) => end_elsewhere(api, spec, progress, pending).await,
         (Err(e), None) => Err(format!(
             "{name}: could not check which folder the interrupted upload was going to ({e}); \
              its progress is kept: run the command again"
@@ -359,11 +398,13 @@ async fn read_row_parent(api: &ApiClient, file_id: Uuid) -> Result<RowAnswer, Up
 async fn end_elsewhere(
     api: &ApiClient,
     spec: &UploadSpec,
+    progress: &dyn ChunkProgress,
     pending: crate::resume::PendingUpload,
 ) -> Result<Option<crate::resume::PendingUpload>, UploadError> {
     end_interrupted(
         api,
         spec,
+        progress,
         pending.file_id,
         "the interrupted upload was going to another folder; starting it again here",
     )
@@ -373,7 +414,8 @@ async fn end_elsewhere(
 
 /// End the interrupted upload `file_id` of `spec`'s file by the one explicit route
 /// (`POST /files/{id}/upload/abandon`, which deletes a never-completed first upload's row: until then it is listed
-/// and counted in the quota), then drop its record and say `why_again` (unless quiet).
+/// and counted in the quota), then drop its record and say `why_again` (unless quiet) through `progress`, so the
+/// line goes around live transfer lines (task 2333, spec §6.7).
 ///
 /// Abandon BEFORE the record goes, and drop it only once the session is gone (or never existed: a 404). A
 /// failure keeps the record and fails this file for this run: an upload now would overwrite the record (one per
@@ -381,6 +423,7 @@ async fn end_elsewhere(
 async fn end_interrupted(
     api: &ApiClient,
     spec: &UploadSpec,
+    progress: &dyn ChunkProgress,
     file_id: Uuid,
     why_again: &str,
 ) -> Result<(), UploadError> {
@@ -398,7 +441,7 @@ async fn end_interrupted(
     }
     crate::resume::clear(&spec.path);
     if !crate::ui::is_quiet() {
-        eprintln!("  {name}: {why_again}");
+        progress.note(&format!("  {name}: {why_again}"), Stream::Stderr);
     }
     Ok(())
 }
@@ -407,7 +450,7 @@ async fn end_interrupted(
 /// session, stream every chunk, complete. Consumes nothing the retry needs —
 /// the encryptor is rebuilt per attempt because the file key derives from the
 /// file id. `direct_given_up`: a direct upload of THIS file already had to be given up in this run, so a new
-/// session must not ask for one again.
+/// session must not ask for one again. `transferred` sums the bytes every attempt of this file sent.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn upload_attempt(
     api: &ApiClient,
@@ -418,6 +461,7 @@ pub(super) async fn upload_attempt(
     plan: SessionPlan,
     direct_given_up: bool,
     progress: &dyn ChunkProgress,
+    transferred: &mut u64,
 ) -> Result<UploadOutcome, AttemptErr> {
     let (file_id, resumed_session, resumed_direct, record_resume_tag) = match plan {
         SessionPlan::Resume {
@@ -518,13 +562,17 @@ pub(super) async fn upload_attempt(
     //
     //    The capabilities are asked only when the answer is used: a resumed API session has no use for it (and a
     //    slow capabilities route costs up to 15 s a try).
-    let (upload_session_id, direct) = if let Some(sid) = resumed_session {
+    let (upload_session_id, direct, init_pool) = if let Some(sid) = resumed_session {
         let direct = if resumed_direct {
             match api.direct_upload_offer().await {
                 DirectOffer::Offered(discovery) => Some(discovery),
                 // A definite no (forced off, or the server does not offer the direction any more): a direct
                 // session takes no proxy PUT, so it is given up.
-                DirectOffer::NotOffered => return Err(AttemptErr::DirectUnavailable { bytes_confirmed: 0 }),
+                DirectOffer::NotOffered => {
+                    return Err(AttemptErr::DirectUnavailable {
+                        confirmed: Tally::default(),
+                    });
+                }
                 // The login is not valid (no session, or the lookup was refused with a 401/403): the way out is
                 // `bb login`, not `--transport api`, and the session and its record are kept (a 50 GB push
                 // killed at 90 % would start again from 0). Each says what it was, in the words the rest of the
@@ -548,7 +596,7 @@ pub(super) async fn upload_attempt(
         } else {
             None
         };
-        (sid.to_string(), direct)
+        (sid.to_string(), direct, None)
     } else {
         // The STORED-id recovery init (a re-init after a swept session) gets a
         // bounded, backed-off retry on a `5xx` before anything else runs: a
@@ -657,13 +705,17 @@ pub(super) async fn upload_attempt(
             );
         }
         let direct = if session_direct { offer } else { None };
-        (init.upload_session_id, direct)
+        (init.upload_session_id, direct, init.pool)
     };
 
     // 6. Run the look-ahead pipeline. Every chunk is PUT to the session; on a
     //    resumed session the server returns `{skipped:true}` for chunks it
     //    already holds, so re-PUTs are cheap and correct.
-    let file_prog = progress.begin_file(&spec.file_name, expected_total);
+    let file_prog = progress.begin_file_chunks(&spec.file_name, expected_total, chunk_count, chunk_size);
+    // A new session's pool is named by its init answer; a resumed one's by its completion (below).
+    if let Some(label) = init_pool {
+        file_prog.pool(label);
+    }
     let result = run_pipeline(
         api,
         &upload_session_id,
@@ -673,6 +725,7 @@ pub(super) async fn upload_attempt(
         expected_total,
         &spec.shutdown,
         file_prog.as_ref(),
+        transferred,
     )
     .await;
 
@@ -685,21 +738,24 @@ pub(super) async fn upload_attempt(
     // logical file (Codex thread #2). So a failure at either stage finishes
     // the bar as `false`, and `finish(true)` fires only once both stages of
     // THIS attempt actually succeeded.
-    if let Err(e) = result {
-        file_prog.finish(false);
-        return Err(e);
-    }
+    let confirmed = match result {
+        Ok(confirmed) => confirmed,
+        Err(e) => {
+            file_prog.finish(false);
+            return Err(e);
+        }
+    };
 
     // 7. Finalise the version.
     let completed = match api.upload_complete_typed(&upload_session_id).await {
         Ok(v) => v,
         Err(e) => {
-            // Every chunk was confirmed (we only reach here on `result == Ok(())`,
-            // which `run_pipeline` only returns once `confirmed_bytes ==
-            // expected_total`) — so a swept-session retry must roll back exactly
-            // `expected_total`, the full amount THIS attempt reported.
+            // Every chunk was confirmed (`run_pipeline` returns `Ok` only once
+            // its tally is `expected_total` bytes in `chunk_count` chunks) — so a
+            // swept-session retry must roll back exactly that: everything THIS
+            // attempt reported, already-stored chunks included.
             file_prog.finish(false);
-            return Err(session_err(None, e, expected_total));
+            return Err(session_err(None, e, confirmed));
         }
     };
     // L13 (SF-0001): the completion answer must name the same item this client
@@ -716,6 +772,11 @@ pub(super) async fn upload_attempt(
         let _ = api.upload_abandon(&file_id_str).await;
         file_prog.finish(false);
         return Err(AttemptErr::Other(e.to_string()));
+    }
+    if resumed_session.is_some()
+        && let Some(label) = PoolLabel::from_answer(&completed)
+    {
+        file_prog.pool(label);
     }
     file_prog.finish(true);
 
@@ -743,6 +804,7 @@ pub(super) async fn upload_attempt(
         version_number: completed.get("version_number").and_then(serde_json::Value::as_i64),
         ciphertext_bytes: expected_total,
         transport: if direct.is_some() { "direct" } else { "api" },
+        transferred_bytes: *transferred,
     })
 }
 
@@ -759,8 +821,10 @@ pub(super) enum ProducerErr {
     ChannelClosed,
 }
 
-/// The producer/consumer core. Returns `Ok(())` only when every planned chunk
-/// was emitted, server-confirmed, and the byte totals reconcile.
+/// The producer/consumer core. Returns what it confirmed only when every
+/// planned chunk was emitted, server-confirmed, and the byte totals reconcile.
+/// Adds the bytes of every chunk it SENT (not one the server already held) to
+/// `transferred`.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_pipeline(
     api: &ApiClient,
@@ -771,7 +835,8 @@ pub(super) async fn run_pipeline(
     expected_total: u64,
     shutdown: &Arc<AtomicBool>,
     file_prog: &dyn FileProgress,
-) -> Result<(), AttemptErr> {
+    transferred: &mut u64,
+) -> Result<Tally, AttemptErr> {
     use tokio::sync::mpsc;
 
     let upload_id = crate::api::DirectUploadId::from(upload_session_id);
@@ -811,8 +876,9 @@ pub(super) async fn run_pipeline(
     // receiver wakes a producer parked on the cap-1 channel, so there is no
     // deadlock; and if this function unwinds, dropping `rx` closes the channel
     // for the same reason.
-    let mut confirmed_bytes: u64 = 0;
-    let mut confirmed_chunks: u32 = 0;
+    // What this attempt reported done: rolled back by the caller if the attempt dies (`AttemptErr`).
+    let mut confirmed = Tally::default();
+    let route = if direct.is_some() { Route::Direct } else { Route::Api };
     let mut consumer_err: Option<AttemptErr> = None;
     while let Some(chunk) = rx.recv().await {
         if shutdown.load(Ordering::Relaxed) {
@@ -827,6 +893,8 @@ pub(super) async fn run_pipeline(
         // client-side "present" set needed.
         // Task 2173: a direct session sends the chunk grant -> PUT to storage -> commit; an API session
         // PUTs it to the API as it always did. Either way the chunk counts only once the server holds it.
+        // In flight from here until this iteration ends, whichever way (task 2333).
+        let _flight = InFlight::start(file_prog, index, route);
         let stored = match direct {
             Some(discovery) => {
                 match crate::direct_upload::upload_chunk(
@@ -836,14 +904,13 @@ pub(super) async fn run_pipeline(
                     index,
                     Bytes::from(chunk.data),
                     shutdown,
+                    file_prog,
                 )
                 .await
                 {
-                    Ok(()) => Ok(()),
+                    Ok(held) => Ok(held),
                     Err(crate::direct_upload::DirectUploadError::UseApi) => {
-                        consumer_err = Some(AttemptErr::DirectUnavailable {
-                            bytes_confirmed: confirmed_bytes,
-                        });
+                        consumer_err = Some(AttemptErr::DirectUnavailable { confirmed });
                         break;
                     }
                     Err(crate::direct_upload::DirectUploadError::Interrupted) => {
@@ -854,7 +921,7 @@ pub(super) async fn run_pipeline(
                         // The same recovery as a swept session on the proxy route (task 1589).
                         consumer_err = Some(AttemptErr::SessionGone {
                             message: format!("chunk {index} upload: {message}"),
-                            bytes_confirmed: confirmed_bytes,
+                            confirmed,
                         });
                         break;
                     }
@@ -867,23 +934,30 @@ pub(super) async fn run_pipeline(
                     }
                 }
             }
+            // The API route always sends the bytes, even for a chunk the server answers `skipped`.
             None => api
-                .upload_chunk_typed(upload_session_id, index, Bytes::from(chunk.data))
+                .upload_chunk_observed(upload_session_id, index, Bytes::from(chunk.data), &|| {
+                    file_prog.chunk_retried(index)
+                })
                 .await
-                .map(|_| ()),
+                .map(|_| Held::Transferred),
         };
         match stored {
-            Ok(()) => {
-                confirmed_bytes += len;
-                confirmed_chunks += 1;
-                file_prog.chunk_confirmed(len);
+            Ok(held) => {
+                confirmed.bytes += len;
+                confirmed.chunks += 1;
+                match held {
+                    Held::AlreadyStored => confirmed.already_stored += 1,
+                    Held::Transferred => *transferred += len,
+                }
+                file_prog.chunk_done(index, len, held);
             }
             Err(e) => {
-                // `confirmed_bytes` is every byte THIS chunk-PUT loop already
-                // reported to `file_prog.chunk_confirmed` before `e` — exactly
+                // `confirmed` is everything THIS chunk-PUT loop already
+                // reported to `file_prog.chunk_done` before `e` — exactly
                 // what a swept-session retry (starting a fresh `FileProgress`
-                // at chunk 0) must roll back on the shared/overall counter.
-                consumer_err = Some(session_err(Some(format!("chunk {index} upload")), e, confirmed_bytes));
+                // at chunk 0) must roll back on the run's counts.
+                consumer_err = Some(session_err(Some(format!("chunk {index} upload")), e, confirmed));
                 break;
             }
         }
@@ -911,17 +985,19 @@ pub(super) async fn run_pipeline(
     }
 
     // Final client-side guards (hygiene; the server recomputes the total).
-    if confirmed_chunks != chunk_count {
+    if confirmed.chunks != chunk_count {
         return Err(AttemptErr::Other(format!(
-            "incomplete upload: {confirmed_chunks}/{chunk_count} chunks confirmed"
+            "incomplete upload: {}/{chunk_count} chunks confirmed",
+            confirmed.chunks
         )));
     }
-    if confirmed_bytes != expected_total {
+    if confirmed.bytes != expected_total {
         return Err(AttemptErr::Other(format!(
-            "ciphertext total mismatch: confirmed {confirmed_bytes}, expected {expected_total}"
+            "ciphertext total mismatch: confirmed {}, expected {expected_total}",
+            confirmed.bytes
         )));
     }
-    Ok(())
+    Ok(confirmed)
 }
 
 /// Generate + encrypt + upload a thumbnail for image files, best-effort. Does
@@ -995,6 +1071,12 @@ pub fn expected_ciphertext_for(size: u64, concurrency: u32) -> u64 {
     size + CHUNK_OVERHEAD * plan.chunk_count
 }
 
+/// The chunk count the upload driver emits for a file of `size` at `concurrency`: the same plan as
+/// [`expected_ciphertext_for`], so a command can plan a run's chunks before any file is opened (task 2333).
+pub fn expected_chunks_for(size: u64, concurrency: u32) -> u32 {
+    beebeeb_types::plan_chunks_concurrent(size, ChunkProfile::Cli, concurrency.max(1)).chunk_count as u32
+}
+
 #[cfg(test)]
 pub(super) mod rss_regression;
 
@@ -1008,3 +1090,7 @@ pub(super) mod swept_session_reinit;
 /// Task 2334: an interrupted create continues only into the folder this write asks for.
 #[cfg(test)]
 mod resume_destination;
+
+/// Task 2333: what the driver tells its progress sink (chunks in flight, retries, pools, rollbacks).
+#[cfg(test)]
+mod live_stats_tests;

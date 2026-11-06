@@ -110,7 +110,10 @@ impl ApiClient {
             if let Some(cut) = listing_cap_reached(&mut all, cap, next.is_some()) {
                 truncated = cut;
                 if cut {
-                    eprintln!("warning: file listing reached the {cap}-entry safety cap; some entries may be omitted");
+                    // Around the live transfer lines when a run draws them (a folder push lists every parent).
+                    crate::transfer_view::notice::stderr(&format!(
+                        "warning: file listing reached the {cap}-entry safety cap; some entries may be omitted"
+                    ));
                 }
                 break;
             }

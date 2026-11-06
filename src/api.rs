@@ -207,6 +207,9 @@ pub struct UploadInit {
     /// The `transport` field of the 201 body (task 2173): `object-upload-v1` when the server
     /// opened a direct session, absent otherwise (today's chunk PUT route).
     pub transport: Option<String>,
+    /// Task 2333: the storage country of the pool the server placed this upload in, the only part of it a user is
+    /// told (never its id, a datacenter code or a city: `PoolLabel::from_answer`). `None` when the answer names none.
+    pub pool: Option<crate::transfer_stats::PoolLabel>,
 }
 
 impl UploadInit {
@@ -237,6 +240,7 @@ impl UploadInit {
             chunk_size_bytes,
             chunk_count,
             transport,
+            pool: crate::transfer_stats::PoolLabel::from_answer(v),
         })
     }
 }
@@ -485,12 +489,14 @@ async fn parse_response_typed(resp: reqwest::Response) -> Result<Value, ApiError
 
         if !crate::ui::is_quiet() {
             use colored::Colorize;
-            eprintln!(
+            // Through the live transfer lines when a run draws them (task 2333, spec §6.7): any request
+            // of a push, pull or sync can meet a 429.
+            crate::transfer_view::notice::stderr(&format!(
                 "  {} rate limited — pausing {}s{}",
                 "⏸".custom_color(crate::colors::AMBER),
                 retry_after,
                 remaining.map_or(String::new(), |r| format!(" ({r} requests remaining)")),
-            );
+            ));
         }
 
         tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
