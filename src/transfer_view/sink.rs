@@ -526,7 +526,10 @@ impl ChunkProgress for LiveProgress {
         self.shared.emit(to, text);
     }
 
+    /// `f` is a prompt: the lines are hidden while it runs, and the time it waits on the person is left out of the
+    /// average and the run's duration (`TransferStats::waited`).
     fn suspend(&self, f: &mut dyn FnMut()) {
+        let start = self.shared.now();
         match &self.shared.mp {
             Some(mp) => {
                 self.shared.suspended.store(true, Ordering::SeqCst);
@@ -535,6 +538,8 @@ impl ChunkProgress for LiveProgress {
             }
             None => f(),
         }
+        let waited = self.shared.now().saturating_sub(start);
+        lock(&self.shared.model).waited(waited);
     }
 }
 

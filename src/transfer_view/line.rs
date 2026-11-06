@@ -36,7 +36,7 @@ fn drop_from_end(prefix: &str, mut segments: Vec<String>, columns: u16) -> Strin
     format!("{prefix}{}", segments.join(SEP))
 }
 
-pub(crate) fn count(n: u32, one: &str, many: &str) -> String {
+fn count(n: u32, one: &str, many: &str) -> String {
     if n == 1 {
         format!("1 {one}")
     } else {

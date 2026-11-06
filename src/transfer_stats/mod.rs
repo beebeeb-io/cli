@@ -253,6 +253,8 @@ pub(crate) struct TransferStats {
     given_up_bytes: u64,
     /// The file the command is sending now (`next_file` to `end_file`).
     share: Option<Share>,
+    /// Time spent waiting on the person (a conflict prompt): left out of the average and the run's duration.
+    waited_ms: u64,
     plan_final: bool,
     limit: u32,
     max_limit: u32,
@@ -283,6 +285,7 @@ impl TransferStats {
             chunks_total: 0,
             given_up_bytes: 0,
             share: None,
+            waited_ms: 0,
             plan_final: false,
             limit: 0,
             max_limit: 0,
@@ -333,6 +336,12 @@ impl TransferStats {
                 self.give_up(share.bytes.saturating_sub(sent));
             }
         }
+    }
+
+    /// `ms` were spent waiting on the person (a conflict prompt). That is not transfer time: the average and the
+    /// summary's duration leave it out (the lead's ruling, 2026-11-06), so `avg × total = bytes` still holds.
+    pub(crate) fn waited(&mut self, ms: u64) {
+        self.waited_ms = self.waited_ms.saturating_add(ms);
     }
 
     /// `bytes` of the plan will not be sent: a file failed for good. They stay in the totals (the run ends short
@@ -495,7 +504,7 @@ impl TransferStats {
     }
 
     pub(crate) fn summary(&self, now_ms: u64) -> Summary {
-        let duration_ms = now_ms.saturating_sub(self.run_start_ms);
+        let duration_ms = self.working_ms(now_ms);
         Summary {
             direction: self.direction,
             files_done: self.files_done,
@@ -561,9 +570,14 @@ impl TransferStats {
         );
     }
 
-    /// Bytes per second since the run started; none before anything moved or time passed.
+    /// The run's time so far, less the time spent waiting on the person.
+    fn working_ms(&self, now_ms: u64) -> u64 {
+        now_ms.saturating_sub(self.run_start_ms).saturating_sub(self.waited_ms)
+    }
+
+    /// Bytes per second over the run's working time; none before anything moved or time passed.
     fn average(&self, now_ms: u64) -> Option<f64> {
-        let elapsed = now_ms.saturating_sub(self.run_start_ms);
+        let elapsed = self.working_ms(now_ms);
         (elapsed > 0 && self.bytes_transferred > 0).then(|| self.bytes_transferred as f64 * 1000.0 / elapsed as f64)
     }
 

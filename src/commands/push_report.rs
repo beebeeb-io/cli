@@ -27,6 +27,11 @@ impl FilePlan {
         }
     }
 
+    /// The plan of the file at `path` as it is now (a file that cannot be read plans as empty: its upload fails).
+    pub(super) fn of_path(path: &std::path::Path) -> Self {
+        Self::of_size(std::fs::metadata(path).map(|m| m.len()).unwrap_or(0))
+    }
+
     fn add_to(self, progress: &LiveProgress) {
         progress.plan_file(self.bytes, self.chunks);
     }
@@ -50,7 +55,11 @@ pub(super) fn start(plans: impl IntoIterator<Item = FilePlan>, verbose: bool) ->
 
 /// `  {n} file[s] · {size} · encrypting with AES-256-GCM`, dim (rich mode).
 pub(super) fn print_resolve_line(files: usize, size: u64) {
-    let files = line::count(files as u32, "file", "files");
+    let files = if files == 1 {
+        "1 file".to_string()
+    } else {
+        format!("{files} files")
+    };
     println!(
         "  {}",
         format!(

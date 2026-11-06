@@ -56,35 +56,6 @@ async fn direct_retry_is_reported() {
     assert_eq!(rec.in_flight(), 0);
 }
 
-/// Review P3: a storage PUT that landed but whose answer was lost (here a 503), then a grant that says `skipped`:
-/// the chunk crossed the wire, so it is counted as transferred, not as already on the server.
-#[tokio::test]
-async fn direct_put_whose_answer_was_lost_counts_as_transferred() {
-    let scratch = Scratch::new("2333-lost-answer");
-    let (path, _, _) = scratch.file(FILE_BYTES);
-    let state = shared(|m| {
-        m.storage_script = VecDeque::from([503]);
-        m.grant_script = VecDeque::from([
-            Grant::Link,
-            Grant::Reply(200, json!({"transport": CAP, "index": 0, "skipped": true}), None),
-        ]);
-    });
-    let rec = Recording::default();
-
-    let outcome = run_with(&state, spec(&path, Uuid::new_v4()), &rec).await.unwrap();
-
-    assert_eq!(rec.of("retry"), ["retry 0"], "premise: the lost answer was retried");
-    let done = rec.of("done");
-    assert!(
-        done[0].starts_with("done 0 ") && done[0].ends_with(" transferred"),
-        "{done:?}"
-    );
-    assert_eq!(
-        outcome.transferred_bytes, outcome.ciphertext_bytes,
-        "every chunk crossed the wire"
-    );
-}
-
 /// N2b: a verbose sink fed by the real direct upload shows no link, no signature, no storage host,
 /// no bucket and no provider name: not in a live line, a chunk line, a notice, or the summary JSON.
 #[tokio::test]

@@ -296,3 +296,23 @@ fn an_error_leaves_the_last_lines_on_screen() {
     assert!(marks.contains(&"draw:cleared".to_string()), "{marks:?}");
     assert!(!marks.contains(&"draw:left".to_string()), "{marks:?}");
 }
+
+/// Review P3 (the lead's ruling, 2026-11-06): the time spent waiting on the person (a conflict prompt, run inside
+/// `suspend`) is left out of the average and of the run's duration: a 30 s prompt, then 125 MB in 10 s, averages
+/// 100 Mbps over 10 s, as the file's own line does.
+#[test]
+fn a_prompt_wait_is_left_out_of_the_average() {
+    let clock = Arc::new(AtomicU64::new(0));
+    let (p, _record) = LiveProgress::for_test(Direction::Upload, Level::Default, 80, Arc::clone(&clock));
+    p.plan_file(125_000_000, 1);
+    p.seal_plan();
+    p.suspend(&mut || clock.store(30_000, Ordering::SeqCst));
+    let f = p.begin_file_chunks("a.mkv", 125_000_000, 1, 125_000_000);
+    f.chunk_started(0, Route::Api);
+    clock.store(40_000, Ordering::SeqCst);
+    f.chunk_done(0, 125_000_000, Held::Transferred);
+    f.chunk_settled(0);
+    f.finish(true);
+    let s = p.summary();
+    assert_eq!((s.duration_ms, s.avg_mbps), (10_000, Some(100.0)));
+}
