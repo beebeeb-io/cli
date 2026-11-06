@@ -43,11 +43,11 @@ const SANCTIONED: &[(&str, &str)] = &[
     // Task 2334: a push reads which folders are shared on their own (invites and folder links it sent).
     (
         "shares.rs",
-        r#"self.get_feature_listing("/api/v1/shares/invites/sent")"#,
+        r#"self.get_feature_listing("/api/v1/shares/invites/sent", absent)"#,
     ),
     (
         "shares.rs",
-        r#"self.get_feature_listing("/api/v1/shares/folder-links")"#,
+        r#"self.get_feature_listing("/api/v1/shares/folder-links", &[404, 405, 501])"#,
     ),
     ("tree.rs", r#".get(self.url(&format!("/api/v1/shared-folders/{id}")))"#),
     (

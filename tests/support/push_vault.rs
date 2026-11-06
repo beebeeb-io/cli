@@ -83,6 +83,10 @@ pub struct Vault {
     pub link_reads: usize,
     /// `GET /files/{id}` requests, by id.
     pub file_reads: HashMap<String, usize>,
+    /// Rows `GET /files/{id}` serves as file-request uploads (the request fields set).
+    pub request_rows: std::collections::HashSet<String>,
+    /// `GET /file-requests` answers this status instead (otherwise: no requests).
+    pub file_requests_status: Option<u16>,
 }
 
 pub type Shared = Arc<Mutex<Vault>>;
@@ -160,6 +164,16 @@ pub async fn start_mock(vault: Shared) -> String {
             }),
         )
         .route(
+            "/api/v1/file-requests",
+            get(|State(v): State<Shared>| async move {
+                let v = v.lock().unwrap();
+                match v.file_requests_status {
+                    Some(code) => err(StatusCode::from_u16(code).unwrap(), "failed by mock"),
+                    None => Json(json!({ "file_requests": [] })).into_response(),
+                }
+            }),
+        )
+        .route(
             "/api/v1/shares/folder-links",
             get(|State(v): State<Shared>| async move {
                 let mut v = v.lock().unwrap();
@@ -230,7 +244,15 @@ pub async fn start_mock(vault: Shared) -> String {
                     return err(StatusCode::from_u16(code).unwrap(), "failed by mock");
                 }
                 match v.items.get(&id) {
-                    Some(i) => Json(row(i)).into_response(),
+                    Some(i) => {
+                        let mut r = row(i);
+                        if v.request_rows.contains(&id) {
+                            r["file_request_id"] = json!(uuid::Uuid::from_u128(77));
+                            r["sender_ephemeral_pubkey"] = json!("AAAA");
+                            r["wrapped_content_key"] = json!("AAAA");
+                        }
+                        Json(r).into_response()
+                    }
                     None => err(StatusCode::NOT_FOUND, "not_found"),
                 }
             }),

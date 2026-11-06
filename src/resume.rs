@@ -305,9 +305,7 @@ pub fn record_finished(path: &Path, upload: FinishedUpload) {
     if let Some(dir) = log.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let appended = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
+    let appended = private_file(std::fs::OpenOptions::new().create(true).append(true))
         .open(&log)
         .and_then(|mut f| std::io::Write::write_all(&mut f, text.as_bytes()));
     let mut cache = FINISHED.lock().unwrap_or_else(|e| e.into_inner());
@@ -328,6 +326,14 @@ pub fn finished_upload(path: &Path) -> Option<FinishedUpload> {
         *cache = Some((log.clone(), load_finished(&log)));
     }
     cache.as_ref().and_then(|(_, entries)| entries.get(&key(path)).copied())
+}
+
+/// `options`, creating the file readable by this user only: the log names local paths of pushed files (task
+/// 2334), as private as `config.json`.
+fn private_file(options: &mut std::fs::OpenOptions) -> &mut std::fs::OpenOptions {
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(options, 0o600);
+    options
 }
 
 /// Read the log (newest line per path wins) and compact it when its superseded lines outnumber the live ones.
@@ -361,7 +367,10 @@ fn load_finished(log: &Path) -> HashMap<String, FinishedUpload> {
             }
         }
         let tmp = log.with_extension("jsonl.tmp");
-        if std::fs::write(&tmp, out).is_ok() {
+        let written = private_file(std::fs::OpenOptions::new().create(true).write(true).truncate(true))
+            .open(&tmp)
+            .and_then(|mut f| std::io::Write::write_all(&mut f, out.as_bytes()));
+        if written.is_ok() {
             let _ = std::fs::rename(&tmp, log);
         }
         return kept.into_iter().map(|(k, (_, u))| (k, u)).collect();
@@ -734,6 +743,11 @@ mod tests {
             2,
             "nothing written for the coarse mtimes"
         );
+        #[cfg(unix)]
+        let mode =
+            |p: &Path| std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(p).unwrap().permissions()) & 0o777;
+        #[cfg(unix)]
+        assert_eq!(mode(&log), 0o600, "the log names local paths: this user only");
         for version in 3..1_300 {
             record_finished(&f, upload(version));
         }
@@ -745,6 +759,8 @@ mod tests {
             1,
             "compacted to the live line"
         );
+        #[cfg(unix)]
+        assert_eq!(mode(&log), 0o600, "the compacted log too");
 
         // A line it cannot read is skipped, never fatal.
         std::fs::write(&log, "not json\n").unwrap();

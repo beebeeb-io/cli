@@ -315,9 +315,11 @@ impl<'a> PushFolders<'a> {
         if candidates.is_empty() {
             return self.create(parent, name).await;
         }
-        // `None`: the share lists could not be read, and `--reuse-shared` lets the push go on (said once).
+        // `None`: the share lists could not be read, and `--reuse-shared` lets the push go on (said once). Only
+        // for ONE candidate: of several, the one that is not shared cannot be told, so nothing is guessed.
         let exposures = match self.exposures(&candidates, shown).await {
             Ok(exposures) => Some(exposures),
+            Err(e) if candidates.len() > 1 => return Err(cannot_choose(&e, candidates.len(), shown)),
             Err(e) if self.shared == SharedReuse::Allow => {
                 if !self.share_failure_said {
                     note(&format!("{e}; uploading into it (--reuse-shared)"));
@@ -363,16 +365,34 @@ impl<'a> PushFolders<'a> {
         Ok(created)
     }
 
-    /// The root-level folder `--folder` names: the user's explicit choice, reused even when shared.
+    /// The root-level folder `--folder` names: the user's explicit choice, reused even when shared. Of several
+    /// same-name folders the oldest that is not shared on its own is used, as for a folder found implicitly;
+    /// a shared one only when every one is shared, and then said. One folder needs no share lists.
     pub async fn named(&mut self, name: &str) -> Result<Uuid, String> {
         let candidates = self.find(None, name, name).await?;
-        match candidates.first() {
-            Some(oldest) => {
-                say_how_many(&candidates, name, "the oldest");
-                Ok(oldest.id)
-            }
-            None => self.create(None, name).await,
+        match candidates.len() {
+            0 => return self.create(None, name).await,
+            1 => return Ok(candidates[0].id),
+            _ => {}
         }
+        let exposures = self
+            .exposures(&candidates, name)
+            .await
+            .map_err(|e| cannot_choose(&e, candidates.len(), name))?;
+        if let Some(i) = exposures.iter().position(|x| !x.is_shared()) {
+            let which = if i == 0 {
+                "the oldest"
+            } else {
+                "the oldest one that is not shared"
+            };
+            say_how_many(&candidates, name, which);
+            return Ok(candidates[i].id);
+        }
+        note(&format!(
+            "reusing the shared folder {name}, the oldest of {} with that name: no unshared one exists",
+            candidates.len()
+        ));
+        Ok(candidates[0].id)
     }
 
     /// A new folder, never a lookup: for a local name that is not UTF-8, which the push stores under a stand-in
@@ -450,6 +470,14 @@ impl<'a> PushFolders<'a> {
 pub(crate) fn oldest_first(mut candidates: Vec<Candidate>) -> Vec<Candidate> {
     candidates.sort_by_key(|c| (c.created_at.is_none(), c.created_at, c.id));
     candidates
+}
+
+/// Several same-name folders and share lists that could not be read: the one that is not shared cannot be
+/// told, so the push stops rather than take the oldest, which may be the shared one a "no" left alone.
+fn cannot_choose(why: &str, count: usize, shown: &str) -> String {
+    format!(
+        "{why}; {count} folders named {shown} are here and the one that is not shared cannot be told, so nothing is uploaded"
+    )
 }
 
 /// "2 folders named X are here; using the oldest", when there is more than one.

@@ -382,6 +382,9 @@ impl OwnedKeyResolver {
             }
             if self.requests_failed {
                 unverified_request = true;
+                // Task 2334: the request list did not load, so a row that does not open below may still be a
+                // request row this device can open on a later run: "not now", never "never".
+                self.server_failed = true;
             } else if let Some(keys) = self.requests.as_mut().and_then(|r| r.row_keys(master, &canonical)) {
                 let beebeeb_core::owned_keys::RequestRowKeys {
                     content_key,
@@ -598,9 +601,10 @@ impl OwnedKeyResolver {
             // An approved legacy invite permits its sender to read the existing
             // inventory without registering custody (reads must not mutate).
             if self.sent_invites.is_none() {
-                // The one reader of this list (`ApiClient::list_sent_invites`): a server without the route sent
-                // no invite, so there is no legacy copy to open here.
-                let sent = self.served(api.list_sent_invites().await)?;
+                // The one reader of this list, with key resolution's rule: only 405/501 say a server without
+                // the route, which sent no invite, so there is no legacy copy to open here; a 404 is a read that
+                // did not answer (task 2334).
+                let sent = self.served(api.list_sent_invites_for_keys().await)?;
                 self.sent_invites = Some(sent["invites"].as_array().cloned().unwrap_or_default());
             }
             if let Some(invite) = self.sent_invites.as_ref().unwrap().iter().find(|r| {

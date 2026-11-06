@@ -564,7 +564,7 @@ async fn at_a_terminal_a_repush_skips_what_is_already_uploaded_without_asking() 
 /// and that read fails) fails the push of a file there: it may be the same name,
 /// so it is never read as "no conflict" (which would upload a second one).
 #[tokio::test(flavor = "multi_thread")]
-async fn a_folder_row_that_cannot_be_read_fails_the_file_instead_of_duplicating_it() {
+async fn a_file_row_that_cannot_be_read_now_fails_the_file_instead_of_duplicating_it() {
     let vault: Shared = Arc::default();
     let api = start_mock(vault.clone()).await;
     let home = scratch_home(&api);
@@ -944,4 +944,165 @@ async fn a_no_to_several_shared_folders_says_only_where_the_files_went() {
         "{run:?}"
     );
     assert_eq!(folders_named(&vault.lock().unwrap(), Some(&movies), MOVIE_DIR).len(), 3);
+}
+
+/// Delta review P1-1: `--folder` names a folder, and of several of that name the oldest one NOT shared on its
+/// own is used, as for a folder found implicitly. A shared one only when every one is shared, and then said.
+#[tokio::test(flavor = "multi_thread")]
+async fn folder_uses_the_unshared_one_of_several_same_name_folders() {
+    let vault: Shared = Arc::default();
+    let api = start_mock(vault.clone()).await;
+    let home = scratch_home(&api);
+    let shared = seed_folder(&vault, None, "Movies");
+    let private = seed_folder(&vault, None, "Movies");
+    share_with_someone(&vault, &shared);
+    let film = write_file(&home, "film.mkv", b"a film");
+
+    let out = bb(
+        &home,
+        &["--api", &api, "push", "--folder", "Movies", film.to_str().unwrap()],
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("using the oldest one that is not shared"),
+        "{}",
+        stderr(&out)
+    );
+    {
+        let v = vault.lock().unwrap();
+        assert_eq!(file_names_in(&v, &private), vec!["film.mkv".to_string()]);
+        assert!(
+            file_names_in(&v, &shared).is_empty(),
+            "nothing goes into the shared one"
+        );
+    }
+
+    // Every one shared: the explicit name decides, and the push says so.
+    share_with_someone(&vault, &private);
+    let poster = write_file(&home, "poster.jpg", b"poster");
+    let out = bb(
+        &home,
+        &["--api", &api, "push", "--folder", "Movies", poster.to_str().unwrap()],
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(stderr(&out).contains("no unshared one exists"), "{}", stderr(&out));
+    let v = vault.lock().unwrap();
+    assert_eq!(file_names_in(&v, &shared), vec!["poster.jpg".to_string()]);
+}
+
+/// Delta review P1-2: a same-folder row that may be a file-request upload, while the request list cannot be
+/// read, may be a same-name file: the push of a file there fails, and never uploads a second one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_row_unopened_while_the_request_list_fails_fails_the_file() {
+    let vault: Shared = Arc::default();
+    let api = start_mock(vault.clone()).await;
+    let home = scratch_home(&api);
+    let movies = seed_folder(&vault, None, "Movies");
+    let request = seed_unreadable(&vault, Some(&movies), false);
+    {
+        let mut v = vault.lock().unwrap();
+        v.request_rows.insert(request);
+        v.file_requests_status = Some(503);
+    }
+    let file = write_file(&home, "note.txt", b"a note");
+
+    let out = bb(
+        &home,
+        &["--api", &api, "push", "--folder", "Movies", file.to_str().unwrap()],
+    )
+    .await;
+    assert_ne!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("could not check whether note.txt already exists"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(vault.lock().unwrap().inits, 0, "no second note.txt");
+}
+
+/// Delta review P1-3: of several same-name folders, with share lists that cannot be read, the one that is not
+/// shared cannot be told. Even with `--reuse-shared` the push stops before any upload, and never takes the
+/// oldest, which is the shared one a "no" left alone.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn of_several_same_name_folders_unreadable_share_lists_stop_the_push() {
+    let vault: Shared = Arc::default();
+    let api = start_mock(vault.clone()).await;
+    let home = scratch_home(&api);
+    let (_movies, shared) = pushed_then_shared(&vault, &api, &home).await;
+    let run = bb_at_terminal(
+        &home,
+        &["--api", &api, "push", "--folder", "Movies", "--keep-both", MOVIE_DIR],
+        "n",
+    )
+    .await;
+    assert_eq!(run.code, Some(0), "{run:?}");
+    let inits_before = vault.lock().unwrap().inits;
+    write_file(&home, &format!("{MOVIE_DIR}/trailer.mkv"), b"trailer");
+    vault.lock().unwrap().invites_status = Some(500);
+
+    let out = bb(
+        &home,
+        &[
+            "--api",
+            &api,
+            "push",
+            "--folder",
+            "Movies",
+            "--keep-both",
+            "--reuse-shared",
+            MOVIE_DIR,
+        ],
+    )
+    .await;
+    assert_ne!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("the one that is not shared cannot be told"),
+        "{}",
+        stderr(&out)
+    );
+    let v = vault.lock().unwrap();
+    assert_eq!(v.inits, inits_before, "nothing uploaded");
+    assert_eq!(
+        file_names_in(&v, &shared),
+        vec![MOVIE.to_string()],
+        "the shared folder is untouched"
+    );
+}
+
+/// Delta review P2-3: the skip proof is for the folder this push writes into. A file this machine uploaded into
+/// one folder, pushed into another that holds a different file of that name, is a conflict there, never
+/// "already uploaded".
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_uploaded_into_one_folder_is_not_skipped_in_another() {
+    let vault: Shared = Arc::default();
+    let api = start_mock(vault.clone()).await;
+    let home = scratch_home(&api);
+    let file = write_file(&home, "a.txt", b"first a");
+    let path = file.to_str().unwrap();
+    let out = bb(&home, &["--api", &api, "push", "--folder", "F1", path]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    // Another machine puts a different a.txt into F2.
+    let elsewhere = scratch_home(&api);
+    let other = write_file(&elsewhere, "a.txt", b"other a");
+    let out = bb(
+        &elsewhere,
+        &["--api", &api, "push", "--folder", "F2", other.to_str().unwrap()],
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let inits_before = vault.lock().unwrap().inits;
+
+    let out = bb(&home, &["--api", &api, "push", "--folder", "F2", path]).await;
+    assert_ne!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(stderr(&out).contains("already exists"), "{}", stderr(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(!stdout.contains("already uploaded"), "{stdout}");
+    assert_eq!(
+        vault.lock().unwrap().inits,
+        inits_before,
+        "nothing uploaded, nothing skipped"
+    );
 }
