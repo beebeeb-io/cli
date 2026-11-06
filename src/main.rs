@@ -29,6 +29,7 @@ mod safe_path;
 mod shared_folder_index;
 mod sync_safety;
 mod thumbnail;
+mod transfer_stats;
 mod transport;
 mod tui;
 mod ui;
