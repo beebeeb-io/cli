@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.16.0] - 2026-11-07
 
 ### Added
+- `bb push --parallel N` sends up to N chunks of a file at once (1 to 8, default 4), within one 640 MiB upload buffer; the default holds up to 512 MiB. Files over 2 GiB use smaller chunks as N rises (64 MiB at 4, 32 MiB at 8), and a file whose chunks don't fit the buffer gets fewer at once, which `-v` says. A rate limit (429) or a busy storage pool (503) pauses the whole push once, with one notice. Ctrl-C stops the whole push and its upload stays resumable; the push prints how many chunks were confirmed and exits 130, and a second Ctrl-C exits at once. The `--json` `transfer` object gains `parallel_asked` and `pauses`.
 - `bb backup add|remove|list|run|status` backs up folders from a Linux machine into your Backups folder (Linux only for now; a systemd user timer is in the README). `run` and `status` exit 0, 3 (finished with something not done) or 4 (a folder turned off because its backup was deleted elsewhere; `bb backup add <folder>` backs it up again); a second `bb backup` at the same time exits 75.
 - Backups are protected on both sides: `bb push` won't add files inside Backups, the Backups folder itself can't be renamed, moved or deleted, and the server refuses the same changes. Deleting a device's backup with `bb rm` always asks first, with the item count; only `--yes` answers that question. `bb mv` and `bb mkdir` follow the same rule, and `bb ls` marks the folder `[Read-only]`.
 - `bb push` shows live numbers on a terminal: a bar, the current speed in Mbps and the time left, updated as the server confirms chunks. `-v` / `--verbose` adds the chunks done and in flight, the average speed, the storage country (Germany or Finland), the direct and API chunk counts, retries and one line per chunk. `--quiet -v` is a usage error.
@@ -16,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A re-pushed file that this machine already uploaded unchanged is skipped and counted (`skipped N already uploaded`, `total_already_uploaded` in `--json`).
 
 ### Changed
+- `bb push` sends 4 chunks at once by default. `--parallel 1` sends the same requests as 0.15.0, except that a 503 on a chunk is now retried. Files between 1 and 2 GiB use 32 MiB chunks at `--parallel 7` and `8`. An upload interrupted by an older `bb` resumes one chunk at a time, in its own chunk size. `bb sync` and `bb backup` are unchanged.
 - `bb rm -f` / `--force` now only skip the move-to-trash prompt. `--yes` answers every question.
 - Not covered yet: `bb sync`, `bb mount`, `bb webdav`, `bb repair` and `bb restore` don't check the Backups rule. A later release adds it; until then, don't use them to change files inside Backups.
 - Uses Beebeeb core v0.2.1.
@@ -26,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dependencies: `libc` 0.2.191, `serde_json` 1.0.154, `regex` 1.13.1; `unicode-width` is now a direct dependency.
 
 ### Fixed
+- A 503 from a busy storage pool on a chunk is retried after a pause instead of failing the file, at every `--parallel` setting.
+- The resume record is written whole, so a kill mid-write can no longer leave half a record. A push interrupted while its last step was running finishes the file on the next run without sending a chunk.
 - `bb backup` refuses a state file that belongs to another account or machine, naming the file to delete, and drops a deleted device folder when a folder is added again.
 - `bb push` stops with a reason when it cannot tell whether its destination is inside Backups, instead of guessing.
 - A resumed upload finishes in the folder the push asked for. An interrupted upload that sits in another folder is ended on the server and the file starts again in the right one; the file is never moved.
