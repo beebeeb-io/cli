@@ -535,7 +535,7 @@ fn records_files(home: &Path) -> Vec<PathBuf> {
 /// the next run uploads them again rather than mark them backed up on the device clock's word.
 #[tokio::test(flavor = "multi_thread")]
 async fn lost_records_upload_again_a_copy_made_within_ten_minutes_of_the_change() {
-    let (vault, api, home, env) = setup().await;
+    let (_vault, api, home, env) = setup().await;
     backup(&home, &api, &env, &["add", "data"]).await;
     let out = backup(&home, &api, &env, &["run"]).await;
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
