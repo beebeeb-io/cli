@@ -44,9 +44,15 @@ pub(super) fn transfer_sink(way: Way, moves: bool, verbose: bool) -> LiveProgres
 /// A pending upload's share of the run, as the driver will send it (spec §4.2): at the chunk size of the resume
 /// record the driver will continue, else `--concurrency`'s. `replacing` is the listed row an in-place replace
 /// versions: the driver asks the sidecar with it (`resume::resumable_upload_for`), so the plan reads the same record.
-pub(super) fn upload_plan(path: &Path, size: u64, concurrency: u32, replacing: Option<Uuid>) -> (u64, u32) {
-    let pending = crate::resume::local_signature(path)
-        .and_then(|(on_disk, mtime_ns)| crate::resume::resumable_upload_for(path, on_disk, mtime_ns, replacing));
+/// `resume`: the sidecar as the pass read it once.
+pub(super) fn upload_plan(
+    resume: &crate::resume::PendingSnapshot,
+    path: &Path,
+    size: u64,
+    concurrency: u32,
+    replacing: Option<Uuid>,
+) -> (u64, u32) {
+    let pending = resume.resumable_now(path, replacing);
     let chunk_size = crate::upload::planned_chunk_size(size, concurrency, concurrency, pending.as_ref());
     crate::upload::expected_at_chunk_size(size, chunk_size)
 }
@@ -92,16 +98,16 @@ impl<'a> UploadShare<'a> {
     }
 }
 
-/// A remote file's share of the download plan, from its row: its ciphertext (28 bytes a chunk) and its chunks.
+/// A remote file's share of the download plan, from its row: its ciphertext and its chunks (`FilePlan`, as `bb pull`).
 pub(super) fn download_plan(remote: &RemoteFile) -> (u64, u32) {
-    let chunks = remote.chunk_count.max(1);
     let size = remote
         .resolved
         .as_ref()
         .and_then(|r| r.canonical.get("size_bytes"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    (size + 28 * chunks as u64, chunks)
+    let plan = crate::transfer_stats::FilePlan::of_size(size, remote.chunk_count);
+    (plan.bytes, plan.chunks)
 }
 
 /// The storage country a remote file's row names (spec §4.4).

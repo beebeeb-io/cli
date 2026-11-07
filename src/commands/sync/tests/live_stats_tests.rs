@@ -190,5 +190,37 @@ fn a_replace_with_a_resume_record_is_planned_as_the_driver_sends_it() {
     let sent =
         crate::upload::expected_at_chunk_size(size, crate::upload::planned_chunk_size(size, 4, 4, driver.as_ref()));
     assert_eq!(sent.1, 9, "premise: the record's 1 MiB chunks");
-    assert_eq!(super::upload_plan(&path, size, 4, Some(row)), sent);
+    let resume = crate::resume::pending_snapshot();
+    assert_eq!(super::upload_plan(&resume, &path, size, 4, Some(row)), sent);
+}
+
+/// Review P3 (#142): the plan reads the sidecar once per pass. A record written after the pass took its snapshot is
+/// not seen by it; a new snapshot sees it.
+#[test]
+fn the_plan_reads_the_sidecar_once() {
+    let scratch = Scratch::new("2333-sync-plan-once");
+    let (path, size, mtime) = scratch.file(MIB);
+    let row = Uuid::new_v4();
+    let resume = crate::resume::pending_snapshot();
+    crate::resume::record_upload(
+        &path,
+        crate::item_id::Proposed::Listed(row),
+        None,
+        Uuid::new_v4(),
+        beebeeb_core::chunk_stream::ChunkFormat::V1Legacy,
+        size,
+        mtime,
+        false,
+        None,
+        MIB as u64 / 4,
+    );
+    assert!(
+        resume.resumable_now(&path, Some(row)).is_none(),
+        "read before the record"
+    );
+    assert!(
+        crate::resume::pending_snapshot()
+            .resumable_now(&path, Some(row))
+            .is_some()
+    );
 }

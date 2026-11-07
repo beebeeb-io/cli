@@ -713,11 +713,18 @@ pub async fn run(
             !dry_run && pending_count > 0,
             verbose,
         );
+        let resume = crate::resume::pending_snapshot();
         let plans: Vec<Option<(u64, u32)>> = pending_uploads
             .iter()
             .map(|(rel, local, replace_id)| {
                 (!dry_run).then(|| {
-                    let plan = upload_plan(&local_dir.join(rel), local.size, concurrency as u32, *replace_id);
+                    let plan = upload_plan(
+                        &resume,
+                        &local_dir.join(rel),
+                        local.size,
+                        concurrency as u32,
+                        *replace_id,
+                    );
                     progress.plan_file(plan.0, plan.1);
                     plan
                 })

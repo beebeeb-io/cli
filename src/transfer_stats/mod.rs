@@ -13,9 +13,11 @@
 
 use std::collections::HashMap;
 
+mod plan;
 mod pool;
 mod window;
 
+pub(crate) use plan::{CHUNK_OVERHEAD, FilePlan};
 pub use pool::PoolLabel;
 #[cfg(test)]
 pub(crate) use pool::absent;

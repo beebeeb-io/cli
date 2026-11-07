@@ -26,7 +26,7 @@ pub(super) const CHANNEL_CAP: usize = 1;
 pub(super) const MAX_THUMBNAIL_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Per-chunk AEAD overhead on the wire: `nonce(12) + tag(16)`.
-pub(super) const CHUNK_OVERHEAD: u64 = 28;
+pub(super) use crate::transfer_stats::CHUNK_OVERHEAD;
 
 /// Chunks of ONE file on the wire at once. The consumer loop in [`run_pipeline`] awaits each chunk's
 /// transfer before it takes the next one off the channel (`rx.recv()`), so a file sends one chunk at a
