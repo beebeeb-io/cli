@@ -28,11 +28,12 @@
 - **The output of `bb pull` and `bb sync` changed.** The old progress bars are gone. End lines show speeds in Mbps (megabits per second, to one decimal), so the same speed reads as a number about 8 times larger than it did in MB/s, and times read `4.2s` or `7m 21s`, not `4240ms`. A script that reads these lines must be changed; `--json` is the stable way to read the numbers. Live lines show only when stdout and stderr are both terminals. On a pipe there are none; with `-v` the per-chunk lines and the end lines still print.
 - **A folder push now uploads 4 files at once by default,** so its per-file lines come in the order the files finish. `--json` keeps the folder's order. With `--quiet`, the ids are printed in the order files finish, not in the folder's order. `--parallel 1` uploads one file at a time.
 - **Not covered yet** (unchanged from 0.16.0): `bb sync`, `bb mount`, `bb webdav`, `bb repair` and `bb restore` don't check the Backups rule. Until a later release adds it, don't use them to change files inside Backups.
-- **Known limits, found in review and not fixed in this release:**
+- **Known limits, not fixed in this release:**
   - Folder push: `--keep-both` on files without an extension can give two files the same name (`report (1)`); a symlink next to its target can be uploaded twice; the second name check, made just before each upload, doubles the cost of listing and decrypting the destination folder, which matters on a very large one.
   - `bb sync`: if a file changes size between the scan and its upload, the live totals are off by the change.
   - `--zip` members and the backup manifest do not show a storage country.
   - With `BB_TRANSPORT_TRACE=1`, the trace lines can tear the live lines.
+  - `bb sync --json`: a run that creates a folder on the server prints a `+ remote folder <name>` line on stdout before the JSON (`would create remote folder` with `--dry-run`), so a JSON parser reading stdout fails on that run. This was already so in 0.16.0.
 - Dependency changes: none. The release uses Beebeeb core v0.2.1 (`a5413d2`), as 0.16.0 did.
 
 ### Verification
