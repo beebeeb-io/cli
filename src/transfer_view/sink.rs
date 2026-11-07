@@ -596,3 +596,5 @@ impl FileProgress for LiveFile {
         lock(&self.shared.model).pool(self.slot, label);
     }
 }
+
+mod files_at_once;

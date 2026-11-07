@@ -253,6 +253,8 @@ pub(crate) struct TransferStats {
     given_up_bytes: u64,
     /// The file the command is sending now (`next_file` to `end_file`).
     share: Option<Share>,
+    /// `--parallel` (spec §7): the shares of the files sent at once, by their key (`files_at_once`).
+    at_once: HashMap<u32, files_at_once::KeyedShare>,
     /// Time spent waiting on the person (a conflict prompt): left out of the average and the run's duration.
     waited_ms: u64,
     plan_final: bool,
@@ -285,6 +287,7 @@ impl TransferStats {
             chunks_total: 0,
             given_up_bytes: 0,
             share: None,
+            at_once: HashMap::new(),
             waited_ms: 0,
             plan_final: false,
             limit: 0,
@@ -647,6 +650,8 @@ impl TransferStats {
         out
     }
 }
+
+mod files_at_once;
 
 #[cfg(test)]
 mod tests;

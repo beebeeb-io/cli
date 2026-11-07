@@ -1107,13 +1107,16 @@ async fn a_owner_only_notice_is_printed_once_per_command() {
         String::from_utf8_lossy(&out.stdout)
     );
 
-    // A directory push into the shared folder: one sentence for the batch.
+    // A directory push into the shared folder: one sentence for the batch. One file at a time: this mock keeps one
+    // upload session (`upload_request`) for every init.
     let dir = h.home.join("batch");
     std::fs::create_dir(&dir).unwrap();
     for name in ["x.txt", "y.txt"] {
         std::fs::write(dir.join(name), b"owner only").unwrap();
     }
-    let out = h.run_plain(&["push", dir.to_str().unwrap(), "--folder", ROOT]).await;
+    let out = h
+        .run_plain(&["push", "--parallel", "1", dir.to_str().unwrap(), "--folder", ROOT])
+        .await;
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(
         String::from_utf8_lossy(&out.stdout).matches(NOTICE).count(),
