@@ -1,5 +1,6 @@
 mod compat;
 mod fallback;
+mod live_stats;
 mod sync;
 mod transport;
 mod version;
@@ -27,6 +28,15 @@ const BUCKET: &str = "bb-test";
 const STRIDE: u64 = 1024;
 const PLAIN_LEN: usize = 20 * 1024 + 100; // 21 chunks, the last one 100 bytes
 const SIG: &str = "SIGNATURE-DO-NOT-PRINT";
+/// What the server says about where the file is stored (task 2333, N3): only the country may be shown. Invented
+/// values: `tests/no_city_copy.rs` reads only `src/`, but a real city or datacenter code has no place here either.
+const POOL_ID: &str = "9f3c2b1a-5e4d-4c3b-8a29-1f0e9d8c7b6a";
+const DATACENTER: &str = "zz9";
+const CITY: &str = "Testville";
+
+fn storage_location() -> Value {
+    json!({ "country": "Germany", "country_code": "DE", "city": CITY })
+}
 
 static SEQ: AtomicUsize = AtomicUsize::new(0);
 
@@ -360,6 +370,9 @@ async fn meta(State(m): State<Arc<Mock>>, AxPath(id): AxPath<String>) -> Respons
         "is_folder": false,
         "chunk_count": count,
         "size_bytes": m.fx.plaintext.len(),
+        "storage_pool_id": POOL_ID,
+        "region": DATACENTER,
+        "storage_location": storage_location(),
     }))
     .into_response()
 }
@@ -383,6 +396,9 @@ async fn list(State(m): State<Arc<Mock>>, Query(q): Query<HashMap<String, String
             "size_bytes": m.fx.plaintext.len(),
             "chunk_count": m.fx.frames.len(),
             "updated_at": "2020-01-01T00:00:00+00:00",
+            "storage_pool_id": POOL_ID,
+            "region": DATACENTER,
+            "storage_location": storage_location(),
         }] }))
         .into_response(),
         Some(_) => Json(json!({ "files": [] })).into_response(),

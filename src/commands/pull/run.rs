@@ -6,6 +6,7 @@
 //! `pull::folder`).
 
 use super::*;
+use crate::upload::{ChunkProgress, InFlight, Route};
 
 pub async fn run(file_id: String, output: Option<PathBuf>, options: PullOptions) -> Result<(), String> {
     match run_once(file_id.clone(), output.clone(), options, false).await {
@@ -37,7 +38,7 @@ pub(super) async fn run_once(
 
     // --zip mode: resolve as folder and download as a zip archive
     if options.zip {
-        return Ok(run_zip(&api, &file_id, output, options.force).await?);
+        return Ok(run_zip(&api, &file_id, output, options.force, options.verbose).await?);
     }
 
     let (file_id, resolved_name) = resolve_file_arg(&api, &file_id).await?;
@@ -86,7 +87,7 @@ pub(super) async fn run_once(
             Some(o) => o,
             None => crate::safe_path::default_output_path(folder_name)?,
         };
-        return Ok(pull_folder(&api, &file_id, &out_dir, options.force).await?);
+        return Ok(pull_folder(&api, &file_id, &out_dir, options.force, options.verbose).await?);
     }
 
     let display_name = decrypted_name.as_deref().unwrap_or(&file_id);
@@ -110,19 +111,36 @@ pub(super) async fn run_once(
     let pin_key = resolved.name_key.as_deref().unwrap_or(&resolved.key);
     let pin = crate::crypto::content_pin_with_key(pin_key, &file_id, name_encrypted_str)?;
 
+    // What the run moves: this file, as its row states it, and where it is stored (task 2333).
+    let plan = report::FilePlan::of_row(&file_meta);
+    let pool = report::pool_of(&file_meta);
+
     // File-request uploads are sealed under a per-file content key C, not the
     // master-derived key the streaming path assumes. Decrypt them via the
     // buffered request-key path (download whole blob → decrypt with C → write).
     if let Some(c) = &request_content_key {
+        let progress = report::start_buffered(options.verbose);
+        plan.add_next(&progress);
+        progress.seal_plan();
+        progress.set_limit(1);
+        let file = progress.begin_file_chunks(display_name, plan.bytes, plan.chunks, 0);
+        if let Some(label) = &pool {
+            file.pool(label.clone());
+        }
+        let flight = InFlight::start(file.as_ref(), 0, Route::Api);
         let dl_start = std::time::Instant::now();
         let encrypted_bytes = api.download_file(&file_id).await?;
         let dl_elapsed = dl_start.elapsed();
-
         let dec_start = std::time::Instant::now();
         let plaintext = crate::crypto::try_decrypt_all_chunks(c, &file_id, pin, &encrypted_bytes, chunk_count)?;
         let dec_elapsed = dec_start.elapsed();
+        // The body counts once it decrypted (spec §4.3): all its chunks at once.
+        file.body_done(chunk_count.max(1), encrypted_bytes.len() as u64, Route::Api);
+        drop(flight);
 
         std::fs::write(&out_path, &plaintext).map_err(|e| format!("failed to write file: {e}"))?;
+        file.finish(true);
+        let transfer = progress.summary();
 
         let dl_speed = if dl_elapsed.as_secs_f64() > 0.0 {
             encrypted_bytes.len() as f64 / dl_elapsed.as_secs_f64()
@@ -141,43 +159,33 @@ pub(super) async fn run_once(
                     "download_ms": dl_elapsed.as_millis() as u64,
                     "decrypt_ms": dec_elapsed.as_millis() as u64,
                     "output": out_path.display().to_string(),
+                    "transfer": transfer.to_json(),
                 }))
                 .unwrap()
             );
         } else if crate::ui::is_quiet() {
             println!("{}", out_path.display());
         } else {
-            println!(
-                "  {} {}  {}  {}",
-                "\u{2713}".custom_color(crate::colors::GREEN_OK),
-                display_name.custom_color(crate::colors::INK),
-                crate::ui::human_size(plaintext.len() as u64).custom_color(crate::colors::INK_DIM),
-                crate::ui::human_speed(dl_speed).custom_color(crate::colors::GREEN_OK)
+            report::print_file(
+                &progress,
+                "  ",
+                (
+                    display_name,
+                    plaintext.len() as u64,
+                    transfer.bytes_transferred,
+                    transfer.duration_ms,
+                ),
+                &report::request_time_text(dl_elapsed.as_millis() as u64, dec_elapsed.as_millis() as u64),
             );
-            println!(
-                "    {}",
-                format!(
-                    "{}ms download \u{00b7} {}ms decrypt",
-                    dl_elapsed.as_millis(),
-                    dec_elapsed.as_millis()
-                )
-                .custom_color(crate::colors::INK_DIM)
-            );
+            report::print_detail(&transfer, options.verbose);
         }
         return Ok(());
     }
 
-    // Estimate the encrypted size for the progress bar length.
-    let size_bytes = file_meta.get("size_bytes").and_then(|v| v.as_i64()).unwrap_or(0) as u64;
-    let est_encrypted = size_bytes + 28 * chunk_count as u64;
-
-    // Stream download + decrypt with constant memory + a live progress bar.
-    let show_bar = crate::ui::is_rich() && std::io::stdout().is_terminal();
-    let progress: Box<dyn crate::upload::ChunkProgress> = if show_bar {
-        Box::new(crate::upload::BarProgress::new(1, est_encrypted))
-    } else {
-        Box::new(crate::upload::NoopProgress)
-    };
+    // Stream download + decrypt with constant memory, live lines on a terminal (task 2333).
+    let progress = report::start(options.verbose);
+    plan.add_next(&progress);
+    progress.seal_plan();
 
     let start = std::time::Instant::now();
     let stats = if let Some(key) = explicit_key {
@@ -188,9 +196,9 @@ pub(super) async fn run_once(
             pin,
             chunk_count,
             &out_path,
-            progress.as_ref(),
+            &progress,
             display_name,
-            None,
+            pool.as_ref(),
         )
         .await?
     } else {
@@ -201,14 +209,14 @@ pub(super) async fn run_once(
             pin,
             chunk_count,
             &out_path,
-            progress.as_ref(),
+            &progress,
             display_name,
-            None,
+            pool.as_ref(),
         )
         .await?
     };
 
-    progress.finish_all();
+    let transfer = progress.summary();
     let elapsed = start.elapsed();
 
     let dl_speed = if elapsed.as_secs_f64() > 0.0 {
@@ -228,6 +236,7 @@ pub(super) async fn run_once(
                 "elapsed_ms": elapsed.as_millis() as u64,
                 "transport": stats.transport,
                 "output": out_path.display().to_string(),
+                "transfer": transfer.to_json(),
             }))
             .unwrap()
         );
@@ -239,18 +248,19 @@ pub(super) async fn run_once(
         return Ok(());
     }
 
-    // Rich mode (default)
-    println!(
-        "  {} {}  {}  {}",
-        "\u{2713}".custom_color(crate::colors::GREEN_OK),
-        display_name.custom_color(crate::colors::INK),
-        crate::ui::human_size(stats.plaintext_bytes).custom_color(crate::colors::INK_DIM),
-        crate::ui::human_speed(dl_speed).custom_color(crate::colors::GREEN_OK)
+    // Rich mode (default): `✓ {name}  {size}  {avg}`, then `{time} · streamed` (spec §6.5).
+    report::print_file(
+        &progress,
+        "  ",
+        (
+            display_name,
+            stats.plaintext_bytes,
+            transfer.bytes_transferred,
+            transfer.duration_ms,
+        ),
+        &report::time_text(transfer.duration_ms, "streamed"),
     );
-    println!(
-        "    {}",
-        format!("{}ms · streamed", elapsed.as_millis()).custom_color(crate::colors::INK_DIM)
-    );
+    report::print_detail(&transfer, options.verbose);
 
     Ok(())
 }

@@ -443,7 +443,19 @@ impl TransferStats {
     }
 
     /// A buffered body: all `chunks` of the file arrived and decrypted at once.
+    ///
+    /// Its length is known only now (a legacy file's JSON chunks are longer than the file row says): a body longer
+    /// than the file's share of the plan grows it, as `begin_file` follows what a driver read (I1).
     pub(crate) fn body_done(&mut self, f: FileSlot, chunks: u32, bytes: u64, route: Route, now_ms: u64) -> ChunkRecord {
+        let file = &mut self.files[f.0 as usize];
+        let longer = file.bytes_done.saturating_add(bytes).saturating_sub(file.bytes_total);
+        if longer > 0 {
+            file.bytes_total += longer;
+            self.bytes_total = self.bytes_total.saturating_add(longer);
+            if let Some(share) = self.share.as_mut() {
+                share.bytes = share.bytes.saturating_add(longer);
+            }
+        }
         let start_ms = self
             .open
             .iter()

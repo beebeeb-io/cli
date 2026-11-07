@@ -108,7 +108,8 @@ async fn push_quiet_prints_only_the_id() {
     assert!(uuid::Uuid::parse_str(lines[0].trim()).is_ok(), "{stdout}");
 }
 
-/// Spec §6.2: `--verbose` with `--quiet` is a usage error in either order, before anything is sent.
+/// Spec §6.2: `--verbose` with `--quiet` is a usage error in either order, before anything is sent: on `bb push`
+/// and `bb pull` (task 2333 PR 2).
 #[tokio::test(flavor = "multi_thread")]
 async fn quiet_and_verbose_is_a_usage_error_in_both_orders() {
     let mock = Mock::default();
@@ -119,6 +120,8 @@ async fn quiet_and_verbose_is_a_usage_error_in_both_orders() {
     for args in [
         ["--api", api.as_str(), "--quiet", "push", "-v", "folder2/a.txt"],
         ["--api", api.as_str(), "push", "-v", "--quiet", "folder2/a.txt"],
+        ["--api", api.as_str(), "--quiet", "pull", "-v", "3e15382b"],
+        ["--api", api.as_str(), "pull", "-v", "--quiet", "3e15382b"],
     ] {
         let out = bb(&home, &args).await;
         let (_stdout, stderr) = text(&out);

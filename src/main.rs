@@ -137,7 +137,10 @@ struct Cli {
 impl Commands {
     /// The command's own `-v, --verbose` (task 2333), where it has one.
     fn verbose(&self) -> bool {
-        matches!(self, Commands::Push { verbose: true, .. })
+        matches!(
+            self,
+            Commands::Push { verbose: true, .. } | Commands::Pull { verbose: true, .. }
+        )
     }
 }
 
@@ -237,6 +240,10 @@ enum Commands {
         /// and refuses (non-zero exit) otherwise — pass -o to save elsewhere
         #[arg(short = 'f', long)]
         force: bool,
+
+        /// Show transfer details: speed, chunks, chunks in flight, route and storage country. No effect with --json
+        #[arg(short = 'v', long)]
+        verbose: bool,
     },
 
     /// List files (decrypts names locally)
@@ -688,11 +695,12 @@ async fn main() {
             output_flag,
             zip,
             force,
+            verbose,
         } => {
             commands::pull::run(
                 file_id,
                 output.or(output_flag),
-                commands::pull::PullOptions { zip, force },
+                commands::pull::PullOptions { zip, force, verbose },
             )
             .await
         }

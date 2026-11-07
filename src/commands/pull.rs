@@ -23,6 +23,8 @@ pub struct PullOptions {
     pub zip: bool,
     /// Overwrite an existing local file without asking.
     pub force: bool,
+    /// Show transfer details (`-v`, task 2333): chunks, chunks in flight, routes, the storage country.
+    pub verbose: bool,
 }
 
 mod error;
@@ -45,6 +47,8 @@ use zip::*;
 mod run;
 pub use run::run;
 
+mod report;
+
 #[cfg(test)]
 mod options_tests {
     use super::PullOptions;
@@ -55,6 +59,7 @@ mod options_tests {
         let o = PullOptions::default();
         assert!(!o.zip);
         assert!(!o.force);
+        assert!(!o.verbose);
     }
 
     /// `--zip` and `--force` are independent flags.
@@ -63,17 +68,26 @@ mod options_tests {
         assert!(
             PullOptions {
                 zip: true,
-                force: false
+                force: false,
+                verbose: false,
             }
             .zip
         );
         assert!(
             PullOptions {
                 zip: false,
-                force: true
+                force: true,
+                verbose: false,
             }
             .force
         );
-        assert!(PullOptions { zip: true, force: true }.force);
+        assert!(
+            PullOptions {
+                zip: true,
+                force: true,
+                verbose: false,
+            }
+            .force
+        );
     }
 }
