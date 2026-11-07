@@ -48,3 +48,8 @@ checksum = "sha256"
 
 # Allow custom modifications to the generated CI file (we add a [patch] removal step)
 allow-dirty = ["ci"]
+
+# GitHub retired the macos-14 runner image on 2026-11-02; dist 0.31.0 still maps aarch64-apple-darwin to it.
+# Build the Apple Silicon target on macos-15 (arm64) instead.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
