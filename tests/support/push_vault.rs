@@ -121,6 +121,12 @@ pub struct Vault {
     pub hide_roles: bool,
     /// Trashed rows: listings leave them out, `GET /files/{id}` says `is_trashed`.
     pub trashed: std::collections::HashSet<String>,
+    /// RFC 3339 time the server stamped on a file's current version at completion, served as `uploaded_at`
+    /// (the field the CLI's backup rebuild reads).
+    pub uploaded_at: HashMap<String, String>,
+    /// Seconds the server's clock runs ahead of the test machine when it stamps `uploaded_at`: a copy stamped
+    /// 11 minutes ahead counts as made 11 minutes after the file changed.
+    pub uploaded_at_offset_secs: i64,
     /// Every request: method, path and its `X-Beebeeb-Origin` header.
     pub requests: Vec<(String, String, Option<String>)>,
     /// `POST /files/trash` and `PATCH /files/{id}` requests, refused ones included.
@@ -163,6 +169,9 @@ pub fn row_in(v: &Vault, i: &Item) -> Value {
         r["system_role"] = v.roles.get(&i.id).map_or(Value::Null, |role| json!(role));
     }
     r["is_trashed"] = json!(v.trashed.contains(&i.id));
+    if let Some(at) = v.uploaded_at.get(&i.id) {
+        r["uploaded_at"] = json!(at);
+    }
     r
 }
 
@@ -644,6 +653,8 @@ pub async fn start_mock(vault: Shared) -> String {
                     item.size = s.size;
                     item.chunk_count = s.chunk_count;
                     let file_id = s.file_id.clone();
+                    let stamped = chrono::Utc::now() + chrono::Duration::seconds(v.uploaded_at_offset_secs);
+                    v.uploaded_at.insert(file_id.clone(), stamped.to_rfc3339());
                     v.contents.insert(
                         file_id.clone(),
                         (s.chunk_size, s.frames.into_values().flatten().collect()),

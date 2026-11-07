@@ -11,7 +11,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use beebeeb_core::backup::{DeviceSelf, FolderState, category_folder_name, records_from_remote};
+use beebeeb_core::backup::{
+    DeviceSelf, FolderState, RebuildClock, category_folder_name, records_from_remote_with_clock,
+};
 use beebeeb_types::backup::{Category, Platform};
 use colored::Colorize;
 
@@ -424,13 +426,17 @@ async fn run_folder(
     };
     let mut records = store.records(source.records_file)?;
     // Records lost (a reinstall): core's rebuild rule marks what the server
-    // already holds, so nothing is uploaded twice (spec §4.2 rule 10).
+    // already holds, so nothing is uploaded twice (spec §4.2 rule 10). The
+    // listing's clock is not measured (the API client does not hand back the
+    // response's `Date` header yet), so core's 10-minute floor applies: a copy
+    // made within 10 minutes of its file's last change is uploaded again
+    // rather than trusted on this device's clock (LD-0123).
     if records.len() == 0
         && let Some(tree) = tree.as_ref().filter(|t| !t.files.is_empty())
     {
         let walk = beebeeb_backup::walk_source(&source.path, excluded)
             .map_err(|e| format!("cannot read {} ({:?})", folder, e.kind()))?;
-        for record in records_from_remote(&tree.files, &walk.entries) {
+        for record in records_from_remote_with_clock(&tree.files, &walk.entries, RebuildClock::UNKNOWN) {
             records.put(record)?;
         }
     }

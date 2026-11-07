@@ -507,3 +507,77 @@ async fn a_failed_manifest_write_keeps_the_report_and_exits_incomplete() {
     assert_eq!(out.status.code(), Some(0), "written on the next run: {}", stderr(&out));
     assert_eq!(files_named(&vault.lock().unwrap(), ".device.json").len(), 1);
 }
+
+/// Every `backup-records-<n>.jsonl` under the scratch home's state dir.
+fn records_files(home: &Path) -> Vec<PathBuf> {
+    fn find(dir: &Path, found: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                find(&path, found);
+            } else if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("backup-records-") && n.ends_with(".jsonl"))
+            {
+                found.push(path);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    find(home, &mut found);
+    found
+}
+
+/// Task 2378 (core v0.2.2, LD-0123): with the records gone (a reinstall) `bb backup` has no measured clock
+/// for the listing, so core's rebuild rule trusts a server copy only when it was uploaded more than 10
+/// minutes after the file last changed. Both files here were uploaded seconds after they were written, so
+/// the next run uploads them again rather than mark them backed up on the device clock's word.
+#[tokio::test(flavor = "multi_thread")]
+async fn lost_records_upload_again_a_copy_made_within_ten_minutes_of_the_change() {
+    let (vault, api, home, env) = setup().await;
+    backup(&home, &api, &env, &["add", "data"]).await;
+    let out = backup(&home, &api, &env, &["run"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(stdout(&out).contains("2 uploaded"), "{}", stdout(&out));
+
+    let lost = records_files(&home);
+    assert!(!lost.is_empty(), "the pass wrote its records under the scratch home");
+    for file in &lost {
+        std::fs::remove_file(file).unwrap();
+    }
+
+    let out = backup(&home, &api, &env, &["run"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("2 uploaded \u{b7} 0 failed"),
+        "a copy made seconds after the change is uploaded again: {}",
+        stdout(&out)
+    );
+    assert!(stdout(&out).contains("0 unchanged"), "{}", stdout(&out));
+}
+
+/// The other side of the same rule: a copy the server stamped more than 10 minutes after the file changed is
+/// trusted, so the rebuild marks it backed up and the next run uploads nothing and adds no second row.
+#[tokio::test(flavor = "multi_thread")]
+async fn lost_records_trust_a_copy_made_more_than_ten_minutes_after_the_change() {
+    let (vault, api, home, env) = setup().await;
+    vault.lock().unwrap().uploaded_at_offset_secs = 11 * 60;
+    backup(&home, &api, &env, &["add", "data"]).await;
+    let out = backup(&home, &api, &env, &["run"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(stdout(&out).contains("2 uploaded"), "{}", stdout(&out));
+
+    for file in records_files(&home) {
+        std::fs::remove_file(file).unwrap();
+    }
+
+    let out = backup(&home, &api, &env, &["run"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("0 uploaded \u{b7} 0 failed") && stdout(&out).contains("2 unchanged"),
+        "a copy made 11 minutes after the change is trusted: {}",
+        stdout(&out)
+    );
+    assert_eq!(files_named(&vault.lock().unwrap(), "a.txt").len(), 1, "no second row");
+}
