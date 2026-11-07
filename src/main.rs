@@ -139,7 +139,9 @@ impl Commands {
     fn verbose(&self) -> bool {
         matches!(
             self,
-            Commands::Push { verbose: true, .. } | Commands::Pull { verbose: true, .. }
+            Commands::Push { verbose: true, .. }
+                | Commands::Pull { verbose: true, .. }
+                | Commands::Sync { verbose: true, .. }
         )
     }
 }
@@ -472,6 +474,11 @@ enum Commands {
         /// removed on its account; local files then sync in as new files.
         #[arg(long, conflicts_with = "daemon")]
         rebind: bool,
+
+        /// Show transfer details: speed, chunks, chunks in flight, route and storage country. No effect with --json
+        /// or --daemon
+        #[arg(short = 'v', long)]
+        verbose: bool,
     },
 
     /// Mount vault as a FUSE filesystem (source builds with `--features fuse` only;
@@ -830,6 +837,7 @@ async fn main() {
             rehash,
             allow_mass_delete,
             rebind,
+            verbose,
         } => {
             // Clamp parallel uploads to a sane window: 0 would stall the pipeline,
             // and unbounded values blow up peak memory (each in-flight file holds
@@ -858,6 +866,8 @@ async fn main() {
                 allow_mass_delete,
                 rebind,
                 concurrency,
+                // A daemon has no terminal to show details on (task 2333, plan Task 10).
+                verbose: verbose && !daemon,
             };
             commands::sync::run(local_dir, remote_path, command, options)
                 .await

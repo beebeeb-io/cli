@@ -108,8 +108,8 @@ async fn push_quiet_prints_only_the_id() {
     assert!(uuid::Uuid::parse_str(lines[0].trim()).is_ok(), "{stdout}");
 }
 
-/// Spec §6.2: `--verbose` with `--quiet` is a usage error in either order, before anything is sent: on `bb push`
-/// and `bb pull` (task 2333 PR 2).
+/// Spec §6.2: `--verbose` with `--quiet` is a usage error in either order, before anything is sent: on `bb push`,
+/// `bb pull` and `bb sync` (task 2333 PR 2).
 #[tokio::test(flavor = "multi_thread")]
 async fn quiet_and_verbose_is_a_usage_error_in_both_orders() {
     let mock = Mock::default();
@@ -117,13 +117,16 @@ async fn quiet_and_verbose_is_a_usage_error_in_both_orders() {
     let home = scratch_home(&api);
     make_folder2(&home);
 
-    for args in [
-        ["--api", api.as_str(), "--quiet", "push", "-v", "folder2/a.txt"],
-        ["--api", api.as_str(), "push", "-v", "--quiet", "folder2/a.txt"],
-        ["--api", api.as_str(), "--quiet", "pull", "-v", "3e15382b"],
-        ["--api", api.as_str(), "pull", "-v", "--quiet", "3e15382b"],
-    ] {
-        let out = bb(&home, &args).await;
+    let cases: [&[&str]; 6] = [
+        &["--api", api.as_str(), "--quiet", "push", "-v", "folder2/a.txt"],
+        &["--api", api.as_str(), "push", "-v", "--quiet", "folder2/a.txt"],
+        &["--api", api.as_str(), "--quiet", "pull", "-v", "3e15382b"],
+        &["--api", api.as_str(), "pull", "-v", "--quiet", "3e15382b"],
+        &["--api", api.as_str(), "--quiet", "sync", "-v", "--once", "folder2"],
+        &["--api", api.as_str(), "sync", "-v", "--quiet", "--once", "folder2"],
+    ];
+    for args in cases {
+        let out = bb(&home, args).await;
         let (_stdout, stderr) = text(&out);
         assert_eq!(out.status.code(), Some(2), "{args:?}: {stderr}");
         assert!(stderr.contains("--verbose cannot be combined with --quiet"), "{stderr}");
@@ -317,5 +320,92 @@ async fn verbose_chunk_lines_on_a_redirected_stderr_carry_no_colour() {
         !chunk_lines[0].contains('\u{1b}'),
         "no colour codes in the log: {:?}",
         chunk_lines[0]
+    );
+}
+
+/// P7 (spec §9.3) and §9.5 `sync_json_has_both_directions`: `bb --json sync --once --concurrency 2` uploads six
+/// files two at a time, one chunk each: the most chunks in flight is 2, the limit 2, and both directions'
+/// `transfer` objects are there (the download one with nothing moved).
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_peak_is_at_most_the_concurrency() {
+    let mock = Mock {
+        chunk_delay_ms: 50,
+        ..Default::default()
+    };
+    let api = start_mock(mock.clone()).await;
+    let home = scratch_home(&api);
+    let local = home.join("syncdir");
+    std::fs::create_dir_all(&local).unwrap();
+    for i in 0..6 {
+        std::fs::write(local.join(format!("f{i}.txt")), format!("file {i}")).unwrap();
+    }
+
+    let out = bb(
+        &home,
+        &[
+            "--api",
+            &api,
+            "--json",
+            "sync",
+            "--once",
+            "--concurrency",
+            "2",
+            local.to_str().unwrap(),
+            "/SyncUp",
+        ],
+    )
+    .await;
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success(), "{stdout}{stderr}");
+    let json: Value = serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    let up = &json["transfer_upload"];
+    assert_eq!(up["direction"], "upload", "{json}");
+    assert_eq!(up["files_done"], 6, "{up}");
+    assert_eq!(up["chunks_done"], 6, "{up}");
+    assert_eq!(up["chunks_total"], 6, "{up}");
+    assert_eq!(up["bytes_done"], up["bytes_total"], "{up}");
+    assert_eq!(up["max_chunks_in_flight"], 2, "{up}");
+    assert_eq!(
+        up["peak_chunks_in_flight"], 2,
+        "two files' chunks overlapped, never more: {up}"
+    );
+    let down = &json["transfer_download"];
+    assert_eq!(down["direction"], "download", "{json}");
+    assert_eq!(down["chunks_done"], 0, "{down}");
+    assert_eq!(down["avg_mbps"], Value::Null, "{down}");
+}
+
+/// Spec §6.5: on a pipe the sync line reads Mbps and a §5 duration; `-v` adds the `↑` detail line.
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_end_line_on_a_pipe() {
+    let api = start_mock(Mock::default()).await;
+    let home = scratch_home(&api);
+    let local = home.join("syncdir");
+    std::fs::create_dir_all(&local).unwrap();
+    std::fs::write(local.join("a.txt"), b"hello").unwrap();
+
+    let out = bb(
+        &home,
+        &[
+            "--api",
+            &api,
+            "sync",
+            "-v",
+            "--once",
+            local.to_str().unwrap(),
+            "/SyncUp",
+        ],
+    )
+    .await;
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success(), "{stdout}{stderr}");
+    let line = regex::Regex::new(r"^  ✓ synced · 1 ↑ · \d+ B · avg .+ Mbps · \d+\.\ds$").unwrap();
+    assert_eq!(stdout.lines().filter(|l| line.is_match(l)).count(), 1, "{stdout}");
+    let detail = regex::Regex::new(r"^    ↑ 1 chunk · 1 at a time · direct 0 · api 1 · 0 retries").unwrap();
+    assert_eq!(stdout.lines().filter(|l| detail.is_match(l)).count(), 1, "{stdout}");
+    assert!(stderr.contains("chunk 1/1 · "), "-v's chunk line on stderr: {stderr}");
+    assert!(
+        !regex::Regex::new(r"MB/s|\b\d+ms\b").unwrap().is_match(&stdout),
+        "{stdout}"
     );
 }

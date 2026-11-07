@@ -255,6 +255,9 @@ pub(crate) struct LiveProgress {
     ticker: Mutex<Option<JoinHandle<()>>>,
     /// `finish_all` ran: the lines are cleared, so dropping the sink leaves nothing behind.
     ended: AtomicBool,
+    /// Files the command sends at once (`bb sync --concurrency`): the upload driver sets one file's limit, the
+    /// run's is that many times it.
+    files_at_once: AtomicU32,
 }
 
 impl LiveProgress {
@@ -325,6 +328,7 @@ impl LiveProgress {
             shared,
             ticker: Mutex::new(ticker),
             ended: AtomicBool::new(false),
+            files_at_once: AtomicU32::new(1),
         }
     }
 
@@ -344,6 +348,16 @@ impl LiveProgress {
 
     pub(crate) fn seal_plan(&self) {
         lock(&self.shared.model).seal_plan();
+    }
+
+    /// The command sends `n` files at once, each at the limit its driver sets (`ChunkProgress::set_limit`).
+    pub(crate) fn set_files_at_once(&self, n: u32) {
+        self.files_at_once.store(n.max(1), Ordering::SeqCst);
+    }
+
+    /// The live lines are drawn (both streams are terminals): a command leaves out the per-file lines they show.
+    pub(crate) fn draws_live(&self) -> bool {
+        self.shared.options.draw == Draw::Terminal
     }
 
     /// The run's end: stops the ticker, clears the lines, then reads the numbers.
@@ -519,7 +533,8 @@ impl ChunkProgress for LiveProgress {
     }
 
     fn set_limit(&self, max_in_flight: u32) {
-        lock(&self.shared.model).set_limit(max_in_flight);
+        let files = self.files_at_once.load(Ordering::SeqCst);
+        lock(&self.shared.model).set_limit(max_in_flight.saturating_mul(files));
     }
 
     fn note(&self, text: &str, to: Stream) {

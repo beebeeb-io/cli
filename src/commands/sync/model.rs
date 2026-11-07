@@ -24,6 +24,8 @@ pub struct SyncOptions {
     pub allow_mass_delete: bool,
     pub rebind: bool,
     pub concurrency: usize,
+    /// `-v`: transfer details (task 2333). A daemon never gets it.
+    pub verbose: bool,
 }
 
 impl SyncOptions {
@@ -38,6 +40,7 @@ impl SyncOptions {
             allow_mass_delete: false,
             rebind: false,
             concurrency: 4,
+            verbose: false,
         }
     }
 }

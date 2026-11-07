@@ -90,4 +90,4 @@ pub(crate) use pipeline::CHUNKS_IN_FLIGHT_PER_FILE;
 #[cfg(test)]
 pub(crate) use pipeline::request_log_tests;
 pub(crate) use pipeline::row_parent;
-pub use pipeline::{expected_at_chunk_size, expected_ciphertext_for, planned_chunk_size, stream_encrypt_upload};
+pub use pipeline::{expected_at_chunk_size, planned_chunk_size, stream_encrypt_upload};

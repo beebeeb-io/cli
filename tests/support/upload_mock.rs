@@ -42,6 +42,8 @@ pub struct Mock {
     pub hold_conflict_checks: Arc<AtomicBool>,
     /// Number of conflict lookups that arrived.
     pub conflict_checks: Arc<Mutex<usize>>,
+    /// Task 2333: every chunk PUT is answered this many milliseconds after its body arrived (chunks overlap).
+    pub chunk_delay_ms: u64,
 }
 
 pub async fn start_mock(mock: Mock) -> String {
@@ -141,6 +143,7 @@ pub async fn start_mock(mock: Mock) -> String {
                         n += frame.map(|b| b.len()).unwrap_or(0);
                     }
                     m.chunk_sizes.lock().unwrap().push(n);
+                    tokio::time::sleep(std::time::Duration::from_millis(m.chunk_delay_ms)).await;
                     Json(json!({ "index": idx, "size": n, "skipped": false }))
                 },
             ),
