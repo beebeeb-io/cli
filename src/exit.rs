@@ -33,6 +33,10 @@ pub const BACKUP_OFF: i32 = 4;
 /// Another process is uploading the same file; retry later.
 pub const BUSY: i32 = 75;
 
+/// A push was interrupted (Ctrl-C) with work left undone — what a shell reports for a killed process. The run
+/// is resumable: the same command continues it.
+pub const INTERRUPTED: i32 = 130;
+
 /// The stored session was rejected by the server (401). Not retryable.
 pub const SESSION_ENDED: i32 = 77;
 /// One-line message printed when a sync run finds its session dead.

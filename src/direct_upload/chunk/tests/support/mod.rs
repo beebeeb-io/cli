@@ -1,8 +1,11 @@
 mod compatibility;
+mod completed;
 mod direct_session;
 mod fallback;
 mod hold;
 mod live_stats;
+mod pause;
+mod request_log;
 mod resume;
 mod retry;
 
@@ -90,6 +93,8 @@ struct Mock {
     // sessions: id -> (file id, direct, committed chunk indexes)
     sessions: HashMap<String, (String, bool, HashSet<u32>)>,
     live: HashSet<String>,
+    /// `--parallel` Task 1: when set, every request of the API and of the storage server is logged here.
+    requests: Option<crate::test_server::RequestLog>,
 }
 
 struct StoragePut {
@@ -115,6 +120,11 @@ fn reply(status: u16, body: serde_json::Value, retry_after: Option<&str>) -> Res
 }
 
 async fn spawn(state: Shared) -> String {
+    let log = state.lock().unwrap().requests.clone();
+    let recorded = |router: Router| match &log {
+        Some(log) => crate::test_server::recorded(router, log),
+        None => router,
+    };
     // The storage server first: its address goes into the links and into discovery.
     let storage_app = Router::new()
         .route(
@@ -143,6 +153,7 @@ async fn spawn(state: Shared) -> String {
             ),
         )
         .with_state(state.clone());
+    let storage_app = recorded(storage_app);
     let storage_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let storage_addr = storage_listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -339,6 +350,7 @@ async fn spawn(state: Shared) -> String {
             }),
         )
         .with_state(state);
+    let app = recorded(app);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -381,6 +393,20 @@ impl Scratch {
             .as_nanos();
         (p, meta.len(), mtime)
     }
+
+    /// A sparse file of `size` bytes (`set_len`): a chunk plan over 2 GiB with no disk I/O.
+    fn sparse_file(&self, size: u64) -> (std::path::PathBuf, u64, u128) {
+        let p = self.dir.join("payload.bin");
+        std::fs::File::create(&p).unwrap().set_len(size).unwrap();
+        let meta = std::fs::metadata(&p).unwrap();
+        let mtime = meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        (p, meta.len(), mtime)
+    }
 }
 
 impl Drop for Scratch {
@@ -411,6 +437,10 @@ fn spec(path: &std::path::Path, file_id: Uuid) -> UploadSpec {
         replace_file_key: None,
         parent_id: None,
         concurrency: CONCURRENCY,
+        unrecorded_resume_concurrency: CONCURRENCY,
+        chunks_in_flight: 1,
+        limits: crate::upload::limits::ChunkLimits::single(),
+        interrupt: None,
         shutdown: Arc::new(AtomicBool::new(false)),
         read_row: None,
     }

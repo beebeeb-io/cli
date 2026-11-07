@@ -46,16 +46,21 @@ fn update_rate_state(headers: &reqwest::header::HeaderMap) {
     }
 }
 
-async fn pace_if_needed() {
+/// Wait out the shared pause (a 429 or 503 anywhere in this process), then pace by the rate-limit headers.
+/// `false`: the push's interrupt fired while the gate was closed, so the request must not be sent.
+async fn pace_if_needed(origin: &str) -> bool {
+    if !pause::wait_open(origin).await {
+        return false;
+    }
     let remaining = RATE_REMAINING.load(Ordering::Relaxed);
     let limit = RATE_LIMIT.load(Ordering::Relaxed);
     let reset = RATE_RESET.load(Ordering::Relaxed);
     if remaining < 0 || limit <= 0 {
-        return;
+        return true;
     }
     let ratio = remaining as f64 / limit as f64;
     if ratio > 0.2 {
-        return;
+        return true;
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -67,6 +72,7 @@ async fn pace_if_needed() {
     if pace_ms > 50 {
         tokio::time::sleep(std::time::Duration::from_millis(pace_ms)).await;
     }
+    true
 }
 
 /// Shown for any 401 the server answers with its generic `unauthorized` body
@@ -301,9 +307,17 @@ fn build_client_with_origin(timeout: std::time::Duration, origin: Option<&'stati
         .unwrap_or_else(|_| Client::new())
 }
 
+impl ApiClient {
+    /// The key of this API's pause gate (`api::pause`): its base URL, normalised to an origin by the gate.
+    pub(crate) fn pause_origin(&self) -> &str {
+        &self.base_url
+    }
+}
+
 mod backups;
 mod client;
 mod id;
+pub(crate) mod pause;
 mod shares;
 mod tree;
 mod upload;
@@ -431,6 +445,18 @@ pub(crate) fn upload_session_gone(status: u16, a_404_counts: bool, text: &str) -
     }
 }
 
+/// A chunk write (API PUT, or a direct grant) answered `400 ... not writable: completed` (spec §5.2): the session
+/// finished, told apart from `expired` (which is [`upload_session_gone`], a swept-session re-init). The server
+/// sends the text in `{error}`, which `message` carries. One place so the two routes cannot drift.
+pub(crate) fn upload_session_completed(status: u16, text: &str) -> bool {
+    status == 400 && text.contains("upload session is not writable: completed")
+}
+
+/// [`upload_session_completed`] for an [`ApiError`] from a proxy chunk PUT.
+pub(crate) fn is_upload_session_completed(e: &ApiError) -> bool {
+    upload_session_completed(e.status, &e.message)
+}
+
 impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.message)
@@ -493,19 +519,22 @@ async fn parse_response_typed(resp: reqwest::Response) -> Result<Value, ApiError
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<u64>().ok());
 
-        if !crate::ui::is_quiet() {
-            use colored::Colorize;
-            // Through the live transfer lines when a run draws them (task 2333, spec §6.7): any request
-            // of a push, pull or sync can meet a 429.
-            crate::transfer_view::notice::stderr(&format!(
-                "  {} rate limited — pausing {}s{}",
-                "⏸".custom_color(crate::colors::AMBER),
-                retry_after,
-                remaining.map_or(String::new(), |r| format!(" ({r} requests remaining)")),
-            ));
+        // One pause for every request of this process (spec §6.1): the gate prints the notice when this
+        // begins a pause, and this call waits on the gate (not on a sleep of its own), so the workers of a push
+        // stop and come back together. Any request of a push, pull or sync can meet a 429.
+        let origin = pause::origin_of(resp.url().as_str());
+        pause::extend(
+            &origin,
+            std::time::Duration::from_secs(retry_after),
+            pause::PauseReason::RateLimited { remaining },
+        );
+        if !pause::wait_open(&origin).await {
+            return Err(ApiError {
+                code: None,
+                message: crate::upload::INTERRUPTED.to_string(),
+                status: status.as_u16(),
+            });
         }
-
-        tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
         // `parse_response`'s callers retry-loop on this exact sentinel
         // string (`e.message == RATE_LIMITED_MESSAGE`) — `.map_err(|e| e.message)`
         // above preserves it byte-for-byte, so none of those call sites

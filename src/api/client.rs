@@ -1019,7 +1019,7 @@ impl ApiClient {
             "bb_version": bb_version,
         });
         for _ in 0..3 {
-            pace_if_needed().await;
+            pace_if_needed(&self.base_url).await;
             let resp = self
                 .client
                 .post(self.url("/api/v1/clients/devices"))
@@ -1060,7 +1060,7 @@ impl ApiClient {
             "remote_path_encrypted": remote_path_encrypted,
         });
         for _ in 0..3 {
-            pace_if_needed().await;
+            pace_if_needed(&self.base_url).await;
             let resp = self
                 .client
                 .post(self.url("/api/v1/clients/sessions"))
@@ -1102,7 +1102,7 @@ impl ApiClient {
             "speed_bps": speed_bps,
         });
         // Heartbeats are fire-and-forget — don't retry
-        pace_if_needed().await;
+        pace_if_needed(&self.base_url).await;
         let resp = self
             .client
             .post(self.url(&format!("/api/v1/clients/sessions/{session_id}/heartbeat")))

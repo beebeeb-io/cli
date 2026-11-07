@@ -118,6 +118,68 @@ pub struct Mock {
     /// Task 2333: the FIRST PUT of each of these indexes answers 429 with
     /// `Retry-After: 0` (a transient refusal the client retries).
     pub chunk_rate_limited_once: HashSet<u32>,
+    /// `--parallel`: the `Retry-After` (seconds) of every 429 and 503 the mock answers (0 unless a test needs a
+    /// real pause).
+    pub retry_after_secs: u64,
+    /// `--parallel` Task 4: the FIRST PUT of each of these indexes answers 503 (the storage pool is briefly
+    /// unavailable), with `retry_after_secs`.
+    pub chunk_busy_once: HashSet<u32>,
+    /// `--parallel` Task 4: the first `GET /files/{id}` answers 429 with `retry_after_secs` (an unpaced
+    /// caller meeting a rate limit).
+    pub file_rate_limited_once: bool,
+    /// `--parallel` Task 1: when set, every request the mock answers is logged here, in order (the recorder
+    /// buffers each body, so a test that aborts a body must not set it).
+    pub requests: Option<RequestLog>,
+    /// `--parallel`: keep only the length of each chunk PUT, not its bytes (a 2 GiB fixture would otherwise be
+    /// held whole in `chunk_bodies`). The body is still streamed and discarded, so the client's PUT completes.
+    pub drop_chunk_bodies: bool,
+    /// `--parallel` Task 5 (the memory and interrupt tests): when set, every chunk PUT drains its body then
+    /// parks forever (the client keeps the frame in flight), so the pipeline reaches its worst memory moment and
+    /// the test can drop the PUTs with an interrupt. [`ChunkHold::held`] counts the PUTs currently parked.
+    pub hold_chunk_puts: Option<Arc<ChunkHold>>,
+    /// `--parallel` Task 5 (spec §5.2): a chunk write to one of these sessions answers `400 ... not writable:
+    /// completed`, and `complete` answers `already_completed` — a session finished out from under a resumed run.
+    pub completed_sessions: HashSet<String>,
+    /// `--parallel` Task 5: these `(session, index)` chunks are already held, so their PUT answers `skipped:true`
+    /// without storing (a resumed session's out-of-order chunks).
+    pub skip_chunks: HashSet<(String, u32)>,
+    /// `--parallel` Task 5: the indexes a PUT stored ANEW (not skipped, not held), in order — so a test can prove
+    /// a resume re-stored only the missing chunk.
+    pub chunk_stored_fresh: Vec<u32>,
+}
+
+/// A gate the mock's held chunk PUTs park on: until the test drops the client PUTs (an interrupt), or until it
+/// [`release`](Self::release)s them to go on to their normal answer.
+#[derive(Default)]
+pub struct ChunkHold {
+    held: std::sync::atomic::AtomicUsize,
+    released: std::sync::atomic::AtomicBool,
+    gate: tokio::sync::Notify,
+}
+
+impl ChunkHold {
+    /// How many chunk PUTs were parked (so far).
+    pub fn held(&self) -> usize {
+        self.held.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Let every parked PUT, and every later one, go on to its normal answer.
+    pub fn release(&self) {
+        self.released.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.gate.notify_waiters();
+    }
+
+    /// Park until released (registered before the flag is read, so a release in between is never missed).
+    async fn park(&self) {
+        self.held.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let notified = self.gate.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if self.released.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        notified.await;
+    }
 }
 
 pub type Shared = Arc<Mutex<Mock>>;
@@ -153,7 +215,8 @@ fn not_found() -> Response {
 }
 
 fn router(state: Shared) -> Router {
-    Router::new()
+    let log = state.lock().unwrap().requests.clone();
+    let router = Router::new()
         .route(
             "/api/v1/uploads/init",
             post(
@@ -203,21 +266,55 @@ fn router(state: Shared) -> Router {
             "/api/v1/uploads/:session/chunks/:idx",
             put(
                 |State(st): State<Shared>, Path((sid, idx)): Path<(String, u32)>, body: Body| async move {
+                    // Stream the body, discarding it when the test does not need the bytes (a 2 GiB fixture must
+                    // not be buffered on either side); the PUT still completes, so the client's budget frees.
+                    let drop_bodies = st.lock().unwrap().drop_chunk_bodies;
                     let mut stream = body.into_data_stream();
                     let mut data = Vec::new();
+                    let mut n = 0usize;
                     while let Some(frame) = stream.next().await {
-                        data.extend_from_slice(&frame.unwrap_or_default());
+                        let frame = frame.unwrap_or_default();
+                        n += frame.len();
+                        if !drop_bodies {
+                            data.extend_from_slice(&frame);
+                        }
                     }
-                    let n = data.len();
+                    let hold = {
+                        let mut m = st.lock().unwrap();
+                        m.chunk_puts.push((sid.clone(), idx));
+                        m.events.push(format!("chunk:{sid}:{idx}"));
+                        if !m.drop_chunk_bodies {
+                            m.chunk_bodies.insert((sid.clone(), idx), data);
+                        }
+                        m.hold_chunk_puts.clone()
+                    };
+                    // Park: the body is received (so the client holds the frame in flight), and no answer comes
+                    // until the client cancels the PUT (an interrupt, a sibling's final error) or the test releases
+                    // the hold, after which the PUT is answered as any other.
+                    if let Some(hold) = hold {
+                        hold.park().await;
+                    }
                     let mut m = st.lock().unwrap();
-                    m.chunk_puts.push((sid.clone(), idx));
-                    m.events.push(format!("chunk:{sid}:{idx}"));
-                    m.chunk_bodies.insert((sid.clone(), idx), data);
+                    if m.completed_sessions.contains(&sid) {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({ "error": "upload session is not writable: completed" })),
+                        )
+                            .into_response();
+                    }
                     if m.chunk_rate_limited_once.remove(&idx) {
                         return (
                             StatusCode::TOO_MANY_REQUESTS,
-                            [("retry-after", "0")],
+                            [("retry-after", m.retry_after_secs.to_string())],
                             Json(json!({ "error": "rate_limited" })),
+                        )
+                            .into_response();
+                    }
+                    if m.chunk_busy_once.remove(&idx) {
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            [("retry-after", m.retry_after_secs.to_string())],
+                            Json(json!({ "error": "storage_unavailable" })),
                         )
                             .into_response();
                     }
@@ -235,6 +332,11 @@ fn router(state: Shared) -> Router {
                         }
                         m.chunk_accept_count.insert(sid.clone(), count + 1);
                     }
+                    // A chunk the (resumed) session already holds answers `skipped` without storing (spec §3).
+                    if m.skip_chunks.contains(&(sid.clone(), idx)) {
+                        return Json(json!({ "index": idx, "size": n, "skipped": true })).into_response();
+                    }
+                    m.chunk_stored_fresh.push(idx);
                     Json(json!({ "index": idx, "size": n, "skipped": false })).into_response()
                 },
             ),
@@ -267,6 +369,22 @@ fn router(state: Shared) -> Router {
             "/api/v1/uploads/:session/complete",
             post(|State(st): State<Shared>, Path(sid): Path<String>| async move {
                 let mut m = st.lock().unwrap();
+                // Spec §5.2: a session already completed answers idempotently (`already_completed`), even though
+                // its chunk writes 400. This is BEFORE the gone check so a completed session is not read as swept.
+                if m.completed_sessions.contains(&sid) {
+                    m.completed.push(sid.clone());
+                    m.events.push(format!("complete:{sid}"));
+                    let fid = m
+                        .complete_echo
+                        .clone()
+                        .or_else(|| m.session_file.get(&sid).cloned())
+                        .unwrap_or_default();
+                    return Json(merged(
+                        json!({ "id": fid, "status": "completed", "already_completed": true }),
+                        &m.complete_extra,
+                    ))
+                    .into_response();
+                }
                 if !m.live.contains(&sid) || m.complete_gone.contains(&sid) {
                     return gone_response(m.gone);
                 }
@@ -318,7 +436,15 @@ fn router(state: Shared) -> Router {
         .route(
             "/api/v1/files/:id",
             get(|State(st): State<Shared>, Path(fid): Path<String>| async move {
-                let m = st.lock().unwrap();
+                let mut m = st.lock().unwrap();
+                if std::mem::take(&mut m.file_rate_limited_once) {
+                    return (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        [("retry-after", m.retry_after_secs.to_string())],
+                        Json(json!({ "error": "rate_limited" })),
+                    )
+                        .into_response();
+                }
                 if let Some(code) = m.file_status {
                     let status = StatusCode::from_u16(code).unwrap();
                     return (status, Json(json!({ "error": "failed by mock" }))).into_response();
@@ -355,7 +481,121 @@ fn router(state: Shared) -> Router {
                 }
             }),
         )
-        .with_state(state)
+        .with_state(state);
+    match log {
+        Some(log) => recorded(router, &log),
+        None => router,
+    }
+}
+
+// ── The request recorder (`--parallel` Task 1: the `--parallel 1` golden) ──────────────────────────────────
+
+/// One request a mock answered: what the `--parallel 1` golden compares. The body is its length only: core seals
+/// every chunk under a fresh nonce, so no two runs send the same bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoggedRequest {
+    pub method: String,
+    /// The path with every id replaced by what it is (`{session}`, `{file}`, `{id}`); never a query string.
+    pub path: String,
+    pub status: u16,
+    /// When the request arrived, in milliseconds since the log was made (the pause tests read it; a golden
+    /// line does not carry it).
+    pub at_ms: u64,
+    /// `None` for the init: its body carries the sealed name, whose JSON array encoding varies in length with
+    /// the nonce's digits (core `seal_name_envelope`), so there is nothing stable to pin.
+    pub body_len: Option<u64>,
+}
+
+impl LoggedRequest {
+    /// One line of a golden file: `METHOD path status body_len` (`-` for a length that is not recorded).
+    pub fn line(&self) -> String {
+        let body_len = self.body_len.map_or("-".to_string(), |n| n.to_string());
+        format!("{} {} {} {body_len}", self.method, self.path, self.status)
+    }
+}
+
+/// The requests a mock answered, in the order they were answered.
+#[derive(Clone)]
+pub struct RequestLog {
+    entries: Arc<Mutex<Vec<LoggedRequest>>>,
+    made: std::time::Instant,
+}
+
+impl Default for RequestLog {
+    fn default() -> Self {
+        Self {
+            entries: Arc::new(Mutex::new(Vec::new())),
+            made: std::time::Instant::now(),
+        }
+    }
+}
+
+impl RequestLog {
+    pub fn entries(&self) -> Vec<LoggedRequest> {
+        self.entries.lock().unwrap().clone()
+    }
+
+    /// Milliseconds since the log was made: the clock `at_ms` is on.
+    pub fn now_ms(&self) -> u64 {
+        self.made.elapsed().as_millis() as u64
+    }
+
+    pub fn lines(&self) -> Vec<String> {
+        self.entries().iter().map(LoggedRequest::line).collect()
+    }
+}
+
+/// `path` with every UUID segment replaced by a placeholder for what it names: `{session}` under `uploads` and
+/// under a storage bucket, `{file}` under `files`, `{id}` elsewhere.
+pub fn placeholders(path: &str) -> String {
+    let segments: Vec<&str> = path.split('/').collect();
+    let mut out: Vec<String> = Vec::with_capacity(segments.len());
+    for (i, segment) in segments.iter().enumerate() {
+        if Uuid::parse_str(segment).is_err() {
+            out.push((*segment).to_string());
+            continue;
+        }
+        let under = i.checked_sub(1).map(|j| segments[j]).unwrap_or("");
+        out.push(
+            match under {
+                "uploads" | "bb-test" => "{session}",
+                "files" => "{file}",
+                _ => "{id}",
+            }
+            .to_string(),
+        );
+    }
+    out.join("/")
+}
+
+/// `router` with every request it answers logged to `log`: method, placeholder path, status and body length.
+/// The body is read whole before the handler runs (so a handler that streams sees one frame).
+pub fn recorded(router: Router, log: &RequestLog) -> Router {
+    router.layer(axum::middleware::from_fn_with_state(log.clone(), record))
+}
+
+async fn record(
+    State(log): State<RequestLog>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let at_ms = log.now_ms();
+    let (parts, body) = request.into_parts();
+    let method = parts.method.to_string();
+    let path = placeholders(parts.uri.path());
+    let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap_or_default();
+    let body_len = (path != "/api/v1/uploads/init").then_some(bytes.len() as u64);
+    let response = next
+        .run(axum::extract::Request::from_parts(parts, Body::from(bytes)))
+        .await;
+    log.entries.lock().unwrap().push(LoggedRequest {
+        method,
+        path,
+        status: response.status().as_u16(),
+        at_ms,
+        body_len,
+    });
+    response
 }
 
 /// Serve the mock on the CURRENT tokio runtime; returns its base URL.
@@ -419,6 +659,23 @@ impl Scratch {
     pub fn file(&self, size: usize) -> (std::path::PathBuf, u64, u128) {
         let p = self.dir.join("payload.bin");
         std::fs::write(&p, vec![0x5Au8; size]).unwrap();
+        let meta = std::fs::metadata(&p).unwrap();
+        let mtime = meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        (p, meta.len(), mtime)
+    }
+}
+
+impl Scratch {
+    /// `payload.bin` of `size` bytes, sparse (`set_len`, never written): the fixture for a chunk plan over 2 GiB
+    /// costs no disk I/O. (path, size, mtime_ns), as [`file`](Self::file).
+    pub fn sparse_file(&self, size: u64) -> (std::path::PathBuf, u64, u128) {
+        let p = self.dir.join("payload.bin");
+        std::fs::File::create(&p).unwrap().set_len(size).unwrap();
         let meta = std::fs::metadata(&p).unwrap();
         let mtime = meta
             .modified()

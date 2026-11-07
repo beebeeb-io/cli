@@ -32,6 +32,10 @@ fn spec(path: &std::path::Path, file_id: Uuid) -> UploadSpec {
         replace_file_key: None,
         parent_id: None,
         concurrency: 1,
+        unrecorded_resume_concurrency: 1,
+        chunks_in_flight: 1,
+        limits: crate::upload::limits::ChunkLimits::single(),
+        interrupt: None,
         shutdown: Arc::new(AtomicBool::new(false)),
         read_row: None,
     }
@@ -272,10 +276,13 @@ async fn pool_label_from_init_and_complete() {
 /// never past it; once the run's sink is done, such a line goes straight to stderr again.
 #[tokio::test]
 async fn rate_limit_pause_prints_through_the_live_sink() {
+    let _notices = crate::transfer_view::notice::TEST_SINK_LOCK.lock().await;
     let s = Scratch::new("2333-pause-line");
     let (path, _, _) = s.file(9 * MIB);
     let mut mock = Mock::default();
     mock.chunk_rate_limited_once.insert(1);
+    // 4 s: no other test's 429 waits this long, so the line below is this pipeline's own.
+    mock.retry_after_secs = 4;
     let state = shared(mock);
     let (live, record) = LiveProgress::for_test(Direction::Upload, Level::Default, 80, Arc::new(AtomicU64::new(0)));
     live.register_notices_for_test();
@@ -285,7 +292,7 @@ async fn rate_limit_pause_prints_through_the_live_sink() {
     let printed = record.lock().unwrap().clone();
     let pauses: Vec<&String> = printed
         .iter()
-        .filter(|l| l.contains("rate limited \u{2014} pausing 0s"))
+        .filter(|l| l.contains("rate limited \u{2014} pausing 4s"))
         .collect();
     assert!(
         !pauses.is_empty() && pauses.iter().all(|l| l.starts_with("err:")),

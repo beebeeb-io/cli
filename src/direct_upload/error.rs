@@ -18,4 +18,7 @@ pub(crate) enum DirectUploadError {
     Terminal { status: u16, message: String },
     /// The run was interrupted while the chunk waited.
     Interrupted,
+    /// Spec §5.2: a resumed direct session the server reports already completed (its grant answers `400 ... not
+    /// writable: completed`). The file is finished; the driver completes it, never re-inits over it.
+    SessionCompleted,
 }

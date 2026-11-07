@@ -12,7 +12,7 @@ impl ApiClient {
         let file_id = file_id.into();
         let token = self.require_auth()?;
         for _ in 0..3 {
-            pace_if_needed().await;
+            pace_if_needed(&self.base_url).await;
             let resp = self
                 .client
                 .put(self.url(&format!("/api/v1/files/{file_id}/thumbnail")))
@@ -39,7 +39,7 @@ impl ApiClient {
         let file_id = file_id.into();
         let token = self.require_auth()?;
         for _ in 0..3 {
-            pace_if_needed().await;
+            pace_if_needed(&self.base_url).await;
             let resp = self
                 .client
                 .put(self.url(&format!("/api/v1/files/{file_id}/thumbnail/large")))

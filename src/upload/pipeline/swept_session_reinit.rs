@@ -25,6 +25,10 @@ fn spec(path: &std::path::Path, file_id: Uuid) -> UploadSpec {
         replace_file_key: None,
         parent_id: None,
         concurrency: 1,
+        unrecorded_resume_concurrency: 1,
+        chunks_in_flight: 1,
+        limits: crate::upload::limits::ChunkLimits::single(),
+        interrupt: None,
         shutdown: Arc::new(AtomicBool::new(false)),
         read_row: None,
     }

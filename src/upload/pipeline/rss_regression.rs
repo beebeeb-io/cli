@@ -122,6 +122,10 @@ async fn upload_peak_heap_is_bounded_at_conc4() {
             replace_file_key: None,
             parent_id: None,
             concurrency: CONC,
+            unrecorded_resume_concurrency: CONC,
+            chunks_in_flight: 1,
+            limits: crate::upload::limits::ChunkLimits::single(),
+            interrupt: None,
             shutdown: Arc::new(AtomicBool::new(false)),
             read_row: None,
         };

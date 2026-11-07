@@ -10,9 +10,18 @@
 //! against a scripted API and a storage server.
 
 use super::*;
+use crate::api::pause;
 
 /// How often a waiting chunk looks at the shutdown flag.
 pub(super) const WAIT_SLICE: Duration = Duration::from_millis(250);
+
+/// Resolves once the run's shutdown flag is set (polled, since an `AtomicBool` has no waker): the shutdown-flag
+/// half of a shared-pause wait, for a run with no bound interrupt (`bb sync`).
+async fn shutdown_set(shutdown: &AtomicBool) {
+    while !shutdown.load(Ordering::Relaxed) {
+        tokio::time::sleep(WAIT_SLICE).await;
+    }
+}
 
 /// Sleep `total`, giving up early (`false`) when the run is being shut down.
 pub(super) async fn wait(total: Duration, shutdown: &AtomicBool) -> bool {
@@ -51,7 +60,8 @@ pub(crate) async fn upload_chunk(
         if shutdown.load(Ordering::Relaxed) {
             return Err(DirectUploadError::Interrupted);
         }
-        let failure = match call {
+        // The failure core's policy answers, and the HTTP status behind it (what decides a shared pause).
+        let (failure, status) = match call {
             dt::Call::UploadGrant => match api.upload_grant(session.as_str(), index, size, discovery).await {
                 UploadCall::Ok(dt::UploadGrant::Skipped) => {
                     return Ok(if put_stored {
@@ -68,15 +78,17 @@ pub(crate) async fn upload_chunk(
                         call = dt::Call::UploadCommit;
                         continue;
                     }
-                    dt::UploadFailure::Put { status }
+                    (dt::UploadFailure::Put { status }, status)
                 }
-                UploadCall::Failed(outcome) => dt::UploadFailure::Grant(outcome),
+                UploadCall::Failed { outcome, status } => (dt::UploadFailure::Grant(outcome), status),
                 UploadCall::SessionGone(message) => return Err(DirectUploadError::SessionGone(message)),
+                UploadCall::SessionCompleted => return Err(DirectUploadError::SessionCompleted),
             },
             dt::Call::UploadCommit => match api.upload_commit(session.as_str(), index, size).await {
                 UploadCall::Ok(_) => return Ok(Held::Transferred),
-                UploadCall::Failed(outcome) => dt::UploadFailure::Commit(outcome),
+                UploadCall::Failed { outcome, status } => (dt::UploadFailure::Commit(outcome), status),
                 UploadCall::SessionGone(message) => return Err(DirectUploadError::SessionGone(message)),
+                UploadCall::SessionCompleted => return Err(DirectUploadError::SessionCompleted),
             },
             // The policy only ever names these two calls.
             _ => return Err(DirectUploadError::UseApi),
@@ -84,7 +96,22 @@ pub(crate) async fn upload_chunk(
         match state.failed(&failure) {
             dt::UploadNext::Retry { after, call: next } => {
                 prog.chunk_retried(index);
-                if !wait(after, shutdown).await {
+                // A 429 (any route) or a 503 (grant, storage PUT, commit) pauses every request of the process
+                // for the wait the policy ordered (spec §6.1). The shared gate ends on the push's bound interrupt;
+                // this run's shutdown flag (bb sync, or a push before its interrupt is bound) ends it too, raced
+                // alongside, so the wait stops either way. Any other failure keeps this chunk's own jittered wait,
+                // so chunks that fail together do not retry together. Either way the try is spent.
+                let went_on = match pause::reason_for(status) {
+                    Some(why) => {
+                        pause::extend(api.pause_origin(), after, why);
+                        tokio::select! {
+                            open = pause::wait_open(api.pause_origin()) => open,
+                            _ = shutdown_set(shutdown) => false,
+                        }
+                    }
+                    None => wait(after, shutdown).await,
+                };
+                if !went_on {
                     return Err(DirectUploadError::Interrupted);
                 }
                 call = next;

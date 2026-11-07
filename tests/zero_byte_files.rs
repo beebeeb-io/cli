@@ -197,7 +197,9 @@ async fn push_json_reports_transfer_stats() {
     assert_eq!(t["bytes_transferred"], v["total_bytes"], "{v}");
     assert_eq!(t["bytes_done"], t["bytes_total"], "{t}");
     assert_eq!(t["peak_chunks_in_flight"], 1, "{t}");
-    assert_eq!(t["max_chunks_in_flight"], 1, "{t}");
+    // The run's limit is `--parallel`'s `used` (spec §8 of the `--parallel` design): 4 by default, even for a
+    // one-chunk file (the peak above says what was actually in flight).
+    assert_eq!(t["max_chunks_in_flight"], 4, "{t}");
     assert!(t["avg_mbps"].is_number(), "{t}");
     assert_eq!(t["routes"], json!({"direct": 0, "api": 1}), "{t}");
     assert_eq!(t["retries"], 0, "{t}");

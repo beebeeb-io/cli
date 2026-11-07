@@ -9,10 +9,11 @@ use colored::Colorize;
 use crate::transfer_stats::{Direction, Summary};
 use crate::transfer_view::line::{self, Role};
 use crate::transfer_view::{LiveProgress, ViewOptions};
-use crate::upload::{CHUNKS_IN_FLIGHT_PER_FILE, ChunkProgress, expected_chunks_for, expected_ciphertext_for};
+use crate::upload::limits::ChunkLimits;
+use crate::upload::{ChunkProgress, expected_at_chunk_size, planned_chunk_size};
 
-/// One file's share of the run's totals: its ciphertext and chunks as the upload driver will send them
-/// (`bb push` uploads at concurrency 1).
+/// One file's share of the run's totals: its ciphertext and chunks as the upload driver will send them: a fresh
+/// upload planned at `--parallel`, a resumed one at the chunk size its record names (`planned_chunk_size`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) struct FilePlan {
     bytes: u64,
@@ -20,16 +21,23 @@ pub(super) struct FilePlan {
 }
 
 impl FilePlan {
-    pub(super) fn of_size(size: u64) -> Self {
-        Self {
-            bytes: expected_ciphertext_for(size, 1),
-            chunks: expected_chunks_for(size, 1),
-        }
+    /// A file of `size` with no resume record, planned at `parallel` chunks at once.
+    pub(super) fn of_size(size: u64, parallel: u32) -> Self {
+        Self::at_chunk_size(size, planned_chunk_size(size, parallel, 1, None))
     }
 
-    /// The plan of the file at `path` as it is now (a file that cannot be read plans as empty: its upload fails).
-    pub(super) fn of_path(path: &std::path::Path) -> Self {
-        Self::of_size(std::fs::metadata(path).map(|m| m.len()).unwrap_or(0))
+    /// The plan of the file at `path` as it is now (a file that cannot be read plans as empty: its upload fails),
+    /// at the chunk size its resume record names, else at `parallel`. A record from before `--parallel` plans as
+    /// `bb push` did then (1), so the totals match what the driver sends (spec §4.3).
+    pub(super) fn of_path(path: &std::path::Path, parallel: u32) -> Self {
+        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let pending = crate::resume::resumable_upload_now(path);
+        Self::at_chunk_size(size, planned_chunk_size(size, parallel, 1, pending.as_ref()))
+    }
+
+    fn at_chunk_size(size: u64, chunk_size: u64) -> Self {
+        let (bytes, chunks) = expected_at_chunk_size(size, chunk_size);
+        Self { bytes, chunks }
     }
 
     fn add_to(self, progress: &LiveProgress) {
@@ -42,14 +50,15 @@ impl FilePlan {
     }
 }
 
-/// The sink of one push: every file planned, the plan sealed, one chunk in flight at a time.
-pub(super) fn start(plans: impl IntoIterator<Item = FilePlan>, verbose: bool) -> LiveProgress {
+/// The sink of one push: every file planned, the plan sealed, the limit what `--parallel` asked (the driver
+/// lowers it per file when the budget does, spec §4.4).
+pub(super) fn start(plans: impl IntoIterator<Item = FilePlan>, verbose: bool, limits: &ChunkLimits) -> LiveProgress {
     let progress = LiveProgress::new(Direction::Upload, ViewOptions::for_command(verbose));
     for plan in plans {
         plan.add_to(&progress);
     }
     progress.seal_plan();
-    progress.set_limit(CHUNKS_IN_FLIGHT_PER_FILE);
+    progress.set_limit(limits.asked());
     progress
 }
 

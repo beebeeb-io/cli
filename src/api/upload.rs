@@ -125,7 +125,10 @@ impl ApiClient {
             "base_version_number": base_version_number,
         });
         for _ in 0..3 {
-            pace_if_needed().await;
+            // After a Ctrl-C no session is opened (a request the run would then abandon).
+            if !pace_if_needed(&self.base_url).await {
+                return Err(crate::upload::INTERRUPTED.to_string().into());
+            }
             let mut request = self
                 .client
                 .post(self.url("/api/v1/uploads/init"))
@@ -232,7 +235,9 @@ impl ApiClient {
             if attempt > 1 {
                 on_retry();
             }
-            pace_if_needed().await;
+            if !pace_if_needed(&self.base_url).await {
+                return Err(crate::upload::INTERRUPTED.to_string().into());
+            }
             let send = self
                 .client
                 .put(&url)
@@ -242,6 +247,25 @@ impl ApiClient {
                 .send()
                 .await;
             match send {
+                // A storage pool that is briefly unavailable (spec §6.1): one pause for every request of the
+                // process, then this chunk's next attempt. It spends one of the chunk's attempts, so it never loops.
+                Ok(resp) if resp.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE => {
+                    let by = resp
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .map_or_else(
+                            || {
+                                std::time::Duration::from_millis(CHUNK_RETRY.delay_ms(attempt))
+                                    .max(std::time::Duration::from_secs(1))
+                            },
+                            std::time::Duration::from_secs,
+                        );
+                    last_err = "server busy (HTTP 503)".to_string();
+                    super::pause::extend(&self.base_url, by, super::pause::PauseReason::Busy503);
+                    continue;
+                }
                 Ok(resp) => match parse_response_typed(resp).await {
                     // parse_response already slept for Retry-After; just re-try.
                     Err(e) if e.message == super::RATE_LIMITED_MESSAGE => {
@@ -282,7 +306,9 @@ impl ApiClient {
         let upload_session_id = upload_session_id.into();
         let token = self.require_auth()?;
         for _ in 0..3 {
-            pace_if_needed().await;
+            if !pace_if_needed(&self.base_url).await {
+                return Err(crate::upload::INTERRUPTED.to_string().into());
+            }
             let resp = self
                 .client
                 .post(self.url(&format!("/api/v1/uploads/{upload_session_id}/complete")))
@@ -307,7 +333,7 @@ impl ApiClient {
         let file_id = file_id.into();
         let token = self.require_auth()?;
         for _ in 0..3 {
-            pace_if_needed().await;
+            pace_if_needed(&self.base_url).await;
             let resp = self
                 .client
                 .post(self.url(&format!("/api/v1/files/{file_id}/upload/abandon")))
