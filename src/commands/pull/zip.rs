@@ -16,8 +16,9 @@ use crate::commands::push::load_master_key;
 
 use super::{guard_existing_output, report, resolve_request_key, warn_skipped};
 use crate::transfer_stats::FileEnd;
+use crate::transfer_view::LiveProgress;
 use crate::transfer_view::units::duration;
-use crate::upload::{ChunkProgress, InFlight, Route, Stream};
+use crate::upload::{ChunkProgress, FileProgress, InFlight, Route, Stream};
 
 /// How deep `--zip` follows folders. A real vault is a few levels deep; a
 /// server that nests folders without end (or lists a folder inside itself) must
@@ -157,9 +158,9 @@ pub(super) async fn run_zip(
                 .map_err(|_| "zip write failed")?;
             continue;
         }
-        // Buffered by design: the body arrives whole and counts once it decrypted (spec §3.1, §4.3).
+        // The body arrives whole and counts once it decrypted (spec §3.1, §4.3).
         progress.set_limit(1);
-        let file = progress.begin_buffered(&item.entry.path, plans[i].bytes, plans[i].chunks);
+        let file = begin_member(&progress, item, &plans[i]);
         let flight = InFlight::start(file.as_ref(), 0, Route::Api);
         let t = std::time::Instant::now();
         let (blob, chunk_size) = match crate::download::download_buffered(api, &item.entry.file_id).await {
@@ -305,6 +306,17 @@ pub(super) fn decrypt_zip_item(
     }
     .map_err(|err| format!("could not be decrypted ({err})"))?;
     Ok(zeroize::Zeroizing::new(plaintext))
+}
+
+/// The member's file in the run's sink (spec §3.2). Only a file-request upload, which `decrypt_zip_item` opens with its
+/// per-file key, is counted without a live line: its body arrives whole and a line would jump from 0 to 100 %. Every
+/// other member is drawn like any pull.
+fn begin_member(progress: &LiveProgress, item: &ZipItem, plan: &report::FilePlan) -> Box<dyn FileProgress> {
+    if item.content_key.is_some() {
+        progress.begin_buffered(&item.entry.path, plan.bytes, plan.chunks)
+    } else {
+        progress.begin_file_chunks(&item.entry.path, plan.bytes, plan.chunks, 0)
+    }
 }
 
 /// One archive member: the core `ZipEntry` plus, for a file-request upload,
@@ -606,8 +618,67 @@ pub(super) fn unique_name(used: &mut std::collections::HashSet<String>, name: &s
 }
 #[cfg(test)]
 mod tests {
-    use super::{ZipSink, unique_name, zip_root_name};
+    use super::{ZipItem, ZipSink, begin_member, unique_name, zip_root_name};
+    use crate::commands::pull::report::FilePlan;
+    use crate::transfer_stats::Direction;
+    use crate::transfer_view::LiveProgress;
+    use crate::transfer_view::sink::Level;
+    use crate::upload::Route;
+    use beebeeb_core::chunk_stream::ExpectedChunkFormat;
+    use beebeeb_core::kdf::FileKey;
     use std::collections::HashSet;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
+
+    fn member(path: &str, content_key: Option<FileKey>) -> ZipItem {
+        ZipItem {
+            entry: beebeeb_core::zip::ZipEntry {
+                path: path.to_string(),
+                file_id: "11111111-1111-4111-8111-111111111111".to_string(),
+                chunk_count: 1,
+                size_bytes: 1000,
+                chunk_format: ExpectedChunkFormat::V2,
+            },
+            content_key,
+            explicit_key: None,
+        }
+    }
+
+    /// Review P2 (#143), spec §3.2 / §6.2: `bb pull --zip` is live. Only a file-request upload (its body arrives whole,
+    /// so a line would jump from 0 to 100 %) is counted without a line; the account's own file is drawn like any pull.
+    #[test]
+    fn an_owner_member_is_drawn_and_only_a_request_member_is_buffered() {
+        let (progress, _record) =
+            LiveProgress::for_test(Direction::Download, Level::Default, 80, Arc::new(AtomicU64::new(0)));
+        let owner = member("Folder/owner.bin", None);
+        let request = member("Folder/request.bin", Some(FileKey::from_bytes([9; 32])));
+        let plans = [FilePlan::of_size(1000, 1), FilePlan::of_size(1000, 1)];
+        for plan in &plans {
+            progress.plan_file(plan.bytes, plan.chunks);
+        }
+        progress.seal_plan();
+        let owner_file = begin_member(&progress, &owner, &plans[0]);
+        let request_file = begin_member(&progress, &request, &plans[1]);
+        let lines = progress.render_now();
+        assert!(
+            lines.iter().any(|l| l.contains("owner.bin")),
+            "the account's own file is drawn: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("request.bin")),
+            "a file-request upload is never drawn: {lines:?}"
+        );
+        owner_file.body_done(1, 1028, Route::Api);
+        owner_file.finish(true);
+        request_file.body_done(1, 1028, Route::Api);
+        request_file.finish(true);
+        let end = progress.summary();
+        assert_eq!(
+            (end.files_done, end.chunks_done),
+            (2, 2),
+            "both members are counted: {end:?}"
+        );
+    }
 
     #[test]
     fn zip_root_name_rejects_hostile_names() {
