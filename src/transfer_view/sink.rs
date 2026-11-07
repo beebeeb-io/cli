@@ -467,6 +467,12 @@ impl LiveProgress {
         self.register_notices();
     }
 
+    /// Tests: the planned bytes failed files will never send, which the ETA leaves out.
+    #[cfg(test)]
+    pub(crate) fn given_up_for_test(&self) -> u64 {
+        lock(&self.shared.model).given_up_bytes()
+    }
+
     #[cfg(test)]
     pub(crate) fn ticker_running(&self) -> bool {
         lock(&self.ticker).as_ref().is_some_and(|t| !t.is_finished())
@@ -618,3 +624,4 @@ impl FileProgress for LiveFile {
 }
 
 mod files_at_once;
+pub(crate) use files_at_once::{FileSink, RunLimit};

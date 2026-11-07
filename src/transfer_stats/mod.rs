@@ -355,6 +355,12 @@ impl TransferStats {
         self.given_up_bytes = self.given_up_bytes.saturating_add(bytes);
     }
 
+    /// Tests: the planned bytes failed files will never send (`give_up`).
+    #[cfg(test)]
+    pub(crate) fn given_up_bytes(&self) -> u64 {
+        self.given_up_bytes
+    }
+
     /// A file has begun: the run got as far as moving bytes.
     pub(crate) fn has_begun(&self) -> bool {
         !self.files.is_empty()

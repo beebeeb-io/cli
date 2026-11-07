@@ -104,3 +104,91 @@ async fn sync_interrupt_settles_every_chunk_and_clears_the_lines() {
     live.summary();
     assert!(!live.ticker_running(), "the summary joined the ticker");
 }
+
+/// One file's attempt through `sink`, as the driver reports it: `sent` of its `chunks` confirmed, then it ends.
+fn attempt(sink: &dyn ChunkProgress, name: &str, bytes: u64, chunks: u32, sent: u32) {
+    let file = sink.begin_file_chunks(name, bytes, chunks, bytes / chunks as u64);
+    for index in 0..sent {
+        file.chunk_started(index, crate::transfer_stats::Route::Api);
+        file.chunk_done(index, bytes / chunks as u64, crate::transfer_stats::Held::Transferred);
+        file.chunk_settled(index);
+    }
+    file.finish(sent == chunks);
+}
+
+/// Review P2 (#142): every pending upload of a pass settles in the run's numbers (spec §4.3). A file the write check
+/// skips never reaches the driver: it leaves the totals. A file whose upload fails stays in them, and what it did
+/// not send leaves the ETA. At the end, done plus given up is the total.
+#[test]
+fn every_pending_upload_of_a_pass_settles() {
+    use super::UploadShare;
+    use crate::transfer_view::sink::{Level, RunLimit};
+    let clock = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let direction = crate::transfer_stats::Direction::Upload;
+    let (live, _) = LiveProgress::for_test(direction, Level::Default, 80, clock);
+    let limit = RunLimit::new(4);
+    let plans = [(1028, 1), (2056, 2), (3084, 3)];
+    let [_, failed, uploaded] = plans;
+    for (bytes, chunks) in plans {
+        live.plan_file(bytes, chunks);
+    }
+    live.seal_plan();
+    // Keys 0, 1, 2: the file the write check skips, the one whose upload fails, the one uploaded.
+    let [skip, fail, ok] = [0u32, 1, 2].map(|key| UploadShare::new(&live, &limit, key, Some(plans[key as usize])));
+    attempt(fail.driver_sink(), "failed.bin", failed.0, failed.1, 1);
+    attempt(ok.driver_sink(), "uploaded.bin", uploaded.0, uploaded.1, uploaded.1);
+    skip.end(&Err::<(), _>("kept read-only"));
+    fail.end(&Err::<(), _>("upload failed"));
+    ok.end(&Ok::<(), String>(()));
+
+    let end = live.summary();
+    let json = end.to_json();
+    assert_eq!(
+        (&json["files_total"], &json["bytes_total"], &json["chunks_total"]),
+        (
+            &serde_json::json!(2),
+            &serde_json::json!(failed.0 + uploaded.0),
+            &serde_json::json!(5)
+        ),
+        "the skipped file left the totals: {json}"
+    );
+    assert_eq!(end.files_done, 1, "{json}");
+    assert_eq!(
+        live.given_up_for_test(),
+        failed.0 / 2,
+        "the failed file's unsent chunk left the ETA"
+    );
+    assert_eq!(
+        end.bytes_done + live.given_up_for_test(),
+        end.bytes_total,
+        "every byte settled: {json}"
+    );
+}
+
+/// Review P2 (#142): an in-place replace with a resume record is planned at the record's chunk size, the one its
+/// driver resumes at: the plan asks the sidecar with the row it versions, as the driver does.
+#[test]
+fn a_replace_with_a_resume_record_is_planned_as_the_driver_sends_it() {
+    let scratch = Scratch::new("2333-sync-plan-replace");
+    let (path, size, mtime) = scratch.file(9 * MIB);
+    let row = Uuid::new_v4();
+    crate::resume::record_upload(
+        &path,
+        crate::item_id::Proposed::Listed(row),
+        None,
+        Uuid::new_v4(),
+        beebeeb_core::chunk_stream::ChunkFormat::V1Legacy,
+        size,
+        mtime,
+        false,
+        None,
+        MIB as u64,
+    );
+    // What the driver of the in-place replace reads (`upload::replacing`: the row's id) and frames the file with.
+    let driver = crate::resume::resumable_upload_for(&path, size, mtime, Some(row));
+    assert!(driver.is_some(), "premise: the replace's driver continues the record");
+    let sent =
+        crate::upload::expected_at_chunk_size(size, crate::upload::planned_chunk_size(size, 4, 4, driver.as_ref()));
+    assert_eq!(sent.1, 9, "premise: the record's 1 MiB chunks");
+    assert_eq!(super::upload_plan(&path, size, 4, Some(row)), sent);
+}
