@@ -21,11 +21,6 @@ pub(super) struct FilePlan {
 }
 
 impl FilePlan {
-    /// A file of `size` with no resume record, planned at `parallel` chunks at once.
-    pub(super) fn of_size(size: u64, parallel: u32) -> Self {
-        Self::at_chunk_size(size, planned_chunk_size(size, parallel, 1, None))
-    }
-
     /// The plan of the file at `path` as it is now (a file that cannot be read plans as empty: its upload fails),
     /// at the chunk size its resume record names, else at `parallel`. A record from before `--parallel` plans as
     /// `bb push` did then (1), so the totals match what the driver sends (spec §4.3).
@@ -48,6 +43,28 @@ impl FilePlan {
     pub(super) fn announce(self, progress: &LiveProgress) {
         progress.next_file(self.bytes, self.chunks);
     }
+
+    /// [`announce`](Self::announce) for a file sent beside others (`--parallel`, spec §7), under its `key`.
+    pub(super) fn announce_as(self, progress: &LiveProgress, key: u32) {
+        progress.next_file_as(key, self.bytes, self.chunks);
+    }
+}
+
+/// A folder push's line for a file that failed (`  ! {path}: {error}`, on stderr around the live lines), as it
+/// fails; none in `--json`, whose `failed` list carries it.
+pub(super) fn note_failure(progress: &dyn ChunkProgress, rel: &str, error: &str) {
+    if crate::ui::is_json() {
+        return;
+    }
+    progress.note(
+        &format!(
+            "  {} {}: {}",
+            "!".custom_color(crate::colors::RED_ERR),
+            rel.custom_color(crate::colors::INK),
+            error,
+        ),
+        crate::upload::Stream::Stderr,
+    );
 }
 
 /// The sink of one push: every file planned, the plan sealed, the limit what `--parallel` asked (the driver

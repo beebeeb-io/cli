@@ -21,9 +21,10 @@ use super::CHANNEL_CAP;
 use crate::api::ApiClient;
 use crate::interrupt::Interrupt;
 use crate::upload::INTERRUPTED;
-use crate::upload::limits::{BufferShare, ChunkLimits};
+use crate::upload::limits::{Admission, BufferShare, ChunkLimits};
 use crate::upload::session::AttemptErr;
 use crate::upload::{FileProgress, Held, InFlight, Route, Tally};
+use tokio::sync::OwnedSemaphorePermit;
 
 /// Distinct producer failure causes, kept separate so the driver can surface an
 /// honest reason rather than a generic "upload failed".
@@ -48,6 +49,8 @@ struct ChunkDone<'a> {
     _flight: InFlight<'a>,
     /// The frame's budget returns when this drops.
     _share: BufferShare,
+    /// Its place among the push's chunks in flight (spec §7), freed when this drops.
+    _slot: OwnedSemaphorePermit,
 }
 
 /// How one chunk's PUT ended.
@@ -91,6 +94,7 @@ fn chunk_put<'a>(
     route: Route,
     chunk: EncryptedChunk,
     share: BufferShare,
+    slot: OwnedSemaphorePermit,
 ) -> Pin<Box<dyn Future<Output = ChunkDone<'a>> + Send + 'a>> {
     Box::pin(async move {
         let index = chunk.index;
@@ -148,13 +152,14 @@ fn chunk_put<'a>(
             outcome,
             _flight: flight,
             _share: share,
+            _slot: slot,
         }
     })
 }
 
 /// The producer/consumer core (`--parallel`, spec §4.2, §5). One producer seals chunks in order, each under a
 /// `2 C` budget share it shrinks to `C` once sealed; `used` workers PUT them concurrently from one
-/// `FuturesUnordered`. Returns what it confirmed only when every planned chunk was emitted, server-confirmed,
+/// `FuturesUnordered`, each PUT holding one of the push's chunk slots (spec §7: ≤ `asked` across its files). Returns what it confirmed only when every planned chunk was emitted, server-confirmed,
 /// and the byte totals reconcile. Adds the bytes of every chunk it SENT (not one the server already held) to
 /// `transferred`. A Ctrl-C (the `interrupt`) or a chunk that fails for good drops every PUT in flight at once.
 #[allow(clippy::too_many_arguments)]
@@ -169,7 +174,7 @@ pub(super) async fn run_pipeline(
     limits: &Arc<ChunkLimits>,
     used: u32,
     chunk_size: u64,
-    read_share: BufferShare,
+    admission: Admission,
     interrupt: Option<&Interrupt>,
     file_prog: &dyn FileProgress,
     transferred: &mut u64,
@@ -183,13 +188,13 @@ pub(super) async fn run_pipeline(
     let limits_p = Arc::clone(limits);
     let used = used.max(1) as usize;
 
-    // Producer: ONE blocking task owns the encryptor and the read buffer's share for the whole file. Before each
-    // seal it takes `2 C` (the frame and the AEAD copy); once sealed it shrinks to `C` (the copy is freed) and
-    // sends the frame with its `C`. The budget wait also selects on `tx.closed()`, so a failed consumer never
-    // makes it seal one more chunk.
+    // Producer: ONE blocking task owns the encryptor and the attempt's admission (the read buffer's share and its
+    // reserve) for the whole file. Before each seal it takes `2 C` (the frame and the AEAD copy), from the pool or
+    // the reserve; once sealed it shrinks to `C` (the copy is freed) and sends the frame with its `C`. The budget
+    // wait also selects on `tx.closed()`, so a failed consumer never makes it seal one more chunk.
     let producer = tokio::task::spawn_blocking(move || -> Result<(), ProducerErr> {
         let mut enc = encryptor;
-        let _read_share = read_share;
+        let admission = admission;
         let handle = tokio::runtime::Handle::current();
         loop {
             // spawn_blocking can't be aborted mid-chunk, so check at the top of each iteration.
@@ -198,7 +203,7 @@ pub(super) async fn run_pipeline(
             }
             let mut seal_share = match handle.block_on(async {
                 tokio::select! {
-                    share = limits_p.share(2 * chunk_size) => Some(share),
+                    share = admission.seal_share(&limits_p, 2 * chunk_size) => Some(share),
                     _ = tx.closed() => None,
                 }
             }) {
@@ -229,17 +234,23 @@ pub(super) async fn run_pipeline(
     let mut in_flight: FuturesUnordered<Pin<Box<dyn Future<Output = ChunkDone<'_>> + Send>>> = FuturesUnordered::new();
     let mut consumer_err: Option<AttemptErr> = None;
     let mut sealing_done = false;
+    // A chunk taken off the channel, waiting for one of the push's chunk slots (spec §7). Counted with the ones in
+    // flight against `used`.
+    let mut waiting: Option<(EncryptedChunk, BufferShare)> = None;
 
     while consumer_err.is_none() {
         // Take a new chunk only while there is room and nothing is stopping the run.
-        let may_take =
-            !sealing_done && in_flight.len() < used && !shutdown.load(Ordering::Relaxed) && interrupt_clear(interrupt);
-        if sealing_done && in_flight.is_empty() {
+        let may_take = !sealing_done
+            && waiting.is_none()
+            && in_flight.len() < used
+            && !shutdown.load(Ordering::Relaxed)
+            && interrupt_clear(interrupt);
+        if sealing_done && in_flight.is_empty() && waiting.is_none() {
             break;
         }
         // Nothing in flight and nothing may be taken: the run is stopping (the shutdown flag of `bb sync`, which
         // has no interrupt arm to fire). Without this every `select!` arm is disabled and tokio panics.
-        if in_flight.is_empty() && !may_take {
+        if in_flight.is_empty() && !may_take && waiting.is_none() {
             consumer_err = Some(AttemptErr::Other(INTERRUPTED.to_string()));
             break;
         }
@@ -266,11 +277,16 @@ pub(super) async fn run_pipeline(
                     }
                 }
             }
+            slot = limits.chunk_slot(), if waiting.is_some() => {
+                if let Some((chunk, share)) = waiting.take() {
+                    in_flight.push(chunk_put(
+                        api, direct, &upload_id, upload_session_id, shutdown, file_prog, route, chunk, share, slot,
+                    ));
+                }
+            }
             maybe = rx.recv(), if may_take => {
                 match maybe {
-                    Some((chunk, share)) => in_flight.push(chunk_put(
-                        api, direct, &upload_id, upload_session_id, shutdown, file_prog, route, chunk, share,
-                    )),
+                    Some(sealed) => waiting = Some(sealed),
                     None => sealing_done = true,
                 }
             }
@@ -281,6 +297,7 @@ pub(super) async fn run_pipeline(
     // Dropping the set cancels every pending PUT (aborting its body), fires each settle guard and returns each
     // budget share; then closing the receiver wakes a producer parked on the channel or the budget.
     drop(in_flight);
+    drop(waiting);
     rx.close();
     let producer_join = producer.await;
 

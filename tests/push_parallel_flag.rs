@@ -228,7 +228,8 @@ async fn ctrl_c_leaves_a_resumable_record() {
 }
 
 /// A folder push stops as a whole at the first Ctrl-C: the files after the interrupted one are never inited,
-/// one interrupt line, exit 130; the same command then finishes the folder.
+/// one interrupt line, exit 130; the same command then finishes the folder. One file at a time (`--parallel 1`),
+/// so "the files after it" are the ones not yet started; `push_parallel_files.rs` covers several files at once.
 #[tokio::test(flavor = "multi_thread")]
 async fn ctrl_c_stops_a_folder_push() {
     let vault: Shared = Arc::default();
@@ -239,7 +240,7 @@ async fn ctrl_c_stops_a_folder_push() {
     write_file(&home, "clip/c.bin", b"one chunk, last");
 
     vault.lock().unwrap().stall = true;
-    let mut child = spawn_bb_piped(&home, &["--api", &api, "push", "clip"]);
+    let mut child = spawn_bb_piped(&home, &["--api", &api, "push", "--parallel", "1", "clip"]);
     wait_for_chunk_0(&vault, &mut child).await;
     ctrl_c(&child);
     let out = output_of(child);
@@ -251,7 +252,7 @@ async fn ctrl_c_stops_a_folder_push() {
     assert_eq!(vault.lock().unwrap().inits, 2, "a and b inited; c never");
     assert!(record_exists(&home), "b's record is on disk");
 
-    let out = bb(&home, &["--api", &api, "push", "clip"]).await;
+    let out = bb(&home, &["--api", &api, "push", "--parallel", "1", "clip"]).await;
     assert_eq!(
         out.status.code(),
         Some(0),

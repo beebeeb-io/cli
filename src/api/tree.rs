@@ -214,17 +214,26 @@ impl ApiClient {
     /// Return all `{id, name_encrypted}` pairs in a folder so the caller can
     /// decrypt names locally and detect filename conflicts before uploading.
     /// `parent_id = None` queries the root folder.
+    /// A 429 waits out the shared pause (in `parse_response`) and asks again, as the upload routes do: a folder
+    /// push looks each file up twice, several at once (`--parallel`, review #141), and a rate limit must not fail
+    /// a file.
     pub async fn check_conflict(&self, parent_id: Option<uuid::Uuid>) -> Result<Value, ApiError> {
         let token = self.require_auth()?;
-        let resp = self
-            .client
-            .post(self.url("/api/v1/files/check-conflict"))
-            .bearer_auth(token)
-            .json(&serde_json::json!({ "parent_id": parent_id }))
-            .send()
-            .await
-            .map_err(format_request_error)?;
-        parse_response(resp).await
+        for _ in 0..3 {
+            let resp = self
+                .client
+                .post(self.url("/api/v1/files/check-conflict"))
+                .bearer_auth(token)
+                .json(&serde_json::json!({ "parent_id": parent_id }))
+                .send()
+                .await
+                .map_err(format_request_error)?;
+            match parse_response(resp).await {
+                Err(e) if e.message == super::RATE_LIMITED_MESSAGE => continue,
+                other => return other,
+            }
+        }
+        Err("rate limited after 3 retries".to_string().into())
     }
 
     pub async fn get_file_count(&self) -> Result<Value, ApiError> {
