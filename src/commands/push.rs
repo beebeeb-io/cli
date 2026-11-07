@@ -9,12 +9,13 @@ use zeroize::Zeroizing;
 
 use crate::api::ApiClient;
 use crate::backup_guard::BackupDepths;
+use crate::commands::push_file::{self, Prepared, UploadResult};
 use crate::commands::push_report::{self, FilePlan};
+use crate::commands::push_schedule;
 use crate::config::load_config;
 use crate::transfer_stats::FileEnd;
 use crate::transfer_view::LiveProgress;
 use crate::ui;
-use crate::upload::{ChunkProgress, Stream};
 
 use crate::interrupt::Interrupt;
 use crate::transfer_stats::Summary;
@@ -22,10 +23,10 @@ use crate::upload::limits::ChunkLimits;
 
 /// What one `bb push` run shares across its files (spec §5.1, §8): the `--parallel` asked, the one 640 MiB
 /// buffer budget every chunk-sized buffer is charged to, and the one interrupt a Ctrl-C sets.
-struct PushCtl {
-    parallel: u32,
-    limits: std::sync::Arc<ChunkLimits>,
-    interrupt: Interrupt,
+pub(super) struct PushCtl {
+    pub(super) parallel: u32,
+    pub(super) limits: std::sync::Arc<ChunkLimits>,
+    pub(super) interrupt: Interrupt,
 }
 
 impl PushCtl {
@@ -79,7 +80,7 @@ impl PushCtl {
 }
 
 /// `true` for the error an interrupted upload returns (`upload::INTERRUPTED` reaching the string boundary).
-fn was_interrupted(e: &str) -> bool {
+pub(super) fn was_interrupted(e: &str) -> bool {
     e == crate::upload::INTERRUPTED
 }
 
@@ -116,7 +117,7 @@ pub enum ConflictStrategy {
 }
 
 /// What a push did with one local file.
-enum Pushed {
+pub(super) enum Pushed {
     Uploaded(UploadResult),
     /// Skipped by the conflict rule (answered "skip").
     Skipped,
@@ -125,7 +126,7 @@ enum Pushed {
 }
 
 /// Outcome of conflict resolution for a single file.
-enum ConflictResolution {
+pub(super) enum ConflictResolution {
     /// Upload, version over the existing file with this server ID.
     Replace { existing_id: uuid::Uuid },
     /// Upload under this (possibly modified) filename as a new file.
@@ -154,10 +155,15 @@ pub(crate) async fn find_conflict(
     parent_uuid: Option<uuid::Uuid>,
 ) -> Result<Option<uuid::Uuid>, String> {
     let unreadable = |why: String| format!("could not check whether {filename} already exists: {why}");
-    let resp = api
-        .check_conflict(parent_uuid)
-        .await
-        .map_err(|e| unreadable(e.message))?;
+    // A Ctrl-C that ended a rate-limit pause is the push's interrupt, not this file's failure: the bare sentinel
+    // goes up, so the folder push counts the file as left undone (review #141).
+    let resp = api.check_conflict(parent_uuid).await.map_err(|e| {
+        if e.message == crate::upload::INTERRUPTED {
+            e.message
+        } else {
+            unreadable(e.message)
+        }
+    })?;
     let files = resp
         .get("files")
         .and_then(serde_json::Value::as_array)
@@ -177,7 +183,12 @@ pub(crate) async fn find_conflict(
         match keys.resolve_or_why(api, master_key, file).await {
             Ok(resolved) if resolved.name == filename => return Ok(Some(file_uuid)),
             Ok(_) | Err(crate::owned_keys::Unresolved::Never(_)) => {}
+            Err(crate::owned_keys::Unresolved::NotNow(e)) if e.contains(crate::upload::INTERRUPTED) => {
+                return Err(crate::upload::INTERRUPTED.to_string());
+            }
             Err(crate::owned_keys::Unresolved::NotNow(e)) => {
+                // The rate-limit sentinel is for retry loops, never for the person.
+                let e = e.replace(crate::api::RATE_LIMITED_MESSAGE, "the server is rate limiting requests");
                 cannot_read.get_or_insert_with(|| format!("a file here could not be read now ({e}); run it again"));
             }
         }
@@ -197,7 +208,7 @@ fn say_already_uploaded(count: usize) {
 }
 
 /// Prompt the user interactively for conflict resolution.
-fn prompt_conflict(filename: &str) -> ConflictResolution {
+pub(super) fn prompt_conflict(filename: &str) -> ConflictResolution {
     eprint!(
         "  {} {} [R]eplace / [K]eep both / [S]kip: ",
         filename.custom_color(crate::colors::AMBER),
@@ -277,7 +288,7 @@ pub async fn run(
         .as_deref()
         .and_then(|p| p.parse::<uuid::Uuid>().ok())
         .map(|p| p.to_string());
-    let result = push_single_file(&api, &path, parent_id, strategy, false, &progress, plan, &ctl).await;
+    let result = push_single_file(&api, &path, parent_id, strategy, &progress, plan, &ctl).await;
     let total_elapsed = total_start.elapsed();
     // The live lines are cleared here: everything below prints under them.
     let transfer = progress.summary();
@@ -368,53 +379,24 @@ async fn resolve_upload_folder(api: &ApiClient, folder: &str, depths: &mut Backu
     Ok(found.to_string())
 }
 
-/// Result data from a single file upload, used for summary + JSON output.
-struct UploadResult {
-    name: String,
-    id: String,
-    size_bytes: u64,
-    encrypted_bytes: u64,
-    /// `"direct"` or `"api"` (additive `--json` key `transport`, as for `bb pull`).
-    transport: &'static str,
-    duration: std::time::Duration,
-    /// The bytes of its chunks confirmed sent, over every upload attempt of the file (a chunk re-sent by a later
-    /// attempt, after a swept session, counts each time; one HTTP chunk retried counts once, when confirmed;
-    /// spec §7 `bytes_transferred`): its end line's speed.
-    transferred_bytes: u64,
-}
-
-impl UploadResult {
-    fn speed_bps(&self) -> f64 {
-        let secs = self.duration.as_secs_f64();
-        if secs > 0.0 {
-            self.encrypted_bytes as f64 / secs
-        } else {
-            0.0
-        }
-    }
-}
-
-/// Upload a single file, counted in `progress` under `plan` (what the run planned for it).
+/// Upload a single file (`bb push <file>`), counted in `progress` under `plan` (what the run planned for it).
 ///
 /// The file is announced to the run as the one sent next, and its end settles its share (`TransferStats::next_file`,
 /// `end_file`): its totals follow the size the driver reads when the file begins (after the conflict lookup and any
 /// prompt), so done never passes total (spec §4.6, I1). A file that is not uploaded (a skip, or already uploaded)
 /// takes its share back out of the run. A failed one keeps it, so the run ends short of its total, and gives up what
-/// it did not send, so the ETA does not wait for it. `in_folder`: part of a folder push, which prints no `resuming`
-/// line (as before).
-#[allow(clippy::too_many_arguments)]
+/// it did not send, so the ETA does not wait for it.
 async fn push_single_file(
     api: &ApiClient,
     path: &std::path::Path,
     parent_id: Option<String>,
     strategy: ConflictStrategy,
-    in_folder: bool,
     progress: &LiveProgress,
     plan: FilePlan,
     ctl: &PushCtl,
 ) -> Result<Pushed, String> {
     plan.announce(progress);
-    let pushed = upload_one(api, path, parent_id, strategy, in_folder, progress, ctl).await;
+    let pushed = upload_one(api, path, parent_id, strategy, progress, ctl).await;
     progress.end_file(match &pushed {
         Ok(Pushed::Uploaded(_)) => FileEnd::Uploaded,
         Ok(Pushed::AlreadyUploaded | Pushed::Skipped) => FileEnd::NotSent,
@@ -423,321 +405,24 @@ async fn push_single_file(
     pushed
 }
 
-#[allow(clippy::too_many_arguments)]
+/// One file, both steps of `push_file` under its upload lock, taken first: one push per local file across
+/// processes, held until this function returns (task 1950 review), so a second `bb push` of a file whose first
+/// push is still uploading never "resumes" the live upload.
 async fn upload_one(
     api: &ApiClient,
     path: &std::path::Path,
     parent_id: Option<String>,
     strategy: ConflictStrategy,
-    in_folder: bool,
     progress: &LiveProgress,
     ctl: &PushCtl,
 ) -> Result<Pushed, String> {
-    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string();
-
-    // The streaming uploader stats + reads the file itself in bounded chunks;
-    // no full read here.
+    // The streaming uploader stats + reads the file itself in bounded chunks; no full read here.
     let master_key = load_master_key()?;
-
-    let parent_uuid: Option<uuid::Uuid> = parent_id.as_deref().and_then(|s| s.parse().ok());
-
-    // One push per local file across processes, held until this function
-    // returns (task 1950 review): a second `bb push` of a file whose first push
-    // is still uploading would otherwise "resume" the live upload below.
-    let _upload_lock = match crate::upload_lock::try_acquire(path) {
-        Ok(lock) => lock,
-        Err(crate::upload_lock::LockError::Held { pid }) => {
-            let holder = pid.map(|p| format!(" (pid {p})")).unwrap_or_default();
-            return Err(crate::exit::with_code(
-                crate::exit::BUSY,
-                format!(
-                    "another bb push of {file_name} is still running{holder}; \
-                     wait for it to finish, or stop it and run this again to resume"
-                ),
-            ));
-        }
-        Err(crate::upload_lock::LockError::Io(e)) => return Err(format!("{file_name}: upload lock: {e}")),
-    };
-
-    // ── Conflict detection ────────────────────────────────────────────────────
-    // Decrypt existing filenames in the folder and check for a match.
-    // If found, ask the user (or apply the strategy flag) how to proceed.
-    let mut mint_tag: Option<[u8; 32]> = None;
-    let mut read_row = None;
-    let (file_id, upload_name, replace_file_id) = {
-        let existing = find_conflict(api, &master_key, &file_name, parent_uuid).await?;
-        // Our own upload of this very file is not a conflict (`push_repeat`): an interrupted one resumes
-        // (task 1950, with no explicit --replace / --keep-both), and a finished one, unchanged on both sides, is
-        // skipped (task 2334). --replace always uploads.
-        let found = match existing {
-            Some(id) if strategy != ConflictStrategy::Replace => {
-                let resume = strategy == ConflictStrategy::Prompt;
-                crate::commands::push_repeat::existing_upload(api, path, id, parent_uuid, resume).await
-            }
-            _ => crate::commands::push_repeat::Existing::Other,
-        };
-        let resumes = match found {
-            crate::commands::push_repeat::Existing::AlreadyUploaded => return Ok(Pushed::AlreadyUploaded),
-            crate::commands::push_repeat::Existing::Interrupted(row) => {
-                read_row = row;
-                true
-            }
-            crate::commands::push_repeat::Existing::Other => false,
-        };
-
-        match existing {
-            None => {
-                // L13/N4: a new item's id comes from core's mint (it carries
-                // the resume tag), never from a local random number.
-                let minted = crate::item_id::mint_owner(&master_key)?;
-                mint_tag = Some(*minted.tag());
-                (minted.id(), file_name.clone(), None)
-            }
-            Some(existing_id) if resumes => {
-                if !in_folder && !ui::is_quiet() && !ui::is_json() {
-                    progress.note(
-                        &format!(
-                            "  {} {}",
-                            "resuming".custom_color(crate::colors::INK_DIM),
-                            format!("{file_name} (the interrupted upload)").custom_color(crate::colors::INK),
-                        ),
-                        Stream::Stdout,
-                    );
-                }
-                // The same id as a new file: the driver finds the resume record
-                // and continues (or, under core's rule, restarts) that upload.
-                (existing_id, file_name.clone(), None)
-            }
-            Some(existing_id) => {
-                let resolution = match strategy {
-                    ConflictStrategy::Replace => ConflictResolution::Replace { existing_id },
-                    ConflictStrategy::KeepBoth => {
-                        let (stem, ext) = split_stem_ext(&file_name);
-                        let new_name = if ext.is_empty() {
-                            format!("{stem} (1)")
-                        } else {
-                            format!("{stem} (1).{ext}")
-                        };
-                        ConflictResolution::Upload { filename: new_name }
-                    }
-                    ConflictStrategy::Prompt => {
-                        // No one can answer the prompt: fail loudly instead of
-                        // reading EOF as "skip" and exiting 0 (flow-6).
-                        if !crate::exit::stdin_is_interactive() {
-                            return Err(crate::exit::with_code(
-                                crate::exit::USAGE,
-                                format!(
-                                    "{file_name} already exists \u{2014} pass --replace or --keep-both \
-                                     (stdin is not a terminal, so there is no one to ask)"
-                                ),
-                            ));
-                        }
-                        // The prompt reads stdin with the live lines hidden (spec §6.7).
-                        let mut r = ConflictResolution::Skip;
-                        progress.suspend(&mut || r = prompt_conflict(&file_name));
-                        // If user chose Replace, inject the actual existing_id
-                        match r {
-                            ConflictResolution::Replace { .. } => ConflictResolution::Replace { existing_id },
-                            ConflictResolution::Upload { .. } => {
-                                let (stem, ext) = split_stem_ext(&file_name);
-                                let new_name = if ext.is_empty() {
-                                    format!("{stem} (1)")
-                                } else {
-                                    format!("{stem} (1).{ext}")
-                                };
-                                ConflictResolution::Upload { filename: new_name }
-                            }
-                            ConflictResolution::Skip => {
-                                if ui::is_rich() {
-                                    progress.note(
-                                        &format!(
-                                            "  {} {}",
-                                            "skip".custom_color(crate::colors::INK_DIM),
-                                            file_name.custom_color(crate::colors::INK_DIM),
-                                        ),
-                                        Stream::Stdout,
-                                    );
-                                }
-                                return Ok(Pushed::Skipped);
-                            }
-                        }
-                    }
-                };
-
-                match resolution {
-                    ConflictResolution::Replace { existing_id } => {
-                        // Re-use the existing UUID so the server auto-versions.
-                        // Key is derived from the existing ID (same as when the
-                        // file was first uploaded).
-                        (existing_id, file_name.clone(), Some(existing_id))
-                    }
-                    // L13: a fresh item's id comes from core's minting type.
-                    ConflictResolution::Upload { filename } => {
-                        let minted = crate::item_id::mint_owner(&master_key)?;
-                        mint_tag = Some(*minted.tag());
-                        (minted.id(), filename, None)
-                    }
-                    ConflictResolution::Skip => return Ok(Pushed::Skipped),
-                }
-            }
-        }
-    };
-
-    // ── Streaming, constant-memory upload ─────────────────────────────────────
-    // For a replace, `file_id` already equals the existing id, so the file key,
-    // the encrypted name, and the server-side version all derive from one id.
-    // The v2 upload driver versions by `file_id` + `base_version_number`, so on
-    // a replace we fetch the existing file's current `version_number` and pass
-    // it as the optimistic-concurrency base (the server returns a stale-version
-    // 409 if it no longer matches). On a fresh push, `base_version_number` stays
-    // `None` and the absent-`file_id`/new-`file_id` decides "new file".
-    //
-    // A replace also carries the existing file's read pin (task 1943), so a
-    // v2-pinned file is written as v2 again: the server keeps its v2 metadata,
-    // and a v1 replace would complete and never open.
-    let (base_version_number, replace_pin, replace_file_key, fresh_id) = match replace_file_id {
-        Some(existing_id) => {
-            let existing = existing_id.to_string();
-            let meta = api.get_file(&existing).await?;
-            // The file's current version (task 1951: it sits in
-            // `download_version`); default 1 if the server reports none — the v2
-            // init still proceeds and only a genuine mismatch 409s.
-            let version = crate::api::current_version_number(&meta).unwrap_or(1) as i32;
-            let name_encrypted = meta
-                .get("name_encrypted")
-                .and_then(|v| v.as_str())
-                .ok_or("server response missing name_encrypted")?;
-            let resolved = crate::owned_keys::OwnedKeyResolver::new()
-                .resolve(api, &master_key, &meta)
-                .await?;
-            // L13: a request row's content is read-only. An edit is saved as a
-            // new owner item — never sealed under `C`, never published.
-            if resolved.origin == beebeeb_core::owned_keys::KeyOrigin::RequestContent {
-                // L13: the edit is a NEW owner item, minted by core.
-                let minted = crate::item_id::mint_owner(&master_key)?;
-                mint_tag = Some(*minted.tag());
-                (None, None, None, Some(minted.id()))
-            } else {
-                // R4-B: request fields whose request list could not load stay
-                // read-only with their own reason.
-                if let Some(reason) = resolved.read_only_reason {
-                    return Err(reason.to_string());
-                }
-                // P2-10: a plaintext name proves nothing; say so, not "older iOS app".
-                if resolved.read_only && crate::crypto::name_is_plaintext(&resolved.canonical) {
-                    return Err(crate::owned_keys::PLAINTEXT_NAME_READ_ONLY.to_string());
-                }
-                // SF-0002: a row sealed by the old iOS app (its name or its CURRENT
-                // version) is read-only, and a check that could not decide refuses
-                // too: only a proven-writable row gets a new version.
-                crate::owned_keys::write_check(
-                    api,
-                    &master_key,
-                    &crate::owned_keys::WriteTarget {
-                        file_id: &existing,
-                        is_folder: false,
-                        name_read_only: resolved.read_only,
-                        row_key: Some(resolved.key.as_ref()),
-                        size_bytes: meta.get("size_bytes").and_then(|v| v.as_u64()),
-                        chunk_count: meta.get("chunk_count").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
-                    },
-                )
-                .await
-                .ensure()?;
-                // L13: the replacement takes its chunk-format pin from the
-                // resolver's write target, not from a local re-read.
-                let pin = match &resolved.write_target {
-                    Some(target) => target.pin(),
-                    None => crate::crypto::content_pin_with_key(&resolved.key, &existing, name_encrypted)?,
-                };
-                (Some(version), Some(pin), Some(resolved.key), None)
-            }
-        }
-        None => (None, None, None, None),
-    };
-    let file_id = fresh_id.unwrap_or(file_id);
-    let master_key = std::sync::Arc::new(master_key);
-    let display_name = upload_name.clone();
-
-    let parent_uuid: Option<uuid::Uuid> = match &parent_id {
-        Some(pid) => Some(pid.parse().map_err(|e| format!("invalid parent ID: {e}"))?),
-        None => None,
-    };
-
-    let file_start = std::time::Instant::now();
-    let spec = crate::upload::UploadSpec {
-        path: path.to_path_buf(),
-        file_name: upload_name,
-        file_id,
-        resume_tag: mint_tag,
-        base_version_number,
-        replace_pin,
-        replace_file_key,
-        parent_id: parent_uuid,
-        // `--parallel` chunks of this file at once, planned at that concurrency (spec §4.2); a record from
-        // before `--parallel` resumes as the push planned then, at 1 (spec §4.3). The run's one budget and one
-        // interrupt, whose flag is the shutdown the producer and the direct route read.
-        concurrency: ctl.parallel,
-        unrecorded_resume_concurrency: 1,
-        chunks_in_flight: ctl.parallel,
-        limits: std::sync::Arc::clone(&ctl.limits),
-        interrupt: Some(ctl.interrupt.clone()),
-        shutdown: std::sync::Arc::clone(ctl.interrupt.flag()),
-        read_row,
-    };
-    let signature = crate::resume::local_signature(path);
-    let outcome = crate::upload::stream_encrypt_upload(api, std::sync::Arc::clone(&master_key), spec, progress).await?;
-    // Task 2334: remember this upload, so a re-run of the push skips it while the file stays unchanged. Only
-    // when the file did not change while it was read (same signature before and after, the size uploaded) and
-    // the server named the version it completed.
-    let unchanged = signature
-        .filter(|before| crate::resume::local_signature(path) == Some(*before) && before.0 == outcome.plaintext_bytes);
-    if let (Some((size, mtime_ns)), Some(version)) = (unchanged, outcome.version_number) {
-        crate::resume::record_finished(
-            path,
-            crate::resume::FinishedUpload {
-                file_id: outcome.server_id,
-                parent_id: parent_uuid,
-                version,
-                size,
-                mtime_ns,
-            },
-        );
+    let _upload_lock = push_file::lock(path)?;
+    match push_file::prepare(api, &master_key, path, parent_id, strategy, false, progress).await? {
+        Prepared::Done(pushed) => Ok(pushed),
+        Prepared::Upload(ready) => push_file::upload(api, std::sync::Arc::new(master_key), *ready, progress, ctl).await,
     }
-    let server_id = outcome.server_id.to_string();
-    let file_elapsed = file_start.elapsed();
-    let file_name = display_name; // possibly-suffixed name for display
-
-    // Mark this upload so a `bb watch` remote-event handler in the same
-    // process doesn't redundantly download the file we just sent.
-    crate::loopback::mark_uploaded(&server_id);
-
-    let upload_result = UploadResult {
-        name: file_name.clone(),
-        id: server_id.clone(),
-        size_bytes: outcome.plaintext_bytes,
-        encrypted_bytes: outcome.ciphertext_bytes,
-        transport: outcome.transport,
-        duration: file_elapsed,
-        transferred_bytes: outcome.transferred_bytes,
-    };
-
-    // ── Per-file output ─────────────────────────────────────────────────────
-    // Quiet prints the id (no live lines are drawn then); rich prints the end line around the live lines. JSON:
-    // the caller collects the results. The owner-only sentence (L15) is the caller's, once the lines are cleared.
-    if ui::is_quiet() {
-        println!("{}", server_id);
-    } else if ui::is_rich() {
-        let line = push_report::file_line(
-            &file_name,
-            upload_result.encrypted_bytes,
-            upload_result.transferred_bytes,
-            file_elapsed,
-        );
-        progress.note(&line, Stream::Stdout);
-    }
-
-    Ok(Pushed::Uploaded(upload_result))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -822,83 +507,99 @@ async fn push_directory(
         .map(|(p, _)| FilePlan::of_path(p, ctl.parallel))
         .collect();
     let progress = push_report::start(plans.iter().copied(), verbose, &ctl.limits);
-    let mut plans = plans.into_iter();
+    // `folders` borrows `master_key` to the end; the uploads share a key of their own.
+    let upload_key = std::sync::Arc::new(load_master_key()?);
 
     let total_start = std::time::Instant::now();
-    let mut upload_results: Vec<UploadResult> = Vec::new();
-    // (path relative to the pushed folder, error) for every file that failed.
-    let mut failures: Vec<(String, String)> = Vec::new();
+    // (input index, result) for every file uploaded, and (input index, path relative to the pushed folder, error)
+    // for every file that failed: both reported in input order.
+    let mut upload_results: Vec<(u32, UploadResult)> = Vec::new();
+    let mut failures: Vec<(u32, String, String)> = Vec::new();
     // Files this machine had already uploaded, unchanged (task 2334): skipped, counted.
     let mut already_uploaded = 0usize;
-    // Ctrl-C (spec §5.1): the file in flight when it came; the files after it are never inited.
-    let mut interrupted_at: Option<String> = None;
 
-    for (entry_path, is_dir) in &entries {
+    // ── Stage 1 (spec §7): in order, without a lock, everything before each file's upload: the conflict check
+    // and its question, the id, the "already uploaded" skip. Every question is asked before the first byte goes
+    // out. One file failing (a server reject, a read error, a refused question) must not abandon the rest of the
+    // folder: it is recorded with its path, and the command fails at the end (flow-6).
+    let files: Vec<&PathBuf> = entries.iter().filter(|(_, is_dir)| !*is_dir).map(|(p, _)| p).collect();
+    let mut admits = Vec::new();
+    let mut prepared = 0usize;
+    for (index, (entry_path, plan)) in files.iter().zip(plans).enumerate() {
+        if ctl.interrupt.is_set() {
+            break;
+        }
+        let index = index as u32;
         let entry_parent = entry_path.parent().unwrap_or(dir_path);
-        let entry_parent_id = folder_map.get(entry_parent).copied().unwrap_or(root_id);
-
-        if *is_dir {
-            continue;
-        } else {
-            if ctl.interrupt.is_set() {
-                break;
+        let parent = Some(folder_map.get(entry_parent).copied().unwrap_or(root_id).to_string());
+        let rel = entry_path
+            .strip_prefix(dir_path)
+            .unwrap_or(entry_path)
+            .display()
+            .to_string();
+        let ready = push_file::prepare(api, &upload_key, entry_path, parent, strategy, true, &progress).await;
+        // A Ctrl-C during its lookup: the file is left undone (not started), not failed.
+        if matches!(&ready, Err(e) if was_interrupted(e) && ctl.interrupt.is_set()) {
+            break;
+        }
+        prepared += 1;
+        match ready {
+            Ok(Prepared::Upload(ready)) => admits.push(push_schedule::Admit {
+                index,
+                rel,
+                plan,
+                ready,
+            }),
+            Ok(Prepared::Done(pushed)) => {
+                plan.announce_as(&progress, index);
+                progress.end_file_as(index, FileEnd::NotSent);
+                already_uploaded += usize::from(matches!(pushed, Pushed::AlreadyUploaded));
             }
-            // One file failing (a server reject, a read error, a network blip)
-            // must not abandon the rest of the folder: record it with its path,
-            // carry on, and fail the command at the end (flow-6: a 0-byte file
-            // used to stop the push, so later siblings were never uploaded).
-            let plan = plans.next().unwrap_or(FilePlan::of_size(0, ctl.parallel));
-            let parent = Some(entry_parent_id.to_string());
-            let ur = match push_single_file(api, entry_path, parent, strategy, true, &progress, plan, ctl).await {
-                Ok(ur) => ur,
-                Err(e) => {
-                    let rel = entry_path
-                        .strip_prefix(dir_path)
-                        .unwrap_or(entry_path)
-                        .display()
-                        .to_string();
-                    // An interrupted file is left undone, not failed: the whole push stops here.
-                    if was_interrupted(&e) && ctl.interrupt.is_set() {
-                        interrupted_at = Some(rel);
-                        break;
-                    }
-                    if !ui::is_json() {
-                        progress.note(
-                            &format!(
-                                "  {} {}: {}",
-                                "!".custom_color(crate::colors::RED_ERR),
-                                rel.custom_color(crate::colors::INK),
-                                e,
-                            ),
-                            Stream::Stderr,
-                        );
-                    }
-                    failures.push((rel, e));
-                    continue;
-                }
-            };
-
-            let ur = match ur {
-                Pushed::Uploaded(ur) => Some(ur),
-                Pushed::AlreadyUploaded => {
-                    already_uploaded += 1;
-                    None
-                }
-                Pushed::Skipped => None,
-            };
-            // Its end line (rich) or id (quiet) was printed by push_single_file.
-            if let Some(ur) = ur {
-                upload_results.push(ur);
+            Err(e) => {
+                plan.announce_as(&progress, index);
+                progress.end_file_as(index, FileEnd::Failed);
+                push_report::note_failure(&progress, &rel, &e);
+                failures.push((index, rel, e));
             }
         }
     }
+
+    // ── Stage 2: up to `--parallel` files at once, each locked and re-checked on admission (`push_schedule`).
+    let mut interrupted: Vec<String> = Vec::new();
+    let mut not_started = files.len() - prepared;
+    if ctl.interrupt.is_set() {
+        not_started += admits.len();
+    } else {
+        let (ended, never) = push_schedule::upload_all(api, upload_key, admits, ctl, &progress).await;
+        not_started += never;
+        for push_schedule::Ended { index, rel, result } in ended {
+            match result {
+                Ok(Pushed::Uploaded(ur)) => upload_results.push((index, ur)),
+                Ok(Pushed::AlreadyUploaded) => already_uploaded += 1,
+                Ok(Pushed::Skipped) => {}
+                // An interrupted file is left undone, not failed: the whole push stops (spec §5.1).
+                Err(e) if was_interrupted(&e) && ctl.interrupt.is_set() => interrupted.push(rel),
+                Err(e) => failures.push((index, rel, e)),
+            }
+        }
+    }
+    upload_results.sort_by_key(|(index, _)| *index);
+    failures.sort_by_key(|(index, ..)| *index);
+    let upload_results: Vec<UploadResult> = upload_results.into_iter().map(|(_, ur)| ur).collect();
+    let failures: Vec<(String, String)> = failures.into_iter().map(|(_, rel, e)| (rel, e)).collect();
 
     let total_elapsed = total_start.elapsed();
     let total_bytes: u64 = upload_results.iter().map(|r| r.encrypted_bytes).sum();
     let uploaded_count = upload_results.len();
     // The live lines are cleared here: everything below prints under them.
     let transfer = progress.summary();
-    if let Some(name) = interrupted_at.or_else(|| ctl.interrupt.is_set().then(|| dir_name.clone())) {
+    // Ctrl-C (spec §5.1, §5.2): one line, exit 130, when a file was left undone. It names the one file that was in
+    // flight, or the pushed folder when several were (its counts are the run's).
+    if ctl.interrupt.is_set() && (!interrupted.is_empty() || not_started > 0) {
+        let name = match interrupted.as_slice() {
+            [one] => one.clone(),
+            _ => dir_name.clone(),
+        };
         ctl.exit_interrupted(&transfer, &name);
     }
 
@@ -989,7 +690,7 @@ fn collect_entries(dir: &std::path::Path, entries: &mut Vec<(PathBuf, bool)>) ->
 }
 
 /// Split "report.pdf" → ("report", "pdf"); "notes" → ("notes", "").
-fn split_stem_ext(filename: &str) -> (&str, &str) {
+pub(super) fn split_stem_ext(filename: &str) -> (&str, &str) {
     match filename.rfind('.') {
         Some(i) if i > 0 => (&filename[..i], &filename[i + 1..]),
         _ => (filename, ""),

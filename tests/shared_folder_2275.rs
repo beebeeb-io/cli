@@ -1107,20 +1107,43 @@ async fn a_owner_only_notice_is_printed_once_per_command() {
         String::from_utf8_lossy(&out.stdout)
     );
 
-    // A directory push into the shared folder: one sentence for the batch.
-    let dir = h.home.join("batch");
-    std::fs::create_dir(&dir).unwrap();
-    for name in ["x.txt", "y.txt"] {
-        std::fs::write(dir.join(name), b"owner only").unwrap();
+    // A directory push into the shared folder: one sentence for the batch, whatever the number of files at once
+    // (the default 4, and 2), and every file completed in a session of its own.
+    for (batch, parallel) in [("batch", None), ("batch2", Some("2"))] {
+        let dir = h.home.join(batch);
+        std::fs::create_dir(&dir).unwrap();
+        for name in ["x.txt", "y.txt", "z.txt"] {
+            std::fs::write(dir.join(name), b"owner only").unwrap();
+        }
+        let before = h.state.lock().unwrap().requests.len();
+        let mut args = vec!["push"];
+        if let Some(n) = parallel {
+            args.extend(["--parallel", n]);
+        }
+        args.extend([dir.to_str().unwrap(), "--folder", ROOT]);
+        let out = h.run_plain(&args).await;
+        assert!(
+            out.status.success(),
+            "{batch}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).matches(NOTICE).count(),
+            1,
+            "{batch}: one notice for the batch: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        let f = h.state.lock().unwrap();
+        let completed: std::collections::BTreeSet<String> = f.requests[before..]
+            .iter()
+            .filter(|(m, p, _)| m == "POST" && p.ends_with("/complete"))
+            .filter_map(|(_, p, _)| p.split('/').nth(4).map(str::to_string))
+            .collect();
+        assert_eq!(completed.len(), 3, "{batch}: three sessions completed: {completed:?}");
+        for sid in &completed {
+            assert_eq!(f.upload_sessions[sid].1, 1, "{batch}: session {sid} got its chunk");
+        }
     }
-    let out = h.run_plain(&["push", dir.to_str().unwrap(), "--folder", ROOT]).await;
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout).matches(NOTICE).count(),
-        1,
-        "one notice for the batch: {}",
-        String::from_utf8_lossy(&out.stdout)
-    );
     assert_eq!(h.count("POST", "/owner-key"), 0);
     h.close().await;
 }

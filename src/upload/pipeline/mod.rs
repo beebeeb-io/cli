@@ -560,9 +560,14 @@ pub(super) async fn upload_attempt(
             Stream::Stderr,
         );
     }
-    // The read buffer's share (spec §4.2): taken before the encryptor is built, held for its whole life (the
-    // producer owns it). `share` caps at the budget, so this never blocks for a single file (R ≤ 128 MiB).
-    let read_share = spec.limits.share(chunk_size).await;
+    // The attempt's admission (spec §4.2, §7): the read buffer's share, taken before the encryptor is built and
+    // held for its whole life, and a reserve of one seal (R + 2 C ≤ 384 MiB, so a single file never waits). Across
+    // the files of a folder push this is where an attempt waits, holding nothing, until it fits the one budget.
+    let admission = spec.limits.admit(chunk_size).await;
+    // A Ctrl-C while this attempt waited for the budget: nothing is opened (no init goes out after it).
+    if spec.shutdown.load(Ordering::Relaxed) {
+        return Err(AttemptErr::Other(INTERRUPTED.to_string()));
+    }
     let file = std::fs::File::open(&spec.path).map_err(|e| format!("open {}: {e}", spec.path.display()))?;
     let encryptor = match &spec.replace_file_key {
         Some(key) => ChunkEncryptor::from_reader_with_file_key(
@@ -804,7 +809,7 @@ pub(super) async fn upload_attempt(
         &spec.limits,
         used,
         chunk_size,
-        read_share,
+        admission,
         spec.interrupt.as_ref(),
         file_prog.as_ref(),
         transferred,
@@ -965,6 +970,7 @@ pub(super) async fn upload_attempt(
         mime,
         size,
         pin,
+        &spec.limits,
     )
     .await;
 
@@ -992,11 +998,15 @@ pub(super) async fn maybe_upload_thumbnail(
     mime: Option<&str>,
     size: u64,
     pin: ExpectedChunkFormat,
+    limits: &Arc<crate::upload::limits::ChunkLimits>,
 ) {
     let is_image = mime.map(|m| m.starts_with("image/")).unwrap_or(false);
     if !is_image || size > MAX_THUMBNAIL_SOURCE_BYTES {
         return;
     }
+    // Spec §7: one at a time across the files of a push, the source read charged to the budget at its cap. The
+    // decoder's own working memory is outside the budget, as in `bb sync`.
+    let _turn = limits.thumbnail_turn(MAX_THUMBNAIL_SOURCE_BYTES).await;
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(_) => return,

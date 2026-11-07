@@ -127,6 +127,9 @@ pub struct Fixture {
     pub owner_index: HashMap<(u32, u32), (u64, Vec<u8>)>,
     pub upload_request: Value,
     pub uploaded_chunks: Vec<Vec<u8>>,
+    /// Every upload session by its id: the init's request and how many chunks it received, so the files of a
+    /// folder push can upload at once (`--parallel`). `upload_request` / `uploaded_chunks` keep the last init's.
+    pub upload_sessions: HashMap<String, (Value, usize)>,
     /// SF-0002 round 2: when set, `GET /files/{id}/download` answers this status
     /// (the read-only check's probe cannot read the version).
     pub download_status: Option<u16>,
@@ -562,15 +565,23 @@ async fn handle(State(state): State<Arc<Mutex<Fixture>>>, req: Request) -> Respo
         let request: Value = serde_json::from_slice(&f.requests.last().unwrap().2).unwrap();
         f.upload_request = request.clone();
         f.uploaded_chunks.clear();
-        json!({"upload_session_id":BAD,"file_id":request["file_id"].as_str().unwrap_or(FILE),"chunk_size_bytes":request["chunk_size_bytes"],"chunk_count":request["chunk_count"]})
+        let sid = format!("55555555-5555-4555-8555-{:012}", f.upload_sessions.len() + 1);
+        f.upload_sessions.insert(sid.clone(), (request.clone(), 0));
+        json!({"upload_session_id":sid,"file_id":request["file_id"].as_str().unwrap_or(FILE),"chunk_size_bytes":request["chunk_size_bytes"],"chunk_count":request["chunk_count"]})
     } else if method == "PUT" && path.contains("/chunks/") {
         let b = f.requests.last().unwrap().2.clone();
         f.uploaded_chunks.push(b);
+        if let Some(session) = path.split('/').nth(4).and_then(|sid| f.upload_sessions.get_mut(sid)) {
+            session.1 += 1;
+        }
         json!({"stored":true})
     } else if method == "POST" && path.ends_with("/complete") {
-        let req = f.upload_request.clone();
+        let (req, chunks) = path
+            .split('/')
+            .nth(4)
+            .and_then(|sid| f.upload_sessions.get(sid).cloned())
+            .unwrap_or_else(|| (f.upload_request.clone(), f.uploaded_chunks.len()));
         if req["file_id"] == FILE || f.review_complete_requested_id {
-            let chunks = f.uploaded_chunks.len();
             let target = if f.review_complete_requested_id {
                 req["file_id"].as_str().unwrap_or(FILE)
             } else {

@@ -481,7 +481,7 @@ fn transfer_stats_is_pure() {
         scanned.push(name);
     }
     scanned.sort();
-    assert_eq!(scanned, ["mod.rs", "pool.rs", "window.rs"]);
+    assert_eq!(scanned, ["files_at_once.rs", "mod.rs", "pool.rs", "window.rs"]);
     assert_eq!(
         hits("fn f() { println!(\"x\"); }"),
         ["println!"],
@@ -617,4 +617,39 @@ fn a_buffered_body_longer_than_its_plan_grows_the_plan() {
     let g = t.begin_file("b.bin", 5 * MB, 1, 0);
     t.body_done(g, 1, 4 * MB, Route::Api, 2000);
     assert_eq!(t.snapshot(2000).bytes_total, 17 * MB);
+}
+
+/// `--parallel` (spec §7): two files in flight at once, each under its own key. Each begins at the size the driver
+/// read, and one that fails gives up only what IT did not send, whatever the other sent meanwhile.
+#[test]
+fn files_at_once_keep_their_own_shares() {
+    let mut t = TransferStats::new(Direction::Upload, 0);
+    t.plan_file(300 * MB, 3);
+    t.plan_file(300 * MB, 3);
+    t.seal_plan();
+    t.set_limit(4);
+    t.next_file_as(0, 300 * MB, 3);
+    t.next_file_as(1, 300 * MB, 3);
+    let a = t.begin_file_as(0, "a", 300 * MB, 3, 100 * MB);
+    let b = t.begin_file_as(1, "b", 200 * MB, 2, 100 * MB);
+    assert_eq!(
+        t.snapshot(0).bytes_total,
+        500 * MB,
+        "b's share follows what the driver read"
+    );
+    chunk(&mut t, a, 0, 100 * MB, 0, 8000);
+    chunk(&mut t, b, 0, 100 * MB, 0, 8000);
+    chunk(&mut t, b, 1, 100 * MB, 8000, 16_000);
+    t.file_done(b, true);
+    t.end_file_as(1, FileEnd::Uploaded);
+    t.chunk_started(a, 1, Route::Api, 16_000);
+    t.end_file_as(0, FileEnd::Failed);
+    // a sent 100 of its 300 MB: 200 MB given up; b's 200 MB do not count as a's.
+    let s = t.snapshot(19_000);
+    assert_eq!((s.bytes_done, s.bytes_total), (300 * MB, 500 * MB), "the plan stays");
+    assert_eq!(
+        s.eta_secs, None,
+        "nothing is waiting to be sent: a gave up exactly what it did not send"
+    );
+    assert_eq!(t.given_up_bytes, 200 * MB);
 }

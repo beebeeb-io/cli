@@ -91,3 +91,96 @@ async fn a_share_larger_than_the_budget_is_capped_not_stuck() {
     assert_eq!(limits.held_bytes(), UPLOAD_BUFFER_BUDGET);
     drop(share);
 }
+
+/// Spec §7: an admitted attempt holds its read buffer and one seal (R + 2 C) until it ends; its seals come from the
+/// pool while the pool has them, and from the reserve (not charged twice) when it does not.
+#[tokio::test(start_paused = true)]
+async fn admission_holds_the_read_buffer_and_one_seal() {
+    let limits = ChunkLimits::new(4);
+    let admission = limits.admit(64 * MIB).await;
+    assert_eq!(limits.held_bytes(), 192 * MIB, "R + 2 C");
+
+    let rest = limits.share(UPLOAD_BUFFER_BUDGET - 192 * MIB).await;
+    let mut lent = tokio::time::timeout(Duration::from_secs(1), admission.seal_share(&limits, 128 * MIB))
+        .await
+        .expect("the pool is empty: the seal comes from the reserve");
+    assert_eq!(
+        limits.held_bytes(),
+        UPLOAD_BUFFER_BUDGET,
+        "a lent seal is not charged twice"
+    );
+    lent.shrink_to(64 * MIB);
+    assert_eq!(limits.held_bytes(), UPLOAD_BUFFER_BUDGET);
+    drop(rest);
+    drop(admission);
+    assert_eq!(
+        limits.held_bytes(),
+        128 * MIB,
+        "the read buffer is back; the reserve (2 C) stays charged while a frame it lent is alive"
+    );
+    drop(lent);
+    assert_eq!(limits.held_bytes(), 0);
+}
+
+/// Spec §7: four files of 128 MiB chunks (a resumed record's size) at N = 8 share the 640 MiB budget without a
+/// deadlock: each admitted attempt can always seal its next chunk. Each simulated file seals 17 chunks, holds at
+/// most 2 in flight (its `used`) and one of the push's 8 chunk slots per PUT, each PUT 10 ms of paused time.
+#[tokio::test(start_paused = true)]
+async fn big_files_admission_never_deadlocks() {
+    const C: u64 = 128 * MIB;
+    let limits = ChunkLimits::new(8);
+    let files: Vec<_> = (0..4)
+        .map(|_| {
+            let limits = Arc::clone(&limits);
+            tokio::spawn(async move {
+                let admission = limits.admit(C).await;
+                let used = Arc::new(tokio::sync::Semaphore::new(used_in_flight(8, C) as usize));
+                let mut puts = Vec::new();
+                for _ in 0..17 {
+                    let mut frame = admission.seal_share(&limits, 2 * C).await;
+                    frame.shrink_to(C);
+                    let own = Arc::clone(&used).acquire_owned().await.expect("open");
+                    let slot = limits.chunk_slot().await;
+                    puts.push(tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        drop((frame, own, slot));
+                    }));
+                }
+                for put in puts {
+                    put.await.expect("put");
+                }
+            })
+        })
+        .collect();
+    let all = async {
+        for file in files {
+            file.await.expect("file");
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(3600), all)
+        .await
+        .expect("every file finished: no deadlock on the budget");
+    assert!(
+        limits.peak_held_bytes() <= UPLOAD_BUFFER_BUDGET,
+        "peak {}",
+        limits.peak_held_bytes()
+    );
+    assert_eq!(limits.held_bytes(), 0);
+}
+
+/// Spec §7: at most `asked` chunk slots are out at once, across every holder.
+#[tokio::test(start_paused = true)]
+async fn chunk_slots_cap_the_push() {
+    let limits = ChunkLimits::new(3);
+    let held: Vec<_> = futures_util::future::join_all((0..3).map(|_| limits.chunk_slot())).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), limits.chunk_slot())
+            .await
+            .is_err(),
+        "a fourth waits"
+    );
+    drop(held);
+    let _granted = tokio::time::timeout(Duration::from_millis(100), limits.chunk_slot())
+        .await
+        .expect("a freed slot is granted");
+}
