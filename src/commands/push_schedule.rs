@@ -7,10 +7,10 @@
 //! The live view keeps one overall line and a line per file in flight (2333's renderer draws every active file),
 //! "chunks in flight" counts across the files, and the limit it shows is `min(N, Σ used)` of the files in flight.
 //!
-//! Owns: `upload_all`, the per-file sink. Must not: prepare a file (`push_file::prepare`) or print the summary.
+//! Owns: `upload_all` (the per-file sink and the run's limit are `transfer_view::sink`'s, shared with `bb sync`).
+//! Must not: prepare a file (`push_file::prepare`) or print the summary.
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
@@ -19,9 +19,9 @@ use super::push::{PushCtl, Pushed};
 use super::push_file::{self, Ready};
 use super::push_report::FilePlan;
 use crate::api::ApiClient;
-use crate::transfer_stats::{FileEnd, Tally};
+use crate::transfer_stats::FileEnd;
 use crate::transfer_view::LiveProgress;
-use crate::upload::{ChunkProgress, FileProgress, Stream};
+use crate::transfer_view::sink::{FileSink, RunLimit};
 
 /// One prepared file of the folder: its index in the push (input order, and its key in the live view), its path
 /// relative to the pushed folder, its plan.
@@ -107,83 +107,4 @@ async fn upload_one(
         },
     );
     Ended { index, rel, result }
-}
-
-/// The limit the live view shows while several files are in flight: `min(N, Σ used)` over them.
-struct RunLimit {
-    asked: u32,
-    used: Mutex<BTreeMap<u32, u32>>,
-}
-
-impl RunLimit {
-    fn new(asked: u32) -> Self {
-        Self {
-            asked,
-            used: Mutex::new(BTreeMap::new()),
-        }
-    }
-
-    fn set(&self, key: u32, used: u32, live: &LiveProgress) {
-        let mut all = self.used.lock().unwrap_or_else(|e| e.into_inner());
-        all.insert(key, used);
-        live.set_limit(self.asked.min(all.values().sum()));
-    }
-
-    /// A file ended: the others' limit, if any are left (else the next file sets it).
-    fn ended(&self, key: u32, live: &LiveProgress) {
-        let mut all = self.used.lock().unwrap_or_else(|e| e.into_inner());
-        all.remove(&key);
-        if !all.is_empty() {
-            live.set_limit(self.asked.min(all.values().sum()));
-        }
-    }
-}
-
-/// The run's sink as one file sees it: its attempts count against its own share (its key), its `used` feeds the
-/// run's limit; everything else is the run's.
-struct FileSink<'a> {
-    live: &'a LiveProgress,
-    key: u32,
-    limit: &'a RunLimit,
-}
-
-impl ChunkProgress for FileSink<'_> {
-    fn begin_file(&self, file_name: &str, expected_ciphertext: u64) -> Box<dyn FileProgress> {
-        self.begin_file_chunks(file_name, expected_ciphertext, 0, 0)
-    }
-
-    fn begin_file_chunks(
-        &self,
-        file_name: &str,
-        expected_ciphertext: u64,
-        chunk_count: u32,
-        chunk_size: u64,
-    ) -> Box<dyn FileProgress> {
-        self.live
-            .begin_file_chunks_as(self.key, file_name, expected_ciphertext, chunk_count, chunk_size)
-    }
-
-    fn rollback(&self, ciphertext_bytes: u64) {
-        self.live.rollback(ciphertext_bytes);
-    }
-
-    fn rollback_tally(&self, file_name: &str, tally: Tally) {
-        self.live.rollback_tally(file_name, tally);
-    }
-
-    fn before_complete(&self, path: &std::path::Path) -> Result<(), String> {
-        self.live.before_complete(path)
-    }
-
-    fn set_limit(&self, max_in_flight: u32) {
-        self.limit.set(self.key, max_in_flight, self.live);
-    }
-
-    fn note(&self, line: &str, to: Stream) {
-        self.live.note(line, to);
-    }
-
-    fn suspend(&self, f: &mut dyn FnMut()) {
-        self.live.suspend(f);
-    }
 }

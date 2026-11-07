@@ -3,7 +3,7 @@
 use super::*;
 use beebeeb_core::download::MAX_FRAME_SIZE;
 
-use crate::upload::{Held, InFlight, Route};
+use crate::upload::{FileProgress, Held, InFlight, Route, Tally};
 
 /// The API stream reads one frame at a time, in order: the most chunks it has in flight (spec §1.3, task 2333).
 const API_STREAM_IN_FLIGHT: u32 = 1;
@@ -314,24 +314,23 @@ pub(super) async fn stream_download_key(
         prog.pool(label.clone());
     }
 
+    let counted = Counted {
+        file: prog.as_ref(),
+        tally: std::sync::Mutex::new(Tally::default()),
+    };
     let result = stream_raw(
-        &mut resp,
-        &key,
-        file_id,
-        pin,
-        count,
-        total,
-        chunk_size,
-        fb_cap,
-        out_path,
-        carry,
-        prog.as_ref(),
+        &mut resp, &key, file_id, pin, count, total, chunk_size, fb_cap, out_path, carry, &counted,
     )
     .await;
 
+    let tally = *counted.tally.lock().unwrap_or_else(|e| e.into_inner());
     match &result {
         Ok(_) => prog.finish(true),
-        Err(_) => prog.finish(false),
+        Err(_) => {
+            // The file failed: what the stream counted is taken back off the run, as a failed direct attempt's is.
+            progress.rollback_failed(tally);
+            prog.finish(false);
+        }
     }
     // A direct attempt that fell back moved its chunks too: the file's speed counts them (spec §4.3).
     result.map(|stats| DownloadStats {
@@ -530,4 +529,54 @@ pub(super) fn header_u64(resp: &reqwest::Response, name: &str) -> Option<u64> {
         .get(name)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse().ok())
+}
+
+/// The API stream's file handle, keeping what it reported done: a failed stream takes that back off the run.
+struct Counted<'a> {
+    file: &'a dyn FileProgress,
+    tally: std::sync::Mutex<Tally>,
+}
+
+impl Counted<'_> {
+    fn add(&self, chunks: u32, bytes: u64) {
+        let mut tally = self.tally.lock().unwrap_or_else(|e| e.into_inner());
+        tally.chunks = tally.chunks.saturating_add(chunks);
+        tally.bytes = tally.bytes.saturating_add(bytes);
+    }
+}
+
+impl FileProgress for Counted<'_> {
+    fn chunk_confirmed(&self, ciphertext_bytes: u64) {
+        self.add(0, ciphertext_bytes);
+        self.file.chunk_confirmed(ciphertext_bytes);
+    }
+
+    /// The stream's caller finishes the file's own handle.
+    fn finish(self: Box<Self>, _success: bool) {}
+
+    fn chunk_started(&self, index: u32, route: Route) {
+        self.file.chunk_started(index, route);
+    }
+
+    fn chunk_retried(&self, index: u32) {
+        self.file.chunk_retried(index);
+    }
+
+    fn chunk_done(&self, index: u32, bytes: u64, held: Held) {
+        self.add(1, bytes);
+        self.file.chunk_done(index, bytes, held);
+    }
+
+    fn body_done(&self, chunks: u32, bytes: u64, route: Route) {
+        self.add(chunks, bytes);
+        self.file.body_done(chunks, bytes, route);
+    }
+
+    fn chunk_settled(&self, index: u32) {
+        self.file.chunk_settled(index);
+    }
+
+    fn pool(&self, label: PoolLabel) {
+        self.file.pool(label);
+    }
 }

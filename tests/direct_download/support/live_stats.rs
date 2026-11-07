@@ -108,6 +108,96 @@ fn verbose_pull_prints_no_secret_or_provider() {
     assert!(stdout.contains("· pool Germany"), "{stdout}");
 }
 
+/// N3's needles: what no output of a download may carry.
+fn n3_needles<'a>(env: &'a Env, storage: &'a str) -> Vec<&'a str> {
+    let mut needles = vec![
+        CITY,
+        DATACENTER,
+        POOL_ID,
+        &POOL_ID[..8],
+        storage,
+        BUCKET,
+        SIG,
+        "test-session-token",
+        env.mock.fx.key_b64.as_str(),
+    ];
+    needles.extend(PROVIDER_NAMES);
+    needles
+}
+
+/// Review P2 (#142), N3 for `bb sync`'s download direction: `bb sync -v --once` and `bb --json sync --once` over the
+/// direct route name the storage country of the file's row only (N3's list). The upload direction:
+/// `tests/transfer_stats_output.rs` `verbose_sync_upload_prints_no_secret_or_provider`.
+#[test]
+fn verbose_sync_download_prints_no_secret_or_provider() {
+    for flags in [["sync", "-v"], ["--json", "sync"]] {
+        let env = setup(Discovery::Offer, Grants::Normal, &[], &[]);
+        let dir = env.cwd.join("syncdir");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut args = vec!["--api", env.api_url.as_str()];
+        args.extend(flags);
+        args.extend(["--once", dir.to_str().unwrap(), "/SyncUp"]);
+        let out = bb(&env, &args, &[]);
+        assert!(out.status.success(), "{flags:?}: {}", describe(&out));
+        assert_eq!(
+            std::fs::read(dir.join("multi.bin")).unwrap_or_default(),
+            env.mock.fx.plaintext
+        );
+        assert_clean(&env, &out);
+        let storage = env.mock.storage_addr.to_string();
+        assert_absent(&describe(&out), &n3_needles(&env, &storage));
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if flags[0] == "--json" {
+            let json: Value = serde_json::from_str(&stdout).unwrap_or(Value::Null);
+            let chunks = env.mock.fx.frames.len();
+            assert_eq!(
+                json["transfer_download"]["pools"],
+                json!([{ "country": "Germany", "country_code": "DE", "chunks": chunks }]),
+                "{}",
+                describe(&out)
+            );
+        } else {
+            assert!(stdout.contains("pool Germany"), "{}", describe(&out));
+        }
+    }
+}
+
+/// Review P2 (#142), N3 for the other pull forms under `-v`: a folder, `--zip`, and a single file whose direct
+/// route is refused, so the download moves to the API stream.
+#[test]
+fn verbose_folder_zip_and_fallback_pulls_print_no_secret_or_provider() {
+    let folder = setup(Discovery::Offer, Grants::Normal, &[], &[]);
+    let zip = setup(Discovery::Offer, Grants::Normal, &[], &[]);
+    let fallback = setup(Discovery::Offer, Grants::DirectUnavailable, &[], &[]);
+    let id = fallback.mock.fx.file_id.clone();
+    for (env, args) in [
+        (&folder, vec!["pull", SYNC_FOLDER_ID, "-o", "pulled", "-v"]),
+        (&zip, vec!["pull", "--zip", "/SyncUp", "-o", "sync.zip", "-v"]),
+        (&fallback, vec!["pull", id.as_str(), "-o", "out.bin", "-v"]),
+    ] {
+        let out = bb(env, &args, &[]);
+        assert!(out.status.success(), "{args:?}: {}", describe(&out));
+        assert_clean(env, &out);
+        let storage = env.mock.storage_addr.to_string();
+        assert_absent(&describe(&out), &n3_needles(env, &storage));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("chunk 1/"),
+            "-v printed its chunk lines: {}",
+            describe(&out)
+        );
+    }
+    assert_eq!(
+        std::fs::read(fallback.cwd.join("out.bin")).unwrap_or_default(),
+        fallback.mock.fx.plaintext
+    );
+    assert_eq!(
+        fallback.mock.log.lock().unwrap().api_download_hits,
+        1,
+        "premise: the API stream served it"
+    );
+}
+
 /// The negative check above can fail: it flags a planted city and provider name.
 #[test]
 fn the_pull_absence_check_can_fail() {

@@ -2,11 +2,13 @@
 //! (task 2333: live lines on a terminal, one run model per direction).
 
 use super::*;
-use crate::transfer_stats::{Direction as Way, Summary};
+use crate::transfer_stats::{Direction as Way, FileEnd, Summary};
 use crate::transfer_view::LiveProgress;
 use crate::transfer_view::line::{self as view_line, Role};
 use crate::transfer_view::sink::{Draw, ViewOptions};
+use crate::transfer_view::sink::{FileSink, RunLimit};
 use crate::transfer_view::units::{duration, mbps};
+use crate::upload::ChunkProgress;
 
 /// One sync pass's tally plus the flags that decide how it is reported.
 pub(super) struct PassReport<'a> {
@@ -40,16 +42,81 @@ pub(super) fn transfer_sink(way: Way, moves: bool, verbose: bool) -> LiveProgres
     LiveProgress::new(way, options)
 }
 
-/// A remote file's share of the download plan, from its row: its ciphertext (28 bytes a chunk) and its chunks.
+/// The run's limit before any driver has reported its own: `min(--concurrency, files pending)` files, each with its
+/// `CHUNKS_IN_FLIGHT_PER_FILE`. A file's write check runs before its driver does, and the view would read `0/0 in
+/// flight` until then; `RunLimit` refines this as each driver reports.
+pub(super) fn open_limit(live: &LiveProgress, concurrency: u32, pending: usize) {
+    let files = concurrency.min(u32::try_from(pending).unwrap_or(u32::MAX));
+    live.set_limit(files.saturating_mul(crate::upload::CHUNKS_IN_FLIGHT_PER_FILE));
+}
+
+/// A pending upload's share of the run, as the driver will send it (spec §4.2): at the chunk size of the resume
+/// record the driver will continue, else `--concurrency`'s. `replacing` is the listed row an in-place replace
+/// versions: the driver asks the sidecar with it (`resume::resumable_upload_for`), so the plan reads the same record.
+/// `resume`: the sidecar as the pass read it once.
+pub(super) fn upload_plan(
+    resume: &crate::resume::PendingSnapshot,
+    path: &Path,
+    size: u64,
+    concurrency: u32,
+    replacing: Option<Uuid>,
+) -> (u64, u32) {
+    let pending = resume.resumable_now(path, replacing);
+    let chunk_size = crate::upload::planned_chunk_size(size, concurrency, concurrency, pending.as_ref());
+    crate::upload::expected_at_chunk_size(size, chunk_size)
+}
+
+/// One pending upload of the pass, as the run's numbers see it (spec §4.3): its planned share is kept under its
+/// index while `--concurrency` files send at once, the driver's attempts count against it, and its turn settles it.
+pub(super) struct UploadShare<'a> {
+    sink: FileSink<'a>,
+    /// The driver was handed the file: from here a failure ends `Failed`, not `NotSent`.
+    sent: AtomicBool,
+}
+
+impl<'a> UploadShare<'a> {
+    /// The file under `key`, announced with its `plan` (`None`: a dry run, which plans nothing).
+    pub(super) fn new(live: &'a LiveProgress, limit: &'a RunLimit, key: u32, plan: Option<(u64, u32)>) -> Self {
+        if let Some((bytes, chunks)) = plan {
+            live.next_file_as(key, bytes, chunks);
+        }
+        Self {
+            sink: FileSink { live, key, limit },
+            sent: AtomicBool::new(false),
+        }
+    }
+
+    /// The sink the upload driver is handed: the file is being sent from here.
+    pub(super) fn driver_sink(&self) -> &FileSink<'a> {
+        self.sent.store(true, Ordering::SeqCst);
+        &self.sink
+    }
+
+    /// The file's turn ended: it leaves the run's limit, and its share ends `Uploaded`; `Failed` when the driver ran
+    /// and failed (what it did not send leaves the ETA); `NotSent` when it never reached the driver (a write check's
+    /// skip, a Ctrl-C before its turn, an error before the upload), so it leaves the totals.
+    pub(super) fn end<T, E>(self, result: &Result<T, E>) {
+        let FileSink { live, key, limit } = self.sink;
+        limit.ended(key, live);
+        let end = match (result, self.sent.into_inner()) {
+            (Ok(_), _) => FileEnd::Uploaded,
+            (Err(_), true) => FileEnd::Failed,
+            (Err(_), false) => FileEnd::NotSent,
+        };
+        live.end_file_as(key, end);
+    }
+}
+
+/// A remote file's share of the download plan, from its row: its ciphertext and its chunks (`FilePlan`, as `bb pull`).
 pub(super) fn download_plan(remote: &RemoteFile) -> (u64, u32) {
-    let chunks = remote.chunk_count.max(1);
     let size = remote
         .resolved
         .as_ref()
         .and_then(|r| r.canonical.get("size_bytes"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    (size + 28 * chunks as u64, chunks)
+    let plan = crate::transfer_stats::FilePlan::of_size(size, remote.chunk_count);
+    (plan.bytes, plan.chunks)
 }
 
 /// The storage country a remote file's row names (spec §4.4).

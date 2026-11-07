@@ -48,6 +48,8 @@ struct Script {
     refused: Vec<u32>,
     /// The pinned per-chunk route answers one byte short for these chunks: a failure, not a chunk.
     api_short: Vec<u32>,
+    /// The full stream ends after this many frames, before the one marked last.
+    stream_frames: Option<usize>,
 }
 
 struct Mock {
@@ -164,7 +166,7 @@ async fn full_stream(State(m): State<Arc<Mock>>) -> Response {
             ),
             (header::HeaderName::from_static("x-chunk-size"), STRIDE.to_string()),
         ],
-        m.frames.concat(),
+        m.frames[..m.script.stream_frames.unwrap_or(m.frames.len())].concat(),
     )
         .into_response()
 }
@@ -393,7 +395,7 @@ async fn direct_download_fallback_rolls_back() {
 }
 
 /// A download dropped mid-way (Ctrl-C, a timeout) leaves nothing open on the sink: every chunk in flight settles, what
-/// was counted is taken back, and the file closes as failed.
+/// was counted is taken back (without the line of a move to the API: #142 review P3), and the file closes as failed.
 #[tokio::test]
 async fn a_dropped_direct_download_settles_and_takes_back_what_it_counted() {
     let rec = Recording::default();
@@ -409,6 +411,40 @@ async fn a_dropped_direct_download_settles_and_takes_back_what_it_counted() {
     );
     assert_eq!(done_indices(&rec), [0], "{:?}", rec.events());
     assert_eq!(rec.in_flight(), 0, "{:?}", rec.events());
-    assert_eq!(rec.of("rollback"), [format!("rollback {FULL_FRAME} 1 0")]);
+    assert_eq!(rec.of("rollback-failed"), [format!("rollback-failed {FULL_FRAME} 1 0")]);
+    assert!(rec.of("rollback").is_empty(), "{:?}", rec.events());
     assert_eq!(rec.of("finish"), ["finish false"]);
+}
+
+/// Review P3 (#142): an API stream that fails takes back what it counted, as a failed direct attempt does: here it
+/// ends after two of its three frames, so the file fails with nothing left counted.
+#[tokio::test]
+async fn a_failed_api_stream_takes_back_what_it_counted() {
+    let (live, _record) = LiveProgress::for_draw(
+        Direction::Download,
+        ViewOptions {
+            level: Level::Verbose,
+            draw: Draw::Off,
+        },
+    );
+    live.plan_file(TOTAL, CHUNKS as u32);
+    live.next_file(TOTAL, CHUNKS as u32);
+    live.seal_plan();
+    let script = Script {
+        stream_frames: Some(2),
+        ..Script::default()
+    };
+    let (result, written, _) = pull(script, &live, None).await;
+    assert!(
+        matches!(result, Err(DownloadError::Unreadable(_))),
+        "the cut stream fails as unreadable"
+    );
+    assert_eq!(written, None, "nothing was published");
+    let end = live.summary();
+    assert_eq!((end.chunks_done, end.bytes_done), (0, 0), "{end:?}");
+    assert_eq!(
+        end.bytes_transferred,
+        2 * FULL_FRAME,
+        "the wire still moved them: {end:?}"
+    );
 }

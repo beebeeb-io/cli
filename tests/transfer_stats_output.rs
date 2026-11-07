@@ -376,6 +376,35 @@ async fn sync_peak_is_at_most_the_concurrency() {
     assert_eq!(down["avg_mbps"], Value::Null, "{down}");
 }
 
+/// Review P3 (#142): sync's limit is at most the files pending. One file at the default `--concurrency 4` can have
+/// one chunk in flight, and `max_chunks_in_flight` says 1, not 4.
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_limit_is_at_most_the_files_pending() {
+    let api = start_mock(Mock::default()).await;
+    let home = scratch_home(&api);
+    let local = home.join("syncdir");
+    std::fs::create_dir_all(&local).unwrap();
+    std::fs::write(local.join("only.txt"), b"one file").unwrap();
+
+    let args = [
+        "--api",
+        &api,
+        "--json",
+        "sync",
+        "--once",
+        local.to_str().unwrap(),
+        "/SyncUp",
+    ];
+    let out = bb(&home, &args).await;
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success(), "{stdout}{stderr}");
+    let json: Value = serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    let up = &json["transfer_upload"];
+    assert_eq!(up["files_done"], 1, "{up}");
+    assert_eq!(up["max_chunks_in_flight"], 1, "{up}");
+    assert_eq!(up["peak_chunks_in_flight"], 1, "{up}");
+}
+
 /// Spec §6.5: on a pipe the sync line reads Mbps and a §5 duration; `-v` adds the `↑` detail line.
 #[tokio::test(flavor = "multi_thread")]
 async fn sync_end_line_on_a_pipe() {
@@ -409,4 +438,50 @@ async fn sync_end_line_on_a_pipe() {
         !regex::Regex::new(r"MB/s|\b\d+ms\b").unwrap().is_match(&stdout),
         "{stdout}"
     );
+}
+
+/// Review P2 (#142), N2a for `bb sync`'s upload direction (spec §9.4): `bb sync -v --once` and `bb --json sync
+/// --once` name the storage country of the init answer only, never its pool id, datacenter code or city, the session
+/// token, the master key or a provider. (The download direction runs over `tests/direct_download/`'s mocks, which
+/// serve no upload: `verbose_sync_download_prints_no_secret_or_provider`.)
+#[tokio::test(flavor = "multi_thread")]
+async fn verbose_sync_upload_prints_no_secret_or_provider() {
+    let mock = Mock {
+        init_extra: Some(json!({
+            "storage_pool_id": "3e15382b-0000-4000-8000-000000000001",
+            "region": "zz9",
+            "storage_location": {"city": "Testville", "country": "Germany", "country_code": "DE"},
+        })),
+        ..Default::default()
+    };
+    let api = start_mock(mock.clone()).await;
+    const TOKEN: &str = "tok-2333-session-secret";
+    // Base64 of the bytes 1..=32: a throwaway key the mock never checks.
+    const KEY: &str = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=";
+    let home = scratch_home_with(&api, TOKEN, KEY);
+
+    for (flags, dir) in [(["sync", "-v"], "syncdir-v"), (["--json", "sync"], "syncdir-json")] {
+        let local = home.join(dir);
+        std::fs::create_dir_all(&local).unwrap();
+        std::fs::write(local.join("a.txt"), b"hello").unwrap();
+        let mut args = vec!["--api", api.as_str()];
+        args.extend(flags);
+        args.extend(["--once", local.to_str().unwrap(), "/SyncUp"]);
+        let out = bb(&home, &args).await;
+        let (stdout, stderr) = text(&out);
+        assert!(out.status.success(), "{args:?}: {stdout}{stderr}");
+        let shown = format!("{stdout}\n{stderr}");
+        if flags[0] == "--json" {
+            let v: Value = serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+            assert_eq!(
+                v["transfer_upload"]["pools"],
+                json!([{"country": "Germany", "country_code": "DE", "chunks": 1}]),
+                "{v}"
+            );
+        } else {
+            assert!(stdout.contains("pool Germany"), "the country is shown: {shown}");
+        }
+        assert_absent(&shown, &["3e15382b", "zz9", "Testville", TOKEN, KEY]);
+        assert_absent(&shown, &PROVIDER_NAMES);
+    }
 }

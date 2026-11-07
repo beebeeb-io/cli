@@ -11,33 +11,9 @@ use crate::transfer_view::sink::{Draw, ViewOptions};
 use crate::transfer_view::units::{bytes, clean_name, duration, mbps};
 use crate::upload::{ChunkProgress, Stream};
 
-/// AES-GCM's nonce and tag: what each chunk adds to the plaintext on the wire.
-const CHUNK_OVERHEAD: u64 = 28;
-
-/// A file row's share of the run: its ciphertext and its chunks, as the row states them. The driver's own reading
-/// of the file (the manifest, the stream's length, a buffered body) replaces the estimate when the file begins.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct FilePlan {
-    pub(super) bytes: u64,
-    pub(super) chunks: u32,
-}
+pub(super) use crate::transfer_stats::FilePlan;
 
 impl FilePlan {
-    pub(super) fn of_row(row: &serde_json::Value) -> Self {
-        let size = row.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
-        let chunks = row.get("chunk_count").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
-        Self::of_size(size, chunks)
-    }
-
-    /// A file of `size` plaintext bytes in `chunks` chunks (at least one: an empty file has one).
-    pub(super) fn of_size(size: u64, chunks: u32) -> Self {
-        let chunks = chunks.max(1);
-        Self {
-            bytes: size.saturating_add(CHUNK_OVERHEAD * chunks as u64),
-            chunks,
-        }
-    }
-
     /// This file is the one the run downloads next: added to the plan and announced, so the driver's reading of it
     /// becomes its share (`TransferStats::begin_file`).
     pub(super) fn add_next(self, progress: &LiveProgress) {

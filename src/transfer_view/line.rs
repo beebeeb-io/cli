@@ -52,7 +52,8 @@ fn percent(done: u64, total: u64) -> u128 {
     if total == 0 {
         100
     } else {
-        done as u128 * 100 / total as u128
+        // A file that grew while it was sent can take done past total: never more than 100 %.
+        (done as u128 * 100 / total as u128).min(100)
     }
 }
 
@@ -340,4 +341,15 @@ pub(crate) fn paint_bar(line: &str) -> String {
     }
     flush(&mut out, &mut run, run_kind);
     out
+}
+
+#[cfg(test)]
+mod percent_tests {
+    /// Review P3 (#142): done past total (a file that grew while it was sent) shows 100 %, never more.
+    #[test]
+    fn percent_is_at_most_100() {
+        assert_eq!(super::percent(150, 100), 100);
+        assert_eq!(super::percent(50, 100), 50);
+        assert_eq!(super::percent(0, 0), 100);
+    }
 }

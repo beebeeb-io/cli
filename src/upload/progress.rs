@@ -56,6 +56,11 @@ pub trait ChunkProgress: Send + Sync {
     fn rollback_tally(&self, _file_name: &str, tally: Tally) {
         self.rollback(tally.bytes)
     }
+    /// [`rollback_tally`](Self::rollback_tally) for an attempt whose file failed: nothing is sent again, so no line
+    /// says its chunks count again. Defaults to `rollback(tally.bytes)`.
+    fn rollback_failed(&self, tally: Tally) {
+        self.rollback(tally.bytes)
+    }
     /// The most chunks that may be in flight now (spec §1.3). No-op by default.
     fn set_limit(&self, _max_in_flight: u32) {}
     /// Print a line the run produced (a notice, a per-file line) without tearing

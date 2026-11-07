@@ -481,7 +481,10 @@ fn transfer_stats_is_pure() {
         scanned.push(name);
     }
     scanned.sort();
-    assert_eq!(scanned, ["files_at_once.rs", "mod.rs", "pool.rs", "window.rs"]);
+    assert_eq!(
+        scanned,
+        ["files_at_once.rs", "mod.rs", "plan.rs", "pool.rs", "window.rs"]
+    );
     assert_eq!(
         hits("fn f() { println!(\"x\"); }"),
         ["println!"],

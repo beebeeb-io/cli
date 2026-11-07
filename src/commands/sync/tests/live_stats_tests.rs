@@ -1,7 +1,8 @@
 //! Task 2333 (plan Review Focus 5): Ctrl-C during `bb sync`'s upload phase. Sync uploads `--concurrency` files at
 //! once through the real driver, with one shutdown flag and no interrupt; when it trips with both files' chunks in
-//! flight, every chunk settles, the sink counts the run's limit as the files at once times each file's (the driver
-//! sets one file's), and the sink's summary (taken before the "interrupted" line prints) stops its ticker.
+//! flight, every chunk settles, and the sink's summary (taken before the "interrupted" line prints) stops its ticker.
+//! (Sync's run-wide limit, `RunLimit` over each file's `FileSink`: `tests/transfer_stats_output.rs`
+//! `sync_peak_is_at_most_the_concurrency` and `sync_limit_is_at_most_the_files_pending`.)
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -93,14 +94,166 @@ async fn sync_interrupt_settles_every_chunk_and_clears_the_lines() {
     // The real sink, drawing through indicatif with its ticker: nothing left in flight, then the summary (which
     // sync takes before it prints "interrupted") stops the ticker and clears the lines.
     let live = Arc::new(LiveProgress::for_ticker_test(Duration::from_millis(1)));
-    live.set_files_at_once(2);
     interrupted_pass(live.clone()).await;
     let stats = live.render_now().into_iter().find(|l| l.contains("in flight"));
     assert!(
-        stats.as_deref().is_some_and(|l| l.contains(" 0/2 in flight")),
+        stats.as_deref().is_some_and(|l| l.contains(" 0/1 in flight")),
         "{stats:?}"
     );
     assert!(live.ticker_running());
     live.summary();
     assert!(!live.ticker_running(), "the summary joined the ticker");
+}
+
+/// One file's attempt through `sink`, as the driver reports it: `sent` of its `chunks` confirmed, then it ends.
+fn attempt(sink: &dyn ChunkProgress, name: &str, bytes: u64, chunks: u32, sent: u32) {
+    let file = sink.begin_file_chunks(name, bytes, chunks, bytes / chunks as u64);
+    for index in 0..sent {
+        file.chunk_started(index, crate::transfer_stats::Route::Api);
+        file.chunk_done(index, bytes / chunks as u64, crate::transfer_stats::Held::Transferred);
+        file.chunk_settled(index);
+    }
+    file.finish(sent == chunks);
+}
+
+/// Review P2 (#142): every pending upload of a pass settles in the run's numbers (spec §4.3). A file the write check
+/// skips never reaches the driver: it leaves the totals. A file whose upload fails stays in them, and what it did
+/// not send leaves the ETA. At the end, done plus given up is the total.
+#[test]
+fn every_pending_upload_of_a_pass_settles() {
+    use super::UploadShare;
+    use crate::transfer_view::sink::{Level, RunLimit};
+    let clock = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let direction = crate::transfer_stats::Direction::Upload;
+    let (live, _) = LiveProgress::for_test(direction, Level::Default, 80, clock);
+    let limit = RunLimit::new(4);
+    let plans = [(1028, 1), (2056, 2), (3084, 3)];
+    let [_, failed, uploaded] = plans;
+    for (bytes, chunks) in plans {
+        live.plan_file(bytes, chunks);
+    }
+    live.seal_plan();
+    // Keys 0, 1, 2: the file the write check skips, the one whose upload fails, the one uploaded.
+    let [skip, fail, ok] = [0u32, 1, 2].map(|key| UploadShare::new(&live, &limit, key, Some(plans[key as usize])));
+    attempt(fail.driver_sink(), "failed.bin", failed.0, failed.1, 1);
+    attempt(ok.driver_sink(), "uploaded.bin", uploaded.0, uploaded.1, uploaded.1);
+    skip.end(&Err::<(), _>("kept read-only"));
+    fail.end(&Err::<(), _>("upload failed"));
+    ok.end(&Ok::<(), String>(()));
+
+    let end = live.summary();
+    let json = end.to_json();
+    assert_eq!(
+        (&json["files_total"], &json["bytes_total"], &json["chunks_total"]),
+        (
+            &serde_json::json!(2),
+            &serde_json::json!(failed.0 + uploaded.0),
+            &serde_json::json!(5)
+        ),
+        "the skipped file left the totals: {json}"
+    );
+    assert_eq!(end.files_done, 1, "{json}");
+    assert_eq!(
+        live.given_up_for_test(),
+        failed.0 / 2,
+        "the failed file's unsent chunk left the ETA"
+    );
+    assert_eq!(
+        end.bytes_done + live.given_up_for_test(),
+        end.bytes_total,
+        "every byte settled: {json}"
+    );
+}
+
+/// Review P2 (#142): an in-place replace with a resume record is planned at the record's chunk size, the one its
+/// driver resumes at: the plan asks the sidecar with the row it versions, as the driver does.
+#[test]
+fn a_replace_with_a_resume_record_is_planned_as_the_driver_sends_it() {
+    let scratch = Scratch::new("2333-sync-plan-replace");
+    let (path, size, mtime) = scratch.file(9 * MIB);
+    let row = Uuid::new_v4();
+    crate::resume::record_upload(
+        &path,
+        crate::item_id::Proposed::Listed(row),
+        None,
+        Uuid::new_v4(),
+        beebeeb_core::chunk_stream::ChunkFormat::V1Legacy,
+        size,
+        mtime,
+        false,
+        None,
+        MIB as u64,
+    );
+    // What the driver of the in-place replace reads (`upload::replacing`: the row's id) and frames the file with.
+    let driver = crate::resume::resumable_upload_for(&path, size, mtime, Some(row));
+    assert!(driver.is_some(), "premise: the replace's driver continues the record");
+    let sent =
+        crate::upload::expected_at_chunk_size(size, crate::upload::planned_chunk_size(size, 4, 4, driver.as_ref()));
+    assert_eq!(sent.1, 9, "premise: the record's 1 MiB chunks");
+    let resume = crate::resume::pending_snapshot();
+    assert_eq!(super::upload_plan(&resume, &path, size, 4, Some(row)), sent);
+}
+
+/// Review P3 (#142): the plan reads the sidecar once per pass. A record written after the pass took its snapshot is
+/// not seen by it; a new snapshot sees it.
+#[test]
+fn the_plan_reads_the_sidecar_once() {
+    let scratch = Scratch::new("2333-sync-plan-once");
+    let (path, size, mtime) = scratch.file(MIB);
+    let row = Uuid::new_v4();
+    let resume = crate::resume::pending_snapshot();
+    crate::resume::record_upload(
+        &path,
+        crate::item_id::Proposed::Listed(row),
+        None,
+        Uuid::new_v4(),
+        beebeeb_core::chunk_stream::ChunkFormat::V1Legacy,
+        size,
+        mtime,
+        false,
+        None,
+        MIB as u64 / 4,
+    );
+    assert!(
+        resume.resumable_now(&path, Some(row)).is_none(),
+        "read before the record"
+    );
+    assert!(
+        crate::resume::pending_snapshot()
+            .resumable_now(&path, Some(row))
+            .is_some()
+    );
+}
+
+/// Review P3 (#143): the upload phase opens the run's limit before any driver has reported its own, so `bb sync -v`
+/// never reads `0/0 in flight` while the write checks run. It is `min(--concurrency, files pending)` files, one chunk
+/// each; `RunLimit` refines it as each driver reports.
+#[test]
+fn the_limit_is_open_before_any_driver_reports() {
+    use super::{UploadShare, open_limit};
+    use crate::transfer_view::sink::{Level, RunLimit};
+    let direction = crate::transfer_stats::Direction::Upload;
+    // (concurrency, files pending, the limit the view shows): more files than `--concurrency`, and fewer.
+    for (concurrency, pending, shown) in [(4u32, 6usize, 4u32), (4, 2, 2)] {
+        let clock = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (live, _) = LiveProgress::for_test(direction, Level::Verbose, 80, clock);
+        for _ in 0..pending {
+            live.plan_file(1028, 1);
+        }
+        live.seal_plan();
+        open_limit(&live, concurrency, pending);
+        // A file at its write check: announced, no driver yet.
+        let limit = RunLimit::new(concurrency);
+        let _share = UploadShare::new(&live, &limit, 0, Some((1028, 1)));
+        let lines = live.render_now();
+        let wanted = format!(" 0/{shown} in flight");
+        assert!(
+            lines.iter().any(|l| l.contains(&wanted)),
+            "{pending} pending at --concurrency {concurrency} reads {wanted:?}: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("0/0 in flight")),
+            "never 0/0 in flight: {lines:?}"
+        );
+    }
 }

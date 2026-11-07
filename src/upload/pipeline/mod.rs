@@ -26,12 +26,12 @@ pub(super) const CHANNEL_CAP: usize = 1;
 pub(super) const MAX_THUMBNAIL_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Per-chunk AEAD overhead on the wire: `nonce(12) + tag(16)`.
-pub(super) const CHUNK_OVERHEAD: u64 = 28;
+pub(super) use crate::transfer_stats::CHUNK_OVERHEAD;
 
 /// Chunks of ONE file on the wire at once. The consumer loop in [`run_pipeline`] awaits each chunk's
 /// transfer before it takes the next one off the channel (`rx.recv()`), so a file sends one chunk at a
 /// time while the producer encrypts the next (`CHANNEL_CAP`). `bb sync` runs `concurrency` files at once:
-/// its run-wide limit is `concurrency × CHUNKS_IN_FLIGHT_PER_FILE`. Test `push_sends_one_chunk_at_a_time`
+/// its run-wide limit is `RunLimit`'s `min(concurrency, Σ)` of this over the files in flight. Test `push_sends_one_chunk_at_a_time`
 /// measures the peak through the real loop, so a change to the loop has to change this constant.
 pub(crate) const CHUNKS_IN_FLIGHT_PER_FILE: u32 = 1;
 

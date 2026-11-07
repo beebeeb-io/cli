@@ -706,164 +706,189 @@ pub async fn run(
         use futures_util::stream::{self, StreamExt};
 
         // Task 2333: live lines on a terminal (spec §6.1). Each file is planned as the driver will send it (its
-        // resume record's chunk size, else `--concurrency`'s); one chunk at a time per file, `--concurrency` files.
+        // resume record's chunk size, else `--concurrency`'s), and keeps its share under its index while
+        // `--concurrency` files send at once (`UploadShare`).
         let progress = transfer_sink(
             crate::transfer_stats::Direction::Upload,
             !dry_run && pending_count > 0,
             verbose,
         );
-        for (rel, local, _) in pending_uploads.iter().filter(|_| !dry_run) {
-            let pending = crate::resume::resumable_upload_now(&local_dir.join(rel));
-            let c = concurrency as u32;
-            let chunk_size = crate::upload::planned_chunk_size(local.size, c, c, pending.as_ref());
-            let (bytes, chunks) = crate::upload::expected_at_chunk_size(local.size, chunk_size);
-            progress.plan_file(bytes, chunks);
-        }
+        let resume = crate::resume::pending_snapshot();
+        let plans: Vec<Option<(u64, u32)>> = pending_uploads
+            .iter()
+            .map(|(rel, local, replace_id)| {
+                (!dry_run).then(|| {
+                    let plan = upload_plan(
+                        &resume,
+                        &local_dir.join(rel),
+                        local.size,
+                        concurrency as u32,
+                        *replace_id,
+                    );
+                    progress.plan_file(plan.0, plan.1);
+                    plan
+                })
+            })
+            .collect();
         progress.seal_plan();
-        // `--concurrency` files at once, each one chunk at a time: the driver sets a file's limit, the sink scales it.
-        progress.set_files_at_once(concurrency as u32);
-        progress.set_limit(crate::upload::CHUNKS_IN_FLIGHT_PER_FILE);
+        if !dry_run {
+            open_limit(&progress, concurrency as u32, pending_count);
+        }
+        // Each file sends one chunk at a time (its driver sets that); the run's limit is their sum, at most
+        // `--concurrency`.
+        let limit = crate::transfer_view::sink::RunLimit::new(concurrency as u32);
         // The live lines show each file; the plain `↑` lines are for a run without them.
         let show_bars = scan_active && progress.draws_live();
 
         let upload_results: Vec<Result<(String, FileEntry, u64), String>> =
-            stream::iter(pending_uploads.into_iter().map(|(rel, local, replace_id)| {
-                let api = &api;
-                let master_key = Arc::clone(&master_key);
-                let local_dir = &local_dir;
-                let remote_folders = &remote_folders;
-                let resolved = remote_files.get(&rel).and_then(|r| r.resolved.clone());
-                let progress = &progress;
-                let shutdown = Arc::clone(&shutdown);
-                async move {
-                    if shutdown.load(Ordering::Relaxed) {
-                        return Err(crate::upload::INTERRUPTED.to_string());
-                    }
+            stream::iter(pending_uploads.into_iter().zip(plans).enumerate().map(
+                |(index, ((rel, local, replace_id), plan))| {
+                    let api = &api;
+                    let master_key = Arc::clone(&master_key);
+                    let local_dir = &local_dir;
+                    let remote_folders = &remote_folders;
+                    let resolved = remote_files.get(&rel).and_then(|r| r.resolved.clone());
+                    let progress = &progress;
+                    let limit = &limit;
+                    let shutdown = Arc::clone(&shutdown);
+                    async move {
+                        let share = UploadShare::new(progress, limit, index as u32, plan);
+                        let result: Result<(String, FileEntry, u64), String> = async {
+                            if shutdown.load(Ordering::Relaxed) {
+                                return Err(crate::upload::INTERRUPTED.to_string());
+                            }
 
-                    // Plain status line only when bars are not showing them.
-                    if !show_bars && !ui::is_json() && !ui::is_quiet() {
-                        let size_str = format_size(local.size);
-                        progress.note(
-                            &format!(
-                                "  {} {} {}",
-                                "\u{2191}".custom_color(crate::colors::GREEN_OK),
-                                rel.custom_color(crate::colors::INK),
-                                format!("({size_str})").custom_color(crate::colors::INK_DIM),
-                            ),
-                            crate::upload::Stream::Stdout,
-                        );
-                    }
+                            // Plain status line only when bars are not showing them.
+                            if !show_bars && !ui::is_json() && !ui::is_quiet() {
+                                let size_str = format_size(local.size);
+                                progress.note(
+                                    &format!(
+                                        "  {} {} {}",
+                                        "\u{2191}".custom_color(crate::colors::GREEN_OK),
+                                        rel.custom_color(crate::colors::INK),
+                                        format!("({size_str})").custom_color(crate::colors::INK_DIM),
+                                    ),
+                                    crate::upload::Stream::Stdout,
+                                );
+                            }
 
-                    if dry_run {
-                        return Ok((
-                            rel,
-                            FileEntry {
-                                remote_id: Uuid::nil(),
-                                remote_version: None,
+                            if dry_run {
+                                return Ok((
+                                    rel,
+                                    FileEntry {
+                                        remote_id: Uuid::nil(),
+                                        remote_version: None,
+                                        last_mtime: local.mtime,
+                                        last_size: local.size,
+                                        last_sync: Utc::now(),
+                                        content_hash: Some(local.content_hash.clone()),
+                                    },
+                                    local.size,
+                                ));
+                            }
+
+                            // SF-0002: ask the write check before touching the remote
+                            // row. A read-only row or one the check could not read is
+                            // left alone (never trashed) and this edit is not uploaded
+                            // this pass; the next pass asks again.
+                            let (replacement, trash_old) =
+                                match replace_decision(api, &master_key, resolved.as_ref(), replace_id.is_some()).await
+                                {
+                                    Replace::Skip(why) if why == crate::crypto::OWNER_REPAIR_READ_ONLY => {
+                                        return Err(format!("{READ_ONLY_KEPT}{rel}"));
+                                    }
+                                    Replace::Skip(why) => return Err(format!("{rel}: {why}")),
+                                    Replace::InPlace(r) => (Some(r.clone()), false),
+                                    Replace::NewFile => (None, true),
+                                    // L13/A9b: a request row's edit becomes a new owner
+                                    // item; the request row is neither versioned nor
+                                    // trashed.
+                                    Replace::SaveAsNew => (None, false),
+                                };
+                            // Not a version of the old remote: it is uploaded as a new
+                            // file and the old one trashed only AFTER that (L5).
+                            let replaced = replace_id.filter(|_| trash_old);
+
+                            let parent_id = match rel.rsplit_once('/') {
+                                Some((parent_rel, _)) => remote_folders.get(parent_rel).copied(),
+                                None => Some(remote_folder_id),
+                            }
+                            .or(Some(remote_folder_id));
+
+                            let file_name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+                            // L13/N4: a new owner item's id (and its resume tag) comes
+                            // from core's mint; a replace keeps the listed row.
+                            let (file_id, resume_tag) = match replacement.as_ref() {
+                                Some(_) => (replace_id.ok_or("missing replacement id")?, None),
+                                None => {
+                                    let minted = crate::item_id::mint_owner(&master_key)?;
+                                    (minted.id(), Some(*minted.tag()))
+                                }
+                            };
+                            let spec = crate::upload::UploadSpec {
+                                path: local_dir.join(&rel),
+                                file_name,
+                                file_id,
+                                resume_tag,
+                                // A version replace only when the old remote's key is
+                                // owned; otherwise a new file under a fresh id (the old
+                                // one is trashed once it exists).
+                                base_version_number: replacement
+                                    .as_ref()
+                                    .map(|r| replacement_version(&r.canonical))
+                                    .transpose()?,
+                                replace_pin: replacement
+                                    .as_ref()
+                                    .map(|r| {
+                                        crate::crypto::content_pin_with_key(
+                                            &r.key,
+                                            r.canonical["id"].as_str().unwrap_or(""),
+                                            r.canonical["name_encrypted"].as_str().unwrap_or(""),
+                                        )
+                                    })
+                                    .transpose()?,
+                                replace_file_key: replacement.as_ref().map(|r| r.key.clone()),
+                                parent_id,
+                                concurrency: concurrency as u32,
+                                unrecorded_resume_concurrency: concurrency as u32,
+                                chunks_in_flight: crate::upload::CHUNKS_IN_FLIGHT_PER_FILE,
+                                limits: crate::upload::limits::ChunkLimits::single(),
+                                interrupt: None,
+                                shutdown,
+                                read_row: None,
+                            };
+                            // Name the file in the error: "upload failed: <server
+                            // message>" alone doesn't say which file to look at (flow-6).
+                            let outcome =
+                                upload_then_trash_replaced(api, master_key, spec, share.driver_sink(), replaced)
+                                    .await
+                                    .map_err(|e| {
+                                        if e == crate::upload::INTERRUPTED {
+                                            e
+                                        } else {
+                                            format!("{rel}: {e}")
+                                        }
+                                    })?;
+
+                            let entry = FileEntry {
+                                remote_id: outcome.server_id,
+                                remote_version: replacement
+                                    .as_ref()
+                                    .and_then(|r| crate::api::current_version_number(&r.canonical))
+                                    .and_then(|v| v.checked_add(1)),
                                 last_mtime: local.mtime,
                                 last_size: local.size,
                                 last_sync: Utc::now(),
                                 content_hash: Some(local.content_hash.clone()),
-                            },
-                            local.size,
-                        ));
-                    }
-
-                    // SF-0002: ask the write check before touching the remote
-                    // row. A read-only row or one the check could not read is
-                    // left alone (never trashed) and this edit is not uploaded
-                    // this pass; the next pass asks again.
-                    let (replacement, trash_old) =
-                        match replace_decision(api, &master_key, resolved.as_ref(), replace_id.is_some()).await {
-                            Replace::Skip(why) if why == crate::crypto::OWNER_REPAIR_READ_ONLY => {
-                                return Err(format!("{READ_ONLY_KEPT}{rel}"));
-                            }
-                            Replace::Skip(why) => return Err(format!("{rel}: {why}")),
-                            Replace::InPlace(r) => (Some(r.clone()), false),
-                            Replace::NewFile => (None, true),
-                            // L13/A9b: a request row's edit becomes a new owner
-                            // item; the request row is neither versioned nor
-                            // trashed.
-                            Replace::SaveAsNew => (None, false),
-                        };
-                    // Not a version of the old remote: it is uploaded as a new
-                    // file and the old one trashed only AFTER that (L5).
-                    let replaced = replace_id.filter(|_| trash_old);
-
-                    let parent_id = match rel.rsplit_once('/') {
-                        Some((parent_rel, _)) => remote_folders.get(parent_rel).copied(),
-                        None => Some(remote_folder_id),
-                    }
-                    .or(Some(remote_folder_id));
-
-                    let file_name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
-                    // L13/N4: a new owner item's id (and its resume tag) comes
-                    // from core's mint; a replace keeps the listed row.
-                    let (file_id, resume_tag) = match replacement.as_ref() {
-                        Some(_) => (replace_id.ok_or("missing replacement id")?, None),
-                        None => {
-                            let minted = crate::item_id::mint_owner(&master_key)?;
-                            (minted.id(), Some(*minted.tag()))
+                            };
+                            Ok((rel, entry, local.size))
                         }
-                    };
-                    let spec = crate::upload::UploadSpec {
-                        path: local_dir.join(&rel),
-                        file_name,
-                        file_id,
-                        resume_tag,
-                        // A version replace only when the old remote's key is
-                        // owned; otherwise a new file under a fresh id (the old
-                        // one is trashed once it exists).
-                        base_version_number: replacement
-                            .as_ref()
-                            .map(|r| replacement_version(&r.canonical))
-                            .transpose()?,
-                        replace_pin: replacement
-                            .as_ref()
-                            .map(|r| {
-                                crate::crypto::content_pin_with_key(
-                                    &r.key,
-                                    r.canonical["id"].as_str().unwrap_or(""),
-                                    r.canonical["name_encrypted"].as_str().unwrap_or(""),
-                                )
-                            })
-                            .transpose()?,
-                        replace_file_key: replacement.as_ref().map(|r| r.key.clone()),
-                        parent_id,
-                        concurrency: concurrency as u32,
-                        unrecorded_resume_concurrency: concurrency as u32,
-                        chunks_in_flight: crate::upload::CHUNKS_IN_FLIGHT_PER_FILE,
-                        limits: crate::upload::limits::ChunkLimits::single(),
-                        interrupt: None,
-                        shutdown,
-                        read_row: None,
-                    };
-                    // Name the file in the error: "upload failed: <server
-                    // message>" alone doesn't say which file to look at (flow-6).
-                    let outcome = upload_then_trash_replaced(api, master_key, spec, progress, replaced)
-                        .await
-                        .map_err(|e| {
-                            if e == crate::upload::INTERRUPTED {
-                                e
-                            } else {
-                                format!("{rel}: {e}")
-                            }
-                        })?;
-
-                    let entry = FileEntry {
-                        remote_id: outcome.server_id,
-                        remote_version: replacement
-                            .as_ref()
-                            .and_then(|r| crate::api::current_version_number(&r.canonical))
-                            .and_then(|v| v.checked_add(1)),
-                        last_mtime: local.mtime,
-                        last_size: local.size,
-                        last_sync: Utc::now(),
-                        content_hash: Some(local.content_hash.clone()),
-                    };
-                    Ok((rel, entry, local.size))
-                }
-            }))
+                        .await;
+                        share.end(&result);
+                        result
+                    }
+                },
+            ))
             .buffer_unordered(concurrency)
             .collect()
             .await;

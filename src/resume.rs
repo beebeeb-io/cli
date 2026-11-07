@@ -228,11 +228,38 @@ pub fn resumable_upload(path: &Path, size: u64, mtime_ns: u128) -> Option<Pendin
 /// replace versions (`None` for a create). See [`resumable_by`].
 pub fn resumable_upload_for(path: &Path, size: u64, mtime_ns: u128, replacing: Option<Uuid>) -> Option<PendingUpload> {
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    load()
-        .uploads
+    resumable_in(&load(), path, size, mtime_ns, replacing)
+}
+
+fn resumable_in(
+    db: &PendingDb,
+    path: &Path,
+    size: u64,
+    mtime_ns: u128,
+    replacing: Option<Uuid>,
+) -> Option<PendingUpload> {
+    db.uploads
         .get(&key(path))
         .filter(|e| e.size == size && e.mtime_ns == mtime_ns && resumable_by(e, replacing))
         .and_then(PendingUpload::from_entry)
+}
+
+/// The sidecar as read once, for a plan over many files (`bb sync`'s pass): each lookup is
+/// [`resumable_upload_for`]'s without reading and parsing the sidecar again.
+pub struct PendingSnapshot(PendingDb);
+
+/// [`PendingSnapshot`] of the sidecar now.
+pub fn pending_snapshot() -> PendingSnapshot {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    PendingSnapshot(load())
+}
+
+impl PendingSnapshot {
+    /// [`resumable_upload_for`] for `path` as it is on disk now. `None` if it cannot be stat'ed.
+    pub fn resumable_now(&self, path: &Path, replacing: Option<Uuid>) -> Option<PendingUpload> {
+        let (size, mtime_ns) = local_signature(path)?;
+        resumable_in(&self.0, path, size, mtime_ns, replacing)
+    }
 }
 
 /// L13 (SF-0001): the record for `path` (same `(size, mtime_ns)` signature) that

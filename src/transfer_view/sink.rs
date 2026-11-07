@@ -255,9 +255,6 @@ pub(crate) struct LiveProgress {
     ticker: Mutex<Option<JoinHandle<()>>>,
     /// `finish_all` ran: the lines are cleared, so dropping the sink leaves nothing behind.
     ended: AtomicBool,
-    /// Files the command sends at once (`bb sync --concurrency`): the upload driver sets one file's limit, the
-    /// run's is that many times it.
-    files_at_once: AtomicU32,
 }
 
 impl LiveProgress {
@@ -328,7 +325,6 @@ impl LiveProgress {
             shared,
             ticker: Mutex::new(ticker),
             ended: AtomicBool::new(false),
-            files_at_once: AtomicU32::new(1),
         }
     }
 
@@ -350,9 +346,25 @@ impl LiveProgress {
         lock(&self.shared.model).seal_plan();
     }
 
-    /// The command sends `n` files at once, each at the limit its driver sets (`ChunkProgress::set_limit`).
-    pub(crate) fn set_files_at_once(&self, n: u32) {
-        self.files_at_once.store(n.max(1), Ordering::SeqCst);
+    /// [`begin_file_chunks`](ChunkProgress::begin_file_chunks) for a body that arrives whole (a file-request upload
+    /// in a folder pull): planned and counted like any file, never drawn as a live line (spec §3.2).
+    pub(crate) fn begin_buffered(
+        &self,
+        file_name: &str,
+        expected_ciphertext: u64,
+        chunk_count: u32,
+    ) -> Box<dyn FileProgress> {
+        let slot = {
+            let mut model = lock(&self.shared.model);
+            let slot = model.begin_file(file_name, expected_ciphertext, chunk_count, 0);
+            model.buffered(slot);
+            slot
+        };
+        Box::new(LiveFile {
+            slot,
+            shared: Arc::clone(&self.shared),
+            next_index: AtomicU32::new(0),
+        })
     }
 
     /// The live lines are drawn (both streams are terminals): a command leaves out the per-file lines they show.
@@ -467,6 +479,12 @@ impl LiveProgress {
         self.register_notices();
     }
 
+    /// Tests: the planned bytes failed files will never send, which the ETA leaves out.
+    #[cfg(test)]
+    pub(crate) fn given_up_for_test(&self) -> u64 {
+        lock(&self.shared.model).given_up_bytes()
+    }
+
     #[cfg(test)]
     pub(crate) fn ticker_running(&self) -> bool {
         lock(&self.ticker).as_ref().is_some_and(|t| !t.is_finished())
@@ -532,9 +550,12 @@ impl ChunkProgress for LiveProgress {
         }
     }
 
+    fn rollback_failed(&self, tally: Tally) {
+        lock(&self.shared.model).rollback(tally);
+    }
+
     fn set_limit(&self, max_in_flight: u32) {
-        let files = self.files_at_once.load(Ordering::SeqCst);
-        lock(&self.shared.model).set_limit(max_in_flight.saturating_mul(files));
+        lock(&self.shared.model).set_limit(max_in_flight);
     }
 
     fn note(&self, text: &str, to: Stream) {
@@ -618,3 +639,4 @@ impl FileProgress for LiveFile {
 }
 
 mod files_at_once;
+pub(crate) use files_at_once::{FileSink, RunLimit};
