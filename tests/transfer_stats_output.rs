@@ -233,7 +233,8 @@ async fn push_folder_with_a_file_that_grew_counts_its_new_size() {
 
     let run = {
         let (home, api) = (home.clone(), api.clone());
-        tokio::spawn(async move { bb(&home, &["--api", &api, "--json", "push", "folder2"]).await })
+        // One file at a time (`--parallel 1`): the second file's upload starts only after the held first init.
+        tokio::spawn(async move { bb(&home, &["--api", &api, "--json", "push", "--parallel", "1", "folder2"]).await })
     };
     // The first file's init is held: the plan is made. Grow the second file past one chunk, then let it go.
     let waited = std::time::Instant::now();
