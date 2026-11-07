@@ -334,6 +334,15 @@ fn chunk_lines() {
         rollback_line("movie.mkv", one, Direction::Upload),
         "    movie.mkv: 1 chunk counted again after the upload restarted"
     );
+    let two = Tally {
+        bytes: 2,
+        chunks: 2,
+        already_stored: 0,
+    };
+    assert_eq!(
+        rollback_line("movie.mkv", two, Direction::Download),
+        "    movie.mkv: 2 chunks counted again after the download moved to the API"
+    );
 }
 
 #[test]
@@ -433,4 +442,15 @@ fn pool_shows_only_a_received_country_cleaned() {
     let mut sum = summary(TOTAL, 440_673);
     sum.pools = s.pools.clone();
     assert!(!verbose_detail(&sum).chars().any(char::is_control));
+}
+
+/// Task 2333 PR 2: a file whose chunk size is not known (a buffered body, a legacy stream without `X-Chunk-Size`)
+/// shows no chunk segment, never `chunk 0 B`.
+#[test]
+fn pool_line_leaves_out_an_unknown_chunk_size() {
+    let mut s = snap(DONE, TOTAL);
+    for f in &mut s.active {
+        f.chunk_size = 0;
+    }
+    assert_eq!(pool_line(&s, 100), "    pool Germany · direct 66 · api 0 · 0 retries");
 }

@@ -21,7 +21,7 @@
 //! (reqwest error text contains the URL), and the optional trace
 //! (`BB_TRANSPORT_TRACE=1`, for support) prints only chunk numbers and statuses.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -35,15 +35,16 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 
 use crate::api::{ApiClient, ChunkApiError, GrantReply, now_ms};
 use crate::download::{AtomicFile, DownloadError, DownloadStats};
-use crate::upload::{ChunkProgress, FileProgress};
+use crate::upload::{ChunkProgress, FileProgress, Held, PoolLabel, Route, Tally};
 
 /// Result of an attempt to download over the direct transport.
 pub(crate) enum DirectResult {
     /// The file is complete and published at the output path.
     Done(DownloadStats),
     /// Direct transport was not used (or was abandoned before anything was
-    /// published): download this file through the API path.
-    UseApi,
+    /// published): download this file through the API path. `transferred_bytes`:
+    /// the ciphertext the abandoned attempt moved (task 2333, the file's speed).
+    UseApi { transferred_bytes: u64 },
 }
 
 /// Is `BB_TRANSPORT_TRACE` switched on? Set and not an explicit "off" (`0`, `false`, `off`, `no`,
@@ -96,30 +97,159 @@ async fn fetch_from_storage(client: &reqwest::Client, grant: dt::ChunkGrant) -> 
     resp.bytes().await.map_err(|_| 0u16)
 }
 
-/// The partly written output: exists only after the first chunk decrypted.
-struct Output {
-    writer: AtomicFile,
-    progress: Box<dyn FileProgress>,
+/// This file's direct attempt, as the run's sink and the disk see it (task 2333). Its progress handle exists from
+/// the first fetch on; a chunk is in flight from its fetch until it is decrypted or the fetch fails (a fetched chunk
+/// waits for the ones before it: core's window keeps those within `max_in_flight` of the first unconsumed one); the
+/// partly written output exists only after the first chunk decrypted.
+///
+/// Dropped without [`finish`], the attempt is discarded: what is in flight settles, the temp file is removed, the
+/// handle closes as failed, and the bytes it counted are taken back off the run (the file starts over on the API
+/// stream, or fails, and either way they would otherwise be counted twice). So no early return leaves a chunk or a
+/// file open on the sink.
+struct Output<'a> {
+    overall: &'a dyn ChunkProgress,
+    name: &'a str,
+    pool: Option<&'a PoolLabel>,
+    /// The most chunks the planner fetches at once (its config, after core's clamp).
+    limit: u32,
+    file: Option<Box<dyn FileProgress>>,
+    open: BTreeSet<u32>,
+    writer: Option<AtomicFile>,
     plaintext_bytes: u64,
     encrypted_bytes: u64,
+    decrypted: u32,
+    /// Finished or discarded: the drop has nothing left to do.
+    ended: bool,
 }
 
-impl Output {
-    /// Throw the partial output away (temp file removed, progress closed as failed).
-    ///
-    /// The bytes it already reported on the run-wide counter are taken back: the file starts over
-    /// (the API stream) or fails, and either way they would otherwise be counted twice.
-    fn discard(self, overall: &dyn ChunkProgress) {
-        let mut writer = self.writer;
-        writer.abort();
-        self.progress.finish(false);
-        overall.rollback(self.encrypted_bytes);
+impl<'a> Output<'a> {
+    fn new(overall: &'a dyn ChunkProgress, name: &'a str, pool: Option<&'a PoolLabel>, limit: u32) -> Self {
+        Self {
+            overall,
+            name,
+            pool,
+            limit,
+            file: None,
+            open: BTreeSet::new(),
+            writer: None,
+            plaintext_bytes: 0,
+            encrypted_bytes: 0,
+            decrypted: 0,
+            ended: false,
+        }
+    }
+
+    /// The handle, made at the first fetch: the planner knows the version's geometry by then.
+    fn file(&mut self, geometry: Option<dt::Geometry>) -> Option<&dyn FileProgress> {
+        if self.file.is_none() {
+            let g = geometry?;
+            self.overall.set_limit(self.limit);
+            let file = self
+                .overall
+                .begin_file_chunks(self.name, g.encrypted_size, g.chunk_count, g.chunk_size);
+            if let Some(label) = self.pool {
+                file.pool(label.clone());
+            }
+            self.file = Some(file);
+        }
+        self.file.as_deref()
+    }
+
+    /// A fetch of chunk `index` goes out by `route`.
+    fn started(&mut self, geometry: Option<dt::Geometry>, index: u32, route: Route) {
+        self.settled(index);
+        if let Some(file) = self.file(geometry) {
+            file.chunk_started(index, route);
+            self.open.insert(index);
+        }
+    }
+
+    /// Chunk `index` left the wire without being counted: its fetch failed, or its bytes did not authenticate.
+    fn settled(&mut self, index: u32) {
+        if self.open.remove(&index)
+            && let Some(file) = &self.file
+        {
+            file.chunk_settled(index);
+        }
+    }
+
+    /// Chunk `index` is fetched again.
+    fn retried(&self, index: u32) {
+        if let Some(file) = &self.file {
+            file.chunk_retried(index);
+        }
+    }
+
+    /// Chunk `index` decrypted: written, then counted, then out of flight.
+    fn decrypted(
+        &mut self,
+        out_path: &Path,
+        index: u32,
+        frame_len: u64,
+        plaintext: &[u8],
+    ) -> Result<(), DownloadError> {
+        if self.writer.is_none() {
+            self.writer = Some(AtomicFile::create(out_path)?);
+        }
+        if let Some(writer) = self.writer.as_mut() {
+            writer.write_all(plaintext)?;
+        }
+        self.plaintext_bytes += plaintext.len() as u64;
+        self.encrypted_bytes += frame_len;
+        self.decrypted += 1;
+        if let Some(file) = &self.file {
+            file.chunk_done(index, frame_len, Held::Transferred);
+        }
+        self.settled(index);
+        Ok(())
+    }
+
+    /// Throw the attempt away (see the type's docs); returns the ciphertext it moved, for the file's speed.
+    fn discard(mut self) -> u64 {
+        self.end(false);
+        self.encrypted_bytes
+    }
+
+    /// [`discard`](Self::discard), then the API path takes the file.
+    fn use_api(self) -> DirectResult {
+        DirectResult::UseApi {
+            transferred_bytes: self.discard(),
+        }
+    }
+
+    fn end(&mut self, ok: bool) {
+        if std::mem::replace(&mut self.ended, true) {
+            return;
+        }
+        for index in std::mem::take(&mut self.open) {
+            if let Some(file) = &self.file {
+                file.chunk_settled(index);
+            }
+        }
+        if !ok {
+            if let Some(mut writer) = self.writer.take() {
+                writer.abort();
+            }
+            if self.decrypted > 0 {
+                self.overall.rollback_tally(
+                    self.name,
+                    Tally {
+                        bytes: self.encrypted_bytes,
+                        chunks: self.decrypted,
+                        already_stored: 0,
+                    },
+                );
+            }
+        }
+        if let Some(file) = self.file.take() {
+            file.finish(ok);
+        }
     }
 }
 
-fn discard(out: Option<Output>, overall: &dyn ChunkProgress) {
-    if let Some(out) = out {
-        out.discard(overall);
+impl Drop for Output<'_> {
+    fn drop(&mut self) {
+        self.end(false);
     }
 }
 
@@ -139,6 +269,7 @@ pub(crate) async fn try_download(
     out_path: &Path,
     progress: &dyn ChunkProgress,
     display_name: &str,
+    pool: Option<&PoolLabel>,
 ) -> Result<DirectResult, DownloadError> {
     try_download_inner(
         api,
@@ -150,6 +281,7 @@ pub(crate) async fn try_download(
         out_path,
         progress,
         display_name,
+        pool,
     )
     .await
 }
@@ -163,6 +295,7 @@ pub(crate) async fn try_download_with_file_key(
     out_path: &Path,
     progress: &dyn ChunkProgress,
     display_name: &str,
+    pool: Option<&PoolLabel>,
 ) -> Result<DirectResult, DownloadError> {
     let decryptor = ChunkDecryptor::for_push_with_file_key(crate::crypto::key_copy(&file_key), file_id, pin);
     try_download_inner(
@@ -175,6 +308,7 @@ pub(crate) async fn try_download_with_file_key(
         out_path,
         progress,
         display_name,
+        pool,
     )
     .await
 }
@@ -189,18 +323,22 @@ async fn try_download_inner(
     out_path: &Path,
     progress: &dyn ChunkProgress,
     display_name: &str,
+    pool: Option<&PoolLabel>,
 ) -> Result<DirectResult, DownloadError> {
+    let nothing_moved = DirectResult::UseApi { transferred_bytes: 0 };
     let Some(discovery) = api.direct_download_offer().await else {
-        return Ok(DirectResult::UseApi);
+        return Ok(nothing_moved);
     };
     let Some(storage) = api.storage_client() else {
-        return Ok(DirectResult::UseApi);
+        return Ok(nothing_moved);
     };
     let config = dt::PlannerConfig::from_discovery(&discovery, rand::random());
+    // Read before the config moves into the planner, with the planner's own clamp.
+    let limit = config.max_in_flight.clamp(1, dt::window::MAX_IN_FLIGHT) as u32;
     let mut planner = dt::DownloadPlanner::new(config, discovery, api.api_base(), file_id);
     let mut tasks: FuturesUnordered<Task<'_>> = FuturesUnordered::new();
     let mut ready: BTreeMap<u32, Bytes> = BTreeMap::new();
-    let mut out: Option<Output> = None;
+    let mut out = Output::new(progress, display_name, pool, limit);
     let mut geometry_checked = false;
     // Chunks that came through the pinned API route instead of storage.
     let mut api_chunks: u32 = 0;
@@ -217,6 +355,7 @@ async fn try_download_inner(
                     }));
                 }
                 dt::Poll::Fetch { index, grant } => {
+                    out.started(planner.geometry(), index, Route::Direct);
                     tasks.push(Box::pin(async move {
                         Event::Storage {
                             index,
@@ -229,10 +368,10 @@ async fn try_download_inner(
                     object_version_id,
                 } => {
                     let Some(length) = planner.geometry().and_then(|g| g.chunk_length(index)) else {
-                        discard(out, progress);
-                        return Ok(DirectResult::UseApi);
+                        return Ok(out.use_api());
                     };
                     trace(|| format!("chunk {index} via the pinned API route"));
+                    out.started(planner.geometry(), index, Route::Api);
                     tasks.push(Box::pin(async move {
                         Event::Api {
                             index,
@@ -244,15 +383,15 @@ async fn try_download_inner(
                 }
                 dt::Poll::Wait { until_ms } => break until_ms,
                 dt::Poll::Done => {
-                    return finish(decryptor, out, api_chunks > 0, progress);
+                    return finish(decryptor, out, api_chunks > 0);
                 }
                 dt::Poll::Stop(verdict) => {
                     drop(tasks);
-                    discard(out, progress);
+                    let transferred_bytes = out.discard();
                     return match verdict {
                         dt::Verdict::ApiForFile => {
                             trace(|| "falling back to the API for this file".to_string());
-                            Ok(DirectResult::UseApi)
+                            Ok(DirectResult::UseApi { transferred_bytes })
                         }
                         dt::Verdict::Restart => Err(changed()),
                         dt::Verdict::Terminal(t) => Err(terminal_message(&t).into()),
@@ -277,8 +416,7 @@ async fn try_download_inner(
                     // Nothing outstanding and nothing scheduled: the planner is stuck.
                     // Never hang a download on that; the API path is always correct.
                     trace(|| "planner stalled; falling back to the API".to_string());
-                    discard(out, progress);
-                    return Ok(DirectResult::UseApi);
+                    return Ok(out.use_api());
                 }
             }
         } else if let Some(at) = wake {
@@ -303,8 +441,7 @@ async fn try_download_inner(
                             // The manifest and the file's metadata disagree: let the
                             // API path, which has its own checks, serve this file.
                             trace(|| "manifest chunk count differs from the metadata".to_string());
-                            discard(out, progress);
-                            return Ok(DirectResult::UseApi);
+                            return Ok(out.use_api());
                         }
                     }
                 }
@@ -322,17 +459,17 @@ async fn try_download_inner(
                 Ok(bytes) => {
                     if let Err(e) = planner.fetch_ok(index) {
                         trace(|| format!("planner error: {e}"));
-                        discard(out, progress);
-                        return Ok(DirectResult::UseApi);
+                        return Ok(out.use_api());
                     }
                     ready.insert(index, bytes);
                 }
                 Err(status) => {
                     trace(|| format!("chunk {index} from storage failed (status {status})"));
+                    out.settled(index);
+                    out.retried(index);
                     if let Err(e) = planner.fetch_failed(index, now) {
                         trace(|| format!("planner error: {e}"));
-                        discard(out, progress);
-                        return Ok(DirectResult::UseApi);
+                        return Ok(out.use_api());
                     }
                 }
             },
@@ -340,28 +477,27 @@ async fn try_download_inner(
                 Ok(bytes) => {
                     if let Err(e) = planner.fetch_ok(index) {
                         trace(|| format!("planner error: {e}"));
-                        discard(out, progress);
-                        return Ok(DirectResult::UseApi);
+                        return Ok(out.use_api());
                     }
                     api_chunks += 1;
                     ready.insert(index, Bytes::from(bytes));
                 }
                 Err(ChunkApiError::Restart) => {
-                    discard(out, progress);
+                    out.discard();
                     return Err(changed());
                 }
                 Err(ChunkApiError::Terminal(message)) => {
-                    discard(out, progress);
+                    out.discard();
                     return Err(message.into());
                 }
                 // The pinned route failed after its own retries: nothing per chunk is left to
                 // try. The planner ends the file and the API stream takes it from the start.
                 Err(ChunkApiError::Failed(message)) => {
                     trace(|| format!("chunk {index} through the pinned API route failed: {message}"));
+                    out.settled(index);
                     if let Err(e) = planner.api_fetch_failed(index) {
                         trace(|| format!("planner error: {e}"));
-                        discard(out, progress);
-                        return Ok(DirectResult::UseApi);
+                        return Ok(out.use_api());
                     }
                 }
             },
@@ -371,31 +507,18 @@ async fn try_download_inner(
         loop {
             let next = planner.consumed_count();
             let Some(frame) = ready.remove(&next) else { break };
-            let Some(geometry) = planner.geometry() else { break };
-            if out.is_none() {
-                let writer = AtomicFile::create(out_path)?;
-                out = Some(Output {
-                    writer,
-                    progress: progress.begin_file(display_name, geometry.encrypted_size),
-                    plaintext_bytes: 0,
-                    encrypted_bytes: 0,
-                });
+            if planner.geometry().is_none() {
+                break;
             }
             match decryptor.push_frame(&frame) {
                 Ok(chunk) => {
-                    if let Some(o) = out.as_mut() {
-                        if let Err(e) = o.writer.write_all(&chunk.data) {
-                            discard(out, progress);
-                            return Err(e);
-                        }
-                        o.plaintext_bytes += chunk.data.len() as u64;
-                        o.encrypted_bytes += frame.len() as u64;
-                        o.progress.chunk_confirmed(frame.len() as u64);
+                    if let Err(e) = out.decrypted(out_path, next, frame.len() as u64, &chunk.data) {
+                        out.discard();
+                        return Err(e);
                     }
                     if let Err(e) = planner.consumed(next) {
                         trace(|| format!("planner error: {e}"));
-                        discard(out, progress);
-                        return Ok(DirectResult::UseApi);
+                        return Ok(out.use_api());
                     }
                 }
                 Err(_) if allow_legacy && next == 0 && pin != ExpectedChunkFormat::V2 => {
@@ -406,15 +529,16 @@ async fn try_download_inner(
                     // A V2 pin has no legacy form (its reader tries only the string-UUID key), so a
                     // frame 0 that fails there IS corrupt or tampered, not a legacy file.
                     trace(|| "chunk 0 did not authenticate; the API path's legacy readers take this file".to_string());
-                    discard(out, progress);
-                    return Ok(DirectResult::UseApi);
+                    return Ok(out.use_api());
                 }
                 Err(_) => {
                     trace(|| format!("chunk {next} did not authenticate"));
+                    // Its bytes are thrown away; the planner fetches it again through the API route.
+                    out.settled(next);
+                    out.retried(next);
                     if let Err(e) = planner.chunk_unauthentic(next) {
                         trace(|| format!("planner error: {e}"));
-                        discard(out, progress);
-                        return Ok(DirectResult::UseApi);
+                        return Ok(out.use_api());
                     }
                     break;
                 }
@@ -425,39 +549,28 @@ async fn try_download_inner(
 
 /// Every chunk is written: the stream must end on the frame that authenticated
 /// as last (truncation, task 1908), then the temp file is published.
-fn finish(
-    decryptor: ChunkDecryptor,
-    out: Option<Output>,
-    mixed: bool,
-    overall: &dyn ChunkProgress,
-) -> Result<DirectResult, DownloadError> {
-    let Some(out) = out else {
+fn finish(decryptor: ChunkDecryptor, mut out: Output<'_>, mixed: bool) -> Result<DirectResult, DownloadError> {
+    let Some(writer) = out.writer.take() else {
         // Done with nothing written cannot happen (every file has a chunk).
-        return Ok(DirectResult::UseApi);
+        return Ok(out.use_api());
     };
     if let Err(e) = decryptor.finish() {
-        out.discard(overall);
+        out.writer = Some(writer);
+        out.discard();
         // The stream ended before the frame marked last: the remote copy is cut short or was
         // tampered with. Like a chunk that does not authenticate, this client cannot read it now.
         return Err(DownloadError::Unreadable(format!("download incomplete: {e}")));
     }
-    let Output {
-        writer,
-        progress,
-        plaintext_bytes,
-        encrypted_bytes,
-    } = out;
-    if let Err(e) = writer.commit() {
-        progress.finish(false);
-        return Err(e);
-    }
-    progress.finish(true);
+    // A failed commit leaves nothing published; dropping `out` closes the file as failed.
+    writer.commit()?;
+    out.end(true);
     Ok(DirectResult::Done(DownloadStats {
-        plaintext_bytes,
-        encrypted_bytes,
+        plaintext_bytes: out.plaintext_bytes,
+        encrypted_bytes: out.encrypted_bytes,
         // "mixed": some chunks came through the pinned API route (a link storage would
         // not serve, a window the server could not give); the file is still one version.
         transport: if mixed { "mixed" } else { "direct" },
+        transferred_bytes: out.encrypted_bytes,
     }))
 }
 
@@ -523,20 +636,24 @@ mod tests {
         let overall = Overall {
             rolled_back: rolled_back.clone(),
         };
-        let writer = AtomicFile::create(&out).unwrap();
-        let partial = Output {
-            writer,
-            progress: Box::new(OneFile),
-            plaintext_bytes: 1000,
-            encrypted_bytes: 1028,
-        };
-        discard(Some(partial), &overall);
+        let partial = partial(&overall, &out, 1000, 1028);
+        assert_eq!(partial.discard(), 1028, "the bytes the attempt moved");
         assert_eq!(rolled_back.load(Ordering::SeqCst), 1028, "what the file had counted");
         assert!(!out.exists(), "nothing was published");
         // No partial output, nothing to take back.
-        discard(None, &overall);
+        Output::new(&overall, "out.bin", None, 4).discard();
         assert_eq!(rolled_back.load(Ordering::SeqCst), 1028);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An attempt that wrote `plaintext` bytes from `encrypted` bytes of decrypted chunks into `path`.
+    fn partial<'a>(overall: &'a dyn ChunkProgress, path: &Path, plaintext: u64, encrypted: u64) -> Output<'a> {
+        let mut out = Output::new(overall, "out.bin", None, 4);
+        out.writer = Some(AtomicFile::create(path).unwrap());
+        out.plaintext_bytes = plaintext;
+        out.encrypted_bytes = encrypted;
+        out.decrypted = 1;
+        out
     }
 
     fn unhex(h: &str) -> Vec<u8> {
@@ -568,13 +685,8 @@ mod tests {
         let overall = Overall {
             rolled_back: rolled_back.clone(),
         };
-        let partial = Output {
-            writer: AtomicFile::create(&out_path).unwrap(),
-            progress: Box::new(OneFile),
-            plaintext_bytes: 3,
-            encrypted_bytes: 3 * stride as u64,
-        };
-        match finish(decryptor, Some(partial), false, &overall) {
+        let partial = partial(&overall, &out_path, 3, 3 * stride as u64);
+        match finish(decryptor, partial, false) {
             Err(DownloadError::Unreadable(message)) => assert!(message.contains("download incomplete"), "{message}"),
             Err(other) => panic!("expected Unreadable, got {other:?}"),
             Ok(_) => panic!("a file without its last frame was published"),

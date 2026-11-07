@@ -3,6 +3,11 @@
 use super::*;
 use beebeeb_core::download::MAX_FRAME_SIZE;
 
+use crate::upload::{Held, InFlight, Route};
+
+/// The API stream reads one frame at a time, in order: the most chunks it has in flight (spec §1.3, task 2333).
+const API_STREAM_IN_FLIGHT: u32 = 1;
+
 /// Download a file's raw encrypted body into memory together with the server's
 /// `X-Chunk-Size` (the uniform plaintext chunk size, V2 files), for callers that
 /// must decrypt with a key the streaming path does not know (file-request
@@ -114,6 +119,7 @@ pub async fn stream_download_decrypt(
     out_path: &Path,
     progress: &dyn ChunkProgress,
     display_name: &str,
+    pool: Option<&PoolLabel>,
 ) -> Result<DownloadStats, DownloadError> {
     stream_download_decrypt_with(
         api,
@@ -124,6 +130,7 @@ pub async fn stream_download_decrypt(
         out_path,
         progress,
         display_name,
+        pool,
         FALLBACK_HARD_CEILING,
     )
     .await
@@ -139,6 +146,7 @@ pub async fn stream_download_decrypt_with_file_key(
     out_path: &Path,
     progress: &dyn ChunkProgress,
     display_name: &str,
+    pool: Option<&PoolLabel>,
 ) -> Result<DownloadStats, DownloadError> {
     stream_download_key(
         api,
@@ -149,6 +157,7 @@ pub async fn stream_download_decrypt_with_file_key(
         out_path,
         progress,
         display_name,
+        pool,
         FALLBACK_HARD_CEILING,
     )
     .await
@@ -193,6 +202,7 @@ pub(super) async fn stream_download_decrypt_with(
     out_path: &Path,
     progress: &dyn ChunkProgress,
     display_name: &str,
+    pool: Option<&PoolLabel>,
     ceiling: u64,
 ) -> Result<DownloadStats, DownloadError> {
     stream_download_key(
@@ -204,6 +214,7 @@ pub(super) async fn stream_download_decrypt_with(
         out_path,
         progress,
         display_name,
+        pool,
         ceiling,
     )
     .await
@@ -219,6 +230,7 @@ pub(super) async fn stream_download_key(
     out_path: &Path,
     progress: &dyn ChunkProgress,
     display_name: &str,
+    pool: Option<&PoolLabel>,
     ceiling: u64,
 ) -> Result<DownloadStats, DownloadError> {
     let count = chunk_count.max(1);
@@ -237,6 +249,7 @@ pub(super) async fn stream_download_key(
                 out_path,
                 progress,
                 display_name,
+                pool,
             )
             .await?
         }
@@ -250,14 +263,16 @@ pub(super) async fn stream_download_key(
                 out_path,
                 progress,
                 display_name,
+                pool,
             )
             .await?
         }
     };
-    match direct {
+    let moved_direct = match direct {
         crate::direct_download::DirectResult::Done(stats) => return Ok(stats),
-        crate::direct_download::DirectResult::UseApi => {}
-    }
+        crate::direct_download::DirectResult::UseApi { transferred_bytes } => transferred_bytes,
+    };
+    progress.set_limit(API_STREAM_IN_FLIGHT);
 
     let mut resp = api.download_stream(file_id).await?;
     let content_len = resp.content_length();
@@ -294,7 +309,10 @@ pub(super) async fn stream_download_key(
         return Err("download returned an empty body".to_string().into());
     }
 
-    let prog = progress.begin_file(display_name, total);
+    let prog = progress.begin_file_chunks(display_name, total, count, chunk_size.unwrap_or(0));
+    if let Some(label) = pool {
+        prog.pool(label.clone());
+    }
 
     let result = stream_raw(
         &mut resp,
@@ -315,7 +333,11 @@ pub(super) async fn stream_download_key(
         Ok(_) => prog.finish(true),
         Err(_) => prog.finish(false),
     }
-    result
+    // A direct attempt that fell back moved its chunks too: the file's speed counts them (spec §4.3).
+    result.map(|stats| DownloadStats {
+        transferred_bytes: stats.transferred_bytes + moved_direct,
+        ..stats
+    })
 }
 
 /// Stream the modern raw format. On a first-frame key failure (binary-UUID
@@ -369,6 +391,8 @@ pub(super) async fn stream_raw(
 
     for i in 0..n {
         let is_last = i == n - 1;
+        // In flight from the moment its read begins until it is counted, fails or the download ends.
+        let _flight = InFlight::start(prog, i as u32, Route::Api);
         let frame: Vec<u8> = if is_last || frame_size == usize::MAX {
             drain_rest(resp, &mut carry, fb_cap).await?;
             std::mem::take(&mut carry)
@@ -399,7 +423,7 @@ pub(super) async fn stream_raw(
                 writer.write_all(&dec.data)?;
                 plaintext_bytes += dec.data.len() as u64;
                 encrypted_bytes += frame.len() as u64;
-                prog.chunk_confirmed(frame.len() as u64);
+                prog.chunk_done(i as u32, frame.len() as u64, Held::Transferred);
             }
             Err(_) if i == 0 => {
                 // First frame failed to authenticate: a JSON-blob file, a
@@ -435,6 +459,7 @@ pub(super) async fn stream_raw(
         plaintext_bytes,
         encrypted_bytes,
         transport: "api",
+        transferred_bytes: encrypted_bytes,
     })
 }
 
@@ -457,11 +482,12 @@ pub(super) fn buffered_fallback(
     let mut writer = AtomicFile::create(out_path)?;
     writer.write_all(&plaintext)?;
     writer.commit()?;
-    prog.chunk_confirmed(encrypted.len() as u64);
+    prog.body_done(count, encrypted.len() as u64, Route::Api);
     Ok(DownloadStats {
         plaintext_bytes: plaintext.len() as u64,
         encrypted_bytes: encrypted.len() as u64,
         transport: "api",
+        transferred_bytes: encrypted.len() as u64,
     })
 }
 

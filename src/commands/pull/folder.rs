@@ -8,18 +8,31 @@
 //! (see `pull::zip`).
 
 use super::*;
+use crate::transfer_stats::FileEnd;
+use crate::upload::{ChunkProgress, InFlight, Route, Stream};
 
 pub(super) async fn pull_folder(
     api: &ApiClient,
     folder_id: &str,
     out_dir: &std::path::Path,
     force: bool,
+    verbose: bool,
 ) -> Result<(), String> {
     // A single resolver, shared across the whole folder tree, so request-uploaded
     // files only trigger one `GET /file-requests` and each R_priv is unwrapped once.
     let mut request_keys: Option<crate::commands::request::RequestKeyResolver> = None;
     let mut keys = crate::owned_keys::OwnedKeyResolver::new();
-    let skipped = pull_folder_inner(api, folder_id, out_dir, force, &mut request_keys, &mut keys).await?;
+    let mut run = report::FolderRun {
+        progress: report::start(verbose),
+        pulled_bytes: 0,
+    };
+    let skipped = pull_folder_inner(api, folder_id, out_dir, force, &mut request_keys, &mut keys, &mut run).await?;
+    // The walk is over: every file is planned (spec §4.2).
+    run.progress.seal_plan();
+    let transfer = run.progress.summary();
+    if crate::ui::is_rich() {
+        report::print_summary(&transfer, skipped as u32, run.pulled_bytes, verbose);
+    }
     if skipped > 0 {
         // Everything safe was pulled; the run is not a clean success, though.
         return Err(crate::exit::with_code(
@@ -31,8 +44,12 @@ pub(super) async fn pull_folder(
 }
 
 /// Warn (stderr, always) that an item was skipped instead of written.
+/// A skipped item, on stderr, around any live lines (task 2333); `!` in the error colour, never amber.
 pub(super) fn warn_skipped(what: &str) {
-    eprintln!("  {} skipped {what}", "!".custom_color(crate::colors::AMBER));
+    crate::transfer_view::notice::stderr(&format!(
+        "  {} skipped {what}",
+        "!".custom_color(crate::colors::RED_ERR)
+    ));
 }
 
 /// Pull one folder level into `out_dir`. Returns how many items were skipped
@@ -44,6 +61,7 @@ pub(super) async fn pull_folder_inner(
     force: bool,
     request_keys: &mut Option<crate::commands::request::RequestKeyResolver>,
     keys: &mut crate::owned_keys::OwnedKeyResolver,
+    run: &mut report::FolderRun,
 ) -> Result<usize, String> {
     let master_key = load_master_key()?;
 
@@ -55,11 +73,14 @@ pub(super) async fn pull_folder_inner(
         .and_then(|v| v.as_array())
         .ok_or("invalid file listing response")?;
 
-    println!(
-        "  {} {} ({})",
-        "pulling".custom_color(crate::colors::GREEN_OK),
-        out_dir.display().to_string().custom_color(crate::colors::INK),
-        format!("{} items", files.len()).custom_color(crate::colors::INK_DIM),
+    run.progress.note(
+        &format!(
+            "  {} {} ({})",
+            "pulling".custom_color(crate::colors::GREEN_OK),
+            out_dir.display().to_string().custom_color(crate::colors::INK),
+            crate::transfer_view::line::count(files.len() as u32, "item", "items").custom_color(crate::colors::INK_DIM),
+        ),
+        Stream::Stdout,
     );
 
     let mut skipped = 0usize;
@@ -100,7 +121,7 @@ pub(super) async fn pull_folder_inner(
         };
 
         if is_subfolder {
-            skipped += Box::pin(pull_folder_inner(api, item_id, &target, force, request_keys, keys)).await?;
+            skipped += Box::pin(pull_folder_inner(api, item_id, &target, force, request_keys, keys, run)).await?;
         } else {
             // A request upload's name is attacker-chosen, so it must not silently
             // replace a local file of the same name (same rule as a single-file
@@ -130,16 +151,19 @@ pub(super) async fn pull_folder_inner(
                 content_key.as_ref(),
                 resolved.name_key.as_deref(),
                 explicit_key.clone(),
+                run,
             )
             .await
             {
                 Ok(()) => {}
                 Err(PullError::Changed(_)) => {
-                    eprintln!(
+                    // Nothing of it was kept: its share leaves the plan, and the next read plans it again.
+                    run.progress.end_file(FileEnd::NotSent);
+                    crate::transfer_view::notice::stderr(&format!(
                         "  {} {}: changed while it downloaded; reading it again",
-                        "!".custom_color(crate::colors::AMBER),
+                        "!".custom_color(crate::colors::RED_ERR),
                         target.display()
-                    );
+                    ));
                     pull_single_file(
                         api,
                         item_id,
@@ -147,6 +171,7 @@ pub(super) async fn pull_folder_inner(
                         content_key.as_ref(),
                         resolved.name_key.as_deref(),
                         explicit_key.clone(),
+                        run,
                     )
                     .await
                     .map_err(|e| format!("{}: {}", target.display(), String::from(e)))?;
@@ -169,6 +194,7 @@ pub(super) async fn pull_single_file(
     request_content_key: Option<&beebeeb_core::kdf::FileKey>,
     name_key: Option<&beebeeb_core::kdf::FileKey>,
     explicit_key: Option<std::sync::Arc<beebeeb_core::kdf::FileKey>>,
+    run: &mut report::FolderRun,
 ) -> Result<(), PullError> {
     let master_key = load_master_key()?;
 
@@ -191,45 +217,52 @@ pub(super) async fn pull_single_file(
         .unwrap_or("file")
         .to_string();
 
+    // The walk reached this file: it joins the run's plan now (spec §4.2), with its storage country.
+    let plan = report::FilePlan::of_row(&file_meta);
+    plan.add_next(&run.progress);
+    let pool = report::pool_of(&file_meta);
+    let progress = &run.progress;
+
     // File-request uploads are sealed under a per-file content key C, which the
     // streaming path (master-derived key) can't decrypt — use the buffered
     // request-key path and return early.
     if let Some(c) = request_content_key {
+        progress.set_limit(1);
+        let file = progress.begin_file_chunks(&name, plan.bytes, plan.chunks, 0);
+        if let Some(label) = &pool {
+            file.pool(label.clone());
+        }
+        let flight = InFlight::start(file.as_ref(), 0, Route::Api);
         let dl_start = std::time::Instant::now();
         let encrypted_bytes = api.download_file(file_id).await?;
         let dl_elapsed = dl_start.elapsed();
         let plaintext = crate::crypto::try_decrypt_all_chunks(c, file_id, pin, &encrypted_bytes, chunk_count)?;
+        // The body counts once it decrypted (spec §4.3): all its chunks at once.
+        file.body_done(chunk_count.max(1), encrypted_bytes.len() as u64, Route::Api);
+        drop(flight);
 
         if let Some(parent) = out_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("failed to create dir: {e}"))?;
         }
         std::fs::write(out_path, &plaintext).map_err(|e| format!("failed to write: {e}"))?;
+        file.finish(true);
+        run.pulled_bytes += plaintext.len() as u64;
 
         if crate::ui::is_quiet() {
-            println!("{}", out_path.display());
+            progress.note(&out_path.display().to_string(), Stream::Stdout);
         } else if crate::ui::is_rich() {
-            let dl_speed = if dl_elapsed.as_secs_f64() > 0.0 {
-                encrypted_bytes.len() as f64 / dl_elapsed.as_secs_f64()
-            } else {
-                0.0
-            };
-            println!(
-                "    {} {}  {}  {}",
-                "\u{2713}".custom_color(crate::colors::GREEN_OK),
-                name.custom_color(crate::colors::INK),
-                crate::ui::human_size(plaintext.len() as u64).custom_color(crate::colors::INK_DIM),
-                crate::ui::human_speed(dl_speed).custom_color(crate::colors::GREEN_OK)
-            );
-            println!(
-                "      {}",
-                format!("{}ms · request", dl_elapsed.as_millis()).custom_color(crate::colors::INK_DIM)
+            let ms = dl_elapsed.as_millis() as u64;
+            report::print_file(
+                progress,
+                "    ",
+                (&name, plaintext.len() as u64, encrypted_bytes.len() as u64, ms),
+                &report::time_text(ms, "request"),
             );
         }
         return Ok(());
     }
 
-    // Streaming, constant-memory decrypt. Folder pulls print a per-file line, so
-    // use a no-op progress sink (no nested bars).
+    // Streaming, constant-memory decrypt, counted on the folder's one sink.
     let start = std::time::Instant::now();
     let stats = if let Some(key) = explicit_key {
         crate::download::stream_download_decrypt_with_file_key(
@@ -239,8 +272,9 @@ pub(super) async fn pull_single_file(
             pin,
             chunk_count,
             out_path,
-            &crate::upload::NoopProgress,
+            progress,
             &name,
+            pool.as_ref(),
         )
         .await?
     } else {
@@ -251,35 +285,26 @@ pub(super) async fn pull_single_file(
             pin,
             chunk_count,
             out_path,
-            &crate::upload::NoopProgress,
+            progress,
             &name,
+            pool.as_ref(),
         )
         .await?
     };
 
-    let elapsed = start.elapsed();
+    let ms = start.elapsed().as_millis() as u64;
+    run.pulled_bytes += stats.plaintext_bytes;
 
     if crate::ui::is_quiet() {
-        println!("{}", out_path.display());
+        run.progress.note(&out_path.display().to_string(), Stream::Stdout);
     } else if crate::ui::is_rich() {
-        let dl_speed = if elapsed.as_secs_f64() > 0.0 {
-            stats.encrypted_bytes as f64 / elapsed.as_secs_f64()
-        } else {
-            0.0
-        };
-        println!(
-            "    {} {}  {}  {}",
-            "\u{2713}".custom_color(crate::colors::GREEN_OK),
-            name.custom_color(crate::colors::INK),
-            crate::ui::human_size(stats.plaintext_bytes).custom_color(crate::colors::INK_DIM),
-            crate::ui::human_speed(dl_speed).custom_color(crate::colors::GREEN_OK)
-        );
-        println!(
-            "      {}",
-            format!("{}ms · streamed", elapsed.as_millis()).custom_color(crate::colors::INK_DIM)
+        report::print_file(
+            &run.progress,
+            "    ",
+            (&name, stats.plaintext_bytes, stats.transferred_bytes, ms),
+            &report::time_text(ms, "streamed"),
         );
     }
     // In JSON mode, the folder pull prints nothing per-file — the caller handles output.
-
     Ok(())
 }

@@ -296,7 +296,7 @@ pub(super) async fn refresh_watch_reads(
             continue;
         }
         if changed || !local.contains_key(rel) && prior.is_none() {
-            if let Err(e) = do_download(api, master, root, rel, r, state, false).await {
+            if let Err(e) = do_download(api, master, root, rel, r, state, false, None).await {
                 print_notice(&format!("{rel}: {e}"));
             }
         }

@@ -41,7 +41,7 @@ use beebeeb_core::chunk_stream::{ChunkDecryptor, ExpectedChunkFormat, MAX_CHUNK_
 use beebeeb_core::kdf::MasterKey;
 
 use crate::api::ApiClient;
-use crate::upload::ChunkProgress;
+use crate::upload::{ChunkProgress, PoolLabel};
 
 #[cfg(test)]
 mod tests {
@@ -182,6 +182,7 @@ mod tests {
             &out,
             &Counting(confirmed.clone()),
             "out.bin",
+            None,
             ceiling,
         )
         .await;
@@ -427,6 +428,7 @@ mod tests {
             &out,
             &Counting(confirmed),
             "out.bin",
+            None,
             ceiling,
         )
         .await;
@@ -830,6 +832,7 @@ mod tests {
                 &out,
                 &Counting(Arc::new(AtomicUsize::new(0))),
                 "out.bin",
+                None,
             ),
         )
         .await;
@@ -861,3 +864,6 @@ use stream::{json_chunk0_probe_len, stream_download_decrypt_with};
 
 mod atomic;
 pub(crate) use atomic::AtomicFile;
+
+#[cfg(test)]
+mod live_stats_tests;

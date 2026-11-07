@@ -68,3 +68,7 @@ mod conflict_policy_tests;
 #[cfg(test)]
 #[path = "sync/tests/a9b_request_edit_tests.rs"]
 mod a9b_request_edit_tests;
+
+#[cfg(test)]
+#[path = "sync/tests/live_stats_tests.rs"]
+mod live_stats_tests;

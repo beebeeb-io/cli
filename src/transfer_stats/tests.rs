@@ -149,7 +149,7 @@ fn eta_needs_three_seconds_of_window() {
 
 #[test]
 fn eta_hidden_until_the_plan_is_final() {
-    let mut t = TransferStats::new(Direction::Upload, 0);
+    let mut t = TransferStats::new(Direction::Download, 0);
     t.plan_file(10 * MB, 10);
     let f = t.begin_file("a", 10 * MB, 10, MB);
     chunk(&mut t, f, 0, MB, 0, 3000);
@@ -595,6 +595,28 @@ fn a_file_that_ends_unsent_or_failed_settles_its_share() {
         "the failed file keeps its share"
     );
     assert_eq!(t.given_up_bytes, 200, "what it did not send is given up");
+}
+
+/// A buffered body's length is known only once it arrived (a legacy file's JSON chunks are longer than the file row
+/// says): the file's share of the plan follows it, as `begin_file` follows what a driver read, so done never passes
+/// total (I1).
+#[test]
+fn a_buffered_body_longer_than_its_plan_grows_the_plan() {
+    let mut t = TransferStats::new(Direction::Download, 0);
+    t.plan_file(10 * MB, 2);
+    t.plan_file(5 * MB, 1);
+    t.seal_plan();
+    t.next_file(10 * MB, 2);
+    let f = t.begin_file("legacy.bin", 10 * MB, 2, 0);
+    t.body_done(f, 2, 12 * MB, Route::Api, 1000);
+    let s = t.snapshot(1000);
+    assert_eq!((s.bytes_done, s.bytes_total), (12 * MB, 17 * MB));
+    assert_eq!((s.chunks_done, s.chunks_total), (2, 3));
+    // A body no longer than the plan leaves it alone.
+    t.next_file(5 * MB, 1);
+    let g = t.begin_file("b.bin", 5 * MB, 1, 0);
+    t.body_done(g, 1, 4 * MB, Route::Api, 2000);
+    assert_eq!(t.snapshot(2000).bytes_total, 17 * MB);
 }
 
 /// `--parallel` (spec §7): two files in flight at once, each under its own key. Each begins at the size the driver

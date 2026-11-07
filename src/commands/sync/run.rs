@@ -1,6 +1,7 @@
 //! The sync pass itself: the control modes, the one-shot run and the watch handoff.
 
 use super::*;
+use crate::upload::ChunkProgress;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -18,6 +19,7 @@ pub async fn run(
         allow_mass_delete,
         rebind,
         concurrency,
+        verbose,
     } = options;
     // ── --status / --stop-session / --stop-all: session control ────────────
     match &command {
@@ -699,21 +701,30 @@ pub async fn run(
     // ── Phase 3: parallel streaming uploads ────────────────────────────────
     let pending_count = pending_uploads.len();
     let mut interrupted_count = 0u32;
+    let upload_summary;
     {
         use futures_util::stream::{self, StreamExt};
 
-        // Rich + TTY → byte-accurate bars (one overall + transient per-file).
-        // Otherwise a no-op sink, and the plain per-file lines below stay.
-        let show_bars = scan_active && !dry_run && pending_count > 0;
-        let progress: Box<dyn crate::upload::ChunkProgress> = if show_bars {
-            let total_expected: u64 = pending_uploads
-                .iter()
-                .map(|(_, l, _)| crate::upload::expected_ciphertext_for(l.size, concurrency as u32))
-                .sum();
-            Box::new(crate::upload::BarProgress::new(pending_count as u64, total_expected))
-        } else {
-            Box::new(crate::upload::NoopProgress)
-        };
+        // Task 2333: live lines on a terminal (spec §6.1). Each file is planned as the driver will send it (its
+        // resume record's chunk size, else `--concurrency`'s); one chunk at a time per file, `--concurrency` files.
+        let progress = transfer_sink(
+            crate::transfer_stats::Direction::Upload,
+            !dry_run && pending_count > 0,
+            verbose,
+        );
+        for (rel, local, _) in pending_uploads.iter().filter(|_| !dry_run) {
+            let pending = crate::resume::resumable_upload_now(&local_dir.join(rel));
+            let c = concurrency as u32;
+            let chunk_size = crate::upload::planned_chunk_size(local.size, c, c, pending.as_ref());
+            let (bytes, chunks) = crate::upload::expected_at_chunk_size(local.size, chunk_size);
+            progress.plan_file(bytes, chunks);
+        }
+        progress.seal_plan();
+        // `--concurrency` files at once, each one chunk at a time: the driver sets a file's limit, the sink scales it.
+        progress.set_files_at_once(concurrency as u32);
+        progress.set_limit(crate::upload::CHUNKS_IN_FLIGHT_PER_FILE);
+        // The live lines show each file; the plain `↑` lines are for a run without them.
+        let show_bars = scan_active && progress.draws_live();
 
         let upload_results: Vec<Result<(String, FileEntry, u64), String>> =
             stream::iter(pending_uploads.into_iter().map(|(rel, local, replace_id)| {
@@ -722,7 +733,7 @@ pub async fn run(
                 let local_dir = &local_dir;
                 let remote_folders = &remote_folders;
                 let resolved = remote_files.get(&rel).and_then(|r| r.resolved.clone());
-                let progress = progress.as_ref();
+                let progress = &progress;
                 let shutdown = Arc::clone(&shutdown);
                 async move {
                     if shutdown.load(Ordering::Relaxed) {
@@ -732,11 +743,14 @@ pub async fn run(
                     // Plain status line only when bars are not showing them.
                     if !show_bars && !ui::is_json() && !ui::is_quiet() {
                         let size_str = format_size(local.size);
-                        println!(
-                            "  {} {} {}",
-                            "\u{2191}".custom_color(crate::colors::GREEN_OK),
-                            rel.custom_color(crate::colors::INK),
-                            format!("({size_str})").custom_color(crate::colors::INK_DIM),
+                        progress.note(
+                            &format!(
+                                "  {} {} {}",
+                                "\u{2191}".custom_color(crate::colors::GREEN_OK),
+                                rel.custom_color(crate::colors::INK),
+                                format!("({size_str})").custom_color(crate::colors::INK_DIM),
+                            ),
+                            crate::upload::Stream::Stdout,
                         );
                     }
 
@@ -854,8 +868,8 @@ pub async fn run(
             .collect()
             .await;
 
-        // Clear the bars before printing the summary / any errors.
-        progress.finish_all();
+        // The live lines go (the ticker stops) before the summary, any error or the interrupted line prints.
+        upload_summary = progress.summary();
 
         for result in upload_results {
             match result {
@@ -911,8 +925,20 @@ pub async fn run(
     }
 
     // ── Phase 4: sequential downloads ──────────────────────────────────────
+    // Task 2333: a second run model, drawn after the upload phase's lines cleared (spec §8).
+    let downloads = transfer_sink(
+        crate::transfer_stats::Direction::Download,
+        !dry_run && !pending_downloads.is_empty(),
+        verbose,
+    );
+    for (_, remote) in pending_downloads.iter().filter(|_| !dry_run) {
+        let (bytes, chunks) = download_plan(remote);
+        downloads.plan_file(bytes, chunks);
+    }
+    downloads.seal_plan();
     for (rel, remote) in &pending_downloads {
-        match do_download(&api, &master_key, &local_dir, rel, remote, &mut state, dry_run).await? {
+        let sink = Some(&downloads);
+        match do_download(&api, &master_key, &local_dir, rel, remote, &mut state, dry_run, sink).await? {
             DownloadOutcome::Downloaded => down_count += 1,
             // Still uploading elsewhere (or unsafe destination); nothing written.
             DownloadOutcome::Deferred => skipped += 1,
@@ -920,6 +946,8 @@ pub async fn run(
             DownloadOutcome::Unreadable => failed += 1,
         }
     }
+
+    let download_summary = downloads.summary();
 
     // ── Phase 5: sequential deletes ────────────────────────────────────────
     for (rel, remote) in &pending_deletes {
@@ -1045,6 +1073,9 @@ pub async fn run(
         dry_run,
         will_enter_watch,
         delete_refused,
+        upload: upload_summary,
+        download: download_summary,
+        verbose,
     })?;
 
     // ── Continuous watch mode ───────────────────────────────────────────────

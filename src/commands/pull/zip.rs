@@ -14,7 +14,10 @@ use std::path::PathBuf;
 use crate::api::ApiClient;
 use crate::commands::push::load_master_key;
 
-use super::{guard_existing_output, resolve_request_key, warn_skipped};
+use super::{guard_existing_output, report, resolve_request_key, warn_skipped};
+use crate::transfer_stats::FileEnd;
+use crate::transfer_view::units::duration;
+use crate::upload::{ChunkProgress, InFlight, Route, Stream};
 
 /// How deep `--zip` follows folders. A real vault is a few levels deep; a
 /// server that nests folders without end (or lists a folder inside itself) must
@@ -37,6 +40,7 @@ pub(super) async fn run_zip(
     path_arg: &str,
     output: Option<PathBuf>,
     force: bool,
+    verbose: bool,
 ) -> Result<(), String> {
     let master_key = load_master_key()?;
 
@@ -80,15 +84,29 @@ pub(super) async fn run_zip(
 
     let total_size: u64 = items.iter().map(|e| e.entry.size_bytes).sum();
 
+    // The run's sink (task 2333): every item planned up front, so the bar, the percent and the ETA hold.
+    let progress = report::start(verbose);
+    let plans: Vec<report::FilePlan> = items
+        .iter()
+        .map(|item| report::FilePlan::of_size(item.entry.size_bytes, item.entry.chunk_count))
+        .collect();
+    for plan in &plans {
+        progress.plan_file(plan.bytes, plan.chunks);
+    }
+    progress.seal_plan();
+
     // Summary line
     if crate::ui::is_rich() {
-        println!(
-            "  {} {} ({} {} {})",
-            "\u{2193}".custom_color(crate::colors::GREEN_OK),
-            format!("Downloading {}", folder_name).custom_color(crate::colors::INK),
-            format!("{} files", items.len()).custom_color(crate::colors::INK_DIM),
-            "\u{00b7}".custom_color(crate::colors::INK_DIM),
-            crate::ui::human_size(total_size).custom_color(crate::colors::INK_DIM),
+        progress.note(
+            &format!(
+                "  {} {} ({} {} {})",
+                "\u{2193}".custom_color(crate::colors::GREEN_OK),
+                format!("Downloading {}", folder_name).custom_color(crate::colors::INK),
+                report::files(items.len()).custom_color(crate::colors::INK_DIM),
+                "\u{00b7}".custom_color(crate::colors::INK_DIM),
+                crate::ui::human_size(total_size).custom_color(crate::colors::INK_DIM),
+            ),
+            Stream::Stdout,
         );
     }
 
@@ -102,23 +120,8 @@ pub(super) async fn run_zip(
     // that function derives every entry's key from the master key and the file
     // id, so it cannot open a file-request upload (task 1760). Follow-up: let
     // core take a per-entry key, then this can call it again.
-    let on_progress = |progress: &beebeeb_core::zip::ZipProgress| {
-        if crate::ui::is_rich() {
-            let pct = if progress.bytes_total > 0 {
-                ((progress.bytes_done as f64 / progress.bytes_total as f64 * 100.0) as u64).min(100)
-            } else {
-                0
-            };
-            eprint!(
-                "\r    {} {}%  {}/{}  {}",
-                "zipping".custom_color(crate::colors::INK_DIM),
-                pct.to_string().custom_color(crate::colors::AMBER),
-                (progress.file_index + 1).to_string().custom_color(crate::colors::INK),
-                progress.file_count.to_string().custom_color(crate::colors::INK_DIM),
-                progress.current_file.custom_color(crate::colors::INK_DIM),
-            );
-        }
-    };
+    // The live lines show the transfer (task 2333); adding to the archive is local and draws nothing of its own.
+    let on_progress = |_: &beebeeb_core::zip::ZipProgress| {};
     let mut sink = ZipSink::new(file, total_size, items.len());
 
     // One file at a time: fetch, decrypt, write, drop. Peak memory is the
@@ -126,15 +129,7 @@ pub(super) async fn run_zip(
     let mut dl_elapsed = std::time::Duration::ZERO;
     let mut zip_elapsed = std::time::Duration::ZERO;
     for (i, item) in items.iter().enumerate() {
-        if crate::ui::is_rich() {
-            eprint!(
-                "\r    {} {}/{}  {}",
-                "fetching".custom_color(crate::colors::INK_DIM),
-                (i + 1).to_string().custom_color(crate::colors::INK),
-                items.len().to_string().custom_color(crate::colors::INK_DIM),
-                item.entry.path.custom_color(crate::colors::INK_DIM),
-            );
-        }
+        progress.next_file(plans[i].bytes, plans[i].chunks);
         if let Some(key) = &item.explicit_key {
             let staging_dest = out_path.with_file_name(format!(".bb-entry-{}", uuid::Uuid::new_v4()));
             let mut staged = TempArchive::create(&staging_dest)?;
@@ -146,11 +141,13 @@ pub(super) async fn run_zip(
                 item.entry.chunk_format,
                 item.entry.chunk_count,
                 &staged.path,
-                &crate::upload::NoopProgress,
+                &progress,
                 &item.entry.path,
+                None,
             )
             .await;
             if let Err(e) = result {
+                progress.end_file(FileEnd::Failed);
                 warn_skipped(&format!("{}: {e}", item.entry.path));
                 skipped += 1;
                 continue;
@@ -160,6 +157,10 @@ pub(super) async fn run_zip(
                 .map_err(|_| "zip write failed")?;
             continue;
         }
+        // Buffered by design: the body arrives whole and counts once it decrypted (spec §3.1, §4.3).
+        progress.set_limit(1);
+        let file = progress.begin_file_chunks(&item.entry.path, plans[i].bytes, plans[i].chunks, 0);
+        let flight = InFlight::start(file.as_ref(), 0, Route::Api);
         let t = std::time::Instant::now();
         let (blob, chunk_size) = crate::download::download_buffered(api, &item.entry.file_id).await?;
         dl_elapsed += t.elapsed();
@@ -168,11 +169,17 @@ pub(super) async fn run_zip(
         let plaintext = match decrypt_zip_item(&master_key, item, &blob, chunk_size) {
             Ok(p) => p,
             Err(e) => {
+                drop(flight);
+                file.finish(false);
+                progress.end_file(FileEnd::Failed);
                 warn_skipped(&format!("{:?}: {e}", item.entry.path));
                 skipped += 1;
                 continue;
             }
         };
+        file.body_done(plans[i].chunks, blob.len() as u64, Route::Api);
+        drop(flight);
+        file.finish(true);
         drop(blob);
         if let Err(e) = sink.add(i, &item.entry.path, &plaintext, &on_progress) {
             // An entry that is not a safe archive path never reaches the writer;
@@ -188,10 +195,8 @@ pub(super) async fn run_zip(
         zip_elapsed += t.elapsed();
     }
 
-    if crate::ui::is_rich() {
-        // Clear the fetching/zipping line
-        eprint!("\r{}\r", " ".repeat(80));
-    }
+    // The transfer is over: the live lines go before the end lines print.
+    let transfer = progress.summary();
 
     let written = sink.written;
     if written == 0 {
@@ -210,22 +215,23 @@ pub(super) async fn run_zip(
 
     if crate::ui::is_rich() {
         println!(
-            "  {} {}  {}  {:.1}s",
+            "  {} {}  {}  {}",
             "\u{2713}".custom_color(crate::colors::GREEN_OK),
             out_path.display().to_string().custom_color(crate::colors::INK),
             crate::ui::human_size(zip_size).custom_color(crate::colors::INK_DIM),
-            total_elapsed.as_secs_f64(),
+            duration(total_elapsed.as_millis() as u64),
         );
         println!(
             "    {}",
             format!(
-                "{} files \u{00b7} {:.1}s download \u{00b7} {:.1}s zip",
-                written,
-                dl_elapsed.as_secs_f64(),
-                zip_elapsed.as_secs_f64(),
+                "{} \u{00b7} {} download \u{00b7} {} zip",
+                report::files(written),
+                duration(dl_elapsed.as_millis() as u64),
+                duration(zip_elapsed.as_millis() as u64),
             )
             .custom_color(crate::colors::INK_DIM),
         );
+        report::print_detail(&transfer, verbose);
     } else if crate::ui::is_json() {
         println!(
             "{}",
@@ -237,6 +243,7 @@ pub(super) async fn run_zip(
                 "download_ms": dl_elapsed.as_millis() as u64,
                 "zip_ms": zip_elapsed.as_millis() as u64,
                 "output": out_path.display().to_string(),
+                "transfer": transfer.to_json(),
             }))
             .unwrap()
         );

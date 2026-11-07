@@ -36,7 +36,7 @@ fn drop_from_end(prefix: &str, mut segments: Vec<String>, columns: u16) -> Strin
     format!("{prefix}{}", segments.join(SEP))
 }
 
-fn count(n: u32, one: &str, many: &str) -> String {
+pub(crate) fn count(n: u32, one: &str, many: &str) -> String {
     if n == 1 {
         format!("1 {one}")
     } else {
@@ -166,7 +166,8 @@ pub(crate) fn pool_line(s: &Snapshot, columns: u16) -> String {
     segments.push(format!("direct {}", s.direct));
     segments.push(format!("api {}", s.api));
     segments.push(retries(s.retries));
-    if let Some(f) = s.active.last() {
+    // A buffered body or a legacy stream has no known chunk size: no segment, never `chunk 0 B`.
+    if let Some(f) = s.active.last().filter(|f| f.chunk_size > 0) {
         segments.push(format!("chunk {}", bytes(f.chunk_size)));
     }
     drop_from_end("    ", segments, columns)
@@ -205,6 +206,7 @@ pub(crate) fn chunk_line(r: &ChunkRecord, multi_file: bool, columns: u16) -> Str
 pub(crate) fn rollback_line(name: &str, t: Tally, d: Direction) -> String {
     let why = match d {
         Direction::Upload => "after the upload restarted",
+        Direction::Download => "after the download moved to the API",
     };
     format!(
         "    {}: {} counted again {why}",

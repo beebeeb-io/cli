@@ -54,7 +54,8 @@ The numbers live in a pure model (`src/transfer_stats/`), the lines in `src/tran
   2. Draw in the sink, never in the command: `LiveProgress` with `ViewOptions::for_command(verbose)`
      decides the live lines (rich, stdout and stderr terminals), the plain lines and `--quiet`/`--json`.
   3. Create the sink where the run starts, plan every file (`plan_file`, `seal_plan`, `set_limit`), and
-     pass it down as `&dyn ChunkProgress`; print through `note` and prompt inside `suspend`.
+     pass it down as `&dyn ChunkProgress`; print through `note` and prompt inside `suspend`. A command
+     that runs several files at once calls `set_files_at_once(n)`: the driver sets one file's limit.
   4. A retry that restarts a file calls `rollback_tally` with the failed attempt's bytes and chunks,
      or the totals drift past the plan.
   5. Re-export a new public sink from `src/upload.rs`; nothing else names `progress::` directly.

@@ -53,7 +53,7 @@ async fn run_with_progress(
 }
 
 /// Records exactly the two run-wide numbers a REAL `ChunkProgress`
-/// consumer (`BarProgress`) exposes to the user: the shared ciphertext
+/// consumer (a run-wide bar) exposes to the user: the shared ciphertext
 /// total after every `chunk_confirmed` and every `rollback`, and how many
 /// times a file was reported finished successfully. Proves Codex thread
 /// #2: a swept-session retry — a brand-new `FileProgress` per attempt,

@@ -547,6 +547,7 @@ pub(super) fn is_decrypt_failure(e: &str) -> bool {
     e.contains("key derivation") || e.contains("decrypt")
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn do_download(
     api: &ApiClient,
     master_key: &beebeeb_core::kdf::MasterKey,
@@ -555,27 +556,65 @@ pub(super) async fn do_download(
     remote: &RemoteFile,
     state: &mut SyncState,
     dry_run: bool,
+    progress: Option<&crate::transfer_view::LiveProgress>,
 ) -> Result<DownloadOutcome, String> {
+    // Task 2333: the pass's download sink (live lines, the run's numbers); a watch loop has none.
+    let sink: &dyn crate::upload::ChunkProgress = match progress {
+        Some(p) => p,
+        None => &crate::upload::NoopProgress,
+    };
+    let out = crate::upload::Stream::Stdout;
     if !ui::is_json() && !ui::is_quiet() {
-        println!(
-            "  {} {}",
-            "\u{2193}".custom_color(crate::colors::CYAN),
-            rel.custom_color(crate::colors::INK),
+        sink.note(
+            &format!(
+                "  {} {}",
+                "\u{2193}".custom_color(crate::colors::CYAN),
+                rel.custom_color(crate::colors::INK),
+            ),
+            out,
         );
     }
 
     if dry_run {
         return Ok(DownloadOutcome::Downloaded);
     }
+    if let Some(p) = progress {
+        let (bytes, chunks) = download_plan(remote);
+        p.next_file(bytes, chunks);
+    }
+    let outcome = do_download_planned(api, master_key, local_dir, rel, remote, state, sink).await;
+    // A file not downloaded now: deferred, it leaves this pass's plan; unreadable, it stays (the pass ends short).
+    match (&outcome, progress) {
+        (Ok(DownloadOutcome::Deferred), Some(p)) => p.end_file(crate::transfer_stats::FileEnd::NotSent),
+        (Ok(DownloadOutcome::Unreadable) | Err(_), Some(p)) => p.end_file(crate::transfer_stats::FileEnd::Failed),
+        _ => {}
+    }
+    outcome
+}
+
+/// [`do_download`] once the file is announced on the sink.
+async fn do_download_planned(
+    api: &ApiClient,
+    master_key: &beebeeb_core::kdf::MasterKey,
+    local_dir: &Path,
+    rel: &str,
+    remote: &RemoteFile,
+    state: &mut SyncState,
+    sink: &dyn crate::upload::ChunkProgress,
+) -> Result<DownloadOutcome, String> {
+    let err = crate::upload::Stream::Stderr;
 
     // Task 1943: no read pin, no read. The file's metadata could not be read, so
     // its chunk format is unknown. Like a download that fails to decrypt (1916)
     // it is reported, the remote copy is left alone, and a later pass retries.
     if let Err(e) = &remote.pin {
-        eprintln!(
-            "  {} {} \u{2014} {e}. The remote copy is untouched; will retry next pass.",
-            "!".custom_color(crate::colors::RED_ERR),
-            rel.custom_color(crate::colors::INK),
+        sink.note(
+            &format!(
+                "  {} {} \u{2014} {e}. The remote copy is untouched; will retry next pass.",
+                "!".custom_color(crate::colors::RED_ERR),
+                rel.custom_color(crate::colors::INK),
+            ),
+            err,
         );
         return Ok(DownloadOutcome::Unreadable);
     }
@@ -585,14 +624,17 @@ pub(super) async fn do_download(
     let out_path = match crate::safe_path::safe_rel_join(local_dir, rel, crate::safe_path::Rules::Host) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!(
-                "  {} skipped download of {rel:?}: {e}",
-                "!".custom_color(crate::colors::AMBER)
+            sink.note(
+                &format!(
+                    "  {} skipped download of {rel:?}: {e}",
+                    "!".custom_color(crate::colors::RED_ERR)
+                ),
+                err,
             );
             return Ok(DownloadOutcome::Deferred);
         }
     };
-    let downloaded = download_to(api, master_key, remote, &out_path).await;
+    let downloaded = download_to(api, master_key, remote, &out_path, sink).await;
     // Typed failures first: no message text decides whether a daemon survives (task 2173).
     if let Err(e) = &downloaded {
         if let Some(outcome) = DownloadOutcome::of_failure(e) {
@@ -600,10 +642,13 @@ pub(super) async fn do_download(
                 DownloadOutcome::Deferred => "will pick up the new version next pass",
                 _ => "the remote copy is untouched; will retry next pass",
             };
-            eprintln!(
-                "  {} {} \u{2014} {e}; {then}.",
-                "!".custom_color(crate::colors::RED_ERR),
-                rel.custom_color(crate::colors::INK),
+            sink.note(
+                &format!(
+                    "  {} {} \u{2014} {e}; {then}.",
+                    "!".custom_color(crate::colors::RED_ERR),
+                    rel.custom_color(crate::colors::INK),
+                ),
+                err,
             );
             return Ok(outcome);
         }
@@ -618,10 +663,13 @@ pub(super) async fn do_download(
             // completed file.
             if !ui::is_quiet() {
                 use colored::Colorize;
-                eprintln!(
-                    "  {} {} \u{2014} still uploading, leaving partial to resume",
-                    "!".custom_color(crate::colors::AMBER),
-                    rel.custom_color(crate::colors::INK_DIM),
+                sink.note(
+                    &format!(
+                        "  {} {} \u{2014} still uploading, leaving partial to resume",
+                        "!".custom_color(crate::colors::RED_ERR),
+                        rel.custom_color(crate::colors::INK_DIM),
+                    ),
+                    err,
                 );
             }
             return Ok(DownloadOutcome::Deferred);
@@ -632,10 +680,13 @@ pub(super) async fn do_download(
             // newer chunk format, a wrong key), not about the file. The remote
             // copy may be the only copy there is: leave it alone, report it, and
             // try again on a later pass.
-            eprintln!(
-                "  {} {} \u{2014} could not decrypt ({e}). The remote copy is untouched; will retry next pass.",
-                "!".custom_color(crate::colors::RED_ERR),
-                rel.custom_color(crate::colors::INK),
+            sink.note(
+                &format!(
+                    "  {} {} \u{2014} could not decrypt ({e}). The remote copy is untouched; will retry next pass.",
+                    "!".custom_color(crate::colors::RED_ERR),
+                    rel.custom_color(crate::colors::INK),
+                ),
+                err,
             );
             return Ok(DownloadOutcome::Unreadable);
         }
@@ -725,16 +776,17 @@ pub(super) async fn download_to(
     master_key: &beebeeb_core::kdf::MasterKey,
     remote: &RemoteFile,
     out_path: &Path,
+    progress: &dyn crate::upload::ChunkProgress,
 ) -> Result<(), crate::download::DownloadError> {
     let pin = remote.pin.clone()?;
+    let pool = download_pool(remote);
     let file_id_str = remote.id.to_string();
     let name = out_path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or(&file_id_str)
         .to_string();
-    // Streaming, constant-memory decrypt. The "↓ rel" line is already printed by
-    // the caller, so use a no-op progress sink here.
+    // Streaming, constant-memory decrypt, counted on the pass's download sink (task 2333).
     if let Some(r) = remote
         .resolved
         .as_ref()
@@ -747,8 +799,9 @@ pub(super) async fn download_to(
             pin,
             remote.chunk_count,
             out_path,
-            &crate::upload::NoopProgress,
+            progress,
             &name,
+            pool.as_ref(),
         )
         .await?;
         return Ok(());
@@ -760,8 +813,9 @@ pub(super) async fn download_to(
         pin,
         remote.chunk_count,
         out_path,
-        &crate::upload::NoopProgress,
+        progress,
         &name,
+        pool.as_ref(),
     )
     .await?;
 

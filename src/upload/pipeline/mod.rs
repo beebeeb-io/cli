@@ -1094,17 +1094,8 @@ pub fn expected_at_chunk_size(size: u64, chunk_size: u64) -> (u64, u32) {
     (size + CHUNK_OVERHEAD * chunks, chunks as u32)
 }
 
-/// Expected ciphertext for a file of `size` under `ChunkProfile::Cli` at the
-/// given upload `concurrency`: `size + 28 · chunk_count`. Used by callers to
-/// size the overall progress bar without opening the file — matches the
-/// concurrency-aware chunk plan the upload driver actually emits.
-pub fn expected_ciphertext_for(size: u64, concurrency: u32) -> u64 {
-    let plan = beebeeb_types::plan_chunks_concurrent(size, ChunkProfile::Cli, concurrency.max(1));
-    size + CHUNK_OVERHEAD * plan.chunk_count
-}
-
-/// The chunk count the upload driver emits for a file of `size` at `concurrency`: the same plan as
-/// [`expected_ciphertext_for`]. Since `--parallel` the push plans through `planned_chunk_size`; this states a
+/// The chunk count the upload driver emits for a file of `size` at `concurrency` (`plan_chunks_concurrent`, the
+/// Cli profile). Since `--parallel` the push plans through `planned_chunk_size`; this states a
 /// test's premise ("16 chunks of 4 MiB").
 #[cfg(test)]
 pub fn expected_chunks_for(size: u64, concurrency: u32) -> u32 {
