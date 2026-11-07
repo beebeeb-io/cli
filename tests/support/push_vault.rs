@@ -85,6 +85,11 @@ pub struct Vault {
     pub links: Vec<Value>,
     /// `POST /files/check-conflict` answers this status instead.
     pub conflict_status: Option<u16>,
+    /// `(from, times, retry_after_secs)`: the `from`-th check-conflict request (1-based) and the `times - 1` after
+    /// it answer 429 with that `Retry-After` (`--parallel` PR 2: a rate limit on stage 2's re-check).
+    pub conflict_429: Option<(usize, usize, u64)>,
+    /// Upload inits of files with these (plaintext) names wait while the name is in the set.
+    pub hold_init_named: std::collections::HashSet<String>,
     /// `GET /shares/invites/sent` answers this status instead.
     pub invites_status: Option<u16>,
     /// A server without the invite and folder-link routes (both 404).
@@ -315,6 +320,22 @@ pub async fn start_mock(vault: Shared) -> String {
                 if let Some(code) = v.conflict_status {
                     return err(StatusCode::from_u16(code).unwrap(), "failed by mock");
                 }
+                let call = v
+                    .requests
+                    .iter()
+                    .filter(|(_, p, _)| p == "/api/v1/files/check-conflict")
+                    .count();
+                if let Some((from, times, retry_after)) = v.conflict_429
+                    && call >= from
+                    && call < from.saturating_add(times)
+                {
+                    return (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        [("retry-after", retry_after.to_string())],
+                        Json(json!({ "error": "rate_limited" })),
+                    )
+                        .into_response();
+                }
                 let parent = body.get("parent_id").and_then(Value::as_str).map(str::to_string);
                 let files: Vec<Value> = v
                     .items
@@ -485,6 +506,13 @@ pub async fn start_mock(vault: Shared) -> String {
             // As on the server (`routes/uploads/init.rs`): a new file's row is
             // created HERE, under the `parent_id` this request names.
             post(|State(v): State<Shared>, Json(body): Json<Value>| async move {
+                let held_id = body.get("file_id").and_then(Value::as_str).unwrap_or("").to_string();
+                let held_name =
+                    beebeeb_core::encrypt::decrypt_name(&master(), &held_id, body["file_name"].as_str().unwrap_or(""))
+                        .unwrap_or_default();
+                while v.lock().unwrap().hold_init_named.contains(&held_name) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
                 let mut v = v.lock().unwrap();
                 v.inits += 1;
                 if let Some((n, code)) = v.init_status_after

@@ -155,10 +155,15 @@ pub(crate) async fn find_conflict(
     parent_uuid: Option<uuid::Uuid>,
 ) -> Result<Option<uuid::Uuid>, String> {
     let unreadable = |why: String| format!("could not check whether {filename} already exists: {why}");
-    let resp = api
-        .check_conflict(parent_uuid)
-        .await
-        .map_err(|e| unreadable(e.message))?;
+    // A Ctrl-C that ended a rate-limit pause is the push's interrupt, not this file's failure: the bare sentinel
+    // goes up, so the folder push counts the file as left undone (review #141).
+    let resp = api.check_conflict(parent_uuid).await.map_err(|e| {
+        if e.message == crate::upload::INTERRUPTED {
+            e.message
+        } else {
+            unreadable(e.message)
+        }
+    })?;
     let files = resp
         .get("files")
         .and_then(serde_json::Value::as_array)
@@ -178,7 +183,12 @@ pub(crate) async fn find_conflict(
         match keys.resolve_or_why(api, master_key, file).await {
             Ok(resolved) if resolved.name == filename => return Ok(Some(file_uuid)),
             Ok(_) | Err(crate::owned_keys::Unresolved::Never(_)) => {}
+            Err(crate::owned_keys::Unresolved::NotNow(e)) if e.contains(crate::upload::INTERRUPTED) => {
+                return Err(crate::upload::INTERRUPTED.to_string());
+            }
             Err(crate::owned_keys::Unresolved::NotNow(e)) => {
+                // The rate-limit sentinel is for retry loops, never for the person.
+                let e = e.replace(crate::api::RATE_LIMITED_MESSAGE, "the server is rate limiting requests");
                 cannot_read.get_or_insert_with(|| format!("a file here could not be read now ({e}); run it again"));
             }
         }
@@ -519,7 +529,6 @@ async fn push_directory(
         if ctl.interrupt.is_set() {
             break;
         }
-        prepared += 1;
         let index = index as u32;
         let entry_parent = entry_path.parent().unwrap_or(dir_path);
         let parent = Some(folder_map.get(entry_parent).copied().unwrap_or(root_id).to_string());
@@ -529,6 +538,11 @@ async fn push_directory(
             .display()
             .to_string();
         let ready = push_file::prepare(api, &upload_key, entry_path, parent, strategy, true, &progress).await;
+        // A Ctrl-C during its lookup: the file is left undone (not started), not failed.
+        if matches!(&ready, Err(e) if was_interrupted(e) && ctl.interrupt.is_set()) {
+            break;
+        }
+        prepared += 1;
         match ready {
             Ok(Prepared::Upload(ready)) => admits.push(push_schedule::Admit {
                 index,

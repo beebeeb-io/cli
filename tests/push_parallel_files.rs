@@ -484,3 +484,101 @@ async fn ctrl_c_stops_every_file() {
     assert_eq!(v.inits, 4, "a and b continued (no init), c and d inited");
     each_completed_once(&v, &names);
 }
+
+/// Review P2 (#141): a Ctrl-C while stage 2's re-checks wait out a rate-limit pause stops the push as an interrupt
+/// (one line, exit 130), never as failed files, and no internal sentinel reaches the person.
+#[tokio::test(flavor = "multi_thread")]
+async fn ctrl_c_during_the_recheck_pause_exits_130() {
+    let vault: Shared = Arc::default();
+    let api = start_mock(vault.clone()).await;
+    let home = scratch_home(&api);
+    for name in ["a.bin", "b.bin"] {
+        write_file(&home, &format!("pair/{name}"), name.as_bytes());
+    }
+    // Stage 1 looks both up (calls 1 and 2); both re-checks of stage 2 meet a 429 and a 60 s pause.
+    vault.lock().unwrap().conflict_429 = Some((3, usize::MAX, 60));
+
+    let mut child = spawn_bb_piped(&home, &["--api", &api, "push", "--parallel", "2", "pair"]);
+    wait_until(&vault, &mut child, "both re-checks rate limited", |v| {
+        count_requests(v, "POST", "/api/v1/files/check-conflict") >= 4
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    ctrl_c(&child);
+    let out = output_of(child);
+
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(130), "{err}");
+    assert_eq!(
+        err.lines().filter(|l| l.starts_with("Interrupted: ")).count(),
+        1,
+        "{err}"
+    );
+    assert!(
+        !err.contains("__interrupted__") && !err.contains("__rate_limited__"),
+        "{err}"
+    );
+    assert_eq!(vault.lock().unwrap().inits, 0, "nothing was inited");
+}
+
+/// Review P2 (#141): a 429 on stage 2's re-check waits out the shared pause and asks again; the file uploads.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_429_on_the_recheck_is_retried() {
+    let vault: Shared = Arc::default();
+    let api = start_mock(vault.clone()).await;
+    let home = scratch_home(&api);
+    write_file(&home, "one/a.bin", b"a");
+    // Call 1 is stage 1's lookup; call 2, the re-check, answers 429 once.
+    vault.lock().unwrap().conflict_429 = Some((2, 1, 1));
+
+    let out = bb(&home, &["--api", &api, "push", "--parallel", "2", "one"]).await;
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert_eq!(err.matches("pausing").count(), 1, "one pause notice: {err}");
+    assert!(!err.contains("__rate_limited__"), "{err}");
+    let v = vault.lock().unwrap();
+    assert_eq!(
+        count_requests(&v, "POST", "/api/v1/files/check-conflict"),
+        3,
+        "the re-check was asked again"
+    );
+    each_completed_once(&v, &["a.bin"]);
+}
+
+/// Review P2 (#141): a file that grows after stage 1 planned it, while two other files of the folder are in flight
+/// (N = 2), is uploaded at its new size, and the run's totals follow it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_that_grew_counts_its_new_size_at_parallel_2() {
+    let vault: Shared = Arc::default();
+    let api = start_mock(vault.clone()).await;
+    let home = scratch_home(&api);
+    write_file(&home, "grow/a.bin", b"aaaa");
+    write_file(&home, "grow/b.bin", b"bbbbbb");
+    let c = write_file(&home, "grow/c.bin", b"c");
+    vault.lock().unwrap().hold_init_named = ["a.bin", "b.bin"].iter().map(|s| s.to_string()).collect();
+
+    let mut child = spawn_bb_piped(&home, &["--api", &api, "--json", "push", "--parallel", "2", "grow"]);
+    wait_until(&vault, &mut child, "a and b's inits held", |v| {
+        count_requests(v, "POST", "/api/v1/uploads/init") >= 2
+    })
+    .await;
+    // c was planned at 1 byte; it grows past one 4 MiB chunk before its own upload begins.
+    let grown = 5 * 1024 * 1024 + 7;
+    std::fs::write(&c, vec![b'c'; grown]).unwrap();
+    vault.lock().unwrap().hold_init_named.clear();
+    let out = output_of(child);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+
+    let json: Value = serde_json::from_slice(&out.stdout).expect("json");
+    let t = &json["transfer"];
+    // The real ciphertext: each chunk adds 28 bytes; c is two chunks at the 4 MiB floor.
+    let real = (4 + 28) + (6 + 28) + (grown as u64 + 2 * 28);
+    assert_eq!(t["bytes_total"], real, "{t}");
+    assert_eq!(t["bytes_done"], t["bytes_total"], "{t}");
+    assert_eq!(
+        (t["chunks_done"].clone(), t["chunks_total"].clone()),
+        (json!(4), json!(4)),
+        "{t}"
+    );
+    assert_eq!(json["total_bytes"], real, "{json}");
+}
