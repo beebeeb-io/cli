@@ -118,6 +118,8 @@ struct Output<'a> {
     plaintext_bytes: u64,
     encrypted_bytes: u64,
     decrypted: u32,
+    /// Discarded because the file starts over on the API stream: the run is told why its chunks count again.
+    to_api: bool,
     /// Finished or discarded: the drop has nothing left to do.
     ended: bool,
 }
@@ -135,6 +137,7 @@ impl<'a> Output<'a> {
             plaintext_bytes: 0,
             encrypted_bytes: 0,
             decrypted: 0,
+            to_api: false,
             ended: false,
         }
     }
@@ -210,10 +213,16 @@ impl<'a> Output<'a> {
         self.encrypted_bytes
     }
 
-    /// [`discard`](Self::discard), then the API path takes the file.
+    /// [`discard`](Self::discard) because the file starts over on the API stream.
+    fn discard_to_api(mut self) -> u64 {
+        self.to_api = true;
+        self.discard()
+    }
+
+    /// [`discard_to_api`](Self::discard_to_api), then the API path takes the file.
     fn use_api(self) -> DirectResult {
         DirectResult::UseApi {
-            transferred_bytes: self.discard(),
+            transferred_bytes: self.discard_to_api(),
         }
     }
 
@@ -231,14 +240,16 @@ impl<'a> Output<'a> {
                 writer.abort();
             }
             if self.decrypted > 0 {
-                self.overall.rollback_tally(
-                    self.name,
-                    Tally {
-                        bytes: self.encrypted_bytes,
-                        chunks: self.decrypted,
-                        already_stored: 0,
-                    },
-                );
+                let tally = Tally {
+                    bytes: self.encrypted_bytes,
+                    chunks: self.decrypted,
+                    already_stored: 0,
+                };
+                if self.to_api {
+                    self.overall.rollback_tally(self.name, tally);
+                } else {
+                    self.overall.rollback_failed(tally);
+                }
             }
         }
         if let Some(file) = self.file.take() {
@@ -387,7 +398,11 @@ async fn try_download_inner(
                 }
                 dt::Poll::Stop(verdict) => {
                     drop(tasks);
-                    let transferred_bytes = out.discard();
+                    let transferred_bytes = if matches!(verdict, dt::Verdict::ApiForFile) {
+                        out.discard_to_api()
+                    } else {
+                        out.discard()
+                    };
                     return match verdict {
                         dt::Verdict::ApiForFile => {
                             trace(|| "falling back to the API for this file".to_string());
@@ -643,6 +658,44 @@ mod tests {
         // No partial output, nothing to take back.
         Output::new(&overall, "out.bin", None, 4).discard();
         assert_eq!(rolled_back.load(Ordering::SeqCst), 1028);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review P3 (#142): only an attempt whose file moves to the API stream says its chunks count again; a failed
+    /// attempt takes its count back without that line.
+    #[test]
+    fn only_a_move_to_the_api_says_the_chunks_count_again() {
+        use crate::transfer_stats::Direction;
+        use crate::transfer_view::LiveProgress;
+        use crate::transfer_view::sink::Level;
+        let dir = std::env::temp_dir().join(format!("bb-rollback-line-142-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clock = Arc::new(AtomicU64::new(0));
+        let (live, record) = LiveProgress::for_test(Direction::Download, Level::Verbose, 80, clock);
+        for (name, to_api) in [("failed.bin", false), ("moved.bin", true)] {
+            let mut attempt = partial(&live, &dir.join(name), 1000, 1028);
+            let file = live.begin_file_chunks(name, 1028, 1, 1000);
+            file.chunk_done(0, 1028, Held::Transferred);
+            attempt.file = Some(file);
+            if to_api {
+                attempt.use_api();
+            } else {
+                attempt.discard();
+            }
+        }
+        let lines: Vec<String> = record.lock().unwrap().clone();
+        let again: Vec<&String> = lines.iter().filter(|l| l.contains("counted again")).collect();
+        assert_eq!(again.len(), 1, "{lines:?}");
+        assert!(
+            lines.last() == Some(again[0]),
+            "the moved attempt's, the last line: {lines:?}"
+        );
+        let end = live.summary();
+        assert_eq!(
+            (end.bytes_done, end.chunks_done),
+            (0, 0),
+            "both attempts were taken back: {end:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

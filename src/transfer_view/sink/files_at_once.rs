@@ -99,6 +99,10 @@ impl ChunkProgress for FileSink<'_> {
         self.live.rollback_tally(file_name, tally);
     }
 
+    fn rollback_failed(&self, tally: Tally) {
+        self.live.rollback_failed(tally);
+    }
+
     fn before_complete(&self, path: &std::path::Path) -> Result<(), String> {
         self.live.before_complete(path)
     }

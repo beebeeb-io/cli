@@ -538,6 +538,10 @@ impl ChunkProgress for LiveProgress {
         }
     }
 
+    fn rollback_failed(&self, tally: Tally) {
+        lock(&self.shared.model).rollback(tally);
+    }
+
     fn set_limit(&self, max_in_flight: u32) {
         let files = self.files_at_once.load(Ordering::SeqCst);
         lock(&self.shared.model).set_limit(max_in_flight.saturating_mul(files));
