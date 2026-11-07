@@ -180,7 +180,7 @@ async fn chunk_slots_cap_the_push() {
         "a fourth waits"
     );
     drop(held);
-    tokio::time::timeout(Duration::from_millis(100), limits.chunk_slot())
+    let _granted = tokio::time::timeout(Duration::from_millis(100), limits.chunk_slot())
         .await
         .expect("a freed slot is granted");
 }
