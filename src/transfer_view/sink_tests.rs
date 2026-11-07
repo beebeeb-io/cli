@@ -316,3 +316,32 @@ fn a_prompt_wait_is_left_out_of_the_average() {
     let s = p.summary();
     assert_eq!((s.duration_ms, s.avg_mbps), (10_000, Some(100.0)));
 }
+
+/// Review P3 (#142), spec §3.2: a body that arrives whole (a file-request upload in a folder pull) is planned and
+/// counted like any file, but never drawn as a live line (it would jump from 0 to 100 %).
+#[test]
+fn a_buffered_body_is_counted_but_never_drawn() {
+    let clock = Arc::new(AtomicU64::new(0));
+    let (p, _record) = LiveProgress::for_test(Direction::Download, Level::Default, 80, Arc::clone(&clock));
+    p.plan_file(1028, 1);
+    p.plan_file(2056, 2);
+    p.seal_plan();
+    let request = p.begin_buffered("request.bin", 1028, 1);
+    let streamed = p.begin_file_chunks("streamed.bin", 2056, 2, 1000);
+    let lines = p.render_now();
+    assert!(!lines.iter().any(|l| l.contains("request.bin")), "{lines:?}");
+    assert!(
+        lines.iter().any(|l| l.contains("streamed.bin")),
+        "premise: an open file is drawn: {lines:?}"
+    );
+
+    request.body_done(1, 1028, Route::Api);
+    request.finish(true);
+    streamed.finish(false);
+    let end = p.summary();
+    assert_eq!(
+        (end.files_done, end.bytes_done, end.chunks_done),
+        (1, 1028, 1),
+        "{end:?}"
+    );
+}

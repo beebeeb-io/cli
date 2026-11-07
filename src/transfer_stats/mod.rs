@@ -234,6 +234,8 @@ struct FileState {
     /// `None` while in progress, then whether it finished.
     finished_ok: Option<bool>,
     pool: Option<PoolLabel>,
+    /// Its body arrives whole (a file-request upload): counted, never drawn as a live line (spec §3.2).
+    buffered: bool,
 }
 
 struct OpenChunk {
@@ -400,6 +402,7 @@ impl TransferStats {
             chunks_done: 0,
             finished_ok: None,
             pool: None,
+            buffered: false,
         });
         FileSlot((self.files.len() - 1) as u32)
     }
@@ -502,6 +505,11 @@ impl TransferStats {
         self.files[f.0 as usize].pool = Some(label);
     }
 
+    /// The file's body arrives whole: it is never drawn as an active file, which would jump from 0 to 100 %.
+    pub(crate) fn buffered(&mut self, f: FileSlot) {
+        self.files[f.0 as usize].buffered = true;
+    }
+
     pub(crate) fn file_done(&mut self, f: FileSlot, ok: bool) {
         if ok {
             self.files_done += 1;
@@ -541,7 +549,7 @@ impl TransferStats {
             active: self
                 .files
                 .iter()
-                .filter(|f| f.finished_ok.is_none())
+                .filter(|f| f.finished_ok.is_none() && !f.buffered)
                 .map(|f| FileView {
                     name: f.name.clone(),
                     bytes_done: f.bytes_done,

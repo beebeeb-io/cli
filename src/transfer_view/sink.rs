@@ -346,6 +346,27 @@ impl LiveProgress {
         lock(&self.shared.model).seal_plan();
     }
 
+    /// [`begin_file_chunks`](ChunkProgress::begin_file_chunks) for a body that arrives whole (a file-request upload
+    /// in a folder pull): planned and counted like any file, never drawn as a live line (spec §3.2).
+    pub(crate) fn begin_buffered(
+        &self,
+        file_name: &str,
+        expected_ciphertext: u64,
+        chunk_count: u32,
+    ) -> Box<dyn FileProgress> {
+        let slot = {
+            let mut model = lock(&self.shared.model);
+            let slot = model.begin_file(file_name, expected_ciphertext, chunk_count, 0);
+            model.buffered(slot);
+            slot
+        };
+        Box::new(LiveFile {
+            slot,
+            shared: Arc::clone(&self.shared),
+            next_index: AtomicU32::new(0),
+        })
+    }
+
     /// The live lines are drawn (both streams are terminals): a command leaves out the per-file lines they show.
     pub(crate) fn draws_live(&self) -> bool {
         self.shared.options.draw == Draw::Terminal

@@ -228,24 +228,30 @@ pub(super) async fn pull_single_file(
     // request-key path and return early.
     if let Some(c) = request_content_key {
         progress.set_limit(1);
-        let file = progress.begin_file_chunks(&name, plan.bytes, plan.chunks, 0);
+        let file = progress.begin_buffered(&name, plan.bytes, plan.chunks);
         if let Some(label) = &pool {
             file.pool(label.clone());
         }
         let flight = InFlight::start(file.as_ref(), 0, Route::Api);
         let dl_start = std::time::Instant::now();
-        let encrypted_bytes = api.download_file(file_id).await?;
-        let dl_elapsed = dl_start.elapsed();
-        let plaintext = crate::crypto::try_decrypt_all_chunks(c, file_id, pin, &encrypted_bytes, chunk_count)?;
-        // The body counts once it decrypted (spec §4.3): all its chunks at once.
-        file.body_done(chunk_count.max(1), encrypted_bytes.len() as u64, Route::Api);
-        drop(flight);
+        let pulled = async {
+            let encrypted_bytes = api.download_file(file_id).await?;
+            let dl_elapsed = dl_start.elapsed();
+            let plaintext = crate::crypto::try_decrypt_all_chunks(c, file_id, pin, &encrypted_bytes, chunk_count)?;
+            // The body counts once it decrypted (spec §4.3): all its chunks at once.
+            file.body_done(chunk_count.max(1), encrypted_bytes.len() as u64, Route::Api);
+            drop(flight);
 
-        if let Some(parent) = out_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("failed to create dir: {e}"))?;
+            if let Some(parent) = out_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("failed to create dir: {e}"))?;
+            }
+            std::fs::write(out_path, &plaintext).map_err(|e| format!("failed to write: {e}"))?;
+            Ok::<_, PullError>((encrypted_bytes, plaintext, dl_elapsed))
         }
-        std::fs::write(out_path, &plaintext).map_err(|e| format!("failed to write: {e}"))?;
-        file.finish(true);
+        .await;
+        // An error closes the file as failed: the lines left above it do not show it as active (spec §6.7).
+        file.finish(pulled.is_ok());
+        let (encrypted_bytes, plaintext, dl_elapsed) = pulled?;
         run.pulled_bytes += plaintext.len() as u64;
 
         if crate::ui::is_quiet() {

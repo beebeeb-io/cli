@@ -159,10 +159,18 @@ pub(super) async fn run_zip(
         }
         // Buffered by design: the body arrives whole and counts once it decrypted (spec §3.1, §4.3).
         progress.set_limit(1);
-        let file = progress.begin_file_chunks(&item.entry.path, plans[i].bytes, plans[i].chunks, 0);
+        let file = progress.begin_buffered(&item.entry.path, plans[i].bytes, plans[i].chunks);
         let flight = InFlight::start(file.as_ref(), 0, Route::Api);
         let t = std::time::Instant::now();
-        let (blob, chunk_size) = crate::download::download_buffered(api, &item.entry.file_id).await?;
+        let (blob, chunk_size) = match crate::download::download_buffered(api, &item.entry.file_id).await {
+            Ok(got) => got,
+            Err(e) => {
+                drop(flight);
+                // The file closes as failed: the lines left above the error do not show it as active (spec §6.7).
+                file.finish(false);
+                return Err(e.into());
+            }
+        };
         dl_elapsed += t.elapsed();
 
         let t = std::time::Instant::now();
