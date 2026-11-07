@@ -190,6 +190,7 @@ pub(super) async fn run_once(
             &out_path,
             progress.as_ref(),
             display_name,
+            None,
         )
         .await?
     } else {
@@ -202,6 +203,7 @@ pub(super) async fn run_once(
             &out_path,
             progress.as_ref(),
             display_name,
+            None,
         )
         .await?
     };

@@ -749,6 +749,7 @@ pub(super) async fn download_to(
             out_path,
             &crate::upload::NoopProgress,
             &name,
+            None,
         )
         .await?;
         return Ok(());
@@ -762,6 +763,7 @@ pub(super) async fn download_to(
         out_path,
         &crate::upload::NoopProgress,
         &name,
+        None,
     )
     .await?;
 

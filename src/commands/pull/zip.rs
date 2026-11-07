@@ -148,6 +148,7 @@ pub(super) async fn run_zip(
                 &staged.path,
                 &crate::upload::NoopProgress,
                 &item.entry.path,
+                None,
             )
             .await;
             if let Err(e) = result {

@@ -262,6 +262,7 @@ async fn read_manifest(api: &ApiClient, master_key: &Arc<MasterKey>, device: Uui
             &out,
             &crate::upload::NoopProgress,
             MANIFEST_NAME,
+            None,
         )
         .await
         .map_err(|e| e.to_string())?;

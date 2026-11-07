@@ -54,4 +54,7 @@ pub struct DownloadStats {
     /// from object storage through presigned links, task 2173) or `"mixed"`
     /// (direct, with some chunks through the pinned per-chunk API route).
     pub transport: &'static str,
+    /// Ciphertext this file moved over the wire, every time: a direct download that fell back to the API stream
+    /// counts the chunks it fetched first as well (task 2333: a file's speed is what it moved over its time).
+    pub transferred_bytes: u64,
 }

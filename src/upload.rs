@@ -74,7 +74,9 @@ mod progress;
 #[cfg(test)]
 pub(crate) use progress::recording::Recording;
 use progress::*;
-pub use progress::{BarProgress, ChunkProgress, FileProgress, Held, NoopProgress, PoolLabel, Stream, Tally};
+pub use progress::{
+    BarProgress, ChunkProgress, FileProgress, Held, InFlight, NoopProgress, PoolLabel, Route, Stream, Tally,
+};
 
 mod session;
 use session::*;

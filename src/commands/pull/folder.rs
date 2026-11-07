@@ -241,6 +241,7 @@ pub(super) async fn pull_single_file(
             out_path,
             &crate::upload::NoopProgress,
             &name,
+            None,
         )
         .await?
     } else {
@@ -253,6 +254,7 @@ pub(super) async fn pull_single_file(
             out_path,
             &crate::upload::NoopProgress,
             &name,
+            None,
         )
         .await?
     };
