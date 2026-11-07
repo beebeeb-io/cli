@@ -8,6 +8,7 @@ use crate::transfer_view::line::{self as view_line, Role};
 use crate::transfer_view::sink::{Draw, ViewOptions};
 use crate::transfer_view::sink::{FileSink, RunLimit};
 use crate::transfer_view::units::{duration, mbps};
+use crate::upload::ChunkProgress;
 
 /// One sync pass's tally plus the flags that decide how it is reported.
 pub(super) struct PassReport<'a> {
@@ -39,6 +40,14 @@ pub(super) fn transfer_sink(way: Way, moves: bool, verbose: bool) -> LiveProgres
         options.draw = Draw::Off;
     }
     LiveProgress::new(way, options)
+}
+
+/// The run's limit before any driver has reported its own: `min(--concurrency, files pending)` files, each with its
+/// `CHUNKS_IN_FLIGHT_PER_FILE`. A file's write check runs before its driver does, and the view would read `0/0 in
+/// flight` until then; `RunLimit` refines this as each driver reports.
+pub(super) fn open_limit(live: &LiveProgress, concurrency: u32, pending: usize) {
+    let files = concurrency.min(u32::try_from(pending).unwrap_or(u32::MAX));
+    live.set_limit(files.saturating_mul(crate::upload::CHUNKS_IN_FLIGHT_PER_FILE));
 }
 
 /// A pending upload's share of the run, as the driver will send it (spec §4.2): at the chunk size of the resume

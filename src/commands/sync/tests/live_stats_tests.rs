@@ -224,3 +224,36 @@ fn the_plan_reads_the_sidecar_once() {
             .is_some()
     );
 }
+
+/// Review P3 (#143): the upload phase opens the run's limit before any driver has reported its own, so `bb sync -v`
+/// never reads `0/0 in flight` while the write checks run. It is `min(--concurrency, files pending)` files, one chunk
+/// each; `RunLimit` refines it as each driver reports.
+#[test]
+fn the_limit_is_open_before_any_driver_reports() {
+    use super::{UploadShare, open_limit};
+    use crate::transfer_view::sink::{Level, RunLimit};
+    let direction = crate::transfer_stats::Direction::Upload;
+    // (concurrency, files pending, the limit the view shows): more files than `--concurrency`, and fewer.
+    for (concurrency, pending, shown) in [(4u32, 6usize, 4u32), (4, 2, 2)] {
+        let clock = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (live, _) = LiveProgress::for_test(direction, Level::Verbose, 80, clock);
+        for _ in 0..pending {
+            live.plan_file(1028, 1);
+        }
+        live.seal_plan();
+        open_limit(&live, concurrency, pending);
+        // A file at its write check: announced, no driver yet.
+        let limit = RunLimit::new(concurrency);
+        let _share = UploadShare::new(&live, &limit, 0, Some((1028, 1)));
+        let lines = live.render_now();
+        let wanted = format!(" 0/{shown} in flight");
+        assert!(
+            lines.iter().any(|l| l.contains(&wanted)),
+            "{pending} pending at --concurrency {concurrency} reads {wanted:?}: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("0/0 in flight")),
+            "never 0/0 in flight: {lines:?}"
+        );
+    }
+}

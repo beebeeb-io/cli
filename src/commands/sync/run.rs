@@ -731,6 +731,9 @@ pub async fn run(
             })
             .collect();
         progress.seal_plan();
+        if !dry_run {
+            open_limit(&progress, concurrency as u32, pending_count);
+        }
         // Each file sends one chunk at a time (its driver sets that); the run's limit is their sum, at most
         // `--concurrency`.
         let limit = crate::transfer_view::sink::RunLimit::new(concurrency as u32);
