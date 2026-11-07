@@ -47,13 +47,12 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use beebeeb_core::chunk_stream::{ChunkEncryptor, ExpectedChunkFormat, SessionResume};
 use beebeeb_core::kdf::MasterKey;
 use beebeeb_types::ChunkProfile;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use uuid::Uuid;
 
 use crate::api::{ApiClient, DirectOffer};
@@ -68,15 +67,13 @@ mod error;
 pub use error::UploadError;
 
 // ── No-op progress (used for --json / --quiet / non-TTY and the watch loops) ──
-// ── indicatif progress (rich + TTY only) ──────────────────────────────────────
+// ── progress sinks (drawing: `transfer_view::LiveProgress`) ─────────────────────
 
 mod progress;
 #[cfg(test)]
 pub(crate) use progress::recording::Recording;
 use progress::*;
-pub use progress::{
-    BarProgress, ChunkProgress, FileProgress, Held, InFlight, NoopProgress, PoolLabel, Route, Stream, Tally,
-};
+pub use progress::{ChunkProgress, FileProgress, Held, InFlight, NoopProgress, PoolLabel, Route, Stream, Tally};
 
 mod session;
 use session::*;
