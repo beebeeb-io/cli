@@ -9,7 +9,8 @@
 
 use super::*;
 use crate::transfer_stats::FileEnd;
-use crate::upload::{ChunkProgress, InFlight, Route, Stream};
+use crate::transfer_view::LiveProgress;
+use crate::upload::{ChunkProgress, FileProgress, InFlight, Route, Stream, Tally};
 
 pub(super) async fn pull_folder(
     api: &ApiClient,
@@ -234,12 +235,19 @@ pub(super) async fn pull_single_file(
         }
         let flight = InFlight::start(file.as_ref(), 0, Route::Api);
         let dl_start = std::time::Instant::now();
+        let mut counted = None;
         let pulled = async {
             let encrypted_bytes = api.download_file(file_id).await?;
             let dl_elapsed = dl_start.elapsed();
             let plaintext = crate::crypto::try_decrypt_all_chunks(c, file_id, pin, &encrypted_bytes, chunk_count)?;
             // The body counts once it decrypted (spec §4.3): all its chunks at once.
-            file.body_done(chunk_count.max(1), encrypted_bytes.len() as u64, Route::Api);
+            let body = Tally {
+                bytes: encrypted_bytes.len() as u64,
+                chunks: chunk_count.max(1),
+                ..Tally::default()
+            };
+            file.body_done(body.chunks, body.bytes, Route::Api);
+            counted = Some(body);
             drop(flight);
 
             if let Some(parent) = out_path.parent() {
@@ -249,8 +257,7 @@ pub(super) async fn pull_single_file(
             Ok::<_, PullError>((encrypted_bytes, plaintext, dl_elapsed))
         }
         .await;
-        // An error closes the file as failed: the lines left above it do not show it as active (spec §6.7).
-        file.finish(pulled.is_ok());
+        close_buffered(progress, file, counted, pulled.is_ok());
         let (encrypted_bytes, plaintext, dl_elapsed) = pulled?;
         run.pulled_bytes += plaintext.len() as u64;
 
@@ -313,4 +320,64 @@ pub(super) async fn pull_single_file(
     }
     // In JSON mode, the folder pull prints nothing per-file — the caller handles output.
     Ok(())
+}
+
+/// Closes a buffered file. A file that failed after its body counted (`counted`: the directory or the write) has what
+/// the body counted taken back off the run first, as the API stream does for its file (spec §4.3); the file then
+/// closes as failed, so the lines left above an error do not show it as active (spec §6.7).
+fn close_buffered(progress: &LiveProgress, file: Box<dyn FileProgress>, counted: Option<Tally>, ok: bool) {
+    if let (false, Some(tally)) = (ok, counted) {
+        progress.rollback_failed(tally);
+    }
+    file.finish(ok);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::close_buffered;
+    use crate::transfer_stats::Direction;
+    use crate::transfer_view::LiveProgress;
+    use crate::transfer_view::sink::Level;
+    use crate::upload::{Route, Tally};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
+
+    /// Review P3 (#143): a request file that fails AFTER its body counted (the directory or the write) takes back what
+    /// the body counted, as the API stream does (spec §4.3); the file closes as failed. A file that did not fail keeps it.
+    #[test]
+    fn a_request_file_that_fails_after_its_body_counted_takes_it_back() {
+        for (ok, bytes_done, chunks_done, files_done) in [(false, 0, 0, 0), (true, 1028, 2, 1)] {
+            let (progress, _record) =
+                LiveProgress::for_test(Direction::Download, Level::Default, 80, Arc::new(AtomicU64::new(0)));
+            progress.plan_file(1028, 2);
+            progress.seal_plan();
+            let file = progress.begin_buffered("request.bin", 1028, 2);
+            file.body_done(2, 1028, Route::Api);
+            let counted = Some(Tally {
+                bytes: 1028,
+                chunks: 2,
+                ..Tally::default()
+            });
+            close_buffered(&progress, file, counted, ok);
+            let end = progress.summary();
+            assert_eq!(
+                (end.bytes_done, end.chunks_done, end.files_done),
+                (bytes_done, chunks_done, files_done),
+                "ok={ok}: {end:?}"
+            );
+        }
+    }
+
+    /// A file that failed before its body counted has nothing to take back: the run's counts stay as they were.
+    #[test]
+    fn a_request_file_that_fails_before_its_body_counted_has_nothing_to_take_back() {
+        let (progress, _record) =
+            LiveProgress::for_test(Direction::Download, Level::Default, 80, Arc::new(AtomicU64::new(0)));
+        progress.plan_file(1028, 2);
+        progress.seal_plan();
+        let file = progress.begin_buffered("request.bin", 1028, 2);
+        close_buffered(&progress, file, None, false);
+        let end = progress.summary();
+        assert_eq!((end.bytes_done, end.chunks_done, end.files_done), (0, 0, 0), "{end:?}");
+    }
 }
