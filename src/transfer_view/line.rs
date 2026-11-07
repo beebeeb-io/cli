@@ -166,7 +166,8 @@ pub(crate) fn pool_line(s: &Snapshot, columns: u16) -> String {
     segments.push(format!("direct {}", s.direct));
     segments.push(format!("api {}", s.api));
     segments.push(retries(s.retries));
-    if let Some(f) = s.active.last() {
+    // A buffered body or a legacy stream has no known chunk size: no segment, never `chunk 0 B`.
+    if let Some(f) = s.active.last().filter(|f| f.chunk_size > 0) {
         segments.push(format!("chunk {}", bytes(f.chunk_size)));
     }
     drop_from_end("    ", segments, columns)
