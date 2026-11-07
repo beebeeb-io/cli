@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-11-07
+
+### Added
+- `bb push --parallel N` now also uploads the files of a folder N at once (default 4; `--parallel 1` is one file at a time). Chunks in flight across all the files stay at most N, within the same 640 MiB upload buffer. The push asks every question it needs (such as a file that already exists) before the first byte goes out. One file failing (another `bb push` of it running, or a same-name file appearing while the push prepares) does not stop the others. Ctrl-C stops every file in flight and starts no new one: one line, exit 130, uploads stay resumable. A name check that hits a rate limit (429) waits for the shared pause and asks again, up to 3 tries.
+- `bb pull` and `bb sync` show live transfer numbers on a terminal, as `bb push` does since 0.16.0: a bar, the percent, bytes done, the current speed in Mbps and the time left (a folder pull has no total or time left; `bb sync` has a live line per phase). A folder pull ends with a summary line; `bb pull --zip` draws a live line for each of your own files (file-request files are read whole and only counted).
+- `-v` / `--verbose` for `bb pull` and `bb sync`: chunks done and in flight, direct or API route, retries, the storage country (Germany or Finland), one line per chunk and a detail line under the end lines. `-v` with `--quiet` is a usage error (exit 2); `-v` has no effect with `--json`, and `bb sync --daemon` ignores it.
+- `bb pull --json` gains a `transfer` object; `bb sync --json` gains `transfer_upload` and `transfer_download`. Existing keys are unchanged.
+
+### Changed
+- The old progress bars of `bb pull` and `bb sync` are gone. End lines show speeds in Mbps (megabits per second) instead of MB/s, and times as `4.2s` or `7m 21s`, not milliseconds. Live lines show only when stdout and stderr are both terminals.
+- A folder push prints its per-file lines in the order files finish, and `--quiet` prints the ids in that order too; `--json` keeps the folder's order.
+- Warnings about skipped files and files that changed while being read use the error colour instead of amber and print above the live lines.
+- No dependency changes; still core v0.2.1.
+
+### Fixed
+- `bb sync` live numbers settle: a skipped or never-started file leaves the totals, a failed file's unsent bytes leave the time left, "in flight" is never higher than the files still to send and shows from the start of the upload phase.
+- A failed or interrupted download takes back the chunks it counted; the "counted again" line of `-v` appears only when a download moved to the API.
+- The percentage never shows more than 100 %, a failed file is no longer drawn as active, and a file-request upload in a folder pull is no longer drawn as a line that jumps from 0 to 100 %.
+- A file row with an enormous size can no longer overflow the transfer plan.
+- Headers say `1 file` and `1 item`, not `1 files` and `1 items`; the `-v` storage line no longer reads `chunk 0 B` for a file read whole.
+
+### Security
+- New tests check that `bb sync` and `bb pull` (a file, a folder, `--zip`, the API fallback) never print a city, a data center code, a pool id, a storage host, a signed link, a token, a key or a provider name.
+
 ## [0.16.0] - 2026-11-07
 
 ### Added
