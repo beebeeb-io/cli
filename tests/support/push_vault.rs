@@ -67,6 +67,11 @@ pub struct Vault {
     pub completed_sessions: HashMap<String, String>,
     /// `(n, status)`: every upload init after the first `n` answers `status`.
     pub init_status_after: Option<(usize, u16)>,
+    /// `--parallel` PR 2: an upload init of the file with this (plaintext) name answers 400.
+    pub refuse_init_named: Option<String>,
+    /// `--parallel` PR 2: the first upload init also adds a finished file of this name in the init's folder, as
+    /// another device would between a push's two stages.
+    pub add_on_first_init: Option<String>,
     /// The current version of every completed file: its plaintext chunk size and its frames, in order, as
     /// `GET /files/{id}/download` serves them.
     pub contents: HashMap<String, (u64, Vec<u8>)>,
@@ -490,6 +495,17 @@ pub async fn start_mock(vault: Shared) -> String {
                 let id = body.get("file_id").and_then(Value::as_str).unwrap_or("").to_string();
                 let base = body.get("base_version_number").and_then(Value::as_i64);
                 let parent = body.get("parent_id").and_then(Value::as_str).map(str::to_string);
+                let name =
+                    beebeeb_core::encrypt::decrypt_name(&master(), &id, body["file_name"].as_str().unwrap_or(""))
+                        .unwrap_or_default();
+                if v.refuse_init_named.as_deref() == Some(name.as_str()) {
+                    return err(StatusCode::BAD_REQUEST, "refused by mock");
+                }
+                if v.inits == 1
+                    && let Some(extra) = v.add_on_first_init.take()
+                {
+                    seed_file_row(&mut v, parent.as_deref(), &extra);
+                }
                 let chunk_size = body.get("chunk_size_bytes").and_then(Value::as_u64).unwrap_or(0);
                 let chunk_count = body.get("chunk_count").and_then(Value::as_u64).unwrap_or(0) as u32;
                 let size = body.get("file_size_bytes").and_then(Value::as_u64).unwrap_or(0);
@@ -699,6 +715,32 @@ pub fn seed_folder(vault: &Shared, parent: Option<&str>, name: &str) -> String {
             version: 0,
             chunk_count: 0,
             size: 0,
+        },
+    );
+    id
+}
+
+/// A finished one-chunk file named `name` in `parent`, sealed under this account's key (another device's upload).
+pub fn seed_file_row(v: &mut Vault, parent: Option<&str>, name: &str) -> String {
+    let item = beebeeb_core::item_id::NewItemId::owner(&master()).unwrap();
+    let sealed =
+        beebeeb_core::encrypt::encrypt_name_for_new_item(&master(), &item, name, None, ExpectedChunkFormat::Unrecorded)
+            .unwrap();
+    v.seq += 1;
+    let id = item.as_str().to_string();
+    let seq = v.seq;
+    v.items.insert(
+        id.clone(),
+        Item {
+            id: id.clone(),
+            parent: parent.map(str::to_string),
+            name_encrypted: sealed,
+            is_folder: false,
+            seq,
+            uploading: false,
+            version: 1,
+            chunk_count: 1,
+            size: 5,
         },
     );
     id
