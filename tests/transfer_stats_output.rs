@@ -376,6 +376,35 @@ async fn sync_peak_is_at_most_the_concurrency() {
     assert_eq!(down["avg_mbps"], Value::Null, "{down}");
 }
 
+/// Review P3 (#142): sync's limit is at most the files pending. One file at the default `--concurrency 4` can have
+/// one chunk in flight, and `max_chunks_in_flight` says 1, not 4.
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_limit_is_at_most_the_files_pending() {
+    let api = start_mock(Mock::default()).await;
+    let home = scratch_home(&api);
+    let local = home.join("syncdir");
+    std::fs::create_dir_all(&local).unwrap();
+    std::fs::write(local.join("only.txt"), b"one file").unwrap();
+
+    let args = [
+        "--api",
+        &api,
+        "--json",
+        "sync",
+        "--once",
+        local.to_str().unwrap(),
+        "/SyncUp",
+    ];
+    let out = bb(&home, &args).await;
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success(), "{stdout}{stderr}");
+    let json: Value = serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    let up = &json["transfer_upload"];
+    assert_eq!(up["files_done"], 1, "{up}");
+    assert_eq!(up["max_chunks_in_flight"], 1, "{up}");
+    assert_eq!(up["peak_chunks_in_flight"], 1, "{up}");
+}
+
 /// Spec §6.5: on a pipe the sync line reads Mbps and a §5 duration; `-v` adds the `↑` detail line.
 #[tokio::test(flavor = "multi_thread")]
 async fn sync_end_line_on_a_pipe() {

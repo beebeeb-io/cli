@@ -1,7 +1,8 @@
 //! Task 2333 (plan Review Focus 5): Ctrl-C during `bb sync`'s upload phase. Sync uploads `--concurrency` files at
 //! once through the real driver, with one shutdown flag and no interrupt; when it trips with both files' chunks in
-//! flight, every chunk settles, the sink counts the run's limit as the files at once times each file's (the driver
-//! sets one file's), and the sink's summary (taken before the "interrupted" line prints) stops its ticker.
+//! flight, every chunk settles, and the sink's summary (taken before the "interrupted" line prints) stops its ticker.
+//! (Sync's run-wide limit, `RunLimit` over each file's `FileSink`: `tests/transfer_stats_output.rs`
+//! `sync_peak_is_at_most_the_concurrency` and `sync_limit_is_at_most_the_files_pending`.)
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -93,11 +94,10 @@ async fn sync_interrupt_settles_every_chunk_and_clears_the_lines() {
     // The real sink, drawing through indicatif with its ticker: nothing left in flight, then the summary (which
     // sync takes before it prints "interrupted") stops the ticker and clears the lines.
     let live = Arc::new(LiveProgress::for_ticker_test(Duration::from_millis(1)));
-    live.set_files_at_once(2);
     interrupted_pass(live.clone()).await;
     let stats = live.render_now().into_iter().find(|l| l.contains("in flight"));
     assert!(
-        stats.as_deref().is_some_and(|l| l.contains(" 0/2 in flight")),
+        stats.as_deref().is_some_and(|l| l.contains(" 0/1 in flight")),
         "{stats:?}"
     );
     assert!(live.ticker_running());
