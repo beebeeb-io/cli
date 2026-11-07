@@ -109,6 +109,13 @@ impl ChunkProgress for Recording {
         ));
     }
 
+    fn rollback_failed(&self, tally: Tally) {
+        self.push(format!(
+            "rollback-failed {} {} {}",
+            tally.bytes, tally.chunks, tally.already_stored
+        ));
+    }
+
     fn set_limit(&self, max_in_flight: u32) {
         self.push(format!("limit {max_in_flight}"));
     }
