@@ -205,6 +205,7 @@ pub(crate) fn chunk_line(r: &ChunkRecord, multi_file: bool, columns: u16) -> Str
 pub(crate) fn rollback_line(name: &str, t: Tally, d: Direction) -> String {
     let why = match d {
         Direction::Upload => "after the upload restarted",
+        Direction::Download => "after the download moved to the API",
     };
     format!(
         "    {}: {} counted again {why}",

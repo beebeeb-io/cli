@@ -101,6 +101,11 @@ pub trait FileProgress: Send + Sync {
     fn chunk_done(&self, _index: u32, bytes: u64, _held: Held) {
         self.chunk_confirmed(bytes)
     }
+    /// A buffered body: all `chunks` arrived and decrypted at once. Defaults to
+    /// `chunk_confirmed(bytes)`.
+    fn body_done(&self, _chunks: u32, bytes: u64, _route: Route) {
+        self.chunk_confirmed(bytes)
+    }
     /// Chunk `index` left the wire: done, failed, interrupted or dropped.
     fn chunk_settled(&self, _index: u32) {}
     /// The storage pool this file's bytes go to (spec §4.4).
@@ -376,6 +381,7 @@ mod existing_sinks {
             f.chunk_done(0, 10, Held::Transferred);
         }
         f.chunk_done(1, 7, Held::AlreadyStored);
+        f.body_done(2, 13, Route::Direct);
         sink.rollback_tally(
             "a",
             Tally {
@@ -388,7 +394,7 @@ mod existing_sinks {
         let mut called = false;
         sink.suspend(&mut || called = true);
         assert!(called);
-        assert_eq!(sink.confirmed.load(Ordering::SeqCst), 17);
+        assert_eq!(sink.confirmed.load(Ordering::SeqCst), 30);
         assert_eq!(sink.rolled_back.load(Ordering::SeqCst), 5);
     }
 }

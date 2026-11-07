@@ -2,7 +2,7 @@
 //! line, so a driver test reads what happened in order (task 2333).
 //!
 //! Lines: `begin <name> <expected> <chunks> <chunk_size>`, `start <i> <route>`,
-//! `retry <i>`, `done <i> <bytes> <held>`,
+//! `retry <i>`, `done <i> <bytes> <held>`, `body <chunks> <bytes> <route>`,
 //! `settle <i>`, `pool <country|->`, `finish <ok>`,
 //! `rollback <bytes> <chunks> <already_stored>`, `limit <n>`,
 //! `note <out|err> <line>`. A legacy call the drivers should no longer make is
@@ -141,6 +141,10 @@ impl FileProgress for Recording {
 
     fn chunk_done(&self, index: u32, bytes: u64, h: Held) {
         self.push(format!("done {index} {bytes} {}", held(h)));
+    }
+
+    fn body_done(&self, chunks: u32, bytes: u64, r: Route) {
+        self.push(format!("body {chunks} {bytes} {}", route(r)));
     }
 
     fn chunk_settled(&self, index: u32) {

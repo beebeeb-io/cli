@@ -39,12 +39,14 @@ pub(crate) const ETA_FLOOR_SECS: f64 = 1.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Direction {
     Upload,
+    Download,
 }
 
 impl Direction {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Direction::Upload => "upload",
+            Direction::Download => "download",
         }
     }
 }
@@ -436,6 +438,32 @@ impl TransferStats {
             route,
             held,
             retries: self.chunk_retries.remove(&(f.0, index)).unwrap_or(0),
+            duration_ms: now_ms.saturating_sub(start_ms),
+        }
+    }
+
+    /// A buffered body: all `chunks` of the file arrived and decrypted at once.
+    pub(crate) fn body_done(&mut self, f: FileSlot, chunks: u32, bytes: u64, route: Route, now_ms: u64) -> ChunkRecord {
+        let start_ms = self
+            .open
+            .iter()
+            .filter(|c| c.file == f)
+            .map(|c| c.start_ms)
+            .min()
+            .unwrap_or(now_ms);
+        self.bytes_done += bytes;
+        self.chunks_done += chunks;
+        self.transferred(route, chunks, bytes, start_ms, now_ms);
+        self.file_progress(f, bytes, chunks);
+        self.check_invariants();
+        ChunkRecord {
+            file_name: self.files[f.0 as usize].name.clone(),
+            index: 0,
+            chunk_count: self.files[f.0 as usize].chunk_count,
+            bytes,
+            route,
+            held: Held::Transferred,
+            retries: 0,
             duration_ms: now_ms.saturating_sub(start_ms),
         }
     }

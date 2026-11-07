@@ -149,7 +149,7 @@ fn eta_needs_three_seconds_of_window() {
 
 #[test]
 fn eta_hidden_until_the_plan_is_final() {
-    let mut t = TransferStats::new(Direction::Upload, 0);
+    let mut t = TransferStats::new(Direction::Download, 0);
     t.plan_file(10 * MB, 10);
     let f = t.begin_file("a", 10 * MB, 10, MB);
     chunk(&mut t, f, 0, MB, 0, 3000);

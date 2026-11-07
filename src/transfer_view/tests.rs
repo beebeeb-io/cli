@@ -334,6 +334,15 @@ fn chunk_lines() {
         rollback_line("movie.mkv", one, Direction::Upload),
         "    movie.mkv: 1 chunk counted again after the upload restarted"
     );
+    let two = Tally {
+        bytes: 2,
+        chunks: 2,
+        already_stored: 0,
+    };
+    assert_eq!(
+        rollback_line("movie.mkv", two, Direction::Download),
+        "    movie.mkv: 2 chunks counted again after the download moved to the API"
+    );
 }
 
 #[test]
