@@ -110,9 +110,9 @@ mod tests {
         assert_eq!(std::fs::read(&out).unwrap(), b"downloaded");
         for taken in ["out.bin.bbtmp", "out.bin.tmp"] {
             assert_eq!(
-                std::fs::read(dir.join(taken)).unwrap(),
-                b"precious",
-                "{taken} was opened and truncated"
+                std::fs::read(dir.join(taken)).ok().as_deref(),
+                Some(&b"precious"[..]),
+                "{taken} was opened: truncated, written or moved"
             );
         }
         assert_eq!(
