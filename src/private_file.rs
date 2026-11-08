@@ -34,12 +34,12 @@ thread_local! {
 }
 
 /// Tests: call `observer` at the seam of every [`write`] this thread makes, until [`stop_observing`].
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn observe(observer: Observer) {
     OBSERVER.with(|o| *o.borrow_mut() = Some(observer));
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn stop_observing() {
     OBSERVER.with(|o| *o.borrow_mut() = None);
 }
