@@ -122,9 +122,11 @@ async fn a_changed_file_uploads_as_a_new_version() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_source_under_an_excluded_dir_is_refused() {
     let (_vault, api, home, env) = setup().await;
-    // The CLI's own state dir (the session and key live there).
-    std::fs::create_dir_all(home.join(".config/beebeeb/inside")).unwrap();
-    let out = backup(&home, &api, &env, &["add", ".config/beebeeb/inside"]).await;
+    // The CLI's own state dir (the session and key live there), wherever this platform keeps it.
+    let inside = support::config_dir::config_dir(&home).join("inside");
+    std::fs::create_dir_all(&inside).unwrap();
+    let inside = inside.strip_prefix(&home).unwrap().to_str().unwrap().to_string();
+    let out = backup(&home, &api, &env, &["add", &inside]).await;
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
     assert!(stderr(&out).contains("one of bb's own folders"), "{}", stderr(&out));
     // A `bb sync` folder, or a folder inside one.
@@ -280,6 +282,11 @@ fn live_folders(v: &Vault, parent: &str, name: &str) -> Vec<String> {
 /// Review #8 (spec §4.3): a file that changes after its upload began is abandoned before it completes, never
 /// stored half old, half new; the run counts it as waiting for the next run, not as failed, and the next run
 /// backs up what the file is now.
+///
+/// The file is rewritten once its chunk has reached the server: the chunk is the whole file, so the upload has
+/// finished reading by then and only the guard before `complete` can see the change (LD-0137: the test used to
+/// rewrite it as soon as the session existed, which is before any byte is read; whether the read came first
+/// then depended on the load of the machine, and the other order is the next test).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_file_changed_while_it_is_read_is_abandoned_and_waits_for_the_next_run() {
     let (vault, api, home, env) = setup().await;
@@ -293,8 +300,8 @@ async fn a_file_changed_while_it_is_read_is_abandoned_and_waits_for_the_next_run
         tokio::spawn(async move { backup(&home, &api, &env, &["run"]).await })
     };
     let deadline = Instant::now() + Duration::from_secs(60);
-    while vault.lock().unwrap().sessions.is_empty() {
-        assert!(Instant::now() < deadline, "the upload never started");
+    while vault.lock().unwrap().held_chunks == 0 {
+        assert!(Instant::now() < deadline, "the chunk never reached the server");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     std::fs::write(&file, b"after, and longer").unwrap();
@@ -323,6 +330,186 @@ async fn a_file_changed_while_it_is_read_is_abandoned_and_waits_for_the_next_run
     let done: Vec<_> = files_named(&v, "c.txt").into_iter().filter(|(_, _, d)| *d).collect();
     assert_eq!(done.len(), 1, "c.txt backed up on the next run");
     assert_eq!(v.items[&done[0].0].size, b"after, and longer".len() as u64);
+}
+
+/// A file that changes after the pass fingerprinted it but before the upload has read it (a log that is still being
+/// written): the plan the upload made (its size) no longer fits the bytes, so the upload's own integrity check
+/// stops it, not the guard before `complete`. That is the same "changed, not failed" as above (LD-0137: it was
+/// counted as failed and the run exited 3, on a Mac under load and three times in Linux CI).
+///
+/// The file is rewritten while the mock holds the upload's `init` answer: nothing has been read yet, and nothing is
+/// read until the answer comes.
+async fn a_file_changed_before_it_is_read_waits_for_the_next_run(after: &[u8]) {
+    let (vault, api, home, env) = setup().await;
+    let file = write_file(&home, "solo/c.txt", b"before");
+    let out = backup(&home, &api, &env, &["add", "solo"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+
+    vault.lock().unwrap().hold_init_named.insert("c.txt".to_string());
+    let run = {
+        let (home, api, env) = (home.clone(), api.clone(), env.clone());
+        tokio::spawn(async move { backup(&home, &api, &env, &["run"]).await })
+    };
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while vault.lock().unwrap().held_inits == 0 {
+        assert!(Instant::now() < deadline, "the upload never reached its init");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    std::fs::write(&file, after).unwrap();
+    vault.lock().unwrap().hold_init_named.clear();
+    let out = run.await.unwrap();
+
+    assert_eq!(out.status.code(), Some(0), "changed, not failed: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(
+        text.contains("0 uploaded \u{b7} 0 failed") && text.contains("1 waiting for the next run"),
+        "{text}"
+    );
+    {
+        let v = vault.lock().unwrap();
+        assert_eq!(
+            v.abandons, 1,
+            "the session that could not complete was ended, or its lease would refuse the retry"
+        );
+        assert!(
+            !files_named(&v, "c.txt").iter().any(|(_, _, done)| *done),
+            "c.txt never completed"
+        );
+    }
+
+    let out = backup(&home, &api, &env, &["run"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(stdout(&out).contains("1 uploaded \u{b7} 0 failed"), "{}", stdout(&out));
+    let v = vault.lock().unwrap();
+    let done: Vec<_> = files_named(&v, "c.txt").into_iter().filter(|(_, _, d)| *d).collect();
+    assert_eq!(done.len(), 1, "c.txt backed up on the next run");
+    assert_eq!(v.items[&done[0].0].size, after.len() as u64);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_that_grew_before_it_was_read_waits_for_the_next_run() {
+    a_file_changed_before_it_is_read_waits_for_the_next_run(b"after, and longer").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_that_shrank_before_it_was_read_waits_for_the_next_run() {
+    a_file_changed_before_it_is_read_waits_for_the_next_run(b"abc").await;
+}
+
+/// Restores the permissions of a folder the test took away, also when the test panics.
+#[cfg(unix)]
+struct Restore(PathBuf);
+
+#[cfg(unix)]
+impl Drop for Restore {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+/// Two files, `a.txt` then `z/b.txt` (the pass queues them in key order, and the drain uploads one at a time). The
+/// run is held at the init of `a.txt`, `change` is applied to `z/b.txt` meanwhile, then the run goes on.
+async fn the_second_file_is_changed_while_the_first_uploads(change: impl FnOnce(&Path)) -> Output {
+    let (vault, api, home, env) = setup().await;
+    write_file(&home, "solo/a.txt", b"first");
+    write_file(&home, "solo/z/b.txt", b"second");
+    let out = backup(&home, &api, &env, &["add", "solo"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+
+    vault.lock().unwrap().hold_init_named.insert("a.txt".to_string());
+    let run = {
+        let (home, api, env) = (home.clone(), api.clone(), env.clone());
+        tokio::spawn(async move { backup(&home, &api, &env, &["run"]).await })
+    };
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while vault.lock().unwrap().held_inits == 0 {
+        assert!(Instant::now() < deadline, "the upload never reached its init");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    change(&home.join("solo/z"));
+    vault.lock().unwrap().hold_init_named.clear();
+    run.await.unwrap()
+}
+
+/// A file that went away between the pass and its upload is a change: it waits for the next run.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_that_went_away_waits_for_the_next_run() {
+    let out =
+        the_second_file_is_changed_while_the_first_uploads(|dir| std::fs::remove_file(dir.join("b.txt")).unwrap())
+            .await;
+    assert_eq!(out.status.code(), Some(0), "gone, not failed: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(
+        text.contains("1 uploaded \u{b7} 0 failed") && text.contains("1 waiting for the next run"),
+        "{text}"
+    );
+}
+
+/// A file the backup cannot even look at (a dropped mount, a folder that lost its search permission) is NOT known to
+/// have changed: it is a failure, exit 3, and the person sees it. Only "not found" is a change.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_that_cannot_be_looked_at_fails_it_does_not_wait() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut restore = None;
+    let out = the_second_file_is_changed_while_the_first_uploads(|dir| {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        restore = Some(Restore(dir.to_path_buf()));
+    })
+    .await;
+    // As root the permission does not bite and there is nothing to test.
+    if std::fs::metadata(restore.as_ref().unwrap().0.join("b.txt")).is_ok() {
+        eprintln!("skipped: the permission is not enforced for this user");
+        return;
+    }
+    assert_eq!(out.status.code(), Some(3), "unreadable is a failure: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(
+        text.contains("1 uploaded \u{b7} 1 failed") && text.contains("0 waiting for the next run"),
+        "{text}"
+    );
+}
+
+/// The other side of the two tests above: only a source that broke the upload is asked whether the file changed.
+/// A failure of the upload itself (here the server refusing the chunk) is a failure, whatever the file did
+/// meanwhile; it is the person's to see, not "waiting for the next run".
+#[tokio::test(flavor = "multi_thread")]
+async fn an_upload_the_server_refuses_fails_even_when_the_file_also_changed() {
+    let (vault, api, home, env) = setup().await;
+    let file = write_file(&home, "solo/c.txt", b"before");
+    let out = backup(&home, &api, &env, &["add", "solo"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+
+    {
+        let mut v = vault.lock().unwrap();
+        v.hold_chunks = true;
+        v.chunk_status = Some(400);
+    }
+    let run = {
+        let (home, api, env) = (home.clone(), api.clone(), env.clone());
+        tokio::spawn(async move { backup(&home, &api, &env, &["run"]).await })
+    };
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while vault.lock().unwrap().held_chunks == 0 {
+        assert!(Instant::now() < deadline, "the chunk never reached the server");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    std::fs::write(&file, b"after, and longer").unwrap();
+    vault.lock().unwrap().hold_chunks = false;
+    let out = run.await.unwrap();
+
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "a refused upload is incomplete: {}",
+        stderr(&out)
+    );
+    let text = stdout(&out);
+    assert!(
+        text.contains("0 uploaded \u{b7} 1 failed") && text.contains("0 waiting for the next run"),
+        "{text}"
+    );
 }
 
 /// Review #2: a copied configuration (a cloned VM image, a copied home) carries another machine's device

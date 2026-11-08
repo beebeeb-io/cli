@@ -14,7 +14,9 @@ use crate::api::InitTransport;
 use crate::upload::limits::used_in_flight;
 
 mod parallel;
+mod source_guard;
 use parallel::run_pipeline;
+use source_guard::{changed_before_init, end_session, source_changed};
 
 /// Look-ahead channel depth. `1` keeps peak memory tight while still
 /// overlapping "encrypt N+1" with "PUT N"; bump to `2` for a touch more
@@ -568,7 +570,18 @@ pub(super) async fn upload_attempt(
     if spec.shutdown.load(Ordering::Relaxed) {
         return Err(AttemptErr::Other(INTERRUPTED.to_string()));
     }
-    let file = std::fs::File::open(&spec.path).map_err(|e| format!("open {}: {e}", spec.path.display()))?;
+    // A file that went away since the caller looked at it is a change, not a failure (LD-0137).
+    let file = match std::fs::File::open(&spec.path) {
+        Ok(file) => file,
+        Err(e) => {
+            if let Some(stop) =
+                changed_before_init(api, progress, &spec.path, &file_id_str, resumed_session.is_some()).await
+            {
+                return Err(stop);
+            }
+            return Err(format!("open {}: {e}", spec.path.display()).into());
+        }
+    };
     let encryptor = match &spec.replace_file_key {
         Some(key) => ChunkEncryptor::from_reader_with_file_key(
             crate::crypto::key_copy(key),
@@ -616,6 +629,12 @@ pub(super) async fn upload_attempt(
     //    stale, so bail and let the next run pick it up.
     if let Ok(m2) = std::fs::metadata(&spec.path) {
         if m2.len() != size {
+            // The caller that reads a file in place calls this a change, not a failure (LD-0137).
+            if let Some(stop) =
+                changed_before_init(api, progress, &spec.path, &file_id_str, resumed_session.is_some()).await
+            {
+                return Err(stop);
+            }
             return Err(AttemptErr::Other(format!(
                 "{} changed size during scan ({size} → {}); will retry next run",
                 spec.file_name,
@@ -906,6 +925,29 @@ pub(super) async fn upload_attempt(
                 resume_tag,
             });
         }
+        // LD-0137: the source file broke the attempt. Bytes that no longer fit the plan (the file grew or shrank)
+        // leave a session that can never complete: it is always ended, or its lease would refuse the next run of
+        // a replace. The caller that reads a file in place then says whether this was a change, in its own words;
+        // if not, the message is what it always was.
+        Err(AttemptErr::SourceChanged(message)) => {
+            file_prog.finish(false);
+            end_session(api, &spec.path, &file_id_str).await;
+            return Err(AttemptErr::Other(
+                source_changed(progress, &spec.path).unwrap_or(message),
+            ));
+        }
+        // A failed read may be only an unreadable file: its session is kept for a resume, unless the caller says
+        // the file changed.
+        Err(AttemptErr::SourceRead(message)) => {
+            file_prog.finish(false);
+            return Err(AttemptErr::Other(match source_changed(progress, &spec.path) {
+                Some(why) => {
+                    end_session(api, &spec.path, &file_id_str).await;
+                    why
+                }
+                None => message,
+            }));
+        }
         Err(e) => {
             file_prog.finish(false);
             return Err(e);
@@ -914,9 +956,8 @@ pub(super) async fn upload_attempt(
 
     // 6b. LD-0113: the caller may stop a file that changed while it was read;
     //     its session is abandoned before anything completes.
-    if let Err(why) = progress.before_complete(&spec.path) {
-        let _ = api.upload_abandon(&file_id_str).await;
-        crate::resume::clear(&spec.path);
+    if let Some(why) = source_changed(progress, &spec.path) {
+        end_session(api, &spec.path, &file_id_str).await;
         file_prog.finish(false);
         return Err(AttemptErr::Other(why));
     }
@@ -1140,3 +1181,8 @@ mod memory_tests;
 /// `--parallel` Task 5 (spec §5.2): a resumed session the server reports already completed is finished.
 #[cfg(test)]
 mod completed_session_tests;
+
+/// LD-0137: a source that changes while it is read ends its session and, for a caller that reads the file in place,
+/// is a change and not a failure.
+#[cfg(test)]
+mod source_changed_tests;

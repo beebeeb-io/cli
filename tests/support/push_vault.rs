@@ -10,6 +10,10 @@ pub use std::process::{Command, Output, Stdio};
 pub use std::sync::{Arc, Mutex};
 pub use std::time::{Duration, Instant};
 
+// The one source of where `bb` keeps its state under a scratch home (LD-0145); `backup_command` calls it too.
+#[path = "config_dir.rs"]
+pub mod config_dir;
+
 pub use axum::body::Bytes;
 pub use axum::extract::{Path as UrlPath, Query, State};
 pub use axum::http::StatusCode;
@@ -59,6 +63,12 @@ pub struct Vault {
     pub stall: bool,
     /// Every chunk PUT waits while this is set (a test changes the source file meanwhile), then goes on.
     pub hold_chunks: bool,
+    /// Every chunk PUT answers this status (after any hold) instead of storing the chunk.
+    pub chunk_status: Option<u16>,
+    /// Chunk PUTs that arrived while `hold_chunks` was set. The body of a PUT is the encrypted chunk, so by the time
+    /// one has arrived `bb` has read that part of the file: a test that changes the file "after it was read" waits
+    /// for this, not for the session (which exists from init on, before any byte is read).
+    pub held_chunks: usize,
     /// `--parallel`: `complete` commits the version, then holds its answer while this is set (a Ctrl-C lands
     /// while `complete` is in flight).
     pub hold_complete: bool,
@@ -90,6 +100,9 @@ pub struct Vault {
     pub conflict_429: Option<(usize, usize, u64)>,
     /// Upload inits of files with these (plaintext) names wait while the name is in the set.
     pub hold_init_named: std::collections::HashSet<String>,
+    /// Upload inits that arrived while their name was in `hold_init_named`: `bb` is then between its last look at
+    /// the file and its first read of it.
+    pub held_inits: usize,
     /// `GET /shares/invites/sent` answers this status instead.
     pub invites_status: Option<u16>,
     /// A server without the invite and folder-link routes (both 404).
@@ -137,6 +150,18 @@ pub struct Vault {
 }
 
 pub type Shared = Arc<Mutex<Vault>>;
+
+/// Holds a request while `holding` says so (polled every 10 ms), and counts it with `arrived` once, the first time it
+/// finds the hold set: a test waits for that count to know the request is in the mock's hands.
+async fn hold_while(v: &Shared, holding: impl Fn(&Vault) -> bool, arrived: impl Fn(&mut Vault)) {
+    let mut counted = false;
+    while holding(&v.lock().unwrap()) {
+        if !std::mem::replace(&mut counted, true) {
+            arrived(&mut v.lock().unwrap());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
 
 pub fn err(status: StatusCode, msg: &str) -> Response {
     (status, Json(json!({ "error": msg, "message": msg }))).into_response()
@@ -519,9 +544,7 @@ pub async fn start_mock(vault: Shared) -> String {
                 let held_name =
                     beebeeb_core::encrypt::decrypt_name(&master(), &held_id, body["file_name"].as_str().unwrap_or(""))
                         .unwrap_or_default();
-                while v.lock().unwrap().hold_init_named.contains(&held_name) {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
+                hold_while(&v, |v| v.hold_init_named.contains(&held_name), |v| v.held_inits += 1).await;
                 let mut v = v.lock().unwrap();
                 v.inits += 1;
                 if let Some((n, code)) = v.init_status_after
@@ -608,8 +631,9 @@ pub async fn start_mock(vault: Shared) -> String {
                     if stall {
                         std::future::pending::<()>().await;
                     }
-                    while v.lock().unwrap().hold_chunks {
-                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    hold_while(&v, |v| v.hold_chunks, |v| v.held_chunks += 1).await;
+                    if let Some(code) = v.lock().unwrap().chunk_status {
+                        return err(StatusCode::from_u16(code).unwrap(), "refused by mock");
                     }
                     let mut v = v.lock().unwrap();
                     if v.completed_sessions.contains_key(&sid) {
@@ -621,6 +645,17 @@ pub async fn start_mock(vault: Shared) -> String {
                     if s.frames.contains_key(&idx) {
                         v.skipped += 1;
                         return Json(json!({ "index": idx, "size": body.len(), "skipped": true })).into_response();
+                    }
+                    // As on the server (`chunk_body_limit`, task 1786): a chunk body may carry at most one chunk of the
+                    // declared geometry, and at most what the declared size leaves after the other chunks.
+                    let stored_other: u64 = s.frames.values().map(|f| f.len() as u64).sum();
+                    let total_cap = s.size + 28 * u64::from(s.chunk_count);
+                    let limit = (s.chunk_size + 28).min(total_cap.saturating_sub(stored_other));
+                    if body.len() as u64 > limit {
+                        return err(
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            "chunk body past the size the upload declared",
+                        );
                     }
                     s.frames.insert(idx, body.to_vec());
                     Json(json!({ "index": idx, "size": body.len(), "skipped": false })).into_response()
@@ -852,10 +887,7 @@ pub fn scratch_home(api: &str) -> PathBuf {
         "email": "push-folder@beebeeb.io",
         "master_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
     });
-    for dir in [
-        home.join("Library/Application Support/beebeeb"),
-        home.join(".config/beebeeb"),
-    ] {
+    for dir in config_dir::login_dirs(&home) {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
     }
@@ -944,14 +976,12 @@ pub fn spawn_bb_piped(home: &Path, args: &[&str]) -> std::process::Child {
 
 /// Whether the resume sidecar in `home` names an in-progress upload (either config dir the harness writes).
 pub fn record_exists(home: &Path) -> bool {
-    [
-        home.join(".config/beebeeb/pending-uploads.json"),
-        home.join("Library/Application Support/beebeeb/pending-uploads.json"),
-    ]
-    .iter()
-    .filter_map(|p| std::fs::read_to_string(p).ok())
-    .filter_map(|text| serde_json::from_str::<Value>(&text).ok())
-    .any(|db| db["uploads"].as_object().is_some_and(|m| !m.is_empty()))
+    config_dir::login_dirs(home)
+        .iter()
+        .map(|dir| dir.join("pending-uploads.json"))
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .filter_map(|text| serde_json::from_str::<Value>(&text).ok())
+        .any(|db| db["uploads"].as_object().is_some_and(|m| !m.is_empty()))
 }
 
 /// Run `bb <args>` with chunk PUTs stalled until the server holds chunk 0 of a

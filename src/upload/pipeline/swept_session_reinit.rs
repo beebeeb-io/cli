@@ -14,7 +14,7 @@ use crate::api::ApiClient;
 // One shared mock of the upload routes (L13 round 2, L8).
 use crate::test_server::{Gone, Mock, Scratch, Shared, spawn};
 
-fn spec(path: &std::path::Path, file_id: Uuid) -> UploadSpec {
+pub(super) fn spec(path: &std::path::Path, file_id: Uuid) -> UploadSpec {
     UploadSpec {
         path: path.to_path_buf(),
         file_name: "payload.bin".to_string(),
