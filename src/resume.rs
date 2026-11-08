@@ -126,10 +126,7 @@ fn db_path() -> PathBuf {
     if let Ok(p) = std::env::var("BB_PENDING_UPLOADS_PATH") {
         return PathBuf::from(p);
     }
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("beebeeb")
-        .join("pending-uploads.json")
+    crate::paths::config_dir().join("pending-uploads.json")
 }
 
 /// The directory holding the resume state (and the upload locks of

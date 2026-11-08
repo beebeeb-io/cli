@@ -261,6 +261,7 @@ fn bb(home: &Path, args: &[&str]) -> Output {
         .args(args)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("BB_CONFIG_DIR", home.join(".config").join("beebeeb"))
         .env("BB_NO_UPDATE", "1")
         .env("NO_COLOR", "1")
         .stdin(std::process::Stdio::null())

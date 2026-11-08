@@ -178,6 +178,20 @@ mod transport_tests {
     }
 
     #[test]
+    fn a_set_bb_config_dir_is_refused_like_a_relocated_xdg_dir() {
+        let refused = check_config_override(Some("/tmp/scratch/bb"), None).unwrap_err();
+        assert!(
+            refused.contains("BB_CONFIG_DIR") && refused.contains("/tmp/scratch/bb"),
+            "{refused}"
+        );
+        assert!(refused.contains("BB_SERVICE_INSTALL_ALLOW_CUSTOM_HOME=1"), "{refused}");
+        assert!(check_config_override(Some("/tmp/scratch/bb"), Some("1")).is_ok());
+        assert!(check_config_override(Some("/tmp/scratch/bb"), Some("0")).is_err());
+        assert!(check_config_override(Some(""), None).is_ok());
+        assert!(check_config_override(None, None).is_ok());
+    }
+
+    #[test]
     fn the_override_lets_an_intended_custom_home_through_and_only_the_value_one() {
         let account = Path::new("/Users/dev");
         let custom = Path::new("/srv/custom-home");

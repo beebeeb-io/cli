@@ -41,6 +41,9 @@ src/test_server.rs        shared loopback mock for tests; tests/ = integration b
 
 ## Traps
 
+- **`BB_CONFIG_DIR`** names the cli's config directory itself (the `beebeeb` dir, used as given; empty = unset). `src/paths.rs::config_dir()` is the
+  only reader (a source sweep fails on any other `dirs::config_dir()` in `src/`). Every test harness sets it to the scratch config dir next to
+  `HOME` / `XDG_CONFIG_HOME`, because on Windows `dirs` ignores those. The service managers refuse a set `BB_CONFIG_DIR`, like a relocated XDG dir.
 - **A test run must never reach production.** The CLI reads no `BB_API_BASE`: with no `--api` and no config it talks to `https://api.beebeeb.io`.
   Set `BB_REFUSE_NON_LOOPBACK_API=1` on EVERY run of the binary and pass an explicit local `--api`; `tests/api_guard.rs` fails an unguarded
   `CARGO_BIN_EXE_bb` spawn. Unit tests use `ApiClient::new_for_test` (refuses non-loopback). The live session and master key are in the OS

@@ -81,6 +81,7 @@ impl Fixture {
             .args(args)
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", self.home.join(".config"))
+            .env("BB_CONFIG_DIR", self.home.join(".config").join("beebeeb"))
             .env("APPDATA", self.home.join("AppData/Roaming"))
             .env("LOCALAPPDATA", self.home.join("AppData/Local"))
             .env("BB_NO_UPDATE", "1")

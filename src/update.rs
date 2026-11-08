@@ -456,10 +456,7 @@ fn is_dev_build() -> bool {
 // ---------------------------------------------------------------------------
 
 fn state_file() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("beebeeb")
-        .join("last_update_check")
+    crate::paths::config_dir().join("last_update_check")
 }
 
 /// Returns `true` when enough time has passed since the last check.

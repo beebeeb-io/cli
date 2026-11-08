@@ -141,6 +141,7 @@ impl Harness {
             .args(["--api", &self.api, "--json"])
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", self.home.join(".config"))
+            .env("BB_CONFIG_DIR", self.home.join(".config").join("beebeeb"))
             .env("BB_REFUSE_NON_LOOPBACK_API", "1")
             .env("BB_NO_UPDATE", "1")
             .env("BB_TRANSPORT", "api")

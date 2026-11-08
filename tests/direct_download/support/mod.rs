@@ -706,6 +706,7 @@ fn bb(env: &Env, args: &[&str], extra_env: &[(&str, &str)]) -> Output {
         .current_dir(&env.cwd)
         .env("HOME", &env.home)
         .env("XDG_CONFIG_HOME", env.home.join(".config"))
+        .env("BB_CONFIG_DIR", env.home.join(".config").join("beebeeb"))
         .env("BB_NO_UPDATE", "1")
         .env("NO_COLOR", "1")
         .stdin(Stdio::null());
@@ -830,6 +831,7 @@ fn sync_until_watching(env: &Env) -> (bool, String, String) {
         .current_dir(&env.cwd)
         .env("HOME", &env.home)
         .env("XDG_CONFIG_HOME", env.home.join(".config"))
+        .env("BB_CONFIG_DIR", env.home.join(".config").join("beebeeb"))
         .env("BB_NO_UPDATE", "1")
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())

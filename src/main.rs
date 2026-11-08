@@ -27,6 +27,7 @@ mod item_id;
 mod loopback;
 mod owned_keys;
 mod path;
+mod paths;
 mod private_file;
 mod region;
 mod resume;

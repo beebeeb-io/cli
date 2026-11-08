@@ -125,6 +125,7 @@ async fn run_with_target(args: &[&str], target_id: Value, success: bool) -> Vec<
                 .args(argv)
                 .env("HOME", &home)
                 .env("XDG_CONFIG_HOME", home.join(".config"))
+                .env("BB_CONFIG_DIR", home.join(".config").join("beebeeb"))
                 .env("BB_NO_UPDATE", "1")
                 .stdin(Stdio::null())
                 .output()

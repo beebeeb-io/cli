@@ -126,6 +126,7 @@ fn spawn_bb(home: &Path, args: &[&str]) -> Child {
         .env("BB_REFUSE_NON_LOOPBACK_API", "1")
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("BB_CONFIG_DIR", home.join(".config").join("beebeeb"))
         .env("PATH", home.join("empty-path"))
         .env("BB_NO_UPDATE", "1")
         .env("NO_COLOR", "1")
