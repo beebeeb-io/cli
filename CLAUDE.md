@@ -33,7 +33,7 @@ src/resume.rs, item_id.rs resume records; L13 own-ids rule (client proposes, ser
 src/safe_path.rs          the ONLY way a server-provided name becomes a local path
 src/sync_safety.rs, daemon.rs   deletion safety (.bb-trash, mass-delete breaker), service manager guard
 src/account_state.rs      OnboardingDoc (lenient, schema major 1), account-state labels; region.rs, web_url.rs, device.rs
-src/config.rs, custody.rs, owned_keys.rs   config.json (session + master key!), key custody
+src/config.rs, custody.rs, owned_keys.rs   config.json (settings only) + the keyring sign-in (credentials.rs, private_file.rs; LD-0029), key custody
 src/exit.rs               exit codes: 0 ok, 1 error, 2 prompt needed but not a TTY, 3 finished with failed/unresolved items
 src/colors.rs, ui.rs, tui/  amber #f5b800, sage #8fc18b, coral #e07a6a: always colors::*, never raw .truecolor()
 src/test_server.rs        shared loopback mock for tests; tests/ = integration binaries (api_guard, sync_never_deletes, pull_*, ...)
@@ -43,8 +43,9 @@ src/test_server.rs        shared loopback mock for tests; tests/ = integration b
 
 - **A test run must never reach production.** The CLI reads no `BB_API_BASE`: with no `--api` and no config it talks to `https://api.beebeeb.io`.
   Set `BB_REFUSE_NON_LOOPBACK_API=1` on EVERY run of the binary and pass an explicit local `--api`; `tests/api_guard.rs` fails an unguarded
-  `CARGO_BIN_EXE_bb` spawn. Unit tests use `ApiClient::new_for_test` (refuses non-loopback). The config file holds the live session and master
-  key (macOS `~/Library/Application Support/beebeeb/config.json`, Linux `~/.config/beebeeb/config.json`): tests isolate HOME.
+  `CARGO_BIN_EXE_bb` spawn. Unit tests use `ApiClient::new_for_test` (refuses non-loopback). The live session and master key are in the OS
+  keyring (LD-0029; `config.json` keeps settings only): tests isolate HOME, and with `BB_REFUSE_NON_LOOPBACK_API` set the binary never
+  touches the OS keyring (a test's legacy-layout `config.json` then prints the F3 "stored unencrypted" warning on stderr).
 - **No city is ever printed** (`bb region`, any command, whichever server answers; `tests/no_city_copy.rs`, `tests/region_choice.rs`). The
   region choices come from `GET /api/v1/storage-regions`, never from the binary.
 - **`bb share` is always double-encrypted** (web wire format, `nonce(12) || AES-256-GCM(K_c, FileKey)`, pinned by the core `share_key_wrap` KAT);
