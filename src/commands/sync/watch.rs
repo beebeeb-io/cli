@@ -97,6 +97,7 @@ pub(super) async fn run_plain_watch(
                     let resync_api = ApiClient::from_config();
                     check_sync_account(&resync_api, state).await?;
                     let resync_master = Arc::new(load_master_key()?);
+                    crate::temp_record::sweep();
                     let mut resync_local = walk_local_files(local_dir)?;
                     let resync_folders = walk_local_folders(local_dir)?;
                     let mut resync_remote_files: HashMap<String, RemoteFile> = HashMap::new();
@@ -267,7 +268,7 @@ pub(super) async fn run_plain_watch(
                     let data = serde_json::to_vec_pretty(&state).map_err(|e| format!("serialize state: {e}"))?;
                     std::fs::write(state_path, data).map_err(|e| format!("write state file: {e}"))?;
 
-                    // Update dashboard
+                    // Update dashboard (the sweep already ran at the top of this pass)
                     let new_local = walk_local_files(local_dir)?;
                     dashboard.file_count.store(new_local.len() as u64, Ordering::Relaxed);
                     dashboard.total_bytes.fetch_add(resync_bytes, Ordering::Relaxed);
@@ -427,6 +428,7 @@ pub(super) async fn run_tui_watch(
                     continue;
                 }
             };
+            crate::temp_record::sweep();
             let mut resync_local = match walk_local_files(&sync_local_dir) {
                 Ok(f) => f,
                 Err(e) => {
@@ -647,7 +649,7 @@ pub(super) async fn run_tui_watch(
                 let _ = std::fs::write(&sync_state_path, data);
             }
 
-            // Compute updated totals.
+            // Compute updated totals (the sweep already ran at the top of this pass).
             let new_local = walk_local_files(&sync_local_dir).unwrap_or_default();
             let new_count = new_local.len() as u64;
             let new_bytes: u64 = new_local.values().map(|f| f.size).sum();

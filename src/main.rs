@@ -33,6 +33,7 @@ mod resume;
 mod safe_path;
 mod shared_folder_index;
 mod sync_safety;
+mod temp_record;
 mod thumbnail;
 mod transfer_stats;
 mod transfer_view;

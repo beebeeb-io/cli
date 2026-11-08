@@ -58,6 +58,7 @@ pub(super) fn scan_local_files(
     scan: Option<&indicatif::ProgressBar>,
 ) -> Result<HashMap<String, LocalFile>, String> {
     let mut out = HashMap::new();
+    let (recorded, root_abs) = recorded_temps(root);
     for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
         if !path.is_file() {
@@ -71,6 +72,9 @@ pub(super) fn scan_local_files(
             .components()
             .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
         {
+            continue;
+        }
+        if recorded.contains(&root_abs.join(rel)) {
             continue;
         }
         let meta = std::fs::metadata(path).map_err(|e| format!("stat {}: {e}", path.display()))?;
@@ -117,6 +121,7 @@ pub(super) fn scan_local_files(
 
 pub(super) fn walk_local_files(root: &Path) -> Result<HashMap<String, LocalFile>, String> {
     let mut out = HashMap::new();
+    let (recorded, root_abs) = recorded_temps(root);
     for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
         if !path.is_file() {
@@ -130,6 +135,9 @@ pub(super) fn walk_local_files(root: &Path) -> Result<HashMap<String, LocalFile>
             .components()
             .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
         {
+            continue;
+        }
+        if recorded.contains(&root_abs.join(rel)) {
             continue;
         }
         let meta = std::fs::metadata(path).map_err(|e| format!("stat {}: {e}", path.display()))?;
@@ -338,4 +346,14 @@ pub(super) async fn refresh_watch_reads(
     }
     *local = walk_local_files(root)?;
     Ok(blocked)
+}
+
+/// The download temps on record, and `root` in the same absolute form, so a
+/// walked path is compared with them whatever name it has. Nothing but a
+/// recorded path is ever left out of a walk.
+fn recorded_temps(root: &Path) -> (std::collections::HashSet<PathBuf>, PathBuf) {
+    let root_abs = root
+        .canonicalize()
+        .unwrap_or_else(|_| crate::temp_record::absolute(root));
+    (crate::temp_record::recorded_paths(), root_abs)
 }

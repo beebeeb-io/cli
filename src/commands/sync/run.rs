@@ -195,6 +195,9 @@ pub async fn run(
     let scan_active = ui::is_rich() && std::io::stdout().is_terminal();
 
     let local_spinner = make_scan_spinner(scan_active, "scanning local", "files");
+    if !dry_run {
+        crate::temp_record::sweep();
+    }
     let mut local_files = scan_local_files(&local_dir, &state.files, rehash, local_spinner.as_ref())?;
     if let Some(pb) = &local_spinner {
         pb.finish_and_clear();
