@@ -757,10 +757,15 @@ fn assert_identical(env: &Env, out: &Output) {
         "output differs from the plaintext\n{}",
         describe(out)
     );
-    assert!(
-        !env.cwd.join("out.bbtmp").exists() && !env.cwd.join("out.bin.bbtmp").exists(),
-        "a temp file was left behind"
-    );
+    // Any temp beside the output (`out.bin.tmp` or a random `out.bin.<hex>.tmp`
+    // since core's TempSibling, `out.bin.bbtmp` before) must be gone.
+    let leftovers: Vec<String> = std::fs::read_dir(&env.cwd)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "out.bin" && n.starts_with("out."))
+        .collect();
+    assert!(leftovers.is_empty(), "a temp file was left behind: {leftovers:?}");
 }
 
 fn assert_nothing_written(env: &Env, out: &Output) {

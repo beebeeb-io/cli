@@ -138,7 +138,10 @@ pub(super) async fn run_once(
         file.body_done(chunk_count.max(1), encrypted_bytes.len() as u64, Route::Api);
         drop(flight);
 
-        std::fs::write(&out_path, &plaintext).map_err(|e| format!("failed to write file: {e}"))?;
+        // Through a temp and a publish, like the streamed path (task 2408): never
+        // truncated in place, never written through a name that reaches another file.
+        crate::download::AtomicFile::write_whole(&out_path, &plaintext)
+            .map_err(|e| format!("failed to write file: {e}"))?;
         file.finish(true);
         let transfer = progress.summary();
 

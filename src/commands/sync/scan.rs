@@ -211,8 +211,33 @@ pub(super) fn foreign_missing(state: &SyncState, rel: &str, remote: &HashMap<Str
             .is_some_and(|p| state.owned_keys.contains_key(&p.remote_id.to_string()))
 }
 
+/// Whether `rel` below `root` reaches a DIFFERENT existing entry through
+/// another of its names: on Windows an 8.3 short name, `REPORT~1.PDF` for
+/// `Report for 2026.pdf` (task 2408). Renaming from or into such a path would
+/// act on that other entry, so it counts as occupied. `Err`: the check could
+/// not finish, or `rel` is not a relative path of plain names.
+fn reaches_another_entry(root: &Path, rel: &str) -> std::io::Result<bool> {
+    crate::safe_path::short_name_alias(root, Path::new(rel)).map(|conflict| conflict.is_some())
+}
+
+/// `safe_rel_join` for a path a remote move renames from or into. `Ok(None)`:
+/// hold the move for conflict handling, because the path reaches a different
+/// existing entry ([`reaches_another_entry`]) or that check could not finish.
+/// Any other refusal is an error, as before.
+fn move_path(root: &Path, rel: &str) -> Result<Option<PathBuf>, String> {
+    match crate::safe_path::safe_rel_join(root, rel, crate::safe_path::Rules::Host) {
+        Ok(path) => Ok(Some(path)),
+        Err(refusal) => match reaches_another_entry(root, rel) {
+            Ok(true) => Ok(None),
+            Err(e) if e.kind() != std::io::ErrorKind::InvalidInput => Ok(None),
+            Ok(false) | Err(_) => Err(refusal),
+        },
+    }
+}
+
 /// Follow identity across remote moves. Only an unchanged local mirror may be
-/// renamed; dirty paths and occupied destinations are held for conflict handling.
+/// renamed; dirty paths, occupied destinations and paths that reach a
+/// different entry through an 8.3 short name are held for conflict handling.
 pub(super) fn reconcile_moves(
     root: &Path,
     state: &mut SyncState,
@@ -238,13 +263,23 @@ pub(super) fn reconcile_moves(
         if dry_run {
             continue;
         }
-        let from =
-            crate::safe_path::safe_rel_join(root, &old, crate::safe_path::Rules::Host).map_err(|e| e.to_string())?;
-        let to =
-            crate::safe_path::safe_rel_join(root, new, crate::safe_path::Rules::Host).map_err(|e| e.to_string())?;
+        let (Some(from), Some(to)) = (move_path(root, &old)?, move_path(root, new)?) else {
+            blocked.insert(old);
+            blocked.insert(new.clone());
+            continue;
+        };
         if from.exists() {
             // Recheck bytes immediately before a local move, as for tombstones.
             if compute_file_hash(&from).ok().as_ref() != entry.content_hash.as_ref() {
+                blocked.insert(old);
+                blocked.insert(new.clone());
+                continue;
+            }
+            // Checked again before any folder is created: hashing a large file
+            // takes a while, and a folder on the way that came to reach another
+            // one is neither created into nor moved into. A check that cannot
+            // finish holds the move.
+            if reaches_another_entry(root, new).unwrap_or(true) {
                 blocked.insert(old);
                 blocked.insert(new.clone());
                 continue;
