@@ -507,3 +507,143 @@ async fn a_failed_manifest_write_keeps_the_report_and_exits_incomplete() {
     assert_eq!(out.status.code(), Some(0), "written on the next run: {}", stderr(&out));
     assert_eq!(files_named(&vault.lock().unwrap(), ".device.json").len(), 1);
 }
+
+/// This machine's `backup-records-<n>.jsonl` files: they sit in the same state dir as its `backup.json`.
+fn records_files(home: &Path) -> Vec<PathBuf> {
+    let dir = settings_file(home)
+        .parent()
+        .expect("backup.json sits in a state dir")
+        .to_path_buf();
+    std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("backup-records-") && n.ends_with(".jsonl"))
+        })
+        .collect()
+}
+
+/// A reinstall: the records are gone, the files on the server and the source stay.
+fn lose_the_records(home: &Path) {
+    let lost = records_files(home);
+    assert!(!lost.is_empty(), "the pass wrote its records beside backup.json");
+    for file in lost {
+        std::fs::remove_file(file).unwrap();
+    }
+}
+
+/// The id of the one live row named `name`.
+fn the_one_file(v: &Vault, name: &str) -> String {
+    let rows = files_named(v, name);
+    assert_eq!(rows.len(), 1, "one row named {name}: {rows:?}");
+    rows[0].0.clone()
+}
+
+/// Task 2378 (core v0.2.2, LD-0123): with the records gone (a reinstall) `bb backup` has no measured clock
+/// for the listing, so core's rebuild rule trusts a server copy only when it was uploaded more than 10
+/// minutes after the file last changed. Both files here were uploaded seconds after they were written, so
+/// the next run uploads them again rather than mark them backed up on the device clock's word. The copy is
+/// found by its parent and exact name and gets a new VERSION: the backup keeps one row per file, never two.
+#[tokio::test(flavor = "multi_thread")]
+async fn lost_records_upload_again_a_copy_made_within_ten_minutes_of_the_change_as_a_new_version() {
+    let (vault, api, home, env) = setup().await;
+    backup(&home, &api, &env, &["add", "data"]).await;
+    let out = backup(&home, &api, &env, &["run"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(stdout(&out).contains("2 uploaded"), "{}", stdout(&out));
+    let (a, b) = {
+        let v = vault.lock().unwrap();
+        (the_one_file(&v, "a.txt"), the_one_file(&v, "b.txt"))
+    };
+
+    lose_the_records(&home);
+
+    let out = backup(&home, &api, &env, &["run"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("2 uploaded \u{b7} 0 failed"),
+        "a copy made seconds after the change is uploaded again: {}",
+        stdout(&out)
+    );
+    assert!(stdout(&out).contains("0 unchanged"), "{}", stdout(&out));
+    let v = vault.lock().unwrap();
+    for (name, id) in [("a.txt", &a), ("b.txt", &b)] {
+        assert_eq!(
+            &the_one_file(&v, name),
+            id,
+            "{name} keeps its id: a new version, never a second row"
+        );
+        assert_eq!(v.items[id].version, 2, "{name}: one more version");
+    }
+}
+
+/// The other side of the same rule: a copy the server stamped more than 10 minutes after the file changed is
+/// trusted, so the rebuild marks it backed up and the next run uploads nothing and adds no version or row.
+#[tokio::test(flavor = "multi_thread")]
+async fn lost_records_trust_a_copy_made_more_than_ten_minutes_after_the_change() {
+    let (vault, api, home, env) = setup().await;
+    vault.lock().unwrap().uploaded_at_offset_secs = 11 * 60;
+    backup(&home, &api, &env, &["add", "data"]).await;
+    let out = backup(&home, &api, &env, &["run"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(stdout(&out).contains("2 uploaded"), "{}", stdout(&out));
+    let a = the_one_file(&vault.lock().unwrap(), "a.txt");
+
+    lose_the_records(&home);
+
+    let out = backup(&home, &api, &env, &["run"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("0 uploaded \u{b7} 0 failed") && stdout(&out).contains("2 unchanged"),
+        "a copy made 11 minutes after the change is trusted: {}",
+        stdout(&out)
+    );
+    let v = vault.lock().unwrap();
+    assert_eq!(the_one_file(&v, "a.txt"), a, "no second row");
+    assert_eq!(v.items[&a].version, 1, "no new version");
+}
+
+/// Two live rows with the exact name in the same folder: which one is the backup's copy is not known, so
+/// nothing is guessed. The file is uploaded as a new file (the behaviour before this rule), the other file
+/// still gets its new version, and the run says so once, without a name.
+#[tokio::test(flavor = "multi_thread")]
+async fn lost_records_with_two_rows_of_the_same_name_upload_a_new_file_and_say_so() {
+    let (vault, api, home, env) = setup().await;
+    backup(&home, &api, &env, &["add", "data"]).await;
+    let out = backup(&home, &api, &env, &["run"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let b = {
+        let mut v = vault.lock().unwrap();
+        let (_, _, data) = tree_ids(&v);
+        seed_file_row(&mut v, Some(&data), "a.txt");
+        assert_eq!(files_named(&v, "a.txt").len(), 2, "two rows named a.txt in one folder");
+        the_one_file(&v, "b.txt")
+    };
+
+    lose_the_records(&home);
+
+    let out = backup(&home, &api, &env, &["run"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(stdout(&out).contains("2 uploaded \u{b7} 0 failed"), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("more than one copy on the server"),
+        "the run says it did not guess: {}",
+        stderr(&out)
+    );
+    assert!(
+        !stderr(&out).contains("a.txt"),
+        "the note names no file: {}",
+        stderr(&out)
+    );
+    let v = vault.lock().unwrap();
+    assert_eq!(
+        files_named(&v, "a.txt").len(),
+        3,
+        "a new file, no guess between the two"
+    );
+    assert_eq!(the_one_file(&v, "b.txt"), b, "b.txt is unambiguous: its own row");
+    assert_eq!(v.items[&b].version, 2, "b.txt: one more version");
+}

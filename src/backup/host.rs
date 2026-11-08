@@ -5,6 +5,7 @@
 //! record when its upload completes.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use beebeeb_backup::{BackupHost, DeviceTree, Fingerprint, HostError, UploadRequest};
@@ -29,6 +30,8 @@ pub(crate) struct Drained {
     pub failed: usize,
     /// Changed again after the pass looked at it: backed up next run.
     pub changed_meanwhile: usize,
+    /// Uploaded as a new file because two or more server rows had its exact name in its folder.
+    pub ambiguous: usize,
 }
 
 pub(crate) struct CliHost<'a> {
@@ -43,6 +46,16 @@ pub(crate) struct CliHost<'a> {
     records: Mutex<Records>,
     queue: Mutex<Vec<UploadRequest>>,
     turned_off: Mutex<Option<FolderPresence>>,
+    /// Uploads that found two or more same-name rows and added no version (see [`SameName`]).
+    ambiguous: AtomicUsize,
+}
+
+/// The server copies, listed before the pass, of a file that has no record: same folder, exact name.
+enum SameName {
+    None,
+    One(Uuid),
+    /// Which row is this backup's copy is not known: nothing is guessed.
+    Several,
 }
 
 impl<'a> CliHost<'a> {
@@ -64,6 +77,25 @@ impl<'a> CliHost<'a> {
             records: Mutex::new(records),
             queue: Mutex::new(Vec::new()),
             turned_off: Mutex::new(None),
+            ambiguous: AtomicUsize::new(0),
+        }
+    }
+
+    /// The live server rows named exactly like `req`, in the exact folder `req` goes into, listed before the
+    /// pass. Only for a file with no record: with one, the pass already knows its remote file. A row in
+    /// another folder, or with a name that differs in any way, never counts.
+    fn same_name_copies(&self, req: &UploadRequest) -> SameName {
+        let Some(tree) = self.tree.as_ref().filter(|_| req.record_key.is_none()) else {
+            return SameName::None;
+        };
+        let mut found = tree
+            .files
+            .iter()
+            .filter(|f| f.key == req.key && tree.parents.get(&f.remote_id) == Some(&req.parent_id));
+        match (found.next(), found.next()) {
+            (None, _) => SameName::None,
+            (Some(only), None) => SameName::One(only.remote_id),
+            (Some(_), Some(_)) => SameName::Several,
         }
     }
 
@@ -90,6 +122,7 @@ impl<'a> CliHost<'a> {
                 Err(_) => drained.failed += 1,
             }
         }
+        drained.ambiguous = self.ambiguous.load(Ordering::Relaxed);
         drained
     }
 
@@ -102,9 +135,18 @@ impl<'a> CliHost<'a> {
         let guard = SourceGuard {
             fingerprint: req.fingerprint,
         };
+        // A file with no record (a reinstall) whose copy the rebuild did not trust: the copy is still on the
+        // server, so the upload adds a version to it instead of making a second row.
         let replace = match req.reason {
             UploadReason::Changed => req.remote_id,
-            UploadReason::New => None,
+            UploadReason::New => match self.same_name_copies(req) {
+                SameName::One(id) => Some(id),
+                SameName::Several => {
+                    self.ambiguous.fetch_add(1, Ordering::Relaxed);
+                    None
+                }
+                SameName::None => None,
+            },
         };
         let mut done = remote::upload(
             self.api,
