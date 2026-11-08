@@ -69,6 +69,7 @@ bb sync ~/vault /Documents  # Two-way sync, then watch for live changes
 | `bb shares` / `bb unshare` | List or revoke share links |
 | `bb request <create\|list\|send\|rm>` | Account-less links that let anyone upload *into* your vault |
 | `bb sync <local> [remote]` | Bidirectional folder sync; continuous by default (`--once`, `--daemon`, `--delete`) |
+| `bb backup <add\|remove\|list\|run\|status>` | Back up folders of this machine (a Linux server or NAS) into `Backups/<this machine>/`, read where they are; see [Backups](#backups) |
 | `bb webdav` | Serve the vault over local WebDAV (Finder, rclone, Cyberduck, WinSCP; not Windows Explorer, see below). Read-only by default (`--read-write` to allow changes); prints a random per-run password that every client must send |
 | `bb mount <point>` | FUSE mount (macFUSE / libfuse3). Source builds with `--features fuse` only; release binaries do not include it, so use `bb webdav` |
 | `bb billing <show\|usage\|invoices\|portal\|addons>` | Plan and renewal info, per-region usage, invoices (`bb billing invoices --open <id>` downloads one as PDF), the Beebeeb web billing page, and add-ons |
@@ -81,12 +82,72 @@ bb sync ~/vault /Documents  # Two-way sync, then watch for live changes
 
 Command overview: `bb --help`. Every flag of a command: `bb <command> --help` (for example `bb push --help`).
 
+### Backups
+
+`bb backup` backs up folders of a headless Linux machine into `Backups/<this machine>/<folder>/`, end-to-end
+encrypted. Files are read where they are and never changed. Each run uploads what is new or changed since the
+last run; a changed file becomes a new version of the same file.
+
+```sh
+bb backup add /srv/photos   # back up a folder of this machine
+bb backup run               # one pass: what is new or changed since the last run
+bb backup status            # each folder: on or off, files backed up, the last run's counts
+bb backup list
+bb backup remove /srv/photos  # stop; what is already in Backups stays there
+```
+
+The machine is named by its pretty hostname (else its hostname) and recognised by `/etc/machine-id`, so a
+reinstall keeps backing up into the same folder. Settings copied to another machine (a cloned disk image, a copied
+home) are refused there, never written into the first machine's folder: delete `backup.json` in bb's state folder
+to back the copy up as a new device. A folder inside bb's own folders (its settings, a `bb sync`
+folder, a `bb mount`) cannot be added; bb's settings and mounts are never walked into. A `bb sync` folder below a
+folder you add is backed up like any other folder, so add the folders next to it instead.
+
+Backups is read-only everywhere else: `bb push`, `bb mkdir` and `bb mv` into it are refused, and `bb ls` shows it
+as `[Read-only]`. `bb rm` can delete a device's backup or one of its folders after a question (`--yes` for
+scripts; `-f` does not answer it). If a folder's backup is deleted from another device, it turns off: `bb backup
+run` uploads nothing of it, `bb backup status` says why and exits 4, and `bb backup add <folder>` backs it up again.
+`bb backup run` exits 0 when everything was backed up, 3 when a file or the device's `.device.json` could not be
+written (tried again on the next run), and 4 when a folder turned off.
+
+To run it every hour, as your user, with systemd:
+
+```ini
+# ~/.config/systemd/user/beebeeb-backup.service
+[Unit]
+Description=Beebeeb backup (one pass)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/bb backup run
+```
+
+```ini
+# ~/.config/systemd/user/beebeeb-backup.timer
+[Unit]
+Description=Run the Beebeeb backup every hour
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=5m
+
+[Install]
+WantedBy=timers.target
+```
+
+Then `systemctl --user daemon-reload && systemctl --user enable --now beebeeb-backup.timer`. On a server
+without a login session, also run `loginctl enable-linger $USER` once, so the timer runs while nobody is signed
+in. `journalctl --user -u beebeeb-backup` shows each run's counts. Exit codes: `0` done, `3` some files failed
+(tried again next run), `4` a backup is off, `75` another run is still going.
+
 ## Security model
 
 beebeeb is zero-knowledge: the server stores only ciphertext and cannot read your file contents, filenames, or share payloads.
 
 - **Keys.** Your master key is derived at login and stays on your device. Per-file keys are derived from it with HKDF using the file's UUID as context, so every file has a unique key.
-- **Encryption.** File content and filenames are sealed with AES-256-GCM before upload, in independently-nonced chunks. Chunk size scales with the file, from 4 MiB up to 128 MiB, and shrinks when `bb sync` uploads several files in parallel so memory stays bounded.
+- **Encryption.** File content and filenames are sealed with AES-256-GCM before upload, in independently-nonced chunks. Chunk size scales with the file, from 4 MiB up to 128 MiB, and shrinks when several chunks or files go up at once (`bb push --parallel`, `bb sync`) so memory stays bounded.
 - **Login.** The device-authorization flow uses an ephemeral P-256 ECDH keypair, so the session token and master key are delivered encrypted and never exposed in transit.
 - **Session storage.** After login, the token and master key live in `~/Library/Application Support/beebeeb/config.json` (macOS) or `~/.config/beebeeb/config.json` (Linux). Guard this file like an SSH identity. Sessions expire after 30 days.
 - **Share links.** Every link `bb share` creates is double-encrypted: `bb` generates a random link key `K_c`, wraps the file key under it (AES-256-GCM), and puts the link key in the URL fragment (`#key=…`), which browsers never send to a server. Beebeeb stores only the wrapped key and cannot open the file. Anyone holding the full link can, so send it the way you would send the file. `--passphrase` is an access gate, not extra encryption: the passphrase goes to the server over TLS when the link is created and is stored only as an Argon2id hash, which the server checks before handing out the file. So that `bb shares` can show the link again, `K_c` and the link token are also stored wrapped under your master key, which never leaves your device.

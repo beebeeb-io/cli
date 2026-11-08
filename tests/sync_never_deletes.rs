@@ -66,7 +66,14 @@ impl Mock {
 /// because the 1908 read path takes the chunk-format pin from it (task 1943).
 fn remote_file(id: &str, name: &str) -> Value {
     let mk = beebeeb_core::kdf::MasterKey::from_bytes([0u8; 32]);
-    let name_encrypted = beebeeb_core::encrypt::encrypt_name(&mk, id, name, None).unwrap();
+    let name_key = beebeeb_core::kdf::derive_file_key(&mk, id.as_bytes());
+    let name_encrypted = beebeeb_core::encrypt::encrypt_name_for(
+        &name_key,
+        name,
+        None,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap();
     json!({
         "id": id,
         "name_encrypted": name_encrypted,

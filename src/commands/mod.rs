@@ -1,4 +1,7 @@
+//! One module per `bb` subcommand, plus the shared confirm and move helpers.
+
 pub mod account;
+pub mod backup;
 pub mod billing;
 pub mod config;
 pub mod confirm;
@@ -12,6 +15,11 @@ pub mod mv;
 pub mod passkey;
 pub mod pull;
 pub mod push;
+mod push_file;
+pub(crate) mod push_folders;
+pub(crate) mod push_repeat;
+pub(crate) mod push_report;
+mod push_schedule;
 pub mod qr;
 pub mod quota;
 pub mod region;

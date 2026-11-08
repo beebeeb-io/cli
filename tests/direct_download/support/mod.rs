@@ -1,17 +1,9 @@
-//! `bb pull` over the direct S3 transport (task 2173, contract v1).
-//!
-//! Drives the real `bb` binary against two in-process mocks: an API (axum) that
-//! speaks discovery, download grants, the pinned per-chunk route and today's
-//! `/download`, and a STORAGE server written by hand on a raw TCP socket, so a
-//! test can send exactly the bytes it wants: a short body, a wrong
-//! `Content-Length`, a redirect, a tampered chunk. Every run has a scratch
-//! `HOME` (never the developer's session) and `BB_NO_UPDATE=1`.
-//!
-//! The file is 21 chunks, so the transfer needs three windows of 8 grants.
-//! Every scenario asserts the output is byte-identical to the plaintext, which
-//! transport carried it (`bb pull --json` reports it), and what the mocks saw.
-//! No scenario may print a signed link: `assert_clean` greps stdout and stderr
-//! for the signature of every link the API issued.
+mod compat;
+mod fallback;
+mod live_stats;
+mod sync;
+mod transport;
+mod version;
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -36,6 +28,15 @@ const BUCKET: &str = "bb-test";
 const STRIDE: u64 = 1024;
 const PLAIN_LEN: usize = 20 * 1024 + 100; // 21 chunks, the last one 100 bytes
 const SIG: &str = "SIGNATURE-DO-NOT-PRINT";
+/// What the server says about where the file is stored (task 2333, N3): only the country may be shown. Invented
+/// values: `tests/no_city_copy.rs` reads only `src/`, but a real city or datacenter code has no place here either.
+const POOL_ID: &str = "9f3c2b1a-5e4d-4c3b-8a29-1f0e9d8c7b6a";
+const DATACENTER: &str = "zz9";
+const CITY: &str = "Testville";
+
+fn storage_location() -> Value {
+    json!({ "country": "Germany", "country_code": "DE", "city": CITY })
+}
 
 static SEQ: AtomicUsize = AtomicUsize::new(0);
 
@@ -50,8 +51,8 @@ struct Fixture {
     frames: Vec<Vec<u8>>,
     name_encrypted: String,
 }
-
 /// 21 chunks of v1 frames under the all-zero test key.
+#[allow(deprecated)] // fixture: a fixed id and chunk size, which the NewItemId/WriteTarget writers cannot express
 fn fixture() -> Fixture {
     let plaintext: Vec<u8> = (0..PLAIN_LEN).map(|i| (i.wrapping_mul(31) % 251) as u8).collect();
     let mk = MasterKey::from_bytes([0u8; 32]);
@@ -92,7 +93,7 @@ fn fixture_legacy_binary_uuid() -> Fixture {
 /// frame dropped: the manifest and the metadata both say 3 chunks, every frame
 /// authenticates, but the stream never reaches the frame marked last.
 fn fixture_v2_missing_last_frame() -> Fixture {
-    let v: Value = serde_json::from_str(include_str!("fixtures/core_1908_vectors.json")).unwrap();
+    let v: Value = serde_json::from_str(include_str!("../../fixtures/core_1908_vectors.json")).unwrap();
     let f = &v["v2_file"];
     let wire = hex_decode(f["wire_hex"].as_str().unwrap());
     let plain = hex_decode(f["plaintext_hex"].as_str().unwrap());
@@ -369,6 +370,9 @@ async fn meta(State(m): State<Arc<Mock>>, AxPath(id): AxPath<String>) -> Respons
         "is_folder": false,
         "chunk_count": count,
         "size_bytes": m.fx.plaintext.len(),
+        "storage_pool_id": POOL_ID,
+        "region": DATACENTER,
+        "storage_location": storage_location(),
     }))
     .into_response()
 }
@@ -392,6 +396,9 @@ async fn list(State(m): State<Arc<Mock>>, Query(q): Query<HashMap<String, String
             "size_bytes": m.fx.plaintext.len(),
             "chunk_count": m.fx.frames.len(),
             "updated_at": "2020-01-01T00:00:00+00:00",
+            "storage_pool_id": POOL_ID,
+            "region": DATACENTER,
+            "storage_location": storage_location(),
         }] }))
         .into_response(),
         Some(_) => Json(json!({ "files": [] })).into_response(),
@@ -750,10 +757,15 @@ fn assert_identical(env: &Env, out: &Output) {
         "output differs from the plaintext\n{}",
         describe(out)
     );
-    assert!(
-        !env.cwd.join("out.bbtmp").exists() && !env.cwd.join("out.bin.bbtmp").exists(),
-        "a temp file was left behind"
-    );
+    // Any temp beside the output (`out.bin.tmp` or a random `out.bin.<hex>.tmp`
+    // since core's TempSibling, `out.bin.bbtmp` before) must be gone.
+    let leftovers: Vec<String> = std::fs::read_dir(&env.cwd)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "out.bin" && n.starts_with("out."))
+        .collect();
+    assert!(leftovers.is_empty(), "a temp file was left behind: {leftovers:?}");
 }
 
 fn assert_nothing_written(env: &Env, out: &Output) {
@@ -786,361 +798,6 @@ fn storage_hits(env: &Env, index: u32) -> usize {
 
 // ─────────────────────────────── scenarios ───────────────────────────────
 
-#[test]
-fn direct_download_is_byte_identical_and_never_touches_the_api_byte_route() {
-    let env = setup(Discovery::Offer, Grants::Normal, &[], &[]);
-    let (out, json) = pull(&env, &[], &[("BB_TRANSPORT_TRACE", "1")]);
-    assert!(out.status.success(), "{}", describe(&out));
-    assert_identical(&env, &out);
-    assert_eq!(json["transport"], "direct", "{}", describe(&out));
-    assert_clean(&env, &out);
-
-    let log = env.mock.log.lock().unwrap();
-    assert_eq!(log.api_download_hits, 0, "the API streamed bytes");
-    assert!(log.api_chunk_hits.is_empty());
-    assert_eq!(log.discovery_hits, 1);
-    assert_eq!(
-        log.discovery_cap_headers,
-        vec![None],
-        "the capability header is for grants only"
-    );
-    // Three windows: 0..8, 8..16, 16..21; the first unpinned, the rest pinned.
-    let starts: Vec<(u64, u64)> = log
-        .grant_bodies
-        .iter()
-        .map(|b| (b["start_index"].as_u64().unwrap(), b["count"].as_u64().unwrap()))
-        .collect();
-    assert_eq!(starts, vec![(0, 8), (8, 8), (16, 5)]);
-    assert_eq!(log.grant_bodies[0]["object_version_id"], Value::Null);
-    assert_eq!(log.grant_bodies[1]["object_version_id"], VERSION);
-    assert!(
-        log.grant_cap_headers
-            .iter()
-            .all(|h| h.as_deref() == Some("object-download-v1"))
-    );
-    // 21 storage requests, one per chunk, none of them carrying the account.
-    assert_eq!(log.storage.len(), 21);
-    for (index, names) in &log.storage {
-        for banned in ["authorization", "cookie", "referer"] {
-            assert!(
-                !names.iter().any(|n| n == banned),
-                "chunk {index} sent {banned}: {names:?}"
-            );
-        }
-        assert!(
-            !names.iter().any(|n| n.starts_with("x-beebeeb")),
-            "chunk {index} sent a Beebeeb header: {names:?}"
-        );
-    }
-}
-
-#[test]
-fn forcing_the_api_transport_by_flag_and_by_environment() {
-    for (args, envs) in [
-        (vec!["--transport", "api"], vec![]),
-        (vec![], vec![("BB_TRANSPORT", "api")]),
-    ] {
-        let env = setup(Discovery::Offer, Grants::Normal, &[], &[]);
-        let (out, json) = pull(&env, &args, &envs);
-        assert!(out.status.success(), "{}", describe(&out));
-        assert_identical(&env, &out);
-        assert_eq!(json["transport"], "api", "{}", describe(&out));
-        let log = env.mock.log.lock().unwrap();
-        assert_eq!(log.discovery_hits, 0, "a forced API run must not even ask discovery");
-        assert!(log.grant_bodies.is_empty() && log.storage.is_empty());
-        assert_eq!(log.api_download_hits, 1);
-    }
-}
-
-#[test]
-fn the_flag_beats_the_environment_and_auto_means_direct() {
-    let env = setup(Discovery::Offer, Grants::Normal, &[], &[]);
-    let (out, json) = pull(&env, &["--transport", "auto"], &[("BB_TRANSPORT", "api")]);
-    assert!(out.status.success(), "{}", describe(&out));
-    assert_eq!(json["transport"], "direct", "{}", describe(&out));
-}
-
-#[test]
-fn servers_without_direct_transport_are_served_over_the_api() {
-    // An old server's unknown route, a node without the route, a server error, a
-    // server that offers nothing: all end on the API, byte-identical, no error text.
-    for mode in [
-        Discovery::Bare404,
-        Discovery::Json404,
-        Discovery::ServerError,
-        Discovery::Nothing,
-    ] {
-        let env = setup(mode, Grants::Normal, &[], &[]);
-        let (out, json) = pull(&env, &[], &[]);
-        assert!(out.status.success(), "{}", describe(&out));
-        assert_identical(&env, &out);
-        assert_eq!(json["transport"], "api", "{}", describe(&out));
-        assert!(
-            String::from_utf8_lossy(&out.stderr).trim().is_empty(),
-            "{}",
-            describe(&out)
-        );
-        let log = env.mock.log.lock().unwrap();
-        assert_eq!(log.discovery_hits, 1, "one discovery request for one file");
-        assert!(log.grant_bodies.is_empty());
-        assert_eq!(log.api_download_hits, 1);
-    }
-}
-
-#[test]
-fn a_refusal_to_serve_this_file_directly_falls_back_to_the_api() {
-    for mode in [
-        Grants::DirectUnavailable,
-        Grants::Bare404,
-        Grants::UnlistedHost,
-        Grants::WrongChunkCount,
-    ] {
-        let env = setup(Discovery::Offer, mode, &[], &[]);
-        let (out, json) = pull(&env, &[], &[("BB_TRANSPORT_TRACE", "1")]);
-        if mode == Grants::WrongChunkCount {
-            // The metadata says 22 chunks, the manifest 21: the direct path steps aside
-            // without fetching anything, and the API path's own checks decide the file
-            // (its stream has 21 frames, so it refuses). Nothing is published either way.
-            assert!(!out.status.success(), "{}", describe(&out));
-            assert_nothing_written(&env, &out);
-            assert_clean(&env, &out);
-            assert_eq!(
-                env.mock.log.lock().unwrap().storage.len(),
-                0,
-                "nothing fetched from storage"
-            );
-            assert_eq!(env.mock.log.lock().unwrap().api_download_hits, 1);
-            let _ = json;
-            continue;
-        }
-        assert!(out.status.success(), "{}", describe(&out));
-        assert_identical(&env, &out);
-        assert_eq!(json["transport"], "api", "{}", describe(&out));
-        assert_clean(&env, &out);
-        let log = env.mock.log.lock().unwrap();
-        assert_eq!(log.api_download_hits, 1);
-        assert_eq!(log.storage.len(), 0, "no storage request for a refused file");
-    }
-}
-
-#[test]
-fn an_authorization_refusal_is_terminal_and_never_falls_back() {
-    let env = setup(Discovery::Offer, Grants::Forbidden, &[], &[]);
-    let (out, _) = pull(&env, &[], &[]);
-    assert!(!out.status.success(), "{}", describe(&out));
-    assert_nothing_written(&env, &out);
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("403"),
-        "{}",
-        describe(&out)
-    );
-    assert_eq!(
-        env.mock.log.lock().unwrap().api_download_hits,
-        0,
-        "403 must not be routed around"
-    );
-}
-
-#[test]
-fn a_version_that_goes_away_mid_transfer_restarts_and_publishes_nothing() {
-    let env = setup(Discovery::Offer, Grants::VersionGoneAfterFirstWindow, &[], &[]);
-    let (out, _) = pull(&env, &[], &[]);
-    assert!(!out.status.success(), "{}", describe(&out));
-    assert_nothing_written(&env, &out);
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("changed again"),
-        "{}",
-        describe(&out)
-    );
-    assert_eq!(env.mock.log.lock().unwrap().api_download_hits, 0, "never mix versions");
-}
-
-#[test]
-fn a_version_published_mid_download_is_read_again_from_fresh_metadata_once() {
-    let env = setup(Discovery::Offer, Grants::VersionGoneOnce, &[], &[]);
-    let (out, json) = pull(&env, &[], &[]);
-    assert!(out.status.success(), "{}", describe(&out));
-    assert_identical(&env, &out);
-    assert_eq!(json["transport"], "direct", "{}", describe(&out));
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("starting again"),
-        "{}",
-        describe(&out)
-    );
-    let starts: Vec<u64> = env
-        .mock
-        .log
-        .lock()
-        .unwrap()
-        .grant_bodies
-        .iter()
-        .map(|b| b["start_index"].as_u64().unwrap())
-        .collect();
-    // The first attempt: window 0, window 8 (refused: the version is gone). The second starts over.
-    assert_eq!(starts, vec![0, 8, 0, 8, 16], "{starts:?}");
-}
-
-#[test]
-fn a_file_another_device_is_still_uploading_goes_straight_to_the_api() {
-    // 409 replace_in_progress with no Retry-After: not a moment's hold. The API path answers it at
-    // once; five waits of five seconds per file would make every sync pass slower.
-    let env = setup(Discovery::Offer, Grants::ReplaceInProgressNoRetryAfter, &[], &[]);
-    let started = std::time::Instant::now();
-    let (out, json) = pull(&env, &[], &[]);
-    assert!(out.status.success(), "{}", describe(&out));
-    assert!(started.elapsed() < std::time::Duration::from_secs(4), "it did not wait");
-    assert_identical(&env, &out);
-    assert_eq!(json["transport"], "api", "{}", describe(&out));
-    let log = env.mock.log.lock().unwrap();
-    assert_eq!(log.grant_bodies.len(), 1, "one grant request, then the API");
-    assert_eq!(log.api_download_hits, 1);
-}
-
-#[test]
-fn the_trace_is_off_when_the_variable_says_zero_and_an_unknown_transport_warns_once() {
-    let env = setup(Discovery::Offer, Grants::Normal, &[], &[]);
-    let (out, _) = pull(&env, &[], &[("BB_TRANSPORT_TRACE", "0")]);
-    assert!(out.status.success(), "{}", describe(&out));
-    assert!(
-        !String::from_utf8_lossy(&out.stderr).contains("transport:"),
-        "{}",
-        describe(&out)
-    );
-    let env = setup(Discovery::Offer, Grants::Normal, &[], &[]);
-    let (out, _) = pull(&env, &[], &[("BB_TRANSPORT_TRACE", "1")]);
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("transport:"),
-        "{}",
-        describe(&out)
-    );
-
-    let env = setup(Discovery::Offer, Grants::Normal, &[], &[]);
-    let (out, json) = pull(&env, &[], &[("BB_TRANSPORT", "bogus")]);
-    assert!(out.status.success(), "{}", describe(&out));
-    assert_eq!(
-        json["transport"],
-        "direct",
-        "an unknown value means auto: {}",
-        describe(&out)
-    );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(stderr.matches("ignoring BB_TRANSPORT").count(), 1, "{}", describe(&out));
-
-    // An empty `BB_TRANSPORT=` is unset: no warning, and still auto. `--quiet` silences the warning.
-    let env = setup(Discovery::Offer, Grants::Normal, &[], &[]);
-    let (out, json) = pull(&env, &[], &[("BB_TRANSPORT", "")]);
-    assert!(out.status.success(), "{}", describe(&out));
-    assert_eq!(json["transport"], "direct", "{}", describe(&out));
-    assert!(
-        !String::from_utf8_lossy(&out.stderr).contains("BB_TRANSPORT"),
-        "{}",
-        describe(&out)
-    );
-    let env = setup(Discovery::Offer, Grants::Normal, &[], &[]);
-    let id = env.mock.fx.file_id.clone();
-    let out = bb(
-        &env,
-        &["pull", &id, "-o", "out.bin", "--quiet"],
-        &[("BB_TRANSPORT", "bogus")],
-    );
-    assert!(out.status.success(), "{}", describe(&out));
-    assert!(
-        !String::from_utf8_lossy(&out.stderr).contains("BB_TRANSPORT"),
-        "{}",
-        describe(&out)
-    );
-}
-
-#[test]
-fn a_file_whose_first_chunk_cannot_be_opened_is_left_to_the_api_paths_legacy_readers() {
-    // Frame 0 fails under the string-UUID key: a pre-`bb repair` file keyed by the binary uuid. The
-    // direct path must not call that "corrupt" (a refetch would fail the same way); the API path's
-    // buffered fallback reads it. Chunks after the first stay corrupt (see the double-tamper test).
-    let env = setup_with(fixture_legacy_binary_uuid(), Discovery::Offer, Grants::Normal, &[], &[]);
-    let (out, json) = pull(&env, &[], &[("BB_TRANSPORT_TRACE", "1")]);
-    assert!(out.status.success(), "{}", describe(&out));
-    assert_identical(&env, &out);
-    assert_eq!(json["transport"], "api", "{}", describe(&out));
-    let log = env.mock.log.lock().unwrap();
-    assert!(!log.grant_bodies.is_empty(), "the direct path was tried first");
-    assert!(
-        log.api_chunk_hits.is_empty(),
-        "no pinned refetch for chunk 0: it would fail the same way"
-    );
-    assert_eq!(log.api_download_hits, 1, "the API stream took the file");
-}
-
-#[test]
-fn a_folder_pull_reads_one_changed_file_again_and_carries_on() {
-    // A new version appears while a file of the folder downloads: that file is read again from
-    // fresh metadata, once; the folder pull is not aborted.
-    let env = setup(Discovery::Offer, Grants::VersionGoneOnce, &[], &[]);
-    let out_dir = env.cwd.join("pulled");
-    let out = bb(&env, &["pull", SYNC_FOLDER_ID, "-o", out_dir.to_str().unwrap()], &[]);
-    assert!(out.status.success(), "{}", describe(&out));
-    assert_eq!(
-        std::fs::read(out_dir.join("multi.bin")).unwrap_or_default(),
-        env.mock.fx.plaintext
-    );
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("reading it again"),
-        "{}",
-        describe(&out)
-    );
-    let starts: Vec<u64> = env
-        .mock
-        .log
-        .lock()
-        .unwrap()
-        .grant_bodies
-        .iter()
-        .map(|b| b["start_index"].as_u64().unwrap())
-        .collect();
-    assert_eq!(starts, vec![0, 8, 0, 8, 16], "{starts:?}");
-}
-
-#[test]
-fn a_folder_pull_does_not_swallow_a_failure_that_is_not_a_version_change() {
-    // The grant route refuses (403): that is not "the version changed". The folder pull must fail,
-    // exit non-zero and name the file, as it always did; skipping it silently and exiting 0 would
-    // make an incomplete folder look complete.
-    let env = setup(Discovery::Offer, Grants::Forbidden, &[], &[]);
-    let out_dir = env.cwd.join("pulled");
-    let out = bb(&env, &["pull", SYNC_FOLDER_ID, "-o", out_dir.to_str().unwrap()], &[]);
-    assert!(!out.status.success(), "{}", describe(&out));
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("403") && stderr.contains("multi.bin"),
-        "{}",
-        describe(&out)
-    );
-    assert!(!out_dir.join("multi.bin").exists());
-}
-
-#[test]
-fn a_tampered_first_chunk_of_a_v2_file_is_corrupt_and_not_handed_to_the_legacy_readers() {
-    // A V2 pin has no legacy form: its reader tries only the string-UUID key. A first chunk that fails
-    // there is damaged or tampered with, so it must NOT go to the API stream (where a large file would
-    // end in a confusing "legacy-format file" error and, in sync, abort the pass).
-    let env = setup_with(
-        fixture_v2_missing_last_frame(),
-        Discovery::Offer,
-        Grants::Normal,
-        &[(0, Fault::Tamper)],
-        &[0],
-    );
-    let (out, _) = pull(&env, &[], &[]);
-    assert!(!out.status.success(), "{}", describe(&out));
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("authenticate"),
-        "{}",
-        describe(&out)
-    );
-    assert_eq!(env.mock.log.lock().unwrap().api_download_hits, 0, "not routed around");
-}
-
-// ─────────────────────────────── bb sync --once ───────────────────────────────
-
 /// `bb sync --once <cwd>/syncdir /SyncUp`: the remote folder holds the fixture file.
 fn sync_once(env: &Env, extra_env: &[(&str, &str)]) -> (Output, PathBuf) {
     let dir = env.cwd.join("syncdir");
@@ -1158,22 +815,6 @@ fn sync_once(env: &Env, extra_env: &[(&str, &str)]) -> (Output, PathBuf) {
         extra_env,
     );
     (out, dir)
-}
-
-#[test]
-fn a_sync_pass_downloads_over_the_direct_transport() {
-    let env = setup(Discovery::Offer, Grants::Normal, &[], &[]);
-    let (out, dir) = sync_once(&env, &[]);
-    assert!(out.status.success(), "{}", describe(&out));
-    assert_eq!(
-        std::fs::read(dir.join("multi.bin")).unwrap_or_default(),
-        env.mock.fx.plaintext
-    );
-    let log = env.mock.log.lock().unwrap();
-    assert!(
-        !log.grant_bodies.is_empty() && log.api_download_hits == 0,
-        "it went direct"
-    );
 }
 
 /// Run `bb sync <cwd>/syncdir /SyncUp` the way a daemon does (no `--once`) until it reaches watch
@@ -1246,324 +887,4 @@ fn sync_left_nothing(dir: &Path) {
         .filter(|n| n != ".bb-sync.json")
         .collect();
     assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
-}
-
-#[test]
-fn a_sync_pass_survives_a_file_that_never_authenticates() {
-    // The chunk fails AEAD from storage and again from the pinned API route: the direct driver's
-    // `Corrupt`. The API path treats a file it cannot decrypt as "unreadable, retry next pass"
-    // (task 1916); the direct path must too. If this ended the pass, launchd and systemd would
-    // restart the daemon every 30 s for ever and the files after it would never arrive.
-    let env = setup(Discovery::Offer, Grants::Normal, &[(2, Fault::Tamper)], &[2]);
-    let (watching, stdout, stderr) = sync_until_watching(&env);
-    assert!(
-        watching,
-        "the daemon must reach watch mode\nstdout:\n{stdout}\nstderr:\n{stderr}"
-    );
-    let dir = env.cwd.join("syncdir");
-    assert!(
-        !dir.join("multi.bin").exists(),
-        "nothing is published for a file that did not authenticate"
-    );
-    sync_left_nothing(&dir);
-    assert!(
-        stderr.contains("did not authenticate") && stderr.contains("next pass"),
-        "{stderr}"
-    );
-    assert!(!stderr.contains("sync incomplete"), "{stderr}");
-
-    // The one-shot form reports the incomplete pass with its own exit code (3), not as an error (1).
-    let env = setup(Discovery::Offer, Grants::Normal, &[(2, Fault::Tamper)], &[2]);
-    let (out, dir) = sync_once(&env, &[]);
-    assert_eq!(out.status.code(), Some(3), "{}", describe(&out));
-    assert!(
-        String::from_utf8_lossy(&out.stdout).contains("1 failed"),
-        "{}",
-        describe(&out)
-    );
-    assert!(!dir.join("multi.bin").exists());
-    assert_clean(&env, &out);
-}
-
-#[test]
-fn a_sync_pass_survives_a_download_that_ends_before_its_last_frame() {
-    // Every frame authenticates, but the stream never reaches the frame marked last: the copy is cut
-    // short or tampered with. That ends THIS file's turn (retry next pass), not the pass.
-    let env = setup_with(
-        fixture_v2_missing_last_frame(),
-        Discovery::Offer,
-        Grants::Normal,
-        &[],
-        &[],
-    );
-    let (watching, stdout, stderr) = sync_until_watching(&env);
-    assert!(
-        watching,
-        "the daemon must reach watch mode\nstdout:\n{stdout}\nstderr:\n{stderr}"
-    );
-    sync_left_nothing(&env.cwd.join("syncdir"));
-    assert!(
-        stderr.contains("download incomplete") && stderr.contains("next pass"),
-        "{stderr}"
-    );
-}
-
-#[test]
-fn a_sync_pass_defers_a_file_whose_version_changed_under_it() {
-    let env = setup(Discovery::Offer, Grants::VersionGoneAfterFirstWindow, &[], &[]);
-    let (watching, stdout, stderr) = sync_until_watching(&env);
-    assert!(
-        watching,
-        "the daemon must reach watch mode\nstdout:\n{stdout}\nstderr:\n{stderr}"
-    );
-    let dir = env.cwd.join("syncdir");
-    assert!(!dir.join("multi.bin").exists());
-    sync_left_nothing(&dir);
-    assert!(stderr.contains("changed") && stderr.contains("next pass"), "{stderr}");
-    assert_eq!(env.mock.log.lock().unwrap().api_download_hits, 0, "never mix versions");
-
-    // Deferred is not a failure: a one-shot pass that only deferred it is complete.
-    let env = setup(Discovery::Offer, Grants::VersionGoneAfterFirstWindow, &[], &[]);
-    let (out, dir) = sync_once(&env, &[]);
-    assert!(out.status.success(), "{}", describe(&out));
-    assert!(!dir.join("multi.bin").exists());
-}
-
-#[test]
-fn an_expired_link_is_renewed_once_and_the_file_stays_direct() {
-    let env = setup(Discovery::Offer, Grants::Normal, &[(3, Fault::Forbidden(1))], &[]);
-    let (out, json) = pull(&env, &[], &[("BB_TRANSPORT_TRACE", "1")]);
-    assert!(out.status.success(), "{}", describe(&out));
-    assert_identical(&env, &out);
-    assert_eq!(json["transport"], "direct", "{}", describe(&out));
-    assert_clean(&env, &out);
-    assert_eq!(storage_hits(&env, 3), 2, "one failure, one retry on a fresh link");
-    let log = env.mock.log.lock().unwrap();
-    assert!(
-        log.grant_bodies
-            .iter()
-            .any(|b| b["renewal"] == true && b["start_index"] == 3 && b["count"] == 1),
-        "a renewal for chunk 3 was requested: {:?}",
-        log.grant_bodies
-    );
-    assert!(log.api_chunk_hits.is_empty() && log.api_download_hits == 0);
-}
-
-#[test]
-fn a_chunk_storage_never_serves_goes_to_the_pinned_api_route() {
-    let env = setup(Discovery::Offer, Grants::Normal, &[(5, Fault::Forbidden(99))], &[]);
-    let (out, json) = pull(&env, &[], &[]);
-    assert!(out.status.success(), "{}", describe(&out));
-    assert_identical(&env, &out);
-    assert_eq!(json["transport"], "mixed", "{}", describe(&out));
-    assert_clean(&env, &out);
-    assert_eq!(storage_hits(&env, 5), 4, "the first attempt plus three renewals");
-    let log = env.mock.log.lock().unwrap();
-    assert_eq!(log.api_chunk_hits, vec![5], "only that chunk, through the pinned route");
-    assert_eq!(log.api_download_hits, 0, "never the full-file stream");
-}
-
-#[test]
-fn broken_storage_responses_are_handled_like_any_storage_failure() {
-    // A short body, a Content-Length that is not the grant's, a body with no
-    // Content-Length: each chunk is retried, then fetched through the API.
-    let env = setup(
-        Discovery::Offer,
-        Grants::Normal,
-        &[
-            (0, Fault::ShortBody),
-            (4, Fault::WrongLength),
-            (9, Fault::Chunked),
-            (12, Fault::Status206),
-        ],
-        &[],
-    );
-    let (out, json) = pull(&env, &[], &[]);
-    assert!(out.status.success(), "{}", describe(&out));
-    assert_identical(&env, &out);
-    assert_eq!(json["transport"], "mixed", "{}", describe(&out));
-    assert_clean(&env, &out);
-    let mut api = env.mock.log.lock().unwrap().api_chunk_hits.clone();
-    api.sort_unstable();
-    assert_eq!(api, vec![0, 4, 9, 12]);
-}
-
-#[test]
-fn a_tampered_storage_chunk_is_refetched_through_the_api_and_a_double_tamper_is_fatal() {
-    let env = setup(Discovery::Offer, Grants::Normal, &[(2, Fault::Tamper)], &[]);
-    let (out, json) = pull(&env, &[], &[]);
-    assert!(out.status.success(), "{}", describe(&out));
-    assert_identical(&env, &out);
-    assert_eq!(json["transport"], "mixed", "{}", describe(&out));
-    assert_eq!(env.mock.log.lock().unwrap().api_chunk_hits, vec![2]);
-
-    let env = setup(Discovery::Offer, Grants::Normal, &[(2, Fault::Tamper)], &[2]);
-    let (out, _) = pull(&env, &[], &[]);
-    assert!(!out.status.success(), "{}", describe(&out));
-    assert_nothing_written(&env, &out);
-    assert_clean(&env, &out);
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("authenticate"),
-        "{}",
-        describe(&out)
-    );
-}
-
-#[test]
-fn a_storage_redirect_is_never_followed() {
-    let env = setup(Discovery::Offer, Grants::Normal, &[(1, Fault::Redirect)], &[]);
-    let (out, json) = pull(&env, &[], &[("BB_TRANSPORT_TRACE", "1")]);
-    assert!(out.status.success(), "{}", describe(&out));
-    assert_identical(&env, &out);
-    assert_eq!(json["transport"], "mixed", "{}", describe(&out));
-    assert_clean(&env, &out);
-    let log = env.mock.log.lock().unwrap();
-    assert_eq!(log.leak_hits, 0, "the client followed a redirect off the storage host");
-    assert_eq!(log.api_chunk_hits, vec![1]);
-}
-
-#[test]
-fn the_pull_json_and_help_stay_compatible() {
-    let env = setup(Discovery::Offer, Grants::Normal, &[], &[]);
-    let (out, json) = pull(&env, &[], &[]);
-    assert!(out.status.success(), "{}", describe(&out));
-    for key in [
-        "id",
-        "name",
-        "size_bytes",
-        "download_speed_bps",
-        "elapsed_ms",
-        "output",
-        "transport",
-    ] {
-        assert!(json.get(key).is_some(), "missing {key} in {json}");
-    }
-    assert_eq!(json["size_bytes"], PLAIN_LEN);
-    let help = bb(&env, &["pull", "--help"], &[]);
-    assert!(help.status.success(), "{}", describe(&help));
-    assert!(
-        !String::from_utf8_lossy(&help.stdout).contains("--transport"),
-        "the debug switch is hidden from --help:\n{}",
-        describe(&help)
-    );
-    let _ = &env.api_url;
-}
-
-#[test]
-fn a_window_the_server_refuses_after_the_first_moves_the_rest_to_the_pinned_api_route() {
-    // The mixed-node rollout case (R1.6): the first window came from a node with the route, a later
-    // one from a node without it. What was written stays; the chunks without a grant come through
-    // the pinned per-chunk route; the full-file stream is never used and no transport is mixed
-    // WITHIN a chunk.
-    let env = setup(Discovery::Offer, Grants::UnavailableAfterFirstWindow, &[], &[]);
-    let (out, json) = pull(&env, &[], &[("BB_TRANSPORT_TRACE", "1")]);
-    assert!(out.status.success(), "{}", describe(&out));
-    assert_identical(&env, &out);
-    assert_eq!(json["transport"], "mixed", "{}", describe(&out));
-    assert_clean(&env, &out);
-    let log = env.mock.log.lock().unwrap();
-    assert_eq!(log.api_download_hits, 0, "no full-file stream");
-    let mut api = log.api_chunk_hits.clone();
-    api.sort_unstable();
-    assert_eq!(
-        api,
-        (8..21).collect::<Vec<u32>>(),
-        "exactly the chunks the first window did not cover"
-    );
-    let storage: std::collections::BTreeSet<u32> = log.storage.iter().map(|(i, _)| *i).collect();
-    assert_eq!(storage, (0..8).collect(), "storage served exactly the granted chunks");
-}
-
-#[test]
-fn an_undecodable_window_after_the_first_is_handled_like_any_window_that_cannot_be_served() {
-    let env = setup(Discovery::Offer, Grants::GarbageAfterFirstWindow, &[], &[]);
-    let (out, json) = pull(&env, &[], &[]);
-    assert!(out.status.success(), "{}", describe(&out));
-    assert_identical(&env, &out);
-    assert_eq!(json["transport"], "mixed", "{}", describe(&out));
-    let log = env.mock.log.lock().unwrap();
-    assert_eq!(log.api_download_hits, 0);
-    assert_eq!(log.api_chunk_hits.len(), 13, "chunks 8..=20 through the pinned route");
-}
-
-#[test]
-fn a_file_held_by_another_operation_is_waited_for_and_stays_direct() {
-    // 409 replace_in_progress with Retry-After: 1 on the first grant request (R1.13): wait, ask again.
-    let env = setup(Discovery::Offer, Grants::ReplaceInProgressOnce, &[], &[]);
-    let started = std::time::Instant::now();
-    let (out, json) = pull(&env, &[], &[]);
-    assert!(out.status.success(), "{}", describe(&out));
-    assert!(
-        started.elapsed() >= std::time::Duration::from_millis(900),
-        "it waited for Retry-After"
-    );
-    assert_identical(&env, &out);
-    assert_eq!(json["transport"], "direct", "{}", describe(&out));
-    let log = env.mock.log.lock().unwrap();
-    assert_eq!(
-        log.grant_bodies[0], log.grant_bodies[1],
-        "the same first window was asked for again"
-    );
-    assert_eq!(log.api_download_hits, 0);
-}
-
-#[test]
-fn a_v2_stream_that_ends_before_its_last_frame_is_never_published() {
-    let env = setup_with(
-        fixture_v2_missing_last_frame(),
-        Discovery::Offer,
-        Grants::Normal,
-        &[],
-        &[],
-    );
-    let (out, _) = pull(&env, &[], &[]);
-    assert!(!out.status.success(), "{}", describe(&out));
-    assert_nothing_written(&env, &out);
-    assert_clean(&env, &out);
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("incomplete"),
-        "{}",
-        describe(&out)
-    );
-    // Control: the same fixture served whole would have decrypted; the failure above is the
-    // missing last frame, not a broken fixture.
-    assert_eq!(env.mock.log.lock().unwrap().storage.len(), 3);
-}
-
-#[test]
-fn the_api_fallback_route_is_held_to_the_manifest_length_and_the_version_pin() {
-    // Storage never serves chunk 5, so it goes through the pinned API route. A body one byte
-    // short there is a failure, not a chunk: nothing per chunk is left to try, so the file
-    // ends on the full API stream, from the start, with the partial output discarded.
-    let env = setup(Discovery::Offer, Grants::Normal, &[(5, Fault::Forbidden(99))], &[]);
-    env.mock.cfg.lock().unwrap().api_chunk_short.push(5);
-    let (out, json) = pull(&env, &[], &[("BB_TRANSPORT_TRACE", "1")]);
-    assert!(out.status.success(), "{}", describe(&out));
-    assert_identical(&env, &out);
-    assert_eq!(json["transport"], "api", "{}", describe(&out));
-    assert_clean(&env, &out);
-    {
-        let log = env.mock.log.lock().unwrap();
-        assert!(
-            log.api_chunk_hits.contains(&5),
-            "the pinned route was tried for chunk 5"
-        );
-        assert_eq!(
-            log.api_download_hits, 1,
-            "then the whole file came through the API stream"
-        );
-    }
-
-    // The pinned version gone on that route: abort, nothing written, no full-file stream.
-    let env = setup(Discovery::Offer, Grants::Normal, &[(5, Fault::Forbidden(99))], &[]);
-    env.mock.cfg.lock().unwrap().api_chunk_gone.push(5);
-    let (out, _) = pull(&env, &[], &[]);
-    assert!(!out.status.success(), "{}", describe(&out));
-    assert_nothing_written(&env, &out);
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("changed"),
-        "{}",
-        describe(&out)
-    );
-    assert_eq!(env.mock.log.lock().unwrap().api_download_hits, 0);
 }

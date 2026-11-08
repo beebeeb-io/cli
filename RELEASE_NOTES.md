@@ -1,45 +1,44 @@
-# bb 0.14.4: downloads straight from storage
+# bb 0.17.3: on Windows, a file name `bb` writes, renames or deletes only ever touches the file with that exact name
 
-`bb pull` and `bb sync` can now fetch a file's encrypted chunks directly from Beebeeb's object storage instead of streaming every byte through the API. The server hands out short-lived links for one file at a time. The CLI authenticates and decrypts every chunk on your machine exactly as before: the links carry ciphertext only, and your keys never leave the device. When the server does not offer direct downloads, or refuses a link, the file comes through the API as it did in 0.14.3.
+Windows also finds a file through its folder's 8.3 short names (for example `REPORT~1.PDF` for `Report for 2026.pdf`). Through 0.17.2, a name `bb` built to write, replace, rename or delete could therefore reach a *different* file that already existed in that folder. This release moves `bb` to Beebeeb core v0.2.7, which refuses such a name, and routes the places in `bb` that wrote files by name on their own through the same check. Linux and macOS have no short names; there `bb` behaves as in 0.17.2, apart from the `.bb-trash` fix and the file-request change below.
 
-### What's New
+### Windows
 
-- **Direct downloads.** The CLI uses time-limited storage links when the server advertises direct downloads (`GET /api/v1/transfer/capabilities`). Chunks are decrypted in order, and the file only appears once it is complete and authenticated.
-- **Automatic fallback.** A file that storage cannot serve before the download starts goes through the API instead. A file that fails partway continues on the API's pinned per-chunk route and keeps what was already written.
-- **`bb pull --json` reports `transport`** (`direct`, `mixed` or `api`). This is an additive key; existing keys are unchanged.
-- **`BB_TRANSPORT=api`** (or `--transport api`) forces the API for every file. `BB_TRANSPORT_TRACE=1` prints each transport decision to stderr, never a URL. `bb sync --daemon` passes the chosen transport on to its child process.
-- Uploads still go through the API in this release.
+- **Downloads** (`bb pull`, `bb sync`) write into a temporary file next to the target, created new every time, and publish it only if the target's name still reaches no other file. A file that appears under a short name while the download runs is never replaced.
+- **`bb pull --zip`** writes its archive the same way. With `--force` it still replaces the archive you named, never another file a short name reaches; the overwrite check refuses such a name before anything is downloaded, with or without `--force`.
+- **`bb sync` moves a removed file into `.bb-trash`** only through folders whose names reach themselves. A folder on the way that a short name reaches is refused, the error names both entries, and the file stays where it is.
+- **`bb sync` applying a rename from another device** holds that change as a conflict if the old or the new name reaches another entry, instead of failing the whole pass. It checks again right before it creates any folder.
+- **File-request pulls** (`bb pull` of uploads received through a file request, and their folder variant) now use the same writer as every other pull. `-o` was not checked at all before.
 
-### Bug Fixes / Hardening
+### Also changed on every platform
 
-- A sync pass no longer aborts on a file it cannot read, or on a file that changes during its download. It defers that file and carries on. Under launchd or systemd an aborted pass meant a restart every 30 seconds.
-- `bb pull <file>` starts over once from fresh metadata when the file changes mid-download, then says "changed again" if it changes a second time.
-- The pinned per-chunk route retries rate limits (429), server errors (5xx), a file that is still being written (409) and a broken read: 4 attempts, at most 60 seconds of waiting, honouring `Retry-After`. A body of the wrong length, an authorization answer and a vanished version are final.
-- `bb sync` no longer mistakes a file ID containing `409` inside a decrypt error for "still uploading". This could make a failed pass exit 0.
-- Storage requests use an HTTP client of their own, with no cookies, no `Authorization` header, no redirects and https only. Their error messages never contain a storage URL.
-- `bb` refuses to install or remove a LaunchAgent or systemd unit when `HOME` is not your account's home directory (on Linux, also when `XDG_CONFIG_HOME` points elsewhere), because the service would run against a different configuration than the one you see. If your home directory is intentionally relocated (for example `sudo -E`), run the command again with `BB_SERVICE_INSTALL_ALLOW_CUSTOM_HOME=1`. Removing a service that is not installed is never refused.
-- A folder pull reads a file that changed during the pull again once instead of aborting, and the retry does not ask the overwrite question twice.
+- **`.bb-trash` only takes plain relative names.** A synced path that was not one (`..`, an absolute path) could move a file outside the recovery folder; it is now refused.
+- **File-request pulls replace the output file instead of writing into it,** as every other pull already did. With `--force` that means the file gets default permissions, a symbolic link at the output is replaced rather than written through, and `-o /dev/stdout` fails (it already failed for every other pull).
+- **A temporary file left by a crash is never reused.** It stays where it is; see "Known limits".
 
-### Compatibility
+### Known limits, not fixed in this release
 
-- **This CLI with an older server:** the server advertises no direct downloads, so every file uses the API, exactly as in 0.14.3.
-- **An older CLI with a newer server:** unchanged. 0.14.3 and earlier never ask for storage links.
-- Dependency change: `beebeeb-core` / `beebeeb-types` pinned to `3235dc15` (the shared direct-transfer rules). No other dependency versions changed.
+- **An interrupted download leaves `<name>.tmp` behind** (for example when `bb sync` is stopped mid-download), and the next `bb sync` pass uploads that partial file as if it were yours. Delete such a `.tmp` file by hand. A later release makes sync skip and clean up its own temporary files.
+- **On Windows, `bb pull --zip` refuses** a folder or file name with `:`, a trailing dot, or a reserved name such as `CON` instead of rewriting it to `_CON` and the like, because of how core v0.2.7 checks names. Core v0.3.0 fixes this.
+- **`cargo audit` was not re-run for this release.** The dependency list differs from 0.17.2 only in the three Beebeeb core packages, so the one item 0.17.2 listed (RUSTSEC-2026-0387, through the password-login library) is expected to remain.
+- **Unchanged from 0.17.2:** `bb sync --json` can print a `+ remote folder` line before the JSON; `bb sync`, `bb mount`, `bb webdav`, `bb repair` and `bb restore` don't check the Backups rule yet.
 
 ### Verification
 
-- Full test suite on Linux, at the commit this release is built from, in a sandbox with no network access and an egress recorder: 730 passed, 0 failed, 4 ignored across 24 test binaries; 0 outbound connection attempts; no service manager touched. Clippy with warnings denied and rustfmt are clean.
-- `tests/direct_download.rs` runs the real `bb` binary against a mock API and a hand-written storage socket. It covers faults, redirects, tampered chunks, expired links, the mixed fallback, and that no link signature appears in any output.
-- `tests/service_guard.rs` puts recording `launchctl` / `systemctl` stubs ahead of the real tools on `PATH` and scans `src/` for any unguarded call.
-- Release gates: full required CLI CI, five platform builds, and draft asset readback with checksum assertions before publishing.
+- **Test suite on Linux in CI** at the merged head (`b1a5027`): 1,290 passed, 0 failed, 5 ignored.
+- **Native Windows** (a real Windows 11 machine, MSVC, temporary folders), the 16 tests that exercise short names:
+  - **Before the fix** (the old code with the new tests): 6 passed, 10 failed. The 10 failures are exactly the ten cases above, which also shows the test folder really had 8.3 names.
+  - **With the fix:** 16 of 16 passed.
+- **Review:** one independent review of the change found nothing blocking (0 of its findings would let a write reach another file). Its one follow-up is the leftover temporary file under "Known limits".
+- **Not run for this release:** the full test suite on Windows (only the 16 short-name tests ran natively); `bb` against a real server (the tests use a local mock); the self-update from 0.17.2, which can only be checked against the published release.
 
 ### Install / Update
 
 ```sh
 bb update
-bb --version   # bb 0.14.4
+bb --version   # bb 0.17.3
 ```
 
 Homebrew: `brew upgrade beebeeb-io/tap/bb`. Scoop: `scoop update bb`. New installs: `curl -fsSL https://get.beebeeb.io | sh`. Restart a running `bb sync` daemon after updating.
 
-Full changelog: https://github.com/beebeeb-io/cli/compare/v0.14.3...v0.14.4
+Full changelog: https://github.com/beebeeb-io/cli/compare/v0.17.2...v0.17.3

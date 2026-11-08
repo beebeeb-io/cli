@@ -1,0 +1,11 @@
+# Search noise filter: read by ripgrep, Claude Code's Grep and fd (token plan task 5).
+# It hides generated files from SEARCH only; git, builds, tests and the Read tool never look at
+# it. To search a hidden path on purpose, name it (rg foo graphify-out/cache/).
+
+# Graph data. GRAPH_SUMMARY.md is the one file agents search.
+graphify-out/*
+!graphify-out/GRAPH_SUMMARY.md
+
+# Cargo build output and installed dependencies.
+target/
+node_modules/

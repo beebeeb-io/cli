@@ -7,11 +7,17 @@
 //!
 //! `bb mkdir -p <path>` walks every segment, creating each missing folder
 //! under the right parent. Idempotent — already-existing segments are skipped.
+//!
+//! LD-0113: a new folder in the Backups tree is refused with core's words
+//! (core's app rule, `Create` on the parent), before anything is created.
 
 use colored::Colorize;
 use uuid::Uuid;
 
+use beebeeb_core::backup::{BackupPosition, Mutation};
+
 use crate::api::ApiClient;
+use crate::backup_guard;
 use crate::colors;
 use crate::commands::push::load_master_key;
 use crate::path;
@@ -30,19 +36,20 @@ pub async fn run(path_arg: String, parents: bool) -> Result<(), String> {
     let (parent_path, leaf) = split_parent_and_leaf(&path_arg)?;
 
     // Parent must exist (we are not recursive).
-    let parent_uuid: Option<String> = match parent_path {
+    let (parent_uuid, parent_depth): (Option<String>, Option<usize>) = match parent_path {
         Some(p) => {
             let resolved = path::resolve_path(&api, &master_key, &p).await?;
             if !resolved.is_folder {
                 return Err(format!("'{p}' is not a folder"));
             }
-            resolved.file_id
+            (resolved.file_id, resolved.backup_depth)
         }
-        None => None,
+        None => (None, None),
     };
 
-    // Reject if the leaf already exists in the parent.
-    if let Some(existing) = path::find_child_by_name(&api, &master_key, parent_uuid.as_deref(), &leaf).await? {
+    if let Some(existing) =
+        path::find_child_by_name(&api, &master_key, parent_uuid.as_deref(), parent_depth, &leaf).await?
+    {
         if existing.is_folder {
             return Err(format!("{path_arg} already exists. use --parents to ignore."));
         } else {
@@ -52,6 +59,9 @@ pub async fn run(path_arg: String, parents: bool) -> Result<(), String> {
         }
     }
 
+    // A parent is a folder: at depth 2 it is a category folder, so its name is
+    // not needed.
+    backup_guard::check(BackupPosition::at_depth(parent_depth, ""), Mutation::Create)?;
     let parent_uuid_typed: Option<Uuid> = parent_uuid.as_deref().and_then(|s| s.parse().ok());
     // L13 (SF-0001): the folder's id is minted by the client and echoed unchanged.
     let created_id = crate::item_id::create_owned_folder(&api, &master_key, &leaf, parent_uuid_typed)
@@ -68,6 +78,9 @@ pub async fn run(path_arg: String, parents: bool) -> Result<(), String> {
         println!("{}", serde_json::to_string_pretty(&json).unwrap());
     } else {
         print_created(&path_arg, &created_id);
+        // L15 = A: a folder created in a shared folder stays owner-only. The
+        // notice names the folder it was created IN, not the new folder.
+        crate::owned_keys::announce_owner_only(&api, &master_key, parent_uuid.as_deref()).await;
     }
     Ok(())
 }
@@ -87,36 +100,51 @@ async fn run_recursive(
     let segments: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
 
     let mut parent_id: Option<String> = None;
+    let mut parent_depth: Option<usize> = None;
     let mut cumulative = String::new();
     let mut created: Vec<(String, String)> = Vec::new(); // (path, id)
+    // The folder the first created segment was made in (for the L15 notice).
+    let mut first_parent: Option<String> = None;
 
     for segment in &segments {
         cumulative.push('/');
         cumulative.push_str(segment);
 
-        // Does this segment already exist?
-        if let Some(existing) = path::find_child_by_name(api, master_key, parent_id.as_deref(), segment).await? {
+        if let Some(existing) =
+            path::find_child_by_name(api, master_key, parent_id.as_deref(), parent_depth, segment).await?
+        {
             if !existing.is_folder {
                 return Err(format!(
                     "cannot create folder '{cumulative}': a file with that name exists"
                 ));
             }
             parent_id = existing.file_id;
+            parent_depth = existing.backup_depth;
             continue;
         }
+        backup_guard::check(BackupPosition::at_depth(parent_depth, ""), Mutation::Create)?;
 
-        // Create it.
         let parent_uuid_typed: Option<Uuid> = parent_id.as_deref().and_then(|s| s.parse().ok());
+        if first_parent.is_none() {
+            first_parent = parent_id.clone();
+        }
         // L13 (SF-0001): the folder's id is minted by the client and echoed unchanged.
         let new_id = crate::item_id::create_owned_folder(api, master_key, segment, parent_uuid_typed)
             .await?
             .to_string();
+        // A folder this run created is outside the tree: its parent was.
+        parent_depth = None;
 
         // Invalidate immediately so the next loop iteration finds the new child.
         path::invalidate_cache();
 
         created.push((cumulative.clone(), new_id.clone()));
         parent_id = Some(new_id);
+    }
+
+    // L15 = A: a folder created in a shared folder stays owner-only.
+    if !ui::is_json() && !created.is_empty() {
+        crate::owned_keys::announce_owner_only(api, master_key, first_parent.as_deref()).await;
     }
 
     if ui::is_json() {

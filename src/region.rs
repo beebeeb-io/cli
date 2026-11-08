@@ -31,6 +31,9 @@
 
 use serde_json::{Value, json};
 
+/// Wire status of a region that can be selected.
+const STATUS_LIVE: &str = "live";
+
 /// One row of the location list.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Choice {
@@ -64,13 +67,13 @@ impl Choice {
         };
         let id = s("id")?.to_string();
         let name = s("name")?.to_string();
-        let status = s("status").unwrap_or("live").to_string();
+        let status = s("status").unwrap_or(STATUS_LIVE).to_string();
         // `selectable` is authoritative; if an older server omits it, a live
         // row is selectable and anything else is not.
         let selectable = v
             .get("selectable")
             .and_then(|x| x.as_bool())
-            .unwrap_or(status == "live");
+            .unwrap_or(status == STATUS_LIVE);
         Some(Choice {
             wire_id: id.clone(),
             id,
@@ -409,7 +412,7 @@ mod tests {
         ]);
         let c = parse_choices(&v);
         assert_eq!(c.len(), 1);
-        assert!(c[0].selectable && c[0].status == "live");
+        assert!(c[0].selectable && c[0].status == STATUS_LIVE);
         assert_eq!(c[0].wire_id_for("sweden"), "a2", "the id the older server can store");
         assert_eq!(c[0].wire_id_for("A1"), "a1", "a typed datacenter id is kept");
     }

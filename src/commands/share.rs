@@ -1,3 +1,6 @@
+//! `bb share`: create an encrypted share link with an expiry and an optional
+//! passphrase.
+
 use base64::Engine as _;
 use colored::Colorize;
 use std::io::{self, Write};
@@ -8,6 +11,9 @@ use crossterm::terminal;
 
 use crate::api::ApiClient;
 use crate::ui;
+
+/// Wire sentinel the server sends for `expires_at` when a share has no expiry.
+const NO_EXPIRY: &str = "never";
 
 /// Parse a human duration like "24h", "7d", "1h" into hours.
 fn parse_hours(s: &str) -> Result<u64, String> {
@@ -40,13 +46,25 @@ const PASSPHRASE_NOTICE: &[&str] = &[
 ///
 /// Every share is end-to-end encrypted (the server refuses anything else,
 /// task 0538): see "Share wire format" below for exactly what is sent.
+/// The share-time choices that are not part of the link itself.
+pub struct ShareOptions {
+    /// Prompt for a passphrase the server checks before serving the link.
+    pub passphrase: bool,
+    /// The removed `--no-double-encrypt` flag, kept only so the CLI can
+    /// explain why it is gone instead of failing with "unknown flag".
+    pub no_double_encrypt: bool,
+}
+
 pub async fn run(
     file: String,
     expires: Option<String>,
     max_opens: Option<u32>,
-    passphrase: bool,
-    no_double_encrypt: bool,
+    options: ShareOptions,
 ) -> Result<(), String> {
+    let ShareOptions {
+        passphrase,
+        no_double_encrypt,
+    } = options;
     if no_double_encrypt {
         return Err(
             "--no-double-encrypt is no longer supported: every share is end-to-end encrypted, \
@@ -66,12 +84,36 @@ pub async fn run(
     let master_key = crate::commands::push::load_master_key()?;
 
     // Resolve a path / short ID / UUID to the full file UUID: the share route
-    // and the key wrap (`build_share_material`) both need the canonical UUID.
-    // Done before the passphrase prompt so a typo fails immediately.
+    // and the row lookup both need the canonical UUID. Done before the
+    // passphrase prompt so a typo fails immediately.
     let (file_id, _) = crate::commands::pull::resolve_file_arg(&api, &file).await?;
-    let file_uuid: uuid::Uuid = file_id
-        .parse()
-        .map_err(|_| format!("invalid file id (expected UUID): {file_id}"))?;
+    uuid::Uuid::parse_str(&file_id).map_err(|_| format!("invalid file id (expected UUID): {file_id}"))?;
+    // R7/L12: the link may only carry the key the row itself authenticated.
+    // Resolve first (fail fast, before the passphrase prompt); a request row or
+    // a plaintext-named row never has a key we can prove opens the item.
+    let row = api.get_file(&file_id).await?;
+    let mut keys = crate::owned_keys::OwnedKeyResolver::new();
+    let resolved = keys
+        .resolve(&api, &master_key, &row)
+        .await
+        .map_err(|e| format!("can't share this file: {e}"))?;
+    if crate::commands::request::is_request_upload(&resolved.canonical) {
+        return Err(
+            "can't share this file: it was sent to you as a request upload, so you never held its key. Ask the sender to share it instead."
+                .to_string(),
+        );
+    }
+    if !resolved.canonical["name_encrypted"]
+        .as_str()
+        .unwrap_or("")
+        .starts_with('{')
+    {
+        return Err(format!(
+            "can't share {:?}: its name is not encrypted, so no key can be proven to open it",
+            resolved.name
+        ));
+    }
+    let file_key = resolved.key.clone();
 
     let passphrase_value = if passphrase {
         print!(
@@ -108,7 +150,7 @@ pub async fn run(
     let client_key: Zeroizing<[u8; 32]> = Zeroizing::new(rand::random());
     let mut material = build_share_material(
         &master_key,
-        &file_uuid,
+        &file_key,
         &client_key,
         beebeeb_core::share_token::generate_share_token(),
     )?;
@@ -131,10 +173,10 @@ pub async fn run(
     {
         // A client-minted token collided with an existing one (≈ never at 160
         // random bits): the server answers 409 — mint a fresh token once.
-        Err(e) if e.contains("share token already exists") => {
+        Err(e) if e.message.contains("share token already exists") => {
             material = build_share_material(
                 &master_key,
-                &file_uuid,
+                &file_key,
                 &client_key,
                 beebeeb_core::share_token::generate_share_token(),
             )?;
@@ -152,7 +194,7 @@ pub async fn run(
 
     let share_id = result.get("id").and_then(|v| v.as_str()).unwrap_or("(unknown)");
     let token = result.get("token").and_then(|v| v.as_str()).unwrap_or(&material.token);
-    let expires_at = result.get("expires_at").and_then(|v| v.as_str()).unwrap_or("never");
+    let expires_at = result.get("expires_at").and_then(|v| v.as_str()).unwrap_or(NO_EXPIRY);
 
     let bare_url = format!("{}/s/{token}", app_url());
     let full_url = share_link(&app_url(), token, &material.key_fragment);
@@ -189,8 +231,8 @@ pub async fn run(
         "url       ".custom_color(crate::colors::INK_DIM),
         full_url.custom_color(crate::colors::AMBER),
     );
-    let expires_display = if expires_at == "never" {
-        "never".to_string()
+    let expires_display = if expires_at == NO_EXPIRY {
+        NO_EXPIRY.to_string()
     } else {
         ui::relative_time(expires_at)
     };
@@ -302,7 +344,7 @@ pub async fn list() -> Result<(), String> {
                 .unwrap_or_else(|| "(link not recoverable)".to_string()),
             _ => "(link not stored \u{00b7} created by an older client)".to_string(),
         };
-        let expires_raw = share.get("expires_at").and_then(|v| v.as_str()).unwrap_or("never");
+        let expires_raw = share.get("expires_at").and_then(|v| v.as_str()).unwrap_or(NO_EXPIRY);
         let is_revoked = share.get("revoked").and_then(|v| v.as_bool()).unwrap_or(false);
         let opens = share
             .get("open_count")
@@ -311,12 +353,11 @@ pub async fn list() -> Result<(), String> {
             .unwrap_or(0);
         let max_opens = share.get("max_opens").and_then(|v| v.as_u64());
 
-        // Status indicator: active, expired, or revoked
         let (status_icon, name_color) = if is_revoked {
             ("\u{2717}".custom_color(crate::colors::RED_ERR), crate::colors::INK_DIM)
         } else {
             // Check if expired by trying to parse the timestamp
-            let is_expired = expires_raw != "never"
+            let is_expired = expires_raw != NO_EXPIRY
                 && chrono::DateTime::parse_from_rfc3339(expires_raw)
                     .map(|dt| dt < chrono::Utc::now())
                     .unwrap_or(false);
@@ -331,8 +372,8 @@ pub async fn list() -> Result<(), String> {
         };
 
         // Relative expiry display
-        let expires_display = if expires_raw == "never" {
-            "never".to_string()
+        let expires_display = if expires_raw == NO_EXPIRY {
+            NO_EXPIRY.to_string()
         } else {
             ui::relative_time(expires_raw)
         };
@@ -388,13 +429,97 @@ pub async fn revoke(share_id: Option<String>) -> Result<(), String> {
 }
 
 /// A share entry parsed from the API response, ready for display.
-struct ShareEntry {
+#[derive(Debug, PartialEq)]
+pub(crate) struct ShareEntry {
     id: String,
     file_name: String,
     expires_display: String,
     open_count: u64,
     is_revoked: bool,
     is_expired: bool,
+}
+
+impl ShareEntry {
+    /// Build from the documented `ShareListItem` shape (the generated wire
+    /// type): the row the server's OpenAPI document describes.
+    fn from_wire(row: &crate::api::generated::ShareListItem, master_key: &beebeeb_core::kdf::MasterKey) -> Self {
+        let file_id = row.file_id.to_string();
+        let file_name = decrypt_share_name(master_key, &file_id, &row.file.name_encrypted);
+        let expires_raw = row.expires_at.as_deref().unwrap_or(NO_EXPIRY);
+        Self {
+            id: row.id.to_string(),
+            file_name,
+            expires_display: display_expiry(expires_raw),
+            open_count: u64::try_from(row.open_count).unwrap_or(0),
+            is_revoked: row.revoked,
+            is_expired: share_is_expired(row.revoked, expires_raw),
+        }
+    }
+
+    /// Build from a row the document does not describe (an older server, or a
+    /// hand-rolled body). Every field keeps the lenient default it had before
+    /// the generated types landed, so an undocumented response still lists.
+    fn from_legacy(share: &serde_json::Value, master_key: &beebeeb_core::kdf::MasterKey) -> Self {
+        let file_id = share.get("file_id").and_then(|v| v.as_str()).unwrap_or("");
+        let name_enc = share
+            .get("file")
+            .and_then(|f| f.get("name_encrypted"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let expires_raw = share.get("expires_at").and_then(|v| v.as_str()).unwrap_or(NO_EXPIRY);
+        let is_revoked = share.get("revoked").and_then(|v| v.as_bool()).unwrap_or(false);
+        Self {
+            id: share.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            file_name: decrypt_share_name(master_key, file_id, name_enc),
+            expires_display: display_expiry(expires_raw),
+            open_count: share
+                .get("open_count")
+                .or_else(|| share.get("opens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            is_revoked,
+            is_expired: share_is_expired(is_revoked, expires_raw),
+        }
+    }
+}
+
+fn decrypt_share_name(master_key: &beebeeb_core::kdf::MasterKey, file_id: &str, name_enc: &str) -> String {
+    if !file_id.is_empty() && !name_enc.is_empty() {
+        crate::crypto::decrypt_name(master_key, file_id, name_enc).unwrap_or_else(|| "(encrypted)".to_string())
+    } else {
+        "(unknown)".to_string()
+    }
+}
+
+fn share_is_expired(revoked: bool, expires_raw: &str) -> bool {
+    !revoked
+        && expires_raw != NO_EXPIRY
+        && chrono::DateTime::parse_from_rfc3339(expires_raw)
+            .map(|dt| dt < chrono::Utc::now())
+            .unwrap_or(false)
+}
+
+fn display_expiry(expires_raw: &str) -> String {
+    if expires_raw == NO_EXPIRY {
+        NO_EXPIRY.to_string()
+    } else {
+        ui::relative_time(expires_raw)
+    }
+}
+
+/// The replacement proof for CL-P3-11: build the display view from the
+/// generated `ShareListItem` and from the old lenient parser, and hand both
+/// back so the fixture test can assert they agree.
+#[cfg(test)]
+pub(crate) fn share_entry_views(
+    row: &serde_json::Value,
+    master_key: &beebeeb_core::kdf::MasterKey,
+) -> (ShareEntry, ShareEntry) {
+    let from_wire = serde_json::from_value::<crate::api::generated::ShareListItem>(row.clone())
+        .map(|parsed| ShareEntry::from_wire(&parsed, master_key))
+        .expect("the fixture is a documented ShareListItem");
+    let from_legacy = ShareEntry::from_legacy(row, master_key);
+    (from_wire, from_legacy)
 }
 
 /// Fetch shares from the API and present an interactive terminal picker.
@@ -418,46 +543,12 @@ async fn pick_share_interactively(api: &ApiClient) -> Result<String, String> {
 
     let entries: Vec<ShareEntry> = shares_json
         .iter()
-        .map(|share| {
-            let id = share.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let file_id = share.get("file_id").and_then(|v| v.as_str()).unwrap_or("");
-            let name_enc = share
-                .get("file")
-                .and_then(|f| f.get("name_encrypted"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let file_name = if !file_id.is_empty() && !name_enc.is_empty() {
-                crate::crypto::decrypt_name(&master_key, file_id, name_enc).unwrap_or_else(|| "(encrypted)".to_string())
-            } else {
-                "(unknown)".to_string()
-            };
-            let expires_raw = share.get("expires_at").and_then(|v| v.as_str()).unwrap_or("never");
-            let is_revoked = share.get("revoked").and_then(|v| v.as_bool()).unwrap_or(false);
-            let is_expired = !is_revoked
-                && expires_raw != "never"
-                && chrono::DateTime::parse_from_rfc3339(expires_raw)
-                    .map(|dt| dt < chrono::Utc::now())
-                    .unwrap_or(false);
-            let open_count = share
-                .get("open_count")
-                .or_else(|| share.get("opens"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let expires_display = if expires_raw == "never" {
-                "never".to_string()
-            } else {
-                ui::relative_time(expires_raw)
-            };
-
-            ShareEntry {
-                id,
-                file_name,
-                expires_display,
-                open_count,
-                is_revoked,
-                is_expired,
-            }
-        })
+        .map(
+            |share| match serde_json::from_value::<crate::api::generated::ShareListItem>(share.clone()) {
+                Ok(row) => ShareEntry::from_wire(&row, &master_key),
+                Err(_) => ShareEntry::from_legacy(share, &master_key),
+            },
+        )
         .collect();
 
     if entries.is_empty() {
@@ -503,7 +594,7 @@ fn run_picker(entries: &[ShareEntry]) -> Result<usize, String> {
     let mut selected: usize = 0;
     let mut stdout = io::stdout();
 
-    // Hide cursor while picking.
+    // The picker redraws in place; a visible cursor would flicker over it.
     crossterm::execute!(stdout, cursor::Hide).map_err(|e| e.to_string())?;
 
     // Draw the initial list.
@@ -555,7 +646,6 @@ fn run_picker(entries: &[ShareEntry]) -> Result<usize, String> {
     }
 }
 
-/// Render the share list to the terminal.
 fn draw_picker(stdout: &mut io::Stdout, entries: &[ShareEntry], selected: usize) -> Result<(), String> {
     use std::io::Write;
 
@@ -571,7 +661,6 @@ fn draw_picker(stdout: &mut io::Stdout, entries: &[ShareEntry], selected: usize)
     for (i, entry) in entries.iter().enumerate() {
         let pointer = if i == selected { ">" } else { " " };
 
-        // Status indicator
         let status = if entry.is_revoked {
             "\u{2717}".custom_color(crate::colors::RED_ERR) // ✗
         } else if entry.is_expired {
@@ -631,13 +720,13 @@ fn draw_picker(stdout: &mut io::Stdout, entries: &[ShareEntry], selected: usize)
 
 /// Wrap `plaintext` under a raw 32-byte key: nonce(12) || ciphertext+tag.
 fn wrap_raw(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, String> {
-    beebeeb_core::encrypt::encrypt_chunk_raw(&beebeeb_core::kdf::FileKey::from_bytes(*key), plaintext)
+    beebeeb_core::encrypt::encrypt_chunk_raw(&crate::crypto::key_from_bytes(key), plaintext)
         .map_err(|e| format!("wrap share key: {e}"))
 }
 
 /// Open a nonce(12) || ciphertext+tag blob under a raw 32-byte key.
 pub(crate) fn unwrap_share_blob(key: &[u8; 32], blob: &[u8]) -> Result<Vec<u8>, String> {
-    beebeeb_core::encrypt::decrypt_chunk_raw(&beebeeb_core::kdf::FileKey::from_bytes(*key), blob)
+    beebeeb_core::encrypt::decrypt_chunk_raw(&crate::crypto::key_from_bytes(key), blob)
         .map_err(|_| "share key blob does not decrypt".to_string())
 }
 
@@ -658,15 +747,15 @@ pub(crate) struct ShareMaterial {
 
 pub(crate) fn build_share_material(
     master_key: &beebeeb_core::kdf::MasterKey,
-    file_uuid: &uuid::Uuid,
+    file_key: &beebeeb_core::kdf::FileKey,
     client_key: &[u8; 32],
     token: String,
 ) -> Result<ShareMaterial, String> {
     let b64 = base64::engine::general_purpose::STANDARD;
     let mk: Zeroizing<[u8; 32]> = Zeroizing::new(master_key.to_bytes());
-    // Same per-file key the web derives in getFileKey(fileId) and the CLI
-    // uses for upload: HKDF(master, file-uuid string).
-    let file_key = beebeeb_core::kdf::derive_file_key(master_key, file_uuid.to_string().as_bytes());
+    // R7: only the key the row's NAME authenticated under may travel in the
+    // link. A derived-from-the-id guess would hand the recipient a key that
+    // does not open a legacy binary-convention item.
     Ok(ShareMaterial {
         wrapped_file_key: wrap_file_key_for_share(client_key, file_key.as_bytes())?,
         owner_wrapped_key: b64.encode(wrap_raw(&mk, client_key)?),
@@ -684,7 +773,9 @@ fn app_url() -> String {
 }
 
 pub(crate) fn share_link(app_url: &str, token: &str, key_fragment: &str) -> String {
-    format!("{app_url}/s/{token}#key={key_fragment}")
+    // Core owns the grammar (and percent-encodes like encodeURIComponent); a
+    // base64url fragment is unreserved, so the printed link is byte-identical.
+    beebeeb_core::share_link::build(app_url, token, key_fragment)
 }
 
 /// Rebuild a share's working link from the owner-wrapped blobs returned by
@@ -744,7 +835,7 @@ mod share_wire_tests {
             .decode(&wire)
             .expect("wrapped_file_key must be STANDARD base64 (server check)");
         assert_eq!(raw.len(), 60, "nonce(12) || ct(32+16) = 60 bytes (K3 wire format)");
-        let opened = beebeeb_core::encrypt::decrypt_chunk_raw(&beebeeb_core::kdf::FileKey::from_bytes(k_c), &raw)
+        let opened = beebeeb_core::encrypt::decrypt_chunk_raw(&crate::crypto::key_from_bytes(&k_c), &raw)
             .expect("must open under the raw K_c exactly as web unwrapKeyFromShare does");
         assert_eq!(opened, fk.to_vec());
     }
@@ -758,15 +849,15 @@ mod share_wire_tests {
         let file_uuid = uuid::Uuid::parse_str("4c53f27f-c64f-4d65-8872-ea36011ef316").unwrap();
         let k_c = [9u8; 32];
         let token = beebeeb_core::share_token::generate_share_token();
-        let m = build_share_material(&mk, &file_uuid, &k_c, token.clone()).unwrap();
+        let file_key = beebeeb_core::kdf::derive_file_key(&mk, file_uuid.to_string().as_bytes());
+        let m = build_share_material(&mk, &file_key, &k_c, token.clone()).unwrap();
         let b64 = base64::engine::general_purpose::STANDARD;
 
         assert_eq!(m.token.len(), 27);
-        let fk = beebeeb_core::kdf::derive_file_key(&mk, file_uuid.to_string().as_bytes());
         let opened = unwrap_share_blob(&k_c, &b64.decode(&m.wrapped_file_key).unwrap()).unwrap();
         assert_eq!(
             opened,
-            fk.as_bytes().to_vec(),
+            file_key.as_bytes().to_vec(),
             "recipient with #key= must get the upload file key"
         );
         assert_eq!(

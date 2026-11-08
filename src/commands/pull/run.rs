@@ -1,0 +1,269 @@
+//! The `bb pull` entry point: load the key, dispatch to single-file or folder
+//! download, and retry only when the remote file changed underneath us.
+//!
+//! Owns: `run` and `run_once`, including the retry loop over `PullError`.
+//! Must not: resolve targets or write bytes itself (see `pull::resolve` and
+//! `pull::folder`).
+
+use super::*;
+use crate::upload::{ChunkProgress, InFlight, Route};
+
+pub async fn run(file_id: String, output: Option<PathBuf>, options: PullOptions) -> Result<(), String> {
+    match run_once(file_id.clone(), output.clone(), options, false).await {
+        // Someone published a new version while this one was downloading. Nothing was written;
+        // the new version's chunk count and read pin need a fresh look, so start over, once.
+        Err(PullError::Changed(_)) => {
+            if !crate::ui::is_quiet() {
+                eprintln!("The file changed while it was downloading; starting again from its new version.");
+            }
+            // The overwrite question was answered in the first attempt (it is asked before any
+            // byte is fetched); the retry must not ask it again.
+            run_once(file_id, output, options, true).await.map_err(|e| match e {
+                PullError::Changed(m) => format!("{m}. It changed again; run the command again"),
+                PullError::Other(m) => m,
+            })
+        }
+        other => other.map_err(String::from),
+    }
+}
+
+pub(super) async fn run_once(
+    file_id: String,
+    output: Option<PathBuf>,
+    options: PullOptions,
+    already_confirmed: bool,
+) -> Result<(), PullError> {
+    let api = ApiClient::from_config();
+    api.require_auth()?;
+
+    // --zip mode: resolve as folder and download as a zip archive
+    if options.zip {
+        return Ok(run_zip(&api, &file_id, output, options.force, options.verbose).await?);
+    }
+
+    let (file_id, resolved_name) = resolve_file_arg(&api, &file_id).await?;
+
+    // If no --output was given and we resolved a path, use the resolved name.
+    // That name still goes through the same safety check as any server-provided
+    // name (task 1733): an explicit `-o` is the only unchecked path.
+    let output = match (output, resolved_name.as_deref()) {
+        (Some(o), _) => Some(o),
+        (None, Some(n)) => Some(crate::safe_path::default_output_path(n)?),
+        (None, None) => None,
+    };
+
+    // Step 1: Get file metadata to learn chunk count and encrypted name
+    let file_meta = api.get_file(&file_id).await?;
+
+    let chunk_count = file_meta.get("chunk_count").and_then(|v| v.as_i64()).unwrap_or(1) as u32;
+
+    let name_encrypted_str = file_meta
+        .get("name_encrypted")
+        .and_then(|v| v.as_str())
+        .ok_or("server response missing name_encrypted")?;
+
+    let master_key = load_master_key()?;
+
+    let mut keys = crate::owned_keys::OwnedKeyResolver::new();
+    let resolved = keys.resolve(&api, &master_key, &file_meta).await?;
+    let request_content_key =
+        if crate::commands::request::is_request_upload(&file_meta) && file_meta["owner_wrapped_file_key"].is_null() {
+            Some(crate::crypto::key_copy(&resolved.key))
+        } else {
+            None
+        };
+    let explicit_key = if !crate::owned_keys::is_derived_origin(resolved.origin) && request_content_key.is_none() {
+        Some(resolved.key.clone())
+    } else {
+        None
+    };
+    let decrypted_name = Some(resolved.name);
+
+    let is_folder = file_meta.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    if is_folder {
+        let folder_name = decrypted_name.as_deref().unwrap_or(&file_id);
+        let out_dir = match output {
+            Some(o) => o,
+            None => crate::safe_path::default_output_path(folder_name)?,
+        };
+        return Ok(pull_folder(&api, &file_id, &out_dir, options.force, options.verbose).await?);
+    }
+
+    let display_name = decrypted_name.as_deref().unwrap_or(&file_id);
+
+    // Output path (needed up front for the streaming write).
+    // The default (no `-o`) comes from a server-provided name, so it must be a
+    // single safe component; `-o` is the user's own choice and is taken as-is.
+    let out_path = match output {
+        Some(o) => o,
+        None => crate::safe_path::default_output_path(decrypted_name.as_deref().unwrap_or(&file_id))?,
+    };
+
+    // Never clobber a local file silently (flow "CLI end to end", issue 5):
+    // checked before any bytes are downloaded, for both decrypt paths below.
+    ask_once(already_confirmed, &out_path, options.force, guard_existing_output)?;
+
+    // The chunk format comes from the file's authenticated metadata, never a
+    // server field (task 1943): core's reader opens a v2-pinned file only as v2.
+    // L12: a request row's NAME key is derived-first (core's resolver), while its
+    // content stays under C. The chunk format lives in the name's metadata.
+    let pin_key = resolved.name_key.as_deref().unwrap_or(&resolved.key);
+    let pin = crate::crypto::content_pin_with_key(pin_key, &file_id, name_encrypted_str)?;
+
+    // What the run moves: this file, as its row states it, and where it is stored (task 2333).
+    let plan = report::FilePlan::of_row(&file_meta);
+    let pool = report::pool_of(&file_meta);
+
+    // File-request uploads are sealed under a per-file content key C, not the
+    // master-derived key the streaming path assumes. Decrypt them via the
+    // buffered request-key path (download whole blob → decrypt with C → write).
+    if let Some(c) = &request_content_key {
+        let progress = report::start_buffered(options.verbose);
+        plan.add_next(&progress);
+        progress.seal_plan();
+        progress.set_limit(1);
+        let file = progress.begin_file_chunks(display_name, plan.bytes, plan.chunks, 0);
+        if let Some(label) = &pool {
+            file.pool(label.clone());
+        }
+        let flight = InFlight::start(file.as_ref(), 0, Route::Api);
+        let dl_start = std::time::Instant::now();
+        let encrypted_bytes = api.download_file(&file_id).await?;
+        let dl_elapsed = dl_start.elapsed();
+        let dec_start = std::time::Instant::now();
+        let plaintext = crate::crypto::try_decrypt_all_chunks(c, &file_id, pin, &encrypted_bytes, chunk_count)?;
+        let dec_elapsed = dec_start.elapsed();
+        // The body counts once it decrypted (spec §4.3): all its chunks at once.
+        file.body_done(chunk_count.max(1), encrypted_bytes.len() as u64, Route::Api);
+        drop(flight);
+
+        // Through a temp and a publish, like the streamed path (task 2408): never
+        // truncated in place, never written through a name that reaches another file.
+        crate::download::AtomicFile::write_whole(&out_path, &plaintext)
+            .map_err(|e| format!("failed to write file: {e}"))?;
+        file.finish(true);
+        let transfer = progress.summary();
+
+        let dl_speed = if dl_elapsed.as_secs_f64() > 0.0 {
+            encrypted_bytes.len() as f64 / dl_elapsed.as_secs_f64()
+        } else {
+            0.0
+        };
+
+        if crate::ui::is_json() {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "id": file_id,
+                    "name": display_name,
+                    "size_bytes": plaintext.len(),
+                    "download_speed_bps": dl_speed as u64,
+                    "download_ms": dl_elapsed.as_millis() as u64,
+                    "decrypt_ms": dec_elapsed.as_millis() as u64,
+                    "output": out_path.display().to_string(),
+                    "transfer": transfer.to_json(),
+                }))
+                .unwrap()
+            );
+        } else if crate::ui::is_quiet() {
+            println!("{}", out_path.display());
+        } else {
+            report::print_file(
+                &progress,
+                "  ",
+                (
+                    display_name,
+                    plaintext.len() as u64,
+                    transfer.bytes_transferred,
+                    transfer.duration_ms,
+                ),
+                &report::request_time_text(dl_elapsed.as_millis() as u64, dec_elapsed.as_millis() as u64),
+            );
+            report::print_detail(&transfer, options.verbose);
+        }
+        return Ok(());
+    }
+
+    // Stream download + decrypt with constant memory, live lines on a terminal (task 2333).
+    let progress = report::start(options.verbose);
+    plan.add_next(&progress);
+    progress.seal_plan();
+
+    let start = std::time::Instant::now();
+    let stats = if let Some(key) = explicit_key {
+        crate::download::stream_download_decrypt_with_file_key(
+            &api,
+            key,
+            &file_id,
+            pin,
+            chunk_count,
+            &out_path,
+            &progress,
+            display_name,
+            pool.as_ref(),
+        )
+        .await?
+    } else {
+        crate::download::stream_download_decrypt(
+            &api,
+            &master_key,
+            &file_id,
+            pin,
+            chunk_count,
+            &out_path,
+            &progress,
+            display_name,
+            pool.as_ref(),
+        )
+        .await?
+    };
+
+    let transfer = progress.summary();
+    let elapsed = start.elapsed();
+
+    let dl_speed = if elapsed.as_secs_f64() > 0.0 {
+        stats.encrypted_bytes as f64 / elapsed.as_secs_f64()
+    } else {
+        0.0
+    };
+
+    if crate::ui::is_json() {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "id": file_id,
+                "name": display_name,
+                "size_bytes": stats.plaintext_bytes,
+                "download_speed_bps": dl_speed as u64,
+                "elapsed_ms": elapsed.as_millis() as u64,
+                "transport": stats.transport,
+                "output": out_path.display().to_string(),
+                "transfer": transfer.to_json(),
+            }))
+            .unwrap()
+        );
+        return Ok(());
+    }
+
+    if crate::ui::is_quiet() {
+        println!("{}", out_path.display());
+        return Ok(());
+    }
+
+    // Rich mode (default): `✓ {name}  {size}  {avg}`, then `{time} · streamed` (spec §6.5).
+    report::print_file(
+        &progress,
+        "  ",
+        (
+            display_name,
+            stats.plaintext_bytes,
+            transfer.bytes_transferred,
+            transfer.duration_ms,
+        ),
+        &report::time_text(transfer.duration_ms, "streamed"),
+    );
+    report::print_detail(&transfer, options.verbose);
+
+    Ok(())
+}

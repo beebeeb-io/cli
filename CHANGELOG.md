@@ -5,15 +5,126 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.17.3] - 2026-11-08
 
-### Added
-- Direct uploads (task 2173): when the server offers `object-upload-v1`, `bb push` and `bb sync` send each chunk straight to object storage through a short-lived link the server grants and then commit it, instead of proxying the bytes through the API. Nothing changes for a server that does not offer it, and `--transport api` / `BB_TRANSPORT=api` force the API. A file whose direct upload cannot finish is sent again through the API, and no further direct upload is started by that process for ten minutes. An interrupted direct upload is continued on the next run; if the server cannot be asked at that moment, or the login is no longer valid, the upload and its progress are kept and the file fails for that run (it is given up only when the server says it offers no direct upload, or with `--transport api`). A chunk the server holds for minutes after a failed copy is waited out, not given up on.
-- `bb push --json` reports `transport` (`direct` or `api`) for every file, like `bb pull --json`.
+### Fixed
+- Windows: a file name `bb` writes, renames or deletes only ever touches the file with that exact name, never another file the folder's 8.3 short names reach. Beebeeb core v0.2.7 (`124389a`); downloads and `bb pull --zip` write through core's exclusive temporary file; `bb sync`'s `.bb-trash` move and remote renames refuse or hold such a name; file-request pulls use the same writer as every other pull.
+- `.bb-trash` only takes plain relative names, on every platform.
 
 ### Changed
-- What the server said about direct transfer is now remembered per API base for the life of the process, for ten minutes: `bb sync --daemon` used to ask the capabilities route again on every resync (it built a new client each time), and a server that said it has no direct transport is asked again after ten minutes.
+- File-request pulls replace the output file instead of writing into it (default permissions with `--force`, a symbolic link is replaced, `-o /dev/stdout` fails), as every other pull already did.
 
+### Known limits
+- An interrupted download leaves `<name>.tmp`, which the next `bb sync` uploads; delete it by hand.
+- On Windows, `bb pull --zip` refuses names with `:`, a trailing dot or a reserved name instead of rewriting them (core v0.3.0 fixes this).
+
+## [0.17.2] - 2026-11-08
+
+### Security
+- `zip` 9.4.1 (was 8.6.0), through Beebeeb core v0.2.4 (`1d1a335`) and the CLI's own dependency. This clears the four `zip` advisories 0.17.1 still reported (RUSTSEC-2026-0429, -0367, -0368, -0369). They were about extracting archives; `bb` only writes them (`bb pull --zip`), so nobody was exposed. `cargo audit`: 5 vulnerabilities before, 1 after (RUSTSEC-2026-0387, through the password-login library, unchanged).
+- The archive `bb pull --zip` writes is the same bytes as before for the five entries checked (a one-off comparison, not a test).
+
+### Fixed
+- `bb backup`: a file that grows, shrinks or goes away while it is being backed up now waits for the next run (counted as "waiting for the next run", exit 0) instead of failing the run (exit 3), and its half-finished upload is ended. A file the backup cannot look at (a dropped network drive, a folder it may no longer open) still fails and says so.
+- `bb push` and `bb sync`: a file that grows or shrinks while it is being uploaded still fails, and its upload session is now ended at once.
+
+### Changed
+- Uses Beebeeb core v0.2.4 (`1d1a335`), was v0.2.2. Core v0.2.3 and v0.2.4 add nothing the CLI calls.
+
+## [0.17.1] - 2026-11-08
+
+### Security
+- The one-time key exchange used when a browser approves `bb login` now runs on `p256` 0.14 (was 0.13.2), which clears the timing issues of RUSTSEC-2026-0387 for that code. The login's wire format is unchanged.
+- TLS and certificate checks updated: `rustls` 0.23.46, `rustls-webpki` 0.103.16, `webpki-roots` 1.0.11 (RUSTSEC-2026-0346, -0285, -0348, -0349, -0382, -0381). Also `quinn-proto` 0.11.19 (five advisories) and `crossbeam-epoch` 0.9.21 (RUSTSEC-2026-0204).
+- `cargo audit`: 17 vulnerabilities before, 5 after. Still reported: RUSTSEC-2026-0387 through the password-login library (OPAQUE, `opaque-ke` 4.0.1; Beebeeb's Ristretto255 suite does not use that code, checked by reading the code, not by a runtime test) and four `zip` advisories about extracting archives (`bb` only writes zip archives; the fix is a major update of `zip`, planned).
+
+### Changed
+- `bb backup` after a reinstall (records lost): a file whose server copy was made within 10 minutes of its last change is uploaded again, because the computer's clock can't be compared with the server's. The re-upload is a new version of that same server file, never a second copy. With two or more server files of that exact name in the folder, `bb backup` uploads a new file and prints one note.
+- Uses Beebeeb core v0.2.2 (`2d89adc`), was v0.2.1.
+
+### Known issues
+- `bb sync --json` still prints a `+ remote folder <name>` line on stdout before the JSON on a run that creates a server folder (unchanged since 0.16.0).
+
+## [0.17.0] - 2026-11-07
+
+### Added
+- `bb push --parallel N` now also uploads the files of a folder N at once (default 4; `--parallel 1` is one file at a time). Chunks in flight across all the files stay at most N, within the same 640 MiB upload buffer. The push asks every question it needs (such as a file that already exists) before the first byte goes out. One file failing (another `bb push` of it running, or a same-name file appearing while the push prepares) does not stop the others. Ctrl-C stops every file in flight and starts no new one: one line, exit 130, uploads stay resumable. A name check that hits a rate limit (429) waits for the shared pause and asks again, up to 3 tries.
+- `bb pull` and `bb sync` show live transfer numbers on a terminal, as `bb push` does since 0.16.0: a bar, the percent, bytes done, the current speed in Mbps and the time left (a folder pull has no total or time left; `bb sync` has a live line per phase). A folder pull ends with a summary line; `bb pull --zip` draws a live line for each of your own files (file-request files are read whole and only counted).
+- `-v` / `--verbose` for `bb pull` and `bb sync`: chunks done and in flight, direct or API route, retries, the storage country (Germany or Finland), one line per chunk and a detail line under the end lines. `-v` with `--quiet` is a usage error (exit 2); `-v` has no effect with `--json`, and `bb sync --daemon` ignores it.
+- `bb pull --json` gains a `transfer` object; `bb sync --json` gains `transfer_upload` and `transfer_download`. Existing keys are unchanged.
+
+### Changed
+- The old progress bars of `bb pull` and `bb sync` are gone. End lines show speeds in Mbps (megabits per second) instead of MB/s, and times as `4.2s` or `7m 21s`, not milliseconds. Live lines show only when stdout and stderr are both terminals.
+- A folder push prints its per-file lines in the order files finish, and `--quiet` prints the ids in that order too; `--json` keeps the folder's order.
+- Warnings about skipped files and files that changed while being read use the error colour instead of amber and print above the live lines.
+- No dependency changes; still core v0.2.1.
+
+### Fixed
+- `bb sync` live numbers settle: a skipped or never-started file leaves the totals, a failed file's unsent bytes leave the time left, "in flight" is never higher than the files still to send and shows from the start of the upload phase.
+- A failed or interrupted download takes back the chunks it counted; the "counted again" line of `-v` appears only when a download moved to the API.
+- The percentage never shows more than 100 %, a failed file is no longer drawn as active, and a file-request upload in a folder pull is no longer drawn as a line that jumps from 0 to 100 %.
+- A file row with an enormous size can no longer overflow the transfer plan.
+- Headers say `1 file` and `1 item`, not `1 files` and `1 items`; the `-v` storage line no longer reads `chunk 0 B` for a file read whole.
+
+### Security
+- New tests check that `bb sync` and `bb pull` (a file, a folder, `--zip`, the API fallback) never print a city, a data center code, a pool id, a storage host, a signed link, a token, a key or a provider name.
+
+## [0.16.0] - 2026-11-07
+
+### Added
+- `bb push --parallel N` sends up to N chunks of a file at once (1 to 8, default 4), within one 640 MiB upload buffer; the default holds up to 512 MiB. Files over 2 GiB use smaller chunks as N rises (64 MiB at 4, 32 MiB at 8), and a file whose chunks don't fit the buffer gets fewer at once, which `-v` says. A rate limit (429) or a busy storage pool (503) pauses the whole push once, with one notice. Ctrl-C stops the whole push and its upload stays resumable; the push prints how many chunks were confirmed and exits 130, and a second Ctrl-C exits at once. The `--json` `transfer` object gains `parallel_asked` and `pauses`.
+- `bb backup add|remove|list|run|status` backs up folders from a Linux machine into your Backups folder (Linux only for now; a systemd user timer is in the README). `run` and `status` exit 0, 3 (finished with something not done) or 4 (a folder turned off because its backup was deleted elsewhere; `bb backup add <folder>` backs it up again); a second `bb backup` at the same time exits 75.
+- Backups are protected on both sides: `bb push` won't add files inside Backups, the Backups folder itself can't be renamed, moved or deleted, and the server refuses the same changes. Deleting a device's backup with `bb rm` always asks first, with the item count; only `--yes` answers that question. `bb mv` and `bb mkdir` follow the same rule, and `bb ls` marks the folder `[Read-only]`.
+- `bb push` shows live numbers on a terminal: a bar, the current speed in Mbps and the time left, updated as the server confirms chunks. `-v` / `--verbose` adds the chunks done and in flight, the average speed, the storage country (Germany or Finland), the direct and API chunk counts, retries and one line per chunk. `--quiet -v` is a usage error.
+- `bb push --json` gains a `transfer` object (totals, `avg_mbps`, `duration_ms`, route counts, retries, and `pools` with the storage country only). Existing keys are unchanged; `total_duration_ms` is still the whole run's wall time.
+- `bb push` of a folder reuses a same-name folder at every level instead of making a second one. A shared folder is reused only after a yes at a terminal or with the new `--reuse-shared` flag; without a terminal it exits 2.
+- A re-pushed file that this machine already uploaded unchanged is skipped and counted (`skipped N already uploaded`, `total_already_uploaded` in `--json`).
+
+### Changed
+- `bb push` sends 4 chunks at once by default. `--parallel 1` sends the same requests as 0.15.0, except that a 503 on a chunk is now retried. Files between 1 and 2 GiB use 32 MiB chunks at `--parallel 7` and `8`. An upload interrupted by an older `bb` resumes one chunk at a time, in its own chunk size. `bb sync` and `bb backup` are unchanged.
+- `bb rm -f` / `--force` now only skip the move-to-trash prompt. `--yes` answers every question.
+- Not covered yet: `bb sync`, `bb mount`, `bb webdav`, `bb repair` and `bb restore` don't check the Backups rule. A later release adds it; until then, don't use them to change files inside Backups.
+- Uses Beebeeb core v0.2.1.
+- Of several same-name folders, `bb push` and `bb push --folder` use the oldest folder that is not shared and say how many there are.
+- Speeds in `bb push` and `bb speedtest` are decimal Mbps with one decimal. Durations read `7m 21s`, not milliseconds, and the end line says `1 file`.
+- Running an unchanged, already completed `bb push` again skips the file and exits 0; it used to refuse with "already exists" and exit 2 without a terminal. A changed file is still a conflict (exit 2).
+- Pushing a folder whose name already exists as a shared folder asks at a terminal, and without a terminal, with `--json` or with `--quiet` uploads nothing and exits 2 unless `--reuse-shared` is passed; 0.15.0 made a new private folder and exited 0.
+- Dependencies: `libc` 0.2.191, `serde_json` 1.0.154, `regex` 1.13.1; `unicode-width` is now a direct dependency.
+
+### Fixed
+- A 503 from a busy storage pool on a chunk is retried after a pause instead of failing the file, at every `--parallel` setting.
+- The resume record is written whole, so a kill mid-write can no longer leave half a record. A push interrupted while its last step was running finishes the file on the next run without sending a chunk.
+- `bb backup` refuses a state file that belongs to another account or machine, naming the file to delete, and drops a deleted device folder when a folder is added again.
+- `bb push` stops with a reason when it cannot tell whether its destination is inside Backups, instead of guessing.
+- A resumed upload finishes in the folder the push asked for. An interrupted upload that sits in another folder is ended on the server and the file starts again in the right one; the file is never moved.
+- When the CLI cannot tell who can see a folder, it treats the folder as shared, and with several same-name folders it uploads nothing, also with `--reuse-shared`.
+- A name check that cannot be read, or a possible file-request upload whose keys did not load, fails the file instead of uploading a duplicate.
+- A file that changes size after the push planned it is counted at its new size. The rate-limit pause message no longer tears the live lines.
+
+### Security
+- The log of finished uploads, which names local paths, is written owner-only (0600), also when the log already exists.
+
+## [0.15.0] - 2026-11-03
+
+### Added
+- `bb push` and `bb sync` upload a file's encrypted chunks directly to object storage when the server offers it (`object-upload-v1`). Otherwise they upload through the API, as before.
+- Files other people add to a folder you share now sync. They open with the key the folder gives them. A file you add to a shared folder from the CLI stays readable only to you, and the CLI says so.
+- Moving a file someone else added out of a shared folder first takes it over under your account. If that cannot be done, the move is refused.
+
+### Changed
+- Files received through a file request open through the shared core code. They can be renamed: the new name is encrypted under a key derived for that file, never the sender's key. Their content is read-only. `bb sync` saves an edit as a new file, the mount refuses to overwrite one, and `bb repair` skips them.
+- The mount (FUSE) moves to fuser 0.18 and is accessible only to your own user (directories 0700, files 0600, owner-only session ACL).
+- The code was split into smaller modules. Behaviour changes are only the ones listed here.
+
+### Fixed
+- `bb sync` only trashes a replaced server file after its new copy is written and checked. It never trashes a file it cannot prove it may change.
+- A local edit of a read-only file is kept and reported with guidance, instead of failing the sync pass.
+- Files the CLI can read but not safely change, such as some saved from the iOS Files app, are read-only, and the CLI says why. A rename the device has no key for is refused with a reason.
+- Sync state is tied to the signed-in account.
+- An oversized downloaded chunk is refused. A file request link whose token is not a single path segment is refused.
+
+### Security
+- Key material the CLI copies while working is wiped after use.
 
 ## [0.14.2] - 2026-10-24
 

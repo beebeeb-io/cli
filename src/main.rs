@@ -1,5 +1,14 @@
+//! The `bb` binary: the clap entry point, the output-mode setup and the dispatch
+//! into `commands`.
+
 mod account_state;
 mod api;
+mod backup;
+mod backup_guard;
+mod cli_args;
+use cli_args::*;
+mod cli_help;
+use cli_help::*;
 mod colors;
 mod commands;
 mod config;
@@ -13,6 +22,7 @@ mod direct_upload;
 mod download;
 mod env_detect;
 mod exit;
+mod interrupt;
 mod item_id;
 mod loopback;
 mod owned_keys;
@@ -24,6 +34,8 @@ mod safe_path;
 mod shared_folder_index;
 mod sync_safety;
 mod thumbnail;
+mod transfer_stats;
+mod transfer_view;
 mod transport;
 mod tui;
 mod ui;
@@ -34,6 +46,8 @@ mod web_url;
 
 #[cfg(test)]
 mod readme_flags_tests;
+#[cfg(all(test, windows))]
+mod short_name_test_support;
 #[cfg(test)]
 mod test_server;
 
@@ -124,6 +138,18 @@ struct Cli {
     command: Commands,
 }
 
+impl Commands {
+    /// The command's own `-v, --verbose` (task 2333), where it has one.
+    fn verbose(&self) -> bool {
+        matches!(
+            self,
+            Commands::Push { verbose: true, .. }
+                | Commands::Pull { verbose: true, .. }
+                | Commands::Sync { verbose: true, .. }
+        )
+    }
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Update bb to the latest release
@@ -183,6 +209,24 @@ enum Commands {
         /// When a file with the same name exists: upload with a numeric suffix
         #[arg(long, conflicts_with = "replace")]
         keep_both: bool,
+
+        /// When the pushed folder already exists here and is shared: upload into it without asking
+        #[arg(long)]
+        reuse_shared: bool,
+
+        /// Show transfer details: speed, chunks, chunks in flight, pool and route. No effect with --json
+        #[arg(short = 'v', long)]
+        verbose: bool,
+
+        #[arg(
+            long,
+            value_parser = clap::value_parser!(u32).range(1..=8),
+            default_value_t = 4,
+            hide_default_value = true,
+            help = "How many chunks to send at once, 1 to 8 [default: 4]. A file whose chunks do not fit the 640 MiB \
+                    upload buffer gets fewer; the output says so."
+        )]
+        parallel: u32,
     },
 
     /// Download a file by UUID, short ID, or path
@@ -207,6 +251,10 @@ enum Commands {
         /// and refuses (non-zero exit) otherwise — pass -o to save elsewhere
         #[arg(short = 'f', long)]
         force: bool,
+
+        /// Show transfer details: speed, chunks, chunks in flight, route and storage country. No effect with --json
+        #[arg(short = 'v', long)]
+        verbose: bool,
     },
 
     /// List files (decrypts names locally)
@@ -256,6 +304,12 @@ enum Commands {
         paths: Vec<String>,
     },
 
+    /// Back up folders of this machine into Backups (one pass per `run`)
+    Backup {
+        #[command(subcommand)]
+        cmd: BackupCmd,
+    },
+
     /// Move files/folders to the trash (reversible with `bb restore`)
     Rm {
         /// One or more vault paths or UUIDs to trash
@@ -271,9 +325,16 @@ enum Commands {
         #[arg(long = "permanent")]
         permanent: bool,
 
-        /// Skip the (soft-trash) confirmation prompt. Does not bypass the
+        /// Skip the (soft-trash) confirmation prompt. Does not answer
+        /// "Delete <device>'s backup?" (only --yes does), and does not bypass
+        /// the step-up required by --permanent.
+        #[arg(short = 'f', long = "force")]
+        force: bool,
+
+        /// Answer yes to every question: the soft-trash confirmation and
+        /// "Delete <device>'s backup?" (for scripts). Does not bypass the
         /// step-up required by --permanent.
-        #[arg(short = 'f', long = "yes", visible_alias = "force")]
+        #[arg(long = "yes")]
         yes: bool,
     },
 
@@ -422,6 +483,11 @@ enum Commands {
         /// removed on its account; local files then sync in as new files.
         #[arg(long, conflicts_with = "daemon")]
         rebind: bool,
+
+        /// Show transfer details: speed, chunks, chunks in flight, route and storage country. No effect with --json
+        /// or --daemon
+        #[arg(short = 'v', long)]
+        verbose: bool,
     },
 
     /// Mount vault as a FUSE filesystem (source builds with `--features fuse` only;
@@ -546,376 +612,6 @@ enum Commands {
     },
 }
 
-#[derive(Subcommand)]
-enum TrashCmd {
-    /// List trashed files and folders
-    List,
-
-    /// Permanently delete everything in the trash (irreversible; requires
-    /// a step-up password confirmation)
-    Empty,
-}
-
-#[derive(Subcommand)]
-enum RequestCmd {
-    /// Create a file request and print its shareable link
-    Create {
-        /// Target folder (UUID or top-level folder name) the uploads land in
-        #[arg(long)]
-        folder: Option<String>,
-
-        /// Maximum number of files the request will accept
-        #[arg(long)]
-        max_files: Option<u32>,
-
-        /// Maximum total bytes (e.g. 100MB, 2GB, 500MiB)
-        #[arg(long)]
-        max_bytes: Option<String>,
-
-        /// Expiry (e.g. 7d, 24h, 30m, 2w; a bare number means days)
-        #[arg(long)]
-        expires: Option<String>,
-
-        /// Title shown to whoever opens the link (defaults to "File request")
-        #[arg(long)]
-        title: Option<String>,
-
-        /// Optional description shown to the uploader
-        #[arg(long)]
-        desc: Option<String>,
-    },
-
-    /// List your file requests with received counts and links
-    List,
-
-    /// Close (default) or hard-delete a file request
-    Rm {
-        /// File request ID
-        id: String,
-
-        /// Hard-delete instead of closing (destructive)
-        #[arg(long)]
-        delete: bool,
-    },
-
-    /// Upload file(s) to a request link — no account needed
-    Send {
-        /// The file-request link (…/r/<token>#<public-key>)
-        url: String,
-
-        /// One or more files to upload
-        #[arg(required = true)]
-        files: Vec<PathBuf>,
-    },
-}
-
-#[derive(Subcommand)]
-enum AccountCmd {
-    /// Show profile, plan, security, sessions, passkeys
-    Show,
-    /// Open the Beebeeb web billing page
-    Billing,
-    /// View or purchase billing add-ons
-    Addons {
-        #[command(subcommand)]
-        action: Option<AddonsAction>,
-    },
-    /// Change email address (verification sent to the new inbox)
-    Update {
-        /// New email address
-        #[arg(long)]
-        email: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum TwofaCmd {
-    /// Show 2FA status (enabled/disabled)
-    Status,
-    /// Begin 2FA setup — returns secret, QR, and backup codes
-    Setup,
-    /// Confirm a TOTP code to enable 2FA after setup
-    Enable {
-        /// 6-digit TOTP code from your authenticator
-        #[arg(long)]
-        code: String,
-    },
-    /// Disable 2FA — requires a valid TOTP code
-    Disable {
-        #[arg(long)]
-        code: String,
-    },
-    // `Verify` (exchange a login-time partial token + code) was REMOVED
-    // (eng-0479): the live POST /api/v1/auth/2fa/verify is the LOGIN-time
-    // exchange, but `bb login`'s browser handshake never produces or needs a
-    // partial token — see the module doc in `commands/twofa.rs` for the full
-    // grep evidence. A visible command with no live semantics is a dead end.
-}
-
-#[derive(Subcommand)]
-enum SessionsCmd {
-    /// List all active sessions (current one marked with `*`)
-    List,
-    /// Revoke one session by id (or a unique id prefix from `bb sessions
-    /// list`). Refuses on the current session — run `bb logout` instead
-    /// (see commands/sessions.rs module doc for why).
-    Revoke {
-        /// Full session id or a unique prefix
-        id: String,
-    },
-    /// Revoke every session except the one you're running this from
-    RevokeAllOthers {
-        /// Skip the confirmation prompt
-        #[arg(short = 'f', long = "yes", visible_alias = "force")]
-        yes: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum RegionCmd {
-    /// List the storage locations by country, with your current choice marked (default)
-    List,
-    /// Show your current choice
-    Get,
-    /// Choose where new uploads are stored, by country
-    Set {
-        /// `europe` (default: any of our European data centers, we place your
-        /// files), or a country: its id, code or name from `bb region list`
-        /// (for example `de` or `Germany`; case does not matter)
-        target: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum PasskeyCmd {
-    /// List your registered passkeys
-    List,
-    /// Register a new passkey (opens the web app — WebAuthn only runs in a browser)
-    Add {
-        /// Print the enrollment URL instead of opening a browser (for SSH / headless use)
-        #[arg(long)]
-        print_url: bool,
-    },
-    /// Remove a passkey by id (or a unique id prefix from `bb passkey list`)
-    Remove {
-        /// Full passkey id or a unique prefix
-        id: String,
-        /// Skip the confirmation prompt
-        #[arg(short = 'f', long = "yes", visible_alias = "force")]
-        yes: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum BillingAction {
-    /// Show plan, storage usage, renewal date, and pending changes
-    Show {
-        /// Output the raw API merge as JSON (use with jq)
-        #[arg(long)]
-        json: bool,
-    },
-    /// Storage usage with a per-region breakdown (approximate — top-level files only)
-    Usage,
-    /// List VAT-compliant invoices (number, date, amount, status, period)
-    Invoices {
-        /// Download and open one invoice's PDF (full invoice id or a unique prefix)
-        #[arg(long, value_name = "ID")]
-        open: Option<String>,
-    },
-    /// Open the Beebeeb web billing page
-    Portal,
-    /// View or purchase billing add-ons
-    Addons {
-        #[command(subcommand)]
-        action: Option<AddonsAction>,
-    },
-}
-
-#[derive(Subcommand)]
-enum AddonsAction {
-    /// Purchase one unit of an add-on
-    Purchase {
-        /// Server add-on field to increment: extra_storage_tb or extra_users
-        addon_id: String,
-    },
-}
-
-/// The curated, hand-grouped rows shown in the `COMMANDS` section. Kept as a
-/// named const (rather than inline in `build_help_text`) so the "everything
-/// else" overflow line below can be computed against it.
-const HELP_MAIN_COMMANDS: &[(&str, &str, &str)] = &[
-    ("ls", "[path]", "list files (decrypts names locally)"),
-    ("mkdir", "<path>", "create a folder · mirrors mkdir -p"),
-    ("mv", "<src> <dst>", "move or rename · mirrors mv"),
-    ("rm", "<path|id>...", "trash files/folders · -r · reversible"),
-    ("restore", "<name|id>", "restore from trash"),
-    ("trash", "list", "browse the trash"),
-    ("search", "<query>", "find files by name · --regex"),
-    ("push", "<path>", "upload · encrypts on the fly"),
-    ("pull", "<id|path>", "download and decrypt"),
-    ("share", "<path|id>", "create encrypted link (expiry, passphrase)"),
-    ("sync", "<dir> [remote]", "sync + watch · continuous by default"),
-    ("webdav", "", "serve vault over WebDAV (Finder, rclone, Cyberduck)"),
-    ("whoami", "", "user · plan · region · quota · session"),
-    ("speedtest", "", "benchmark network + crypto speed"),
-    ("repair", "", "fix cross-client encryption"),
-    ("update", "", "install the latest bb release"),
-];
-
-/// The curated `ACCOUNT` section — account-security commands added in 0.10.0
-/// (task 1506: these five were shipped but missing from `--help` entirely).
-const HELP_ACCOUNT_COMMANDS: &[(&str, &str, &str)] = &[
-    ("account", "<action>", "profile, plan & security · show, update"),
-    ("billing", "<action>", "plan, usage, invoices, portal, add-ons"),
-    ("2fa", "<action>", "two-factor auth (TOTP) · setup, enable, disable"),
-    ("sessions", "<action>", "active sessions across devices · list, revoke"),
-    ("passkey", "<action>", "WebAuthn passkeys · list, add, remove"),
-    ("region", "[action]", "where new uploads are stored · list, get, set"),
-];
-
-/// Links printed at the foot of every help surface (the custom `bb --help`
-/// screen and clap's own rendering). Full https URLs to pages that exist —
-/// the previous footer pointed at `beebeeb.io/cli` and
-/// `beebeeb.io/fingerprints`, both 404. `help_links_return_200` (run in CI)
-/// checks every URL here answers 200.
-const HELP_FOOTER_LINKS: &[(&str, &str)] = &[
-    ("docs", "https://github.com/beebeeb-io/cli"),
-    ("security", "https://beebeeb.io/security"),
-];
-
-/// The footer block, one `# label  url` line per link, plus a pointer to
-/// per-command help (the top-level screen lists no per-command flags).
-fn help_footer_text() -> String {
-    let mut out = String::from("# flags    bb <command> --help");
-    for (label, url) in HELP_FOOTER_LINKS {
-        out.push_str(&format!("\n# {label:<8} {url}"));
-    }
-    out
-}
-
-/// Every top-level subcommand name the clap tree actually declares
-/// (non-hidden). Used both to render the "+ …" overflow line and, in tests,
-/// to prove the help screen never drops a command silently again.
-fn top_level_command_names() -> Vec<String> {
-    Cli::command()
-        .get_subcommands()
-        .filter(|c| !c.is_hide_set())
-        .map(|c| c.get_name().to_string())
-        .collect()
-}
-
-/// Builds the full `bb --help` screen as a plain `String` — split out from
-/// `print_custom_help` so tests can assert against the text directly instead
-/// of capturing stdout.
-fn build_help_text() -> String {
-    use std::fmt::Write as _;
-
-    use crate::{colors, ui};
-
-    let version = env!("CARGO_PKG_VERSION");
-    let w = 58;
-    let mut out = String::new();
-
-    let _ = writeln!(out, "{}", ui::box_header("BEEBEEB", w));
-    let _ = writeln!(
-        out,
-        "{}",
-        ui::box_line(
-            &format!(
-                "{}",
-                "end-to-end encrypted vault, from the terminal".custom_color(colors::INK_DIM)
-            ),
-            w,
-        )
-    );
-    let _ = writeln!(
-        out,
-        "{}",
-        ui::box_line(
-            &format!(
-                "v{} · {}",
-                version.custom_color(colors::INK_DIM),
-                "e2ee".custom_color(colors::GREEN_OK)
-            ),
-            w,
-        )
-    );
-    let _ = writeln!(out, "{}", ui::box_footer(w));
-    let _ = writeln!(out);
-
-    let _ = writeln!(out, "  {}", "COMMANDS".custom_color(colors::AMBER));
-    for (name, args, desc) in HELP_MAIN_COMMANDS {
-        let _ = writeln!(
-            out,
-            "  {:<10}{:<18}{}",
-            name.custom_color(colors::GREEN_OK),
-            args.custom_color(colors::PATH),
-            desc.custom_color(colors::INK_DIM)
-        );
-    }
-    let _ = writeln!(out);
-
-    let _ = writeln!(out, "  {}", "ACCOUNT".custom_color(colors::AMBER));
-    for (name, args, desc) in HELP_ACCOUNT_COMMANDS {
-        let _ = writeln!(
-            out,
-            "  {:<10}{:<18}{}",
-            name.custom_color(colors::GREEN_OK),
-            args.custom_color(colors::PATH),
-            desc.custom_color(colors::INK_DIM)
-        );
-    }
-    let _ = writeln!(out);
-
-    // Every remaining top-level subcommand, derived from the clap tree
-    // itself rather than hand-maintained — a new subcommand can never go
-    // missing from --help again (task 1506).
-    let curated: std::collections::HashSet<&str> = HELP_MAIN_COMMANDS
-        .iter()
-        .map(|(name, _, _)| *name)
-        .chain(HELP_ACCOUNT_COMMANDS.iter().map(|(name, _, _)| *name))
-        .collect();
-    let overflow: Vec<String> = top_level_command_names()
-        .into_iter()
-        .filter(|name| !curated.contains(name.as_str()))
-        .collect();
-    if !overflow.is_empty() {
-        let _ = writeln!(
-            out,
-            "  {}",
-            format!("+ {}", overflow.join(", ")).custom_color(colors::INK_DIM)
-        );
-        let _ = writeln!(out);
-    }
-
-    let _ = writeln!(out, "  {}", "FLAGS".custom_color(colors::AMBER));
-    let flags: &[(&str, &str)] = &[
-        ("--json", "structured JSON output"),
-        ("--quiet", "minimal · no progress"),
-        ("--api <url>", "override API endpoint"),
-    ];
-    for (flag, desc) in flags {
-        let _ = writeln!(
-            out,
-            "  {:<14}{}",
-            flag.custom_color(colors::CYAN),
-            desc.custom_color(colors::INK_DIM)
-        );
-    }
-    let _ = writeln!(out);
-    for line in help_footer_text().lines() {
-        let _ = writeln!(out, "  {}", line.custom_color(colors::INK_SAGE));
-    }
-
-    out
-}
-
-fn print_custom_help() {
-    // Ensure color system is initialised (ui::init hasn't been called yet).
-    ui::init(false, false, false);
-    print!("{}", build_help_text());
-}
-
 #[tokio::main]
 async fn main() {
     // Custom help — intercept before clap's default
@@ -933,8 +629,30 @@ async fn main() {
 
     let cli = Cli::parse();
 
-    ui::init(cli.json, cli.quiet, cli.no_color);
+    let output_mode = if cli.json {
+        ui::OutputMode::Json
+    } else if cli.quiet {
+        ui::OutputMode::Quiet
+    } else {
+        ui::OutputMode::Rich
+    };
+    let color = if cli.no_color {
+        ui::ColorChoice::Never
+    } else {
+        ui::ColorChoice::Auto
+    };
+    ui::init(output_mode, color);
     transport::init(cli.transport);
+    // Spec §6.2 (task 2333): checked here, before anything is sent, not with clap's `conflicts_with`: `--quiet`
+    // is global, and `bb --quiet push -v` parses it before the subcommand, where a subcommand's conflict may
+    // not see it.
+    // `--json` wins over `--quiet` (the output mode above) and makes `-v` moot, so only quiet output conflicts.
+    if cli.quiet && !cli.json && cli.command.verbose() {
+        fail(exit::with_code(
+            exit::USAGE,
+            "--verbose cannot be combined with --quiet",
+        ));
+    }
 
     // Explicit updates bypass automatic opt-out/cooldown and report errors.
     if !matches!(cli.command, Commands::Update) {
@@ -972,14 +690,39 @@ async fn main() {
             folder,
             replace,
             keep_both,
-        } => commands::push::run(path, parent, folder, replace, keep_both).await,
+            reuse_shared,
+            verbose,
+            parallel,
+        } => {
+            let strategy = if replace {
+                commands::push::ConflictStrategy::Replace
+            } else if keep_both {
+                commands::push::ConflictStrategy::KeepBoth
+            } else {
+                commands::push::ConflictStrategy::Prompt
+            };
+            let shared = if reuse_shared {
+                commands::push_folders::SharedReuse::Allow
+            } else {
+                commands::push_folders::SharedReuse::Ask
+            };
+            commands::push::run(path, parent, folder, strategy, shared, verbose, parallel).await
+        }
         Commands::Pull {
             file_id,
             output,
             output_flag,
             zip,
             force,
-        } => commands::pull::run(file_id, output.or(output_flag), zip, force).await,
+            verbose,
+        } => {
+            commands::pull::run(
+                file_id,
+                output.or(output_flag),
+                commands::pull::PullOptions { zip, force, verbose },
+            )
+            .await
+        }
         Commands::Ls {
             path,
             long,
@@ -1012,8 +755,27 @@ async fn main() {
             targets,
             recursive,
             permanent,
+            force,
             yes,
-        } => commands::rm::run(targets, recursive, permanent, yes).await,
+        } => {
+            commands::rm::run(
+                targets,
+                commands::rm::RmOptions {
+                    recursive,
+                    permanent,
+                    skip_confirm: force || yes,
+                    answer_backup_question: yes,
+                },
+            )
+            .await
+        }
+        Commands::Backup { cmd } => match cmd {
+            BackupCmd::Add { folder } => commands::backup::add(folder).await,
+            BackupCmd::Remove { folder } => commands::backup::remove(folder).await,
+            BackupCmd::List => commands::backup::list().await,
+            BackupCmd::Run => commands::backup::run().await,
+            BackupCmd::Status => commands::backup::status().await,
+        },
         Commands::Restore { target } => commands::restore::run(target).await,
         Commands::Trash { cmd } => match cmd {
             TrashCmd::List => commands::trash::list().await,
@@ -1031,7 +793,18 @@ async fn main() {
             max_opens,
             passphrase,
             no_double_encrypt,
-        } => commands::share::run(file_id, expires, max_opens, passphrase, no_double_encrypt).await,
+        } => {
+            commands::share::run(
+                file_id,
+                expires,
+                max_opens,
+                commands::share::ShareOptions {
+                    passphrase,
+                    no_double_encrypt,
+                },
+            )
+            .await
+        }
         Commands::Request(cmd) => match cmd {
             RequestCmd::Create {
                 folder,
@@ -1055,19 +828,8 @@ async fn main() {
             commands::sync::run(
                 Some(path),
                 parent,
-                false,
-                false,
-                false,
-                false,
-                false,
-                false,
-                false,
-                None,
-                false,
-                4,
-                false,
-                false,
-                false,
+                commands::sync::SyncCommand::Run,
+                commands::sync::SyncOptions::watch(),
             )
             .await
         }
@@ -1087,31 +849,41 @@ async fn main() {
             rehash,
             allow_mass_delete,
             rebind,
+            verbose,
         } => {
             // Clamp parallel uploads to a sane window: 0 would stall the pipeline,
             // and unbounded values blow up peak memory (each in-flight file holds
             // ~chunk_size worth of buffers). (1, 8) is the supported range.
             let concurrency = concurrency.clamp(1, 8);
             daemon::migrate_sync_services();
-            commands::sync::run(
-                local_dir,
-                remote_path,
+            let command = if let Some(name) = stop_session {
+                commands::sync::SyncCommand::StopSession(name)
+            } else if stop_all {
+                commands::sync::SyncCommand::StopAll
+            } else if status {
+                commands::sync::SyncCommand::Status
+            } else if stop {
+                commands::sync::SyncCommand::StopLegacy
+            } else if daemon {
+                commands::sync::SyncCommand::Daemon
+            } else {
+                commands::sync::SyncCommand::Run
+            };
+            let options = commands::sync::SyncOptions {
                 dry_run,
                 force,
-                delete,
+                delete_remote: delete,
                 once,
-                daemon,
-                stop,
-                status,
-                stop_session,
-                stop_all,
-                concurrency,
                 rehash,
                 allow_mass_delete,
                 rebind,
-            )
-            .await
-            .map_err(exit::sync_error)
+                concurrency,
+                // A daemon has no terminal to show details on (task 2333, plan Task 10).
+                verbose: verbose && !daemon,
+            };
+            commands::sync::run(local_dir, remote_path, command, options)
+                .await
+                .map_err(exit::sync_error)
         }
         Commands::Mount {
             mountpoint,
@@ -1126,7 +898,18 @@ async fn main() {
             cache_ttl,
             no_cache,
             verbose,
-        } => commands::webdav::run(port, read_write, cache_ttl, no_cache, verbose).await,
+        } => {
+            commands::webdav::run(
+                port,
+                cache_ttl,
+                commands::webdav::WebdavOptions {
+                    read_write,
+                    no_cache,
+                    verbose,
+                },
+            )
+            .await
+        }
         Commands::Speedtest => commands::speedtest::run().await,
         Commands::Repair { dry_run } => commands::repair::run(dry_run).await,
         Commands::Billing { action } => match action {
@@ -1177,159 +960,24 @@ async fn main() {
     };
 
     if let Err(e) = result {
-        let line = format!(
-            "  {} {}",
-            "error:".custom_color(crate::colors::RED_ERR),
-            e.custom_color(crate::colors::INK),
-        );
-        let code = exit::code();
-        exit::report_then_disarm(
-            &mut std::io::stderr(),
-            &mut std::io::stdout(),
-            &line,
-            code,
-            daemon::disarm_launchagent_if_managed,
-        );
-        std::process::exit(code);
+        fail(e);
     }
 }
 
-#[cfg(test)]
-mod help_screen_tests {
-    use super::*;
-
-    /// Task 1506: the hand-written `bb --help` screen listed 24 of the 32
-    /// top-level commands and silently dropped `2fa`, `sessions`, `passkey`,
-    /// `billing` and `account` — exactly the headline features of the
-    /// 0.10.0 release. This asserts every non-hidden name in the clap
-    /// command tree shows up SOMEWHERE in the rendered help text (curated
-    /// section or the derived overflow line), so a future subcommand can't
-    /// go missing the same way.
-    #[test]
-    fn manual_update_is_an_explicit_command() {
-        assert!(
-            Cli::try_parse_from(["bb", "update"]).is_ok(),
-            "bb update must be recognized"
-        );
-    }
-
-    #[test]
-    fn help_screen_lists_every_top_level_subcommand() {
-        // Force plain text so ANSI escape codes never hide a name from the
-        // substring/word-boundary check below. Independent of `ui::MODE`
-        // (a once-per-process OnceLock) so this is safe next to other tests.
-        colored::control::set_override(false);
-
-        let help = build_help_text();
-
-        let missing: Vec<String> = top_level_command_names()
-            .into_iter()
-            .filter(|name| {
-                let pattern = format!(r"\b{}\b", regex::escape(name));
-                let re = regex::Regex::new(&pattern).expect("valid word-boundary regex");
-                !re.is_match(&help)
-            })
-            .collect();
-
-        assert!(
-            missing.is_empty(),
-            "bb --help is missing top-level subcommand(s): {missing:?}\n--- rendered help ---\n{help}"
-        );
-    }
-
-    /// Every link-shaped token (`host.tld/path`, with or without a scheme)
-    /// in a rendered help screen. Deliberately matches BARE domains too, so a
-    /// footer written as `beebeeb.io/cli` is caught, not just full URLs.
-    fn help_urls(text: &str) -> Vec<String> {
-        let re = regex::Regex::new(r"(?:https?://)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/[A-Za-z0-9._~/#-]*)?")
-            .expect("valid url regex");
-        re.find_iter(text).map(|m| m.as_str().to_string()).collect()
-    }
-
-    /// Both help surfaces: the custom top-level screen (`bb`, `bb --help`)
-    /// and clap's own rendering (reached via e.g. `bb --json --help`), which
-    /// carries the `after_help` footer.
-    fn all_help_text() -> String {
-        colored::control::set_override(false);
-        format!("{}\n{}", build_help_text(), Cli::command().render_long_help())
-    }
-
-    /// Pages checked to answer HTTP 200 on 2026-09-25 (flow-6 issue 8:
-    /// `beebeeb.io/cli` and `beebeeb.io/fingerprints` were 404). The ignored
-    /// network test `help_links_return_200` re-checks them live in CI.
-    const CHECKED_LIVE_URLS: &[&str] = &["https://github.com/beebeeb-io/cli", "https://beebeeb.io/security"];
-
-    #[test]
-    fn help_links_are_full_urls_to_checked_live_pages() {
-        let help = all_help_text();
-        let urls = help_urls(&help);
-        assert!(
-            !urls.is_empty(),
-            "help footer must link somewhere; found no URLs in:\n{help}"
-        );
-        let bad: Vec<&String> = urls
-            .iter()
-            .filter(|u| !CHECKED_LIVE_URLS.contains(&u.as_str()))
-            .collect();
-        assert!(bad.is_empty(), "help links not in the checked-live list: {bad:?}");
-    }
-
-    /// Network check: every link printed by any help surface answers 200.
-    /// Ignored by default (needs the internet); CI runs it with `--ignored`.
-    #[tokio::test]
-    #[ignore = "network: run with cargo test help_links_return_200 -- --ignored"]
-    async fn help_links_return_200() {
-        let help = all_help_text();
-        let urls = help_urls(&help);
-        assert!(!urls.is_empty(), "no URLs extracted from help");
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(20))
-            .user_agent("beebeeb-cli-help-link-check")
-            .build()
-            .expect("http client");
-        let mut failures = Vec::new();
-        let mut checked = 0usize;
-        for u in &urls {
-            let full = if u.starts_with("http") {
-                u.clone()
-            } else {
-                format!("https://{u}")
-            };
-            match client.get(&full).send().await {
-                Ok(r) if r.status().as_u16() == 200 => checked += 1,
-                Ok(r) => failures.push(format!("{full} -> {}", r.status())),
-                Err(e) => failures.push(format!("{full} -> {e}")),
-            }
-        }
-        println!("help link check: {checked} of {} URLs answered 200", urls.len());
-        assert!(failures.is_empty(), "dead help links: {failures:?}");
-    }
-
-    /// The custom top-level screen lists no per-command flags; the README
-    /// must not promise that it does.
-    #[test]
-    fn readme_points_flag_reference_at_subcommand_help() {
-        let readme = include_str!("../README.md");
-        assert!(
-            !readme.contains("including every flag: `bb --help`"),
-            "README still claims `bb --help` shows every flag"
-        );
-        assert!(
-            readme.contains("`bb <command> --help`"),
-            "README must point the flag reference at `bb <command> --help`"
-        );
-    }
-
-    /// Sanity check on the helper itself: it must actually see the full
-    /// clap tree (guards against a future refactor that swaps in a stale or
-    /// partial `Command`).
-    #[test]
-    fn top_level_command_names_is_not_suspiciously_short() {
-        let names = top_level_command_names();
-        assert!(
-            names.len() >= 30,
-            "expected ~32 top-level subcommands, got {}: {names:?}",
-            names.len()
-        );
-    }
+/// Print a failed command's error and exit with its recorded code.
+fn fail(e: String) -> ! {
+    let line = format!(
+        "  {} {}",
+        "error:".custom_color(crate::colors::RED_ERR),
+        e.custom_color(crate::colors::INK),
+    );
+    let code = exit::code();
+    exit::report_then_disarm(
+        &mut std::io::stderr(),
+        &mut std::io::stdout(),
+        &line,
+        code,
+        daemon::disarm_launchagent_if_managed,
+    );
+    std::process::exit(code);
 }

@@ -8,6 +8,8 @@
 //!   (a prompt with stdin not a terminal) — re-run with the named flag.
 //! - [`INCOMPLETE`] (3): the command ran, but some items did not make it
 //!   (e.g. `bb sync --once` with failed uploads or unresolved conflicts).
+//! - [`BACKUP_OFF`] (4): `bb backup run` / `status` found a backup off, its
+//!   folder deleted elsewhere; nothing of it is uploaded until it is added again.
 //!
 //! - [`BUSY`] (75, EX_TEMPFAIL): another `bb push` of the same file is still
 //!   running; run it again once that one has finished (or was stopped).
@@ -24,9 +26,16 @@ use std::sync::atomic::{AtomicI32, Ordering};
 pub const USAGE: i32 = 2;
 /// The run finished but left items failed or unresolved.
 pub const INCOMPLETE: i32 = 3;
+/// LD-0113 (spec Amendment 12): a backup is off because its folder was
+/// deleted; `bb backup add <folder>` backs it up again.
+pub const BACKUP_OFF: i32 = 4;
 
 /// Another process is uploading the same file; retry later.
 pub const BUSY: i32 = 75;
+
+/// A push was interrupted (Ctrl-C) with work left undone — what a shell reports for a killed process. The run
+/// is resumable: the same command continues it.
+pub const INTERRUPTED: i32 = 130;
 
 /// The stored session was rejected by the server (401). Not retryable.
 pub const SESSION_ENDED: i32 = 77;

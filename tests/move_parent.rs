@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{Path, Query, State};
-use axum::routing::{get, patch};
+use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::{Value, json};
 
@@ -13,19 +13,41 @@ const SOURCE: &str = "11111111-1111-4111-8111-111111111111";
 const TARGET: &str = "22222222-2222-4222-8222-222222222222";
 const FILE: &str = "33333333-3333-4333-8333-333333333333";
 const FOLDER: &str = "44444444-4444-4444-8444-444444444444";
+/// FILE's content. A rename asks the SF-0002 write check first, which reads the
+/// version's chunk 0 (`owned_keys::write_check`), so the mock serves a real
+/// frame and the listing carries its size, as the server does.
+const FILE_BYTES: &[u8] = b"file content";
 type Calls = Arc<Mutex<Vec<(String, Value)>>>;
 
 async fn run(args: &[&str]) -> Vec<(String, Value)> {
     run_with_target(args, json!(TARGET), true).await
 }
 
+/// 2275 L12: an O file's plaintext name authenticates nothing, so such a row
+/// resolves read-only from a listing (`owned_keys` 16bb08e) and a rename is
+/// refused. The fixture models a real owner file by sealing FILE's name under
+/// the string convention, as `bb push` itself writes it.
+fn sealed_file_name() -> String {
+    let master = beebeeb_core::kdf::MasterKey::from_bytes([0; 32]);
+    let key = beebeeb_core::kdf::derive_file_key(&master, FILE.as_bytes());
+    beebeeb_core::encrypt::encrypt_name_for(
+        &key,
+        "file.txt",
+        None,
+        beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+    )
+    .unwrap()
+}
+
 async fn run_with_target(args: &[&str], target_id: Value, success: bool) -> Vec<(String, Value)> {
     let calls = Calls::default();
+    let file_name_encrypted = sealed_file_name();
     let app = Router::new()
         .route(
             "/api/v1/files",
             get(move |Query(q): Query<HashMap<String, String>>| {
                 let target_id = target_id.clone();
+                let file_name_encrypted = file_name_encrypted.clone();
                 async move {
                     Json(json!({"files": match q.get("parent_id").map(String::as_str) {
                         None => json!([
@@ -33,7 +55,8 @@ async fn run_with_target(args: &[&str], target_id: Value, success: bool) -> Vec<
                             {"id": target_id, "name_encrypted": "Target", "is_folder": true}
                         ]),
                         Some(SOURCE) => json!([
-                            {"id": FILE, "name_encrypted": "file.txt", "is_folder": false, "parent_id": SOURCE},
+                            {"id": FILE, "name_encrypted": file_name_encrypted, "is_folder": false, "parent_id": SOURCE,
+                             "size_bytes": FILE_BYTES.len(), "chunk_count": 1},
                             {"id": FOLDER, "name_encrypted": "Child", "is_folder": true, "parent_id": SOURCE}
                         ]),
                         _ => json!([])
@@ -42,13 +65,33 @@ async fn run_with_target(args: &[&str], target_id: Value, success: bool) -> Vec<
             }),
         )
         .route(
+            "/api/v1/files/:id/download",
+            get(|Path(id): Path<String>| async move {
+                // The config's master key is 32 zero bytes; FILE is sealed under its canonical key.
+                let master = beebeeb_core::kdf::MasterKey::from_bytes([0; 32]);
+                let key = beebeeb_core::kdf::derive_file_key(&master, id.as_bytes());
+                beebeeb_core::encrypt::encrypt_chunk_raw(&key, FILE_BYTES).unwrap()
+            }),
+        )
+        .route(
             "/api/v1/files/:id",
-            patch(
+            // A19: the move checks the source's ancestry before it moves, so the
+            // row itself is readable (nothing here is inside a shared folder).
+            get(|Path(id): Path<String>| async move {
+                let parent = if id == SOURCE { Value::Null } else { json!(SOURCE) };
+                Json(json!({"id": id, "parent_id": parent, "is_folder": true}))
+            })
+            .patch(
                 |State(c): State<Calls>, Path(id): Path<String>, Json(body): Json<Value>| async move {
                     c.lock().unwrap().push((id, body));
                     Json(json!({"ok": true}))
                 },
             ),
+        )
+        // No approved legacy invites: the ancestry walk ends at the vault root.
+        .route(
+            "/api/v1/shares/invites/sent",
+            get(|| async { Json(json!({"invites": []})) }),
         )
         .with_state(calls.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

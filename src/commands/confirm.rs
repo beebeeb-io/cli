@@ -124,7 +124,7 @@ mod tests {
         );
     }
 
-    /// Regression for Codex's PR #33 review (`src/api.rs:1892`, task 1547).
+    /// Regression for Codex's PR #33 review (`src/api/tree.rs:299`, task 1547).
     /// The server's real `SessionTooOldForConfirmation` body
     /// (`beebeeb-api/src/error.rs`) is a genuine two-field response whose
     /// `message` does NOT repeat the `error` code:

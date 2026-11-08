@@ -1,3 +1,5 @@
+//! The dashboard's input: the polled key events and the actions they map to.
+
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use std::time::Duration;
 
@@ -24,6 +26,9 @@ pub enum TuiEvent {
     SessionsRefresh(Vec<SessionInfo>),
     /// An error message from the sync task.
     SyncError(String),
+    /// A notice from the sync task: shown, but the sync is not in error (an
+    /// SF-0002 read-only row whose edit was kept locally).
+    SyncNotice(String),
 }
 
 /// Action returned from the TUI to the caller.
@@ -47,7 +52,6 @@ pub fn poll_key(timeout: Duration) -> Option<KeyEvent> {
     None
 }
 
-/// Check if a key event is Ctrl+C.
 pub fn is_ctrl_c(key: &KeyEvent) -> bool {
     key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
 }

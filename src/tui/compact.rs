@@ -1,3 +1,5 @@
+//! The compact dashboard: one line per file event, for a narrow terminal.
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -15,7 +17,6 @@ const INK: Color = Color::Rgb(233, 230, 221);
 const INK_DIM: Color = Color::Rgb(106, 101, 91);
 const CYAN: Color = Color::Rgb(127, 184, 209);
 
-/// Render the compact view into the given frame.
 pub fn render(f: &mut Frame, state: &TuiState) {
     let area = f.area();
 
@@ -74,7 +75,7 @@ fn render_file_log(f: &mut Frame, area: Rect, state: &TuiState) {
                 FileEventStatus::Error => ("\u{2717}", RED_ERR),    // X mark
                 FileEventStatus::Skipped => ("-", INK_DIM),
             };
-            let size_str = format_size_binary(evt.size);
+            let size_str = crate::ui::human_size_binary(evt.size);
             Line::from(vec![
                 Span::raw("  "),
                 Span::styled(evt.timestamp.as_str(), Style::default().fg(INK_DIM)),
@@ -108,7 +109,7 @@ fn render_status_bar(f: &mut Frame, area: Rect, state: &TuiState) {
     };
 
     let files_str = format!("{} files", state.local_file_count);
-    let bytes_str = format_size_binary(state.local_total_bytes);
+    let bytes_str = crate::ui::human_size_binary(state.local_total_bytes);
 
     let line = Line::from(vec![
         Span::raw("  "),
@@ -126,23 +127,4 @@ fn render_status_bar(f: &mut Frame, area: Rect, state: &TuiState) {
         Span::styled(state.status_text.as_str(), Style::default().fg(INK_DIM)),
     ]);
     f.render_widget(Paragraph::new(line), area);
-}
-
-/// Format bytes using binary units (1024 base) to match the plan.
-fn format_size_binary(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * KB;
-    const GB: u64 = 1024 * MB;
-    if bytes == 0 {
-        return "\u{2014}".to_string(); // em dash
-    }
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
-    }
 }

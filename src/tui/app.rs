@@ -1,3 +1,5 @@
+//! The dashboard's event loop: raw mode, the alternate screen and the key handling.
+
 use std::io;
 use std::time::Duration;
 
@@ -128,6 +130,9 @@ fn event_loop(
                     }
                     TuiEvent::SyncError(msg) => {
                         state.sync_status = SyncStatus::Error;
+                        state.status_text = msg;
+                    }
+                    TuiEvent::SyncNotice(msg) => {
                         state.status_text = msg;
                     }
                     TuiEvent::Key(_) | TuiEvent::Tick => {

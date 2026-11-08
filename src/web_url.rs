@@ -32,6 +32,11 @@ pub(crate) fn host_of(api_url: &str) -> &str {
     host_and_port.split(':').next().unwrap_or(host_and_port)
 }
 
+/// Loopback host names accepted by both the URL rewriter and the WebDAV guard.
+pub(crate) const LOCALHOST: &str = "localhost";
+pub(crate) const LOOPBACK_V4: &str = "127.0.0.1";
+pub(crate) const LOOPBACK_V6: &str = "::1";
+
 /// Derive the web app's base URL (scheme + host, no trailing slash) from a
 /// configured API base URL, never a hard-coded production host. Pure
 /// function of the API URL string so it's unit-testable without touching the
@@ -53,7 +58,7 @@ pub(crate) fn web_app_base_from_api(api_url: &str) -> String {
     let api = api_url.trim_end_matches('/');
     let host = host_of(api);
 
-    if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+    if host == LOCALHOST || host == LOOPBACK_V4 || host == LOOPBACK_V6 {
         return "http://localhost:5173".to_string();
     }
     if let Some(rest) = api.strip_prefix("https://api.") {

@@ -14,6 +14,9 @@
 //! request, answers already-stored chunks with `skipped`, and serves the
 //! completed file back. Scratch `HOME`, stdin not a terminal.
 
+#[path = "support/config_dir.rs"]
+mod state_dirs;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -445,10 +448,106 @@ async fn rerunning_an_interrupted_push_resumes_it() {
     );
 }
 
-/// A completed push keeps today's refusal on a re-run: exit 2 with the hint,
-/// and no upload starts.
+/// N4: the resume record carries the core resume tag minted with the id, so a
+/// resumed create can prove core chose that id. A local `Uuid::new_v4()` (the
+/// old fresh-push path) carries no tag and fails here.
 #[tokio::test(flavor = "multi_thread")]
-async fn rerunning_a_completed_push_still_refuses() {
+async fn an_interrupted_push_records_the_core_resume_tag() {
+    let vault: Shared = Arc::default();
+    let api = start_mock(vault.clone()).await;
+    let home = scratch_home(&api);
+    std::fs::write(home.join("big.bin"), content(1)).unwrap();
+
+    push_and_kill(&vault, &home, &["--api", &api, "push", "big.bin"]).await;
+    let id = {
+        let v = vault.lock().unwrap();
+        v.sessions.values().next().expect("the interrupted session").id.clone()
+    };
+    let record: Value = serde_json::from_slice(
+        &std::fs::read(state_dirs::config_dir(&home).join("pending-uploads.json")).expect("a pending record"),
+    )
+    .unwrap();
+    let entry = record["uploads"]
+        .as_object()
+        .expect("uploads")
+        .values()
+        .next()
+        .expect("one upload");
+    assert_eq!(entry["file_id"], json!(id));
+    let tag: [u8; 32] = entry["resume_tag"]
+        .as_array()
+        .expect("the core resume tag is recorded")
+        .iter()
+        .map(|v| v.as_u64().unwrap() as u8)
+        .collect::<Vec<_>>()
+        .try_into()
+        .expect("a 32-byte tag");
+    let master = beebeeb_core::kdf::MasterKey::from_bytes([0u8; 32]);
+    assert_eq!(
+        beebeeb_core::item_id::NewItemId::resume(&master, &id, &tag)
+            .expect("the tag core minted resumes this id")
+            .as_str(),
+        id
+    );
+}
+
+/// R4-C (review-4 P3): after a re-init, the sidecar must pair the id it
+/// re-inited with that id's OWN tag — never the freshly minted spec's tag. The
+/// re-run below restarts the pending id (its recorded chunk format is v2 while
+/// a create writes v1), then is killed again so the re-init's record survives.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reinit_records_the_pending_ids_own_resume_tag() {
+    let vault: Shared = Arc::default();
+    let api = start_mock(vault.clone()).await;
+    let home = scratch_home(&api);
+    std::fs::write(home.join("big.bin"), content(1)).unwrap();
+
+    push_and_kill(&vault, &home, &["--api", &api, "push", "big.bin"]).await;
+    let pending_id = {
+        let v = vault.lock().unwrap();
+        v.sessions.values().next().expect("the interrupted session").id.clone()
+    };
+    // The mock still holds run 1's frame 0; clear it so `push_and_kill` waits
+    // for THIS run's init (and its record) instead of returning at once.
+    for session in vault.lock().unwrap().sessions.values_mut() {
+        session.frames.clear();
+    }
+    // Force `RestartWithFreshSession`: a create writes v1, the record says v2.
+    let path = state_dirs::config_dir(&home).join("pending-uploads.json");
+    let mut record: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    for entry in record["uploads"].as_object_mut().unwrap().values_mut() {
+        entry["chunk_format"] = json!(2);
+    }
+    std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+
+    push_and_kill(&vault, &home, &["--api", &api, "push", "big.bin"]).await;
+
+    let record: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let entry = record["uploads"]
+        .as_object()
+        .expect("uploads")
+        .values()
+        .next()
+        .expect("one upload");
+    assert_eq!(entry["file_id"], json!(pending_id), "the re-init keeps the pending id");
+    let tag: [u8; 32] = entry["resume_tag"]
+        .as_array()
+        .expect("a resume tag")
+        .iter()
+        .map(|v| v.as_u64().unwrap() as u8)
+        .collect::<Vec<_>>()
+        .try_into()
+        .expect("a 32-byte tag");
+    let master = beebeeb_core::kdf::MasterKey::from_bytes([0u8; 32]);
+    beebeeb_core::item_id::NewItemId::resume(&master, &pending_id, &tag)
+        .expect("the pending id is recorded with its own tag, not another id's");
+}
+
+/// A completed file is never resumed or uploaded again by a plain re-run. Unchanged on both sides, it is this
+/// machine's own finished upload: skipped and counted, exit 0 (task 2334, lead ruling 2026-11-06; until then
+/// this test pinned a refusal). Changed, it is a real name conflict (exit 2). Either way no upload starts.
+#[tokio::test(flavor = "multi_thread")]
+async fn rerunning_a_completed_push_skips_it_unchanged_and_refuses_it_changed() {
     let vault: Shared = Arc::default();
     let api = start_mock(vault.clone()).await;
     let home = scratch_home(&api);
@@ -458,11 +557,24 @@ async fn rerunning_a_completed_push_still_refuses() {
     assert!(out.status.success(), "first push failed: {}", stderr(&out));
 
     let out = bb(&home, &["--api", &api, "push", "big.bin"]).await;
-    assert_eq!(out.status.code(), Some(2), "a completed file is a real conflict");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("skipped 1 already uploaded"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    std::fs::write(home.join("big.bin"), content(2)).unwrap();
+    let out = bb(&home, &["--api", &api, "push", "big.bin"]).await;
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a changed completed file is a real conflict"
+    );
     assert!(stderr(&out).contains("already exists"), "{}", stderr(&out));
     assert!(stderr(&out).contains("--replace"), "{}", stderr(&out));
     let v = vault.lock().unwrap();
-    assert_eq!(v.inits, 1, "the refused re-run starts no upload");
+    assert_eq!(v.inits, 1, "neither re-run starts an upload");
     assert_eq!(v.file.as_ref().unwrap().version, 1);
 }
 

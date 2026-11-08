@@ -69,13 +69,33 @@ struct PendingEntry {
     /// client did not mint). Only a replace of that same row may resume it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     replaces: Option<Uuid>,
+    /// Task 2275 L13/N4: the core resume tag minted with `file_id` (a create).
+    /// Absent on a replace or an older record; core's `NewItemId::resume` takes
+    /// the id only with this tag, so a resumed create proves the id was minted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resume_tag: Option<Vec<u8>>,
     /// Task 2173: the session is a direct one (`object-upload-v1`). A direct session takes no proxy
     /// chunk PUT and an API session takes no grant, so a resumed upload must continue on the
     /// transport it began on. Absent on records from an older CLI, which only had the API route.
     #[serde(default)]
     direct: bool,
+    /// Task 2334: the folder this write asked for when its session was opened (`parent_id: null` = the root).
+    /// Absent on records written before 2334; the upload driver then asks the server where the row is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    destination: Option<Destination>,
+    /// `--parallel` (spec §4.3): the plaintext chunk size the session was opened with. The chunk plan follows
+    /// `--parallel` since then, and the session's does not, so a resumed upload frames against this. Absent on
+    /// records written before: the driver then plans as its caller did before this change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    chunk_size_bytes: Option<u64>,
     size: u64,
     mtime_ns: u128,
+}
+
+/// Where a recorded upload's row was created: its parent folder, `None` for the root.
+#[derive(Serialize, Deserialize, Clone, Copy)]
+struct Destination {
+    parent_id: Option<Uuid>,
 }
 
 /// A resumable in-progress upload: see [`resumable_upload`].
@@ -88,6 +108,16 @@ pub struct PendingUpload {
     pub chunk_format: Option<ChunkFormat>,
     /// The session was opened as a direct upload (task 2173); see [`PendingEntry`].
     pub direct: bool,
+    /// L13/N4: the core resume tag carried by a minted create, if the record
+    /// has one. The driver re-proves the id with `NewItemId::resume` before
+    /// continuing such a session.
+    pub resume_tag: Option<[u8; 32]>,
+    /// Task 2334: the folder the upload was going to (`Some(None)` = the root);
+    /// `None` when the record does not say (written before 2334).
+    pub destination: Option<Option<Uuid>>,
+    /// `--parallel`: the chunk size the session was opened with; `None` when the record does not say (written
+    /// before `--parallel`).
+    pub chunk_size_bytes: Option<u64>,
 }
 
 fn db_path() -> PathBuf {
@@ -127,13 +157,46 @@ fn load() -> PendingDb {
         .unwrap_or_default()
 }
 
+/// Test-only: `save` writes its temp file and then stops short of the rename, as a kill there would.
+#[cfg(test)]
+pub(crate) static FAIL_RENAME_FOR_TEST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Where `save` writes before it renames onto `path`: per process, so two processes saving at once never share a
+/// temp file (spec §5.3).
+pub(crate) fn temp_path(path: &Path) -> PathBuf {
+    let name = path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+    path.with_file_name(format!("{name}.{}.tmp", std::process::id()))
+}
+
+/// Write the record whole (spec §5.3): the bytes go to a private per-process temp file, synced, then renamed onto
+/// the record, so a kill at any point leaves either the old record or the new one, never half of one.
 fn save(db: &PendingDb) {
     let path = db_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(bytes) = serde_json::to_vec_pretty(db) {
-        let _ = std::fs::write(&path, bytes);
+    let Ok(bytes) = serde_json::to_vec_pretty(db) else {
+        return;
+    };
+    let tmp = temp_path(&path);
+    let written = open_private(
+        std::fs::OpenOptions::new().create(true).write(true).truncate(true),
+        &tmp,
+    )
+    .and_then(|mut f| {
+        std::io::Write::write_all(&mut f, &bytes)?;
+        f.sync_all()
+    });
+    #[cfg(test)]
+    let written = written.and_then(|()| {
+        if FAIL_RENAME_FOR_TEST.load(std::sync::atomic::Ordering::SeqCst) {
+            Err(std::io::Error::other("rename failed for the test"))
+        } else {
+            Ok(())
+        }
+    });
+    if written.and_then(|()| std::fs::rename(&tmp, &path)).is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
 }
 
@@ -165,11 +228,38 @@ pub fn resumable_upload(path: &Path, size: u64, mtime_ns: u128) -> Option<Pendin
 /// replace versions (`None` for a create). See [`resumable_by`].
 pub fn resumable_upload_for(path: &Path, size: u64, mtime_ns: u128, replacing: Option<Uuid>) -> Option<PendingUpload> {
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    load()
-        .uploads
+    resumable_in(&load(), path, size, mtime_ns, replacing)
+}
+
+fn resumable_in(
+    db: &PendingDb,
+    path: &Path,
+    size: u64,
+    mtime_ns: u128,
+    replacing: Option<Uuid>,
+) -> Option<PendingUpload> {
+    db.uploads
         .get(&key(path))
         .filter(|e| e.size == size && e.mtime_ns == mtime_ns && resumable_by(e, replacing))
         .and_then(PendingUpload::from_entry)
+}
+
+/// The sidecar as read once, for a plan over many files (`bb sync`'s pass): each lookup is
+/// [`resumable_upload_for`]'s without reading and parsing the sidecar again.
+pub struct PendingSnapshot(PendingDb);
+
+/// [`PendingSnapshot`] of the sidecar now.
+pub fn pending_snapshot() -> PendingSnapshot {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    PendingSnapshot(load())
+}
+
+impl PendingSnapshot {
+    /// [`resumable_upload_for`] for `path` as it is on disk now. `None` if it cannot be stat'ed.
+    pub fn resumable_now(&self, path: &Path, replacing: Option<Uuid>) -> Option<PendingUpload> {
+        let (size, mtime_ns) = local_signature(path)?;
+        resumable_in(&self.0, path, size, mtime_ns, replacing)
+    }
 }
 
 /// L13 (SF-0001): the record for `path` (same `(size, mtime_ns)` signature) that
@@ -194,6 +284,9 @@ impl PendingUpload {
             session_id,
             chunk_format: e.chunk_format.and_then(|c| ChunkFormat::from_u8(c).ok()),
             direct: e.direct,
+            resume_tag: e.resume_tag.as_deref().and_then(|b| <[u8; 32]>::try_from(b).ok()),
+            destination: e.destination.map(|d| d.parent_id),
+            chunk_size_bytes: e.chunk_size_bytes,
         })
     }
 }
@@ -201,6 +294,13 @@ impl PendingUpload {
 /// [`resumable_upload`] for `path` as it is on disk right now (same size and
 /// mtime derivation as the upload driver). `None` if it cannot be stat'ed.
 pub fn resumable_upload_now(path: &Path) -> Option<PendingUpload> {
+    let (size, mtime_ns) = local_signature(path)?;
+    resumable_upload(path, size, mtime_ns)
+}
+
+/// `(size, mtime in ns)` of `path` on disk now: the signature every record here is matched on, as `bb sync`
+/// matches its change detection. `None` if it cannot be stat'ed.
+pub fn local_signature(path: &Path) -> Option<(u64, u128)> {
     let meta = std::fs::metadata(path).ok()?;
     let mtime_ns = meta
         .modified()
@@ -208,7 +308,148 @@ pub fn resumable_upload_now(path: &Path) -> Option<PendingUpload> {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    resumable_upload(path, meta.len(), mtime_ns)
+    Some((meta.len(), mtime_ns))
+}
+
+// ── Finished uploads (task 2334) ────────────────────────────────────────────
+//
+// A re-run of `bb push` reuses the folder it pushed into, so every file the earlier run finished meets its own
+// upload as a same-name file. The CLI writes no content hash a server row carries (the init body,
+// `api/upload.rs`, holds id, sealed name, size, parent and chunk plan), so the proof that a same-name file is
+// this machine's own upload of the same local file is this record: written when `bb push` finishes a file,
+// checked against the server's row by `commands::push_repeat`.
+//
+// An append-only log beside the resume sidecar, one JSON line per finished upload (the newest line for a path
+// wins), so a push of many files never rewrites a growing file per upload. Read once per process; rewritten
+// without its superseded lines when they outnumber the live ones. A line another process appends while this
+// one compacts can be lost: that file then meets the conflict rule again, never a silent skip.
+
+/// One file `bb push` finished: the server id and folder it went to, the version it made, and the local file's
+/// signature at the time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinishedUpload {
+    pub file_id: Uuid,
+    /// `None`: the root.
+    pub parent_id: Option<Uuid>,
+    pub version: i64,
+    pub size: u64,
+    pub mtime_ns: u128,
+}
+
+/// One line of the log. Nested, not `#[serde(flatten)]`: a flattened struct cannot carry the `u128` mtime.
+#[derive(Serialize, Deserialize)]
+struct FinishedLine {
+    key: String,
+    upload: FinishedUpload,
+}
+
+/// At most this many paths are remembered; past it the oldest go at the next compaction.
+const FINISHED_MAX: usize = 100_000;
+
+/// The log as this process read it, for the log at that path.
+static FINISHED: Mutex<Option<(PathBuf, HashMap<String, FinishedUpload>)>> = Mutex::new(None);
+
+fn finished_path() -> PathBuf {
+    db_path().with_file_name("finished-uploads.jsonl")
+}
+
+/// Remember that `bb push` finished `path` as `upload`. Not when the file's mtime is a whole second (or
+/// absent, 0): a file system that keeps whole seconds cannot tell a same-size edit in that second from no
+/// edit, so such a file is never proven unchanged and meets the conflict rule on a re-push.
+pub fn record_finished(path: &Path, upload: FinishedUpload) {
+    if upload.mtime_ns % 1_000_000_000 == 0 {
+        return;
+    }
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let key = key(path);
+    let line = FinishedLine {
+        key: key.clone(),
+        upload,
+    };
+    let log = finished_path();
+    let Ok(mut text) = serde_json::to_string(&line) else {
+        return;
+    };
+    text.push('\n');
+    if let Some(dir) = log.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let appended = open_private(std::fs::OpenOptions::new().create(true).append(true), &log)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, text.as_bytes()));
+    let mut cache = FINISHED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((cached_for, entries)) = cache.as_mut()
+        && *cached_for == log
+        && appended.is_ok()
+    {
+        entries.insert(key, upload);
+    }
+}
+
+/// What `bb push` last finished for `path`, if this machine remembers it.
+pub fn finished_upload(path: &Path) -> Option<FinishedUpload> {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let log = finished_path();
+    let mut cache = FINISHED.lock().unwrap_or_else(|e| e.into_inner());
+    if cache.as_ref().is_none_or(|(cached_for, _)| *cached_for != log) {
+        *cache = Some((log.clone(), load_finished(&log)));
+    }
+    cache.as_ref().and_then(|(_, entries)| entries.get(&key(path)).copied())
+}
+
+/// Open `path` with `options`, readable by this user only (task 2334): the log names local paths of pushed
+/// files, as private as `config.json`. A file that already exists with a wider mode (a leftover `.tmp`, or a
+/// log an earlier build made) is narrowed too, as `config.rs` does.
+fn open_private(options: &mut std::fs::OpenOptions, path: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(options, 0o600);
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    Ok(file)
+}
+
+/// Read the log (newest line per path wins) and compact it when its superseded lines outnumber the live ones.
+fn load_finished(log: &Path) -> HashMap<String, FinishedUpload> {
+    let Ok(text) = std::fs::read_to_string(log) else {
+        return HashMap::new();
+    };
+    let mut newest: HashMap<String, (usize, FinishedUpload)> = HashMap::new();
+    let mut lines = 0usize;
+    for (at, line) in text.lines().enumerate() {
+        lines += 1;
+        let Ok(l) = serde_json::from_str::<FinishedLine>(line) else {
+            continue;
+        };
+        newest.insert(l.key, (at, l.upload));
+    }
+    if newest.len() > FINISHED_MAX || lines > 2 * newest.len() + 1_000 {
+        let mut kept: Vec<(String, (usize, FinishedUpload))> = newest.into_iter().collect();
+        kept.sort_by_key(|(_, (at, _))| *at);
+        let drop = kept.len().saturating_sub(FINISHED_MAX);
+        kept.drain(..drop);
+        let mut out = String::new();
+        for (key, (_, upload)) in &kept {
+            let line = FinishedLine {
+                key: key.clone(),
+                upload: *upload,
+            };
+            if let Ok(text) = serde_json::to_string(&line) {
+                out.push_str(&text);
+                out.push('\n');
+            }
+        }
+        let tmp = log.with_extension("jsonl.tmp");
+        let written = open_private(
+            std::fs::OpenOptions::new().create(true).write(true).truncate(true),
+            &tmp,
+        )
+        .and_then(|mut f| std::io::Write::write_all(&mut f, out.as_bytes()));
+        if written.is_ok() {
+            let _ = std::fs::rename(&tmp, log);
+        }
+        return kept.into_iter().map(|(k, (_, u))| (k, u)).collect();
+    }
+    newest.into_iter().map(|(k, (_, u))| (k, u)).collect()
 }
 
 /// Record an in-progress upload so an interrupted run can resume it. Called
@@ -227,6 +468,7 @@ pub fn record(
     record_with_transport(
         path,
         crate::item_id::Proposed::Minted(file_id),
+        None,
         upload_session_id,
         chunk_format,
         size,
@@ -235,17 +477,108 @@ pub fn record(
     );
 }
 
+/// [`record`] with the chunk size the session was opened with (`--parallel`): the shape `record_upload` writes,
+/// without a destination.
+#[cfg(test)]
+pub fn record_with_chunk_size(
+    path: &Path,
+    file_id: Uuid,
+    upload_session_id: Uuid,
+    chunk_format: ChunkFormat,
+    size: u64,
+    mtime_ns: u128,
+    chunk_size_bytes: u64,
+) {
+    write_record(
+        path,
+        crate::item_id::Proposed::Minted(file_id),
+        None,
+        upload_session_id,
+        chunk_format,
+        size,
+        mtime_ns,
+        false,
+        None,
+        Some(chunk_size_bytes),
+    );
+}
+
 /// [`record`] for the write `proposed` names (a create's minted id, or the row a
 /// replace lists: L13 marks only the first as self-minted), saying whether the
-/// session is a direct upload (task 2173).
+/// session is a direct upload (task 2173). Records no destination: the shape a
+/// CLI before task 2334 wrote, which the driver must still read.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub fn record_with_transport(
     path: &Path,
     proposed: crate::item_id::Proposed,
+    resume_tag: Option<[u8; 32]>,
     upload_session_id: Uuid,
     chunk_format: ChunkFormat,
     size: u64,
     mtime_ns: u128,
     direct: bool,
+) {
+    write_record(
+        path,
+        proposed,
+        resume_tag,
+        upload_session_id,
+        chunk_format,
+        size,
+        mtime_ns,
+        direct,
+        None,
+        None,
+    );
+}
+
+/// Record an in-progress upload (see [`record`]) with the folder its write asked
+/// for, `parent_id` (`None` = the root): task 2334, so a later write into
+/// another folder knows without asking that it may not continue this session;
+/// and with `chunk_size_bytes`, the plaintext chunk size the session was opened
+/// with (`--parallel`, spec §4.3), so a resumed upload frames against it.
+// The sidecar record has this many independent facts; grouping them would only
+// move the same fields into a struct at every call site.
+#[allow(clippy::too_many_arguments)]
+pub fn record_upload(
+    path: &Path,
+    proposed: crate::item_id::Proposed,
+    resume_tag: Option<[u8; 32]>,
+    upload_session_id: Uuid,
+    chunk_format: ChunkFormat,
+    size: u64,
+    mtime_ns: u128,
+    direct: bool,
+    parent_id: Option<Uuid>,
+    chunk_size_bytes: u64,
+) {
+    write_record(
+        path,
+        proposed,
+        resume_tag,
+        upload_session_id,
+        chunk_format,
+        size,
+        mtime_ns,
+        direct,
+        Some(Destination { parent_id }),
+        Some(chunk_size_bytes),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_record(
+    path: &Path,
+    proposed: crate::item_id::Proposed,
+    resume_tag: Option<[u8; 32]>,
+    upload_session_id: Uuid,
+    chunk_format: ChunkFormat,
+    size: u64,
+    mtime_ns: u128,
+    direct: bool,
+    destination: Option<Destination>,
+    chunk_size_bytes: Option<u64>,
 ) {
     use crate::item_id::Proposed;
     let file_id = proposed.id();
@@ -257,9 +590,12 @@ pub fn record_with_transport(
             file_id,
             self_minted: matches!(proposed, Proposed::Minted(_)).then_some(file_id),
             replaces: matches!(proposed, Proposed::Listed(_)).then_some(file_id),
+            resume_tag: resume_tag.map(|t| t.to_vec()),
             upload_session_id: Some(upload_session_id),
             chunk_format: Some(chunk_format.as_u8()),
             direct,
+            destination,
+            chunk_size_bytes,
             size,
             mtime_ns,
         },
@@ -310,6 +646,9 @@ mod tests {
             session_id,
             chunk_format,
             direct: false,
+            resume_tag: None,
+            destination: None,
+            chunk_size_bytes: None,
         };
         record(&f, id, sid, ChunkFormat::V1Legacy, 5, 100);
         assert_eq!(
@@ -321,6 +660,7 @@ mod tests {
         record_with_transport(
             &f,
             crate::item_id::Proposed::Minted(id),
+            None,
             sid,
             ChunkFormat::V1Legacy,
             5,
@@ -335,7 +675,27 @@ mod tests {
             })
         );
         // (The older-record case, with no `direct` field at all, is the raw-JSON loop below: it reads as an API session.)
+
+        // Task 2334: a new record says which folder its write asked for, the root
+        // included; one written without it (`record`, as before 2334) does not.
+        let folder = Uuid::new_v4();
+        for asked in [Some(folder), None] {
+            record_upload(
+                &f,
+                crate::item_id::Proposed::Minted(id),
+                None,
+                sid,
+                ChunkFormat::V1Legacy,
+                5,
+                100,
+                false,
+                asked,
+                4 * 1024 * 1024,
+            );
+            assert_eq!(resumable_upload(&f, 5, 100).map(|p| p.destination), Some(Some(asked)));
+        }
         record(&f, id, sid, ChunkFormat::V1Legacy, 5, 100);
+        assert_eq!(resumable_upload(&f, 5, 100).map(|p| p.destination), Some(None));
 
         // A changed size or mtime must NOT resume onto stale chunks.
         assert_eq!(resumable_upload(&f, 6, 100), None);
@@ -398,6 +758,7 @@ mod tests {
         record_with_transport(
             &f,
             crate::item_id::Proposed::Listed(row),
+            None,
             sid,
             ChunkFormat::V1Legacy,
             5,
@@ -424,6 +785,197 @@ mod tests {
         assert_eq!(resumable_upload_for(&f, 5, 100, Some(row)), None);
         assert!(unresumable_upload(&f, 5, 100, Some(row)).is_some());
 
+        unsafe {
+            std::env::remove_var("BB_PENDING_UPLOADS_PATH");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `--parallel` (spec §4.3): the chunk size a session was opened with comes back with its record, and a record
+    /// from before (`record`, or raw JSON without the field) reads as none.
+    #[test]
+    fn record_round_trips_chunk_size_and_an_old_record_reads_none() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("bb-resume-geometry-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("pending.json");
+        // SAFETY: serialised by TEST_ENV_LOCK; no other code reads the var meanwhile.
+        unsafe {
+            std::env::set_var("BB_PENDING_UPLOADS_PATH", &db);
+        }
+        let f = dir.join("file.bin");
+        std::fs::write(&f, b"hello").unwrap();
+        let (id, sid) = (Uuid::new_v4(), Uuid::new_v4());
+
+        record_upload(
+            &f,
+            crate::item_id::Proposed::Minted(id),
+            None,
+            sid,
+            ChunkFormat::V1Legacy,
+            5,
+            100,
+            false,
+            None,
+            32 * 1024 * 1024,
+        );
+        assert_eq!(
+            resumable_upload(&f, 5, 100).and_then(|p| p.chunk_size_bytes),
+            Some(32 * 1024 * 1024)
+        );
+        let raw = serde_json::to_value(load().uploads.get(&key(&f)).unwrap()).unwrap();
+        assert_eq!(raw["chunk_size_bytes"], serde_json::json!(32 * 1024 * 1024));
+
+        record(&f, id, sid, ChunkFormat::V1Legacy, 5, 100);
+        assert_eq!(resumable_upload(&f, 5, 100).map(|p| p.chunk_size_bytes), Some(None));
+        let key = key(&f);
+        let raw = serde_json::json!({"file_id": id, "upload_session_id": sid, "self_minted": id, "chunk_format": 1, "size": 5, "mtime_ns": 100});
+        std::fs::write(&db, serde_json::json!({"uploads": {&key: raw}}).to_string()).unwrap();
+        assert_eq!(
+            resumable_upload(&f, 5, 100).map(|p| p.chunk_size_bytes),
+            Some(None),
+            "a record from before this change names no chunk size"
+        );
+
+        unsafe {
+            std::env::remove_var("BB_PENDING_UPLOADS_PATH");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Spec §5.3: the record is written whole. A save that dies after its temp file is written leaves the old
+    /// record intact and parseable, and the temp file is this process's own.
+    #[test]
+    fn torn_write_keeps_the_old_record_and_the_temp_name_is_per_process() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("bb-resume-torn-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("pending.json");
+        // SAFETY: serialised by TEST_ENV_LOCK; no other code reads the var meanwhile.
+        unsafe {
+            std::env::set_var("BB_PENDING_UPLOADS_PATH", &db);
+        }
+        let f = dir.join("file.bin");
+        std::fs::write(&f, b"hello").unwrap();
+        let (id, sid) = (Uuid::new_v4(), Uuid::new_v4());
+        record(&f, id, sid, ChunkFormat::V1Legacy, 5, 100);
+        let before = std::fs::read(&db).unwrap();
+
+        let tmp = temp_path(&db);
+        assert!(
+            tmp.to_string_lossy()
+                .ends_with(&format!("pending.json.{}.tmp", std::process::id())),
+            "{}",
+            tmp.display()
+        );
+
+        FAIL_RENAME_FOR_TEST.store(true, std::sync::atomic::Ordering::SeqCst);
+        record(&f, Uuid::new_v4(), Uuid::new_v4(), ChunkFormat::V1Legacy, 5, 100);
+        FAIL_RENAME_FOR_TEST.store(false, std::sync::atomic::Ordering::SeqCst);
+
+        assert_eq!(std::fs::read(&db).unwrap(), before, "the old record is intact");
+        assert_eq!(
+            resumable_upload(&f, 5, 100).map(|p| (p.file_id, p.session_id)),
+            Some((id, sid)),
+            "and still parses"
+        );
+        assert!(!tmp.exists(), "the torn temp file is removed");
+
+        unsafe {
+            std::env::remove_var("BB_PENDING_UPLOADS_PATH");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Task 2334: what `bb push` finished is remembered per path, the newest line winning, across processes; a
+    /// log of mostly superseded lines is rewritten to the live ones.
+    #[test]
+    fn a_finished_upload_is_remembered_newest_first_and_the_log_compacts() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("bb-finished-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // SAFETY: serialised by TEST_ENV_LOCK; no other code reads the var meanwhile.
+        unsafe {
+            std::env::set_var("BB_PENDING_UPLOADS_PATH", dir.join("pending.json"));
+        }
+        let f = dir.join("movie.mkv");
+        std::fs::write(&f, b"one movie").unwrap();
+        let folder = Uuid::new_v4();
+        let upload = |version| FinishedUpload {
+            file_id: Uuid::from_u128(7),
+            parent_id: Some(folder),
+            version,
+            size: 9,
+            mtime_ns: 100,
+        };
+
+        let log = dir.join("finished-uploads.jsonl");
+        // A log an earlier build made, readable by everyone: narrowed on the next write.
+        std::fs::write(&log, "").unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&log, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
+        assert_eq!(finished_upload(&f), None);
+        record_finished(&f, upload(1));
+        assert_eq!(finished_upload(&f), Some(upload(1)));
+        record_finished(&f, upload(2));
+        assert_eq!(finished_upload(&f), Some(upload(2)), "the newest wins");
+        *FINISHED.lock().unwrap() = None;
+        assert_eq!(
+            finished_upload(&f),
+            Some(upload(2)),
+            "read back from the log, as a new process does"
+        );
+        assert_eq!(finished_upload(&dir.join("other.mkv")), None);
+        let coarse = dir.join("coarse.mkv");
+        record_finished(
+            &coarse,
+            FinishedUpload {
+                mtime_ns: 1_700_000_000_000_000_000,
+                ..upload(1)
+            },
+        );
+        record_finished(
+            &coarse,
+            FinishedUpload {
+                mtime_ns: 0,
+                ..upload(1)
+            },
+        );
+        assert_eq!(
+            finished_upload(&coarse),
+            None,
+            "a whole-second or absent mtime proves nothing"
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap().lines().count(),
+            2,
+            "nothing written for the coarse mtimes"
+        );
+        #[cfg(unix)]
+        let mode =
+            |p: &Path| std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(p).unwrap().permissions()) & 0o777;
+        #[cfg(unix)]
+        assert_eq!(mode(&log), 0o600, "the log names local paths: this user only");
+        for version in 3..1_300 {
+            record_finished(&f, upload(version));
+        }
+        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1_299);
+        *FINISHED.lock().unwrap() = None;
+        assert_eq!(finished_upload(&f), Some(upload(1_299)));
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap().lines().count(),
+            1,
+            "compacted to the live line"
+        );
+        #[cfg(unix)]
+        assert_eq!(mode(&log), 0o600, "the compacted log too");
+
+        // A line it cannot read is skipped, never fatal.
+        std::fs::write(&log, "not json\n").unwrap();
+        *FINISHED.lock().unwrap() = None;
+        assert_eq!(finished_upload(&f), None);
+        // SAFETY: as above.
         unsafe {
             std::env::remove_var("BB_PENDING_UPLOADS_PATH");
         }

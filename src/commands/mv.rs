@@ -7,11 +7,18 @@
 //!
 //! Filenames are encrypted client-side. The file's UUID does not change on
 //! move or rename, so the file key stays identical — no chunk re-encryption.
+//!
+//! LD-0113: core's app rule decides first under the Backups root: the moved
+//! row is checked for `Move` / `Rename`, the folder it goes into for `Create`,
+//! all before anything moves. A server `409 protected_folder` prints core's
+//! words too.
 
+use beebeeb_core::backup::{BackupPosition, Mutation};
 use colored::Colorize;
 use uuid::Uuid;
 
 use crate::api::ApiClient;
+use crate::backup_guard;
 use crate::colors;
 use crate::commands::push::load_master_key;
 use crate::path;
@@ -49,12 +56,15 @@ async fn move_bulk(
         ));
     }
     let dst_id = destination_parent(&resolved_dst)?;
+    // LD-0113: nothing new goes into the Backups tree.
+    backup_guard::check(resolved_dst.backup_position(), Mutation::Create)?;
 
     // Resolve every source first so a typo doesn't half-finish the move.
-    let mut resolved_srcs: Vec<(String, String)> = Vec::with_capacity(srcs.len());
+    let mut src_keys = crate::owned_keys::OwnedKeyResolver::new();
+    let mut resolved_srcs: Vec<(String, String, Option<String>, bool)> = Vec::with_capacity(srcs.len());
     for s in srcs {
-        let r = path::resolve_path(api, master_key, s).await?;
-        let Some(id) = r.file_id else {
+        let r = path::resolve_path_with_keys(api, master_key, s, &mut src_keys).await?;
+        let Some(id) = r.file_id.clone() else {
             return Err(format!("cannot move the vault root ({s})"));
         };
         // A folder cannot move into its own descendant.
@@ -63,20 +73,38 @@ async fn move_bulk(
         if r.is_folder && (d_norm == s_norm || d_norm.starts_with(&format!("{s_norm}/"))) {
             return Err(format!("cannot move {s} into {dst} (would create a cycle)"));
         }
-        resolved_srcs.push((s.clone(), id));
+        if r.parent_id != dst_id {
+            backup_guard::check(r.backup_position(), Mutation::Move)?;
+        }
+        resolved_srcs.push((s.clone(), id, r.parent_id.map(|p| p.to_string()), r.is_folder));
     }
 
     let mut ok = 0u32;
     let mut failures: Vec<(String, String)> = Vec::new();
-    for (input, id) in resolved_srcs {
+    for (input, id, parent_id, is_folder) in resolved_srcs {
+        // A19: a source leaving a shared root adopts its foreign subtree first.
+        if let Err(e) = src_keys
+            .adopt_before_move(api, master_key, &id, parent_id.as_deref(), is_folder)
+            .await
+        {
+            failures.push((input, e));
+            continue;
+        }
         match api.move_file(&id, None, Some(dst_id)).await {
             Ok(_) => ok += 1,
-            Err(e) => failures.push((input, e)),
+            Err(e) => failures.push((input, backup_guard::server_refusal(e, Mutation::Move))),
         }
     }
 
     path::invalidate_cache();
 
+    // L15 = A (P2-11): one notice for the command when anything landed in a
+    // shared folder (the user may move many sources in one go).
+    if ok > 0 && !ui::is_json() {
+        if let Some(dst) = dst_id {
+            crate::owned_keys::announce_owner_only(api, master_key, Some(&dst.to_string())).await;
+        }
+    }
     if ui::is_json() {
         let json = serde_json::json!({
             "ok": failures.is_empty(),
@@ -113,8 +141,10 @@ async fn move_single(
     src_arg: &str,
     dst_arg: &str,
 ) -> Result<(), String> {
-    // Resolve src.
-    let src = path::resolve_path(api, master_key, src_arg).await?;
+    // Resolve src. Its resolver keeps the key the row opened under, for the
+    // SF-0002 write check below.
+    let mut src_keys = crate::owned_keys::OwnedKeyResolver::new();
+    let src = path::resolve_path_with_keys(api, master_key, src_arg, &mut src_keys).await?;
     let Some(src_id) = src.file_id.clone() else {
         return Err("cannot move the vault root".to_string());
     };
@@ -134,10 +164,13 @@ async fn move_single(
     // Resolve dst — three branches.
     let dst_existing = path::resolve_path_if_exists(api, master_key, dst_arg).await?;
 
-    let (new_parent_id, new_name): (Option<Uuid>, Option<String>) = if let Some(d) = dst_existing {
+    // The third value: where the folder the row would go into is in the
+    // Backups tree (LD-0113).
+    let (new_parent_id, new_name, into): (Option<Uuid>, Option<String>, BackupPosition) = if let Some(d) = dst_existing
+    {
         if d.is_folder {
             // Case 1: dst is an existing folder → move into it, keep the name.
-            (destination_parent(&d)?, None)
+            (destination_parent(&d)?, None, d.backup_position())
         } else {
             // Case 3: dst is an existing file → refuse to overwrite.
             return Err(format!(
@@ -147,30 +180,92 @@ async fn move_single(
     } else {
         // Case 2: dst does not exist → resolve its parent and split off the leaf.
         let (parent_path, leaf) = split_dst(dst_arg)?;
-        let parent_id = match parent_path.as_deref() {
+        let (parent_id, into) = match parent_path.as_deref() {
             Some(p) => {
                 let parent = path::resolve_path(api, master_key, p).await?;
                 if !parent.is_folder {
                     return Err(format!("{p} is a file, not a folder"));
                 }
-                destination_parent(&parent)?
+                (destination_parent(&parent)?, parent.backup_position())
             }
-            None => None,
+            None => (None, BackupPosition::Outside),
         };
-        (parent_id, Some(leaf))
+        (parent_id, Some(leaf), into)
     };
+
+    // LD-0113: core's app rule, before any check that reads more and before
+    // anything moves: the row for its move and its rename, the folder it goes
+    // into for a new item.
+    if src.parent_id != new_parent_id {
+        backup_guard::check(src.backup_position(), Mutation::Move)?;
+        backup_guard::check(into, Mutation::Create)?;
+    }
+    if new_name.as_deref().is_some_and(|n| n != src.name) {
+        backup_guard::check(src.backup_position(), Mutation::Rename)?;
+    }
+
+    // SF-0002: a row sealed by the old iOS File Provider is read-only: a move
+    // is fine (it re-encrypts nothing), a rename would rewrite its name under a
+    // convention the row does not use. The name may resolve normally while the
+    // CURRENT version's content is still uppercase-sealed, so a rename asks the
+    // one write check; a check that could not decide refuses as well.
+    if new_name.as_deref().is_some_and(|n| n != src.name) {
+        // P2-10: a plaintext name is not the SF-0002 repair convention.
+        if src.read_only && src_keys.name_is_plaintext_for(&src_id) {
+            return Err(crate::owned_keys::PLAINTEXT_NAME_READ_ONLY.to_string());
+        }
+        // R4-B: request fields whose request list could not load stay read-only
+        // for their own reason, never writable as an owner row.
+        if let Some(reason) = src_keys.read_only_reason_for(&src_id) {
+            return Err(reason.to_string());
+        }
+        // The listing that resolved this path already carries the version's
+        // geometry, so no second GET is made.
+        let row_key = src_keys.key_for(&src_id);
+        crate::owned_keys::write_check(
+            api,
+            master_key,
+            &crate::owned_keys::WriteTarget {
+                file_id: &src_id,
+                is_folder: src.is_folder,
+                name_read_only: src.read_only,
+                row_key: row_key.as_deref(),
+                size_bytes: src.size_bytes,
+                chunk_count: src.chunk_count,
+            },
+        )
+        .await
+        .ensure()?;
+    }
 
     // Preserve omitted/NULL/UUID: a changed parent at root is an explicit
     // Some(None), while a rename within the same directory omits parent_id.
     let new_parent_send = (src.parent_id != new_parent_id).then_some(new_parent_id);
+    let dest_parent = new_parent_send.flatten();
     let mut name_changed = false;
     let new_name_encrypted = match new_name {
         Some(name) if name != src.name => {
             name_changed = true;
-            Some(
-                beebeeb_core::encrypt::encrypt_name(master_key, &src_id, &name, None)
-                    .map_err(|e| format!("failed to encrypt new name: {e}"))?,
-            )
+            // L13/A9 (§15): the resolver hands out the seal target. An owner
+            // row re-seals through its write target (key + chunk-format pin); a
+            // request row re-seals through core's RenameTarget — the
+            // string-convention key derived from the row id and the pin the
+            // current name records, NEVER the content key `C`. An upper-repair
+            // request name has no target (read-only) and a row with neither is
+            // refused instead of sealed under a guess.
+            let sealed = if let Some(target) = src_keys.write_target_for(&src_id) {
+                beebeeb_core::encrypt::encrypt_name_for(
+                    &crate::crypto::key_copy(target.key()),
+                    &name,
+                    None,
+                    target.pin(),
+                )
+            } else if let Some(target) = src_keys.rename_target_for(&src_id) {
+                beebeeb_core::rename::encrypt_name_for_rename_target(&target, &name, None)
+            } else {
+                return Err(crate::owned_keys::RENAME_UNKNOWN_KEY.to_string());
+            };
+            Some(sealed.map_err(|e| format!("failed to encrypt new name: {e}"))?)
         }
         _ => None,
     };
@@ -179,8 +274,22 @@ async fn move_single(
         return noop(dst_arg);
     }
 
-    api.move_file(&src_id, new_name_encrypted.as_deref(), new_parent_send)
+    // L12/A19: a move of a shared item (or a folder holding shared descendants)
+    // adopts every foreign item involved first, confirmed by a readback. The
+    // helper fails closed when the ancestry cannot be read.
+    let src_parent = src.parent_id.map(|p| p.to_string());
+    src_keys
+        .adopt_before_move(api, master_key, &src_id, src_parent.as_deref(), src.is_folder)
         .await?;
+
+    let mutation = if new_parent_send.is_some() {
+        Mutation::Move
+    } else {
+        Mutation::Rename
+    };
+    api.move_file(&src_id, new_name_encrypted.as_deref(), new_parent_send)
+        .await
+        .map_err(|e| backup_guard::server_refusal(e, mutation))?;
     path::invalidate_cache();
 
     if ui::is_json() {
@@ -202,6 +311,13 @@ async fn move_single(
             "ok ·".custom_color(colors::GREEN_OK),
             msg.custom_color(colors::INK)
         );
+    }
+
+    // L15 = A: a move into a shared folder stays owner-only.
+    if !ui::is_json() && new_parent_send.is_some() {
+        if let Some(parent) = dest_parent {
+            crate::owned_keys::announce_owner_only(api, master_key, Some(&parent.to_string())).await;
+        }
     }
 
     Ok(())
@@ -256,6 +372,10 @@ mod parent_target_tests {
             parent_id: None,
             name: name.into(),
             is_folder: true,
+            read_only: false,
+            size_bytes: None,
+            chunk_count: 1,
+            backup_depth: None,
         }
     }
 

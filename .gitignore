@@ -50,6 +50,8 @@ desktop.ini
 
 # Logs
 *.log
+# The `--parallel 1` goldens (`upload::pipeline::request_log_tests`) are request logs, kept.
+!src/upload/pipeline/testdata/*.log
 npm-debug.log*
 
 # Test & coverage

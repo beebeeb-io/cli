@@ -1,3 +1,5 @@
+//! The full dashboard: the header, the file table, the progress bars and the hints.
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -14,7 +16,6 @@ const RED_ERR: Color = Color::Rgb(224, 122, 106);
 const INK: Color = Color::Rgb(233, 230, 221);
 const INK_DIM: Color = Color::Rgb(106, 101, 91);
 
-/// Render the full-screen dashboard view.
 pub fn render(f: &mut Frame, state: &TuiState) {
     let area = f.area();
 
@@ -100,18 +101,16 @@ fn render_sessions(f: &mut Frame, area: Rect, state: &TuiState) {
             detail_parts.push(format!("{} files", session.files_synced));
         }
         if session.bytes_synced > 0 {
-            detail_parts.push(format_size_binary(session.bytes_synced));
+            detail_parts.push(crate::ui::human_size_binary(session.bytes_synced));
         }
         if let Some(ref hb) = session.last_heartbeat {
             detail_parts.push(format!("heartbeat {hb}"));
         }
 
-        if let Some(ref file) = session.current_file {
-            let speed_str = session
-                .speed_bps
-                .map(|s| format!(" \u{00b7} {}/s", format_size_binary(s)))
-                .unwrap_or_default();
-            detail_parts.push(format!("uploading {file}{speed_str}"));
+        // Task 1922: the server no longer carries `current_file`; only the
+        // heartbeat's numeric speed remains, so show just that.
+        if let Some(speed) = session.speed_bps.filter(|s| *s > 0) {
+            detail_parts.push(format!("{}/s", crate::ui::human_size_binary(speed)));
         }
 
         let detail_str = if detail_parts.is_empty() {
@@ -148,23 +147,4 @@ fn render_hints(f: &mut Frame, area: Rect) {
         Span::styled(" quit", Style::default().fg(INK_DIM)),
     ]);
     f.render_widget(Paragraph::new(line), area);
-}
-
-/// Format bytes using binary units (1024 base).
-fn format_size_binary(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * KB;
-    const GB: u64 = 1024 * MB;
-    if bytes == 0 {
-        return "\u{2014}".to_string();
-    }
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
-    }
 }

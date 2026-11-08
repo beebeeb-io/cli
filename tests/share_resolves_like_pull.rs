@@ -70,9 +70,10 @@ async fn list_files(Query(q): Query<std::collections::HashMap<String, String>>) 
 }
 
 async fn file_meta(State(s): State<Shared>, AxPath(id): AxPath<String>) -> (StatusCode, Json<Value>) {
-    s.lock().unwrap().metadata_ids.push(id);
-    // Stop `bb pull` right after it has told us which id it resolved.
-    (StatusCode::NOT_FOUND, Json(json!({ "error": "test stop" })))
+    // R7 (P1-3): `bb share` fetches the row before it may send a key, so this
+    // answers with a real row; `bb pull` keeps going until the download 404s.
+    s.lock().unwrap().metadata_ids.push(id.clone());
+    (StatusCode::OK, Json(entry(&id, "item", false)))
 }
 
 async fn create_share(State(s): State<Shared>, Json(body): Json<Value>) -> Json<Value> {
@@ -167,7 +168,9 @@ async fn share_accepts_path_and_short_id_and_resolves_like_pull() {
         );
     }
 
-    // `bb pull` resolves the same arguments to the same UUIDs.
+    // `bb pull` resolves the same arguments to the same UUIDs. Sharing above
+    // also fetched rows, so start from a clean record.
+    state.lock().unwrap().metadata_ids.clear();
     for (arg, want) in [
         ("note.txt", NOTE_ID),
         ("4c53f27f", NOTE_ID),

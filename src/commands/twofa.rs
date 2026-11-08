@@ -483,7 +483,7 @@ pub async fn enable(code: String) -> Result<(), String> {
 /// `X-Confirm-Token`). The LIVE handler
 /// (`repos/server/beebeeb-api/src/routes/totp.rs::disable`, ~L155-244) takes
 /// `auth: AuthUser` + `Json<CodeRequest>` only — no
-/// `crate::confirmation::consume_confirmation_from_headers` call anywhere in
+/// `consume_confirmation_from_headers` step-up call anywhere in
 /// that function, unlike `setup`'s step-up gate a few lines above it. The
 /// TOTP code IS the step-up proof here; sending anything beyond the code
 /// would not match what the server checks. Followed the server, not the plan.

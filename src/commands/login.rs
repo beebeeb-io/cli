@@ -1,3 +1,6 @@
+//! `bb login`: the browser hand-off and the ECDH key exchange that ends in a
+//! session token.
+
 use colored::Colorize;
 use zeroize::Zeroizing;
 

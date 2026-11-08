@@ -1,3 +1,5 @@
+//! `bb logout`: end the session on the server and forget the token locally.
+
 use colored::Colorize;
 
 use crate::api::ApiClient;

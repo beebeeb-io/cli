@@ -44,8 +44,9 @@ use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
-use super::webdav_guard::{self, Guard};
+use super::webdav_guard::{self, Guard, GuardOptions};
 use crate::api::ApiClient;
+use crate::commands::move_target;
 use crate::config::load_config;
 
 // Chunk size is now computed dynamically via beebeeb_types::plan_chunks().
@@ -53,1414 +54,41 @@ use crate::config::load_config;
 
 // ─── Directory cache ─────────────────────────────────────────────────────────
 
-/// One cached directory listing.
-#[derive(Clone)]
-struct CachedDir {
-    /// Decoded + decrypted entries for this directory.
-    children: Vec<ResolvedEntry>,
-    /// When this entry was populated.
-    cached_at: Instant,
-}
-
-/// Global directory-listing cache keyed by parent path (e.g. `"/"`, `"/Documents"`).
-type DirCache = Mutex<HashMap<String, CachedDir>>;
-
 // ─── Lock store ──────────────────────────────────────────────────────────────
-
-/// An active WebDAV lock.  Stubs only — no distributed coordination.
-/// Exists solely to satisfy Finder/LibreOffice lock expectations.
-#[derive(Clone)]
-struct LockEntry {
-    /// `urn:uuid:<UUID>` token that the client echoes back on writes.
-    token: String,
-    /// Lock owner string (from the request XML, for display only).
-    #[allow(dead_code)]
-    owner: String,
-    /// Whether the lock is exclusive (true) or shared (false).
-    exclusive: bool,
-    /// When the lock expires (Instant).
-    expires_at: Instant,
-}
-
-/// Lock store: path → active lock.
-type LockStore = Mutex<HashMap<String, LockEntry>>;
 
 // ─── CLI entry point ─────────────────────────────────────────────────────────
 
-pub async fn run(port: u16, read_write: bool, cache_ttl: u64, no_cache: bool, verbose: bool) -> Result<(), String> {
-    let read_only = !read_write;
-    let config = load_config();
-
-    if config.session_token.is_none() {
-        return Err("Not logged in. Run `bb login` first.".to_string());
-    }
-
-    let mk_b64 = config.master_key.ok_or("No master key found. Run `bb login` first.")?;
-    let mk_bytes: Zeroizing<Vec<u8>> = Zeroizing::new(
-        base64::engine::general_purpose::STANDARD
-            .decode(&mk_b64)
-            .map_err(|e| format!("invalid master key in config: {e}"))?,
-    );
-    if mk_bytes.len() != 32 {
-        return Err(format!("master key must be 32 bytes, got {}", mk_bytes.len()));
-    }
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&mk_bytes);
-    let master_key = beebeeb_core::kdf::MasterKey::from_bytes(arr);
-
-    let effective_ttl = if no_cache || cache_ttl == 0 {
-        Duration::ZERO
-    } else {
-        Duration::from_secs(cache_ttl)
-    };
-
-    let state = Arc::new(DavState {
-        api: ApiClient::from_config(),
-        master_key,
-        read_only,
-        dir_cache: Mutex::new(HashMap::new()),
-        cache_ttl: effective_ttl,
-        locks: Mutex::new(HashMap::new()),
-        request_count: std::sync::atomic::AtomicU64::new(0),
-        error_count: std::sync::atomic::AtomicU64::new(0),
-        verbose,
-    });
-
-    // Bind first (once; a taken port fails here, clearly), then derive the guard from the
-    // port actually bound so `--port 0` works too.
-    let listener = bind_loopback(port).await?;
-    let port = listener.local_addr().map_err(|e| format!("local_addr: {e}"))?.port();
-    let secret = webdav_guard::generate_secret();
-    let guard = Arc::new(Guard::new(port, &secret, read_only, verbose));
-    let router = build_router(state, guard);
-
-    let ro_label = if read_only { "read-only" } else { "read-write" };
-    let cache_label = if no_cache || cache_ttl == 0 {
-        "disabled".to_string()
-    } else {
-        format!("{cache_ttl}s TTL")
-    };
-    println!();
-    println!(
-        "  {} {} {}",
-        "\u{25CF}".custom_color(crate::colors::GREEN_OK),
-        "WebDAV gateway".custom_color(crate::colors::INK_WARM),
-        ro_label.custom_color(crate::colors::INK_DIM),
-    );
-    println!(
-        "  {}  {}",
-        "url     ".custom_color(crate::colors::INK_DIM),
-        format!("http://localhost:{port}").custom_color(crate::colors::AMBER),
-    );
-    println!(
-        "  {}  {}",
-        "user    ".custom_color(crate::colors::INK_DIM),
-        "bb (any name works)".custom_color(crate::colors::INK_DIM),
-    );
-    // The one place the credential is printed. It is random for this run only and is
-    // never written to disk or logged.
-    println!(
-        "  {}  {}",
-        "password".custom_color(crate::colors::INK_DIM),
-        secret.custom_color(crate::colors::AMBER),
-    );
-    println!(
-        "  {}  {}",
-        "mount   ".custom_color(crate::colors::INK_DIM),
-        format!("http://bb:{secret}@localhost:{port}/").custom_color(crate::colors::AMBER),
-    );
-    println!(
-        "  {}  {}",
-        "mode    ".custom_color(crate::colors::INK_DIM),
-        ro_label.custom_color(crate::colors::INK),
-    );
-    println!(
-        "  {}  {}",
-        "cache   ".custom_color(crate::colors::INK_DIM),
-        cache_label.custom_color(crate::colors::INK_DIM),
-    );
-    if !verbose {
-        println!(
-            "  {}  {}",
-            "logging ".custom_color(crate::colors::INK_DIM),
-            "compact (use --verbose for full request log)".custom_color(crate::colors::INK_DIM),
-        );
-    }
-    if read_only {
-        println!(
-            "  {}",
-            "Read-only: uploads, deletes and renames are refused. Restart with --read-write to allow them."
-                .custom_color(crate::colors::INK_DIM),
-        );
-    } else {
-        println!(
-            "  {}",
-            "Read-write: anything holding the password can change or delete files in your vault."
-                .custom_color(crate::colors::AMBER),
-        );
-    }
-    println!();
-    println!(
-        "  {}",
-        format!(
-            "# Finder: Go \u{2192} Connect to Server \u{2192} http://localhost:{port} (it asks for the password above)"
-        )
-        .custom_color(crate::colors::INK_SAGE),
-    );
-    println!(
-        "  {}",
-        "# rclone / Cyberduck: use the url, user and password above".custom_color(crate::colors::INK_SAGE),
-    );
-    if let Some(hint) = windows_explorer_hint() {
-        println!("  {}", hint.custom_color(crate::colors::AMBER));
-    }
-    println!("  {}", "# press Ctrl+C to stop".custom_color(crate::colors::INK_SAGE),);
-    println!();
-
-    axum::serve(listener, router)
-        .await
-        .map_err(|e| format!("server error: {e}"))
-}
-
-/// One startup line for Windows only. Explorer's WebDAV redirector refuses HTTP Basic over
-/// plain HTTP by default (the `BasicAuthLevel` policy), and the gateway deliberately keeps
-/// its per-run password and serves plain HTTP on loopback, so Explorer cannot connect.
-/// Compiled everywhere (so it is tested on every platform); returns `None` off Windows.
-fn windows_explorer_hint() -> Option<&'static str> {
-    if cfg!(windows) {
-        Some(WINDOWS_EXPLORER_HINT)
-    } else {
-        None
-    }
-}
-
-const WINDOWS_EXPLORER_HINT: &str = "Windows Explorer is not supported by `bb webdav` (it refuses password login over plain HTTP). Use the Beebeeb desktop app, rclone, Cyberduck or WinSCP.";
-
-/// Bind `127.0.0.1:<port>` and nothing else. There is deliberately no way to pick another
-/// address; the post-bind check makes that a property of the code, not of the literal.
-async fn bind_loopback(port: u16) -> Result<tokio::net::TcpListener, String> {
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
-        if e.kind() == std::io::ErrorKind::AddrInUse {
-            format!("failed to bind {addr}: port {port} is already in use. Stop the other program (an earlier `bb webdav`?) or pick another port with --port.")
-        } else {
-            format!("failed to bind {addr}: {e}")
-        }
-    })?;
-    let bound = listener.local_addr().map_err(|e| format!("local_addr: {e}"))?;
-    if !bound.ip().is_loopback() {
-        return Err(format!("refusing to serve the vault on non-loopback address {bound}"));
-    }
-    Ok(listener)
-}
-
-/// The gateway's router: every route, behind the guard.
-fn build_router(state: Arc<DavState>, guard: Arc<Guard>) -> Router {
-    Router::new()
-        .route("/", any(handle_webdav))
-        .route("/*path", any(handle_webdav))
-        .with_state(state)
-        .layer(axum::middleware::from_fn_with_state(guard, webdav_guard::enforce))
-}
-
 // ─── Shared state ─────────────────────────────────────────────────────────────
-
-struct DavState {
-    api: ApiClient,
-    master_key: beebeeb_core::kdf::MasterKey,
-    read_only: bool,
-    dir_cache: DirCache,
-    /// Zero duration = caching disabled.
-    cache_ttl: Duration,
-    /// In-memory WebDAV lock store (stub — single-instance only).
-    locks: LockStore,
-    /// Total requests served (atomic for lock-free increment).
-    request_count: std::sync::atomic::AtomicU64,
-    /// Total error responses (atomic for lock-free increment).
-    error_count: std::sync::atomic::AtomicU64,
-    /// Log every request (--verbose).
-    verbose: bool,
-}
 
 // ─── Request dispatcher ───────────────────────────────────────────────────────
 
-async fn handle_webdav(State(state): State<Arc<DavState>>, req: Request) -> Response {
-    let method = req.method().clone();
-    let uri = req.uri().clone();
-    let headers = req.headers().clone();
-    let path = uri.path().to_string();
-
-    // Suppress noisy logging for macOS/Windows metadata files (DS_Store,
-    // ._ resource forks, Spotlight indices, etc.)  These generate many
-    // PROPFIND 404s that clutter the console without adding signal.
-    let is_metadata = is_os_metadata_path(&path);
-    state.request_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if state.verbose && !is_metadata {
-        eprintln!(
-            "  {} {} {}",
-            "WebDAV".custom_color(crate::colors::INK_DIM),
-            method.to_string().custom_color(crate::colors::INK),
-            path.custom_color(crate::colors::INK_DIM),
-        );
-    }
-
-    // Reject macOS/Windows metadata files that Finder and Explorer create.
-    // These pollute the vault with system junk that users never want stored.
-    if is_metadata {
-        let is_propfind = method.as_str() == "PROPFIND";
-        if is_propfind {
-            // Return an empty 207 so Finder doesn't spam retries.
-            let body = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-                        <D:multistatus xmlns:D=\"DAV:\"/>";
-            let mut headers = HeaderMap::new();
-            headers.insert("Content-Type", "application/xml; charset=utf-8".parse().unwrap());
-            return (StatusCode::MULTI_STATUS, headers, body).into_response();
-        }
-        return (StatusCode::FORBIDDEN, "OS metadata files are not stored").into_response();
-    }
-
-    // Defence in depth: the guard middleware already refuses writes in read-only mode.
-    if webdav_guard::is_write_method(&method) && state.read_only {
-        return (
-            StatusCode::FORBIDDEN,
-            "bb webdav is read-only; restart it with --read-write to allow changes",
-        )
-            .into_response();
-    }
-
-    // Extract the If: (<token>) header once (used by PUT/DELETE to verify locks)
-    let if_token = headers.get("if").and_then(|v| v.to_str().ok()).and_then(parse_if_token);
-
-    let response = match method {
-        Method::OPTIONS => options_response(&state),
-        ref m if m.as_str() == "PROPFIND" => {
-            let depth = headers.get("depth").and_then(|v| v.to_str().ok()).unwrap_or("1");
-            propfind_response(&state, &path, depth).await
-        }
-        Method::GET => get_response(&state, &path, &headers).await,
-        Method::HEAD => head_response(&state, &path).await,
-        Method::PUT => {
-            let if_match = headers
-                .get("if-match")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
-            // Verify lock if the path is locked and client provides a token
-            if let Err(r) = check_lock(&state, &path, if_token.as_deref()).await {
-                return r;
-            }
-            let body_bytes = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
-                Ok(b) => b.to_vec(),
-                Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-            };
-            put_response(&state, &path, body_bytes, if_match.as_deref()).await
-        }
-        Method::DELETE => {
-            let if_match = headers
-                .get("if-match")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
-            if let Err(r) = check_lock(&state, &path, if_token.as_deref()).await {
-                return r;
-            }
-            delete_response(&state, &path, if_match.as_deref()).await
-        }
-        ref m if m.as_str() == "MKCOL" => mkcol_response(&state, &path).await,
-        ref m if m.as_str() == "MOVE" => {
-            let destination = headers
-                .get("destination")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("")
-                .to_string();
-            move_response(&state, &path, &destination).await
-        }
-        ref m if m.as_str() == "LOCK" => {
-            let timeout_secs = parse_timeout_header(&headers);
-            let body_bytes = axum::body::to_bytes(req.into_body(), 64 * 1024)
-                .await
-                .map(|b| b.to_vec())
-                .unwrap_or_default();
-            lock_response(&state, &path, &body_bytes, timeout_secs).await
-        }
-        ref m if m.as_str() == "UNLOCK" => {
-            let lock_token = headers
-                .get("lock-token")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("")
-                .to_string();
-            unlock_response(&state, &path, &lock_token).await
-        }
-        _ => (StatusCode::METHOD_NOT_ALLOWED, "").into_response(),
-    };
-
-    // Track errors for compact logging
-    if response.status().is_client_error() || response.status().is_server_error() {
-        state.error_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    response
-}
-
 // ─── OPTIONS ─────────────────────────────────────────────────────────────────
-
-fn options_response(state: &DavState) -> Response {
-    let mut headers = HeaderMap::new();
-    // DAV: 1, 2 — class 2 requires LOCK/UNLOCK, which we stub
-    headers.insert("DAV", "1, 2".parse().unwrap());
-    let allow = if state.read_only {
-        "OPTIONS, GET, HEAD, PROPFIND, LOCK, UNLOCK"
-    } else {
-        "OPTIONS, GET, HEAD, PROPFIND, PUT, DELETE, MKCOL, MOVE, LOCK, UNLOCK"
-    };
-    headers.insert("Allow", allow.parse().unwrap());
-    // MS-Author-Via tells some clients (Office, SharePoint) this is WebDAV
-    headers.insert("MS-Author-Via", "DAV".parse().unwrap());
-    (StatusCode::OK, headers, "").into_response()
-}
 
 // ─── PROPFIND ────────────────────────────────────────────────────────────────
 
-async fn propfind_response(state: &Arc<DavState>, path: &str, depth: &str) -> Response {
-    // Resolve path to a vault entry
-    let resolved = match resolve_path(state, path).await {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("  PROPFIND {path}: {e}");
-            return (StatusCode::NOT_FOUND, format!("not found: {e}")).into_response();
-        }
-    };
-
-    let mut xml_entries: Vec<String> = Vec::new();
-
-    // Always include the resource itself
-    xml_entries.push(prop_entry(path, &resolved));
-
-    // For Depth: 1 on a collection, also list children
-    if depth == "1" && resolved.is_collection {
-        let parent_id = resolved.file_id.as_deref();
-        let cache_key = normalise_cache_key(path);
-
-        // Try to serve from cache
-        let cached_children = get_from_cache(state, &cache_key).await;
-
-        let children = if let Some(entries) = cached_children {
-            entries
-        } else {
-            // Cache miss — fetch from API and populate
-            let entries = match state.api.list_files(parent_id).await {
-                Ok(resp) => {
-                    let files = resp
-                        .get("files")
-                        .and_then(|f| f.as_array())
-                        .cloned()
-                        .unwrap_or_default();
-                    files
-                        .iter()
-                        .filter_map(|f| decode_file_entry(f, &state.master_key, path))
-                        .collect::<Vec<_>>()
-                }
-                Err(e) => {
-                    eprintln!("  PROPFIND list error: {e}");
-                    vec![]
-                }
-            };
-            store_in_cache(state, cache_key, entries.clone()).await;
-            entries
-        };
-
-        for entry in &children {
-            xml_entries.push(prop_entry(
-                &child_href(path, &entry.display_name, entry.is_collection),
-                entry,
-            ));
-        }
-    }
-
-    let body = format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-         <D:multistatus xmlns:D=\"DAV:\">\n\
-         {}\n\
-         </D:multistatus>",
-        xml_entries.join("\n")
-    );
-
-    let mut headers = HeaderMap::new();
-    headers.insert("Content-Type", "application/xml; charset=utf-8".parse().unwrap());
-    (StatusCode::MULTI_STATUS, headers, body).into_response()
-}
-
 // ─── GET ─────────────────────────────────────────────────────────────────────
-
-async fn get_response(state: &Arc<DavState>, path: &str, req_headers: &HeaderMap) -> Response {
-    let resolved = match resolve_path(state, path).await {
-        Ok(r) => r,
-        Err(e) => return (StatusCode::NOT_FOUND, e).into_response(),
-    };
-
-    if resolved.is_collection {
-        return (StatusCode::METHOD_NOT_ALLOWED, "is a directory").into_response();
-    }
-
-    let file_id = match &resolved.file_id {
-        Some(id) => id.clone(),
-        None => return (StatusCode::NOT_FOUND, "no file id").into_response(),
-    };
-
-    // Build ETag and conditional-request headers
-    let etag = make_etag(&file_id, resolved.modified.as_deref());
-
-    // If-None-Match (for GET caching by client)
-    if let Some(inm) = req_headers.get("if-none-match").and_then(|v| v.to_str().ok()) {
-        if inm == etag || inm == "*" {
-            let mut h = HeaderMap::new();
-            h.insert("ETag", etag.parse().unwrap());
-            return (StatusCode::NOT_MODIFIED, h, "").into_response();
-        }
-    }
-
-    // If-Modified-Since (RFC 7232)
-    let modified_dt = resolved
-        .modified
-        .as_deref()
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
-    if let Some(ims_val) = req_headers.get("if-modified-since").and_then(|v| v.to_str().ok()) {
-        if let Some(ref mdt) = modified_dt {
-            if let Ok(ims_dt) = chrono::DateTime::parse_from_rfc2822(ims_val) {
-                if mdt <= &ims_dt {
-                    let mut h = HeaderMap::new();
-                    h.insert("ETag", etag.parse().unwrap());
-                    return (StatusCode::NOT_MODIFIED, h, "").into_response();
-                }
-            }
-        }
-    }
-
-    // The read pin from the file's authenticated metadata (task 1943): refuse
-    // before downloading anything if it could not be read.
-    let pin = match &resolved.pin {
-        Ok(pin) => *pin,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.clone()).into_response(),
-    };
-
-    // Download encrypted bytes
-    let encrypted_bytes = match state.api.download_file(&file_id).await {
-        Ok(b) => b,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-    };
-
-    // Decrypt all chunks using the shared helper that handles both
-    // CLI-format (JSON) and web-app-format (raw binary) chunks, and
-    // both UUID key derivation methods (binary and string).
-    let plaintext = match crate::crypto::decrypt_file_chunks(
-        &state.master_key,
-        &file_id,
-        pin,
-        &encrypted_bytes,
-        resolved.chunk_count,
-    ) {
-        Ok(p) => p,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-    };
-
-    let mut headers = HeaderMap::new();
-    let mime = resolve_mime(&resolved.display_name);
-    if let Ok(hv) = mime.parse() {
-        headers.insert("Content-Type", hv);
-    }
-    headers.insert("Content-Length", plaintext.len().to_string().parse().unwrap());
-    headers.insert("ETag", etag.parse().unwrap_or_else(|_| "\"\"".parse().unwrap()));
-    if let Some(ref mdt) = modified_dt {
-        let lm = mdt.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
-        if let Ok(hv) = lm.parse() {
-            headers.insert("Last-Modified", hv);
-        }
-    }
-    // RFC 6266: percent-encode the filename to protect against injection of
-    // `"`, `\r`, `\n`, or other characters that would break the header.
-    // `filename=` carries an ASCII fallback (non-ASCII → `_`); `filename*=`
-    // carries the full Unicode name percent-encoded as UTF-8.
-    let ascii_fallback: String = resolved
-        .display_name
-        .chars()
-        .map(|c| {
-            if c.is_ascii() && c != '"' && c != '\\' && c != '\r' && c != '\n' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let encoded = percent_encode(resolved.display_name.as_bytes(), NON_ALPHANUMERIC).to_string();
-    let header_value = format!("inline; filename=\"{}\"; filename*=UTF-8''{}", ascii_fallback, encoded);
-    headers.insert(
-        "Content-Disposition",
-        header_value.parse().unwrap_or_else(|_| "inline".parse().unwrap()),
-    );
-
-    (StatusCode::OK, headers, Body::from(plaintext)).into_response()
-}
 
 // ─── HEAD ─────────────────────────────────────────────────────────────────────
 
-async fn head_response(state: &Arc<DavState>, path: &str) -> Response {
-    let resolved = match resolve_path(state, path).await {
-        Ok(r) => r,
-        Err(e) => return (StatusCode::NOT_FOUND, e).into_response(),
-    };
-
-    let file_id = resolved.file_id.as_deref().unwrap_or("");
-    let etag = make_etag(file_id, resolved.modified.as_deref());
-
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        "Content-Length",
-        resolved.size_bytes.unwrap_or(0).to_string().parse().unwrap(),
-    );
-    let mime = resolve_mime(&resolved.display_name);
-    if let Ok(hv) = mime.parse() {
-        headers.insert("Content-Type", hv);
-    }
-    headers.insert("ETag", etag.parse().unwrap_or_else(|_| "\"\"".parse().unwrap()));
-    if let Some(ref m) = resolved.modified {
-        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(m) {
-            let lm = dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
-            if let Ok(hv) = lm.parse() {
-                headers.insert("Last-Modified", hv);
-            }
-        }
-    }
-
-    (StatusCode::OK, headers, "").into_response()
-}
-
 // ─── PUT (upload / overwrite) ─────────────────────────────────────────────────
-
-async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8>, if_match: Option<&str>) -> Response {
-    // Derive filename from the last path segment
-    let filename = path
-        .trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .unwrap_or("file")
-        .to_string();
-    if filename.is_empty() {
-        return (StatusCode::METHOD_NOT_ALLOWED, "cannot PUT on a collection").into_response();
-    }
-
-    // Resolve the parent directory (everything before the last segment)
-    let parent_path = {
-        let trimmed = path.trim_end_matches('/');
-        match trimmed.rfind('/') {
-            Some(0) => "/",
-            Some(i) => &trimmed[..i],
-            None => "/",
-        }
-    };
-
-    let parent_id: Option<String> = if parent_path == "/" {
-        None
-    } else {
-        match resolve_path(state, parent_path).await {
-            Ok(e) if e.is_collection => e.file_id,
-            Ok(_) => {
-                return (StatusCode::CONFLICT, "parent is not a folder").into_response();
-            }
-            Err(e) => {
-                return (StatusCode::CONFLICT, format!("parent not found: {e}")).into_response();
-            }
-        }
-    };
-
-    // Check if a file already exists at this path — handles overwrite + If-Match.
-    // For versioning: reuse the existing file_id so the server creates a version
-    // entry rather than a new file (keeps share links valid, builds history).
-    let existing_file_id: Option<uuid::Uuid> = if let Ok(existing) = resolve_path(state, path).await {
-        if let Some(ref eid) = existing.file_id {
-            // If-Match precondition: client must supply current ETag
-            if let Some(im) = if_match {
-                let current_etag = make_etag(eid, existing.modified.as_deref());
-                if im != "*" && im != current_etag {
-                    return (StatusCode::PRECONDITION_FAILED, "ETag mismatch").into_response();
-                }
-            }
-            // Parse existing ID — if valid UUID, reuse for versioning
-            eid.parse::<uuid::Uuid>().ok()
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    // Invalidate parent directory cache so the new file appears immediately
-    let parent_cache_key = normalise_cache_key(parent_path);
-    invalidate_cache(state, &parent_cache_key).await;
-
-    // Use existing UUID for versioning; mint a fresh one for new files. L13
-    // (SF-0001): every answer below must echo exactly this id.
-    let proposed = match existing_file_id {
-        Some(listed) => crate::item_id::Proposed::Listed(listed),
-        None => crate::item_id::Proposed::Minted(crate::item_id::mint()),
-    };
-    let file_uuid = proposed.id();
-    let file_key = beebeeb_core::kdf::derive_file_key(&state.master_key, file_uuid.to_string().as_bytes());
-
-    // Encrypt filename (MIME type is now part of the encrypted envelope)
-    let mime = beebeeb_core::media::guess_mime_type(&filename);
-    let name_encrypted =
-        match beebeeb_core::encrypt::encrypt_name(&state.master_key, &file_uuid.to_string(), &filename, mime) {
-            Ok(s) => s,
-            Err(e) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-            }
-        };
-
-    // Encrypt body in chunks using adaptive chunk sizing
-    let plan = beebeeb_types::plan_chunks(body.len() as u64, beebeeb_types::ChunkProfile::Cli);
-    let chunk_size = plan.chunk_size_bytes as usize;
-
-    let chunks_raw: Vec<&[u8]> = if body.is_empty() {
-        vec![&[]]
-    } else {
-        body.chunks(chunk_size).collect()
-    };
-
-    let mut encrypted_chunks: Vec<(u32, Vec<u8>)> = Vec::with_capacity(chunks_raw.len());
-    let mut total_encrypted_size: i64 = 0;
-
-    for (i, chunk) in chunks_raw.iter().enumerate() {
-        let bytes = match beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, chunk) {
-            Ok(b) => b,
-            Err(e) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, format!("encrypt chunk {i}: {e}")).into_response();
-            }
-        };
-        total_encrypted_size += bytes.len() as i64;
-        encrypted_chunks.push((i as u32, bytes));
-    }
-
-    let parent_uuid = parent_id.as_deref().and_then(|s| s.parse::<uuid::Uuid>().ok());
-    let is_media = beebeeb_core::media::is_media(mime);
-    let effective_file_id = Some(file_uuid);
-    let _ = total_encrypted_size; // v2 init takes plaintext size; server recomputes encrypted total
-
-    // On a replace (the path already had a file), pass the existing file's
-    // current version_number as the v2 optimistic-concurrency base so the server
-    // versions by file_id (stale-version → 409).
-    let base_version_number: Option<i32> = if let Some(eid) = existing_file_id {
-        match state.api.get_file(&eid.to_string()).await {
-            // Task 1951: the current version sits in `download_version`.
-            Ok(meta) => Some(crate::api::current_version_number(&meta).unwrap_or(1) as i32),
-            Err(_) => None,
-        }
-    } else {
-        None
-    };
-
-    // V2 upload: init (open session) → chunks (by session) → complete (by session).
-    let init = match state
-        .api
-        .upload_init(
-            effective_file_id,
-            &name_encrypted,
-            parent_uuid,
-            body.len() as i64,
-            chunk_size as i64,
-            encrypted_chunks.len() as i32,
-            is_media,
-            base_version_number,
-        )
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-    };
-
-    // L13 (SF-0001): the init must echo the id this client chose (a fresh one
-    // for a new file, the listed row's for a replace). A different id aborts
-    // before a single chunk is PUT under it.
-    if let Err(e) = proposed.verify(Some(&init.file_id)) {
-        // The session it just opened is not a session for our item: end it
-        // (best effort, by the id WE chose) so it cannot hold a lease over it.
-        let _ = state.api.upload_abandon(&file_uuid.to_string()).await;
-        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-    }
-
-    let session_id = init.upload_session_id.clone();
-
-    for (idx, data) in encrypted_chunks {
-        if let Err(e) = state.api.upload_chunk(&session_id, idx, bytes::Bytes::from(data)).await {
-            return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
-        }
-    }
-
-    match state.api.upload_complete(&session_id).await {
-        Ok(answer) => {
-            // L13 (SF-0001): the completion answer must name the same item.
-            if let Err(e) = proposed.verify(crate::item_id::echoed_id(&answer)) {
-                // End the mislabelled session once, by the id this client chose.
-                let _ = state.api.upload_abandon(&file_uuid.to_string()).await;
-                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-            }
-            let mut headers = HeaderMap::new();
-            headers.insert("Location", path.parse().unwrap_or_else(|_| "/".parse().unwrap()));
-            (StatusCode::CREATED, headers, "").into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-    }
-}
 
 // ─── MKCOL (create folder) ───────────────────────────────────────────────────
 
-async fn mkcol_response(state: &Arc<DavState>, path: &str) -> Response {
-    let folder_name = path
-        .trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .unwrap_or("folder")
-        .to_string();
-    if folder_name.is_empty() {
-        return (StatusCode::METHOD_NOT_ALLOWED, "cannot MKCOL root").into_response();
-    }
-
-    // Resolve parent
-    let parent_path = {
-        let trimmed = path.trim_end_matches('/');
-        match trimmed.rfind('/') {
-            Some(0) => "/",
-            Some(i) => &trimmed[..i],
-            None => "/",
-        }
-    };
-    let parent_id: Option<uuid::Uuid> = if parent_path == "/" {
-        None
-    } else {
-        match resolve_path(state, parent_path).await {
-            Ok(e) if e.is_collection => e.file_id.as_deref().and_then(|s| s.parse().ok()),
-            Ok(_) => return (StatusCode::CONFLICT, "parent is not a folder").into_response(),
-            Err(e) => {
-                return (StatusCode::CONFLICT, format!("parent not found: {e}")).into_response();
-            }
-        }
-    };
-
-    // Check folder doesn't already exist
-    if resolve_path(state, path).await.is_ok() {
-        return (StatusCode::METHOD_NOT_ALLOWED, "already exists").into_response();
-    }
-
-    // The folder name is sealed under the folder's own id. L13 (SF-0001): this
-    // client mints that id; a different echo aborts before the folder is listed
-    // or written into.
-    match crate::item_id::create_owned_folder(&state.api, &state.master_key, &folder_name, parent_id).await {
-        Ok(_) => {
-            // Invalidate parent directory cache
-            invalidate_cache(state, &normalise_cache_key(parent_path)).await;
-            let mut headers = HeaderMap::new();
-            headers.insert("Location", path.parse().unwrap_or_else(|_| "/".parse().unwrap()));
-            (StatusCode::CREATED, headers, "").into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-    }
-}
-
 // ─── DELETE (soft-delete / trash) ────────────────────────────────────────────
-
-async fn delete_response(state: &Arc<DavState>, path: &str, if_match: Option<&str>) -> Response {
-    let resolved = match resolve_path(state, path).await {
-        Ok(r) => r,
-        Err(e) => return (StatusCode::NOT_FOUND, e).into_response(),
-    };
-
-    let file_id = match &resolved.file_id {
-        Some(id) => id.clone(),
-        None => return (StatusCode::METHOD_NOT_ALLOWED, "cannot delete root").into_response(),
-    };
-
-    // If-Match precondition check
-    if let Some(im) = if_match {
-        let current_etag = make_etag(&file_id, resolved.modified.as_deref());
-        if im != "*" && im != current_etag {
-            return (StatusCode::PRECONDITION_FAILED, "ETag mismatch").into_response();
-        }
-    }
-
-    // Invalidate parent directory in cache
-    let parent_path = parent_of(path);
-    invalidate_cache(state, &normalise_cache_key(parent_path)).await;
-
-    match state.api.trash_file(&file_id).await {
-        Ok(_) => (StatusCode::NO_CONTENT, "").into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-    }
-}
 
 // ─── MOVE (rename / reparent) ────────────────────────────────────────────────
 
-async fn move_response(state: &Arc<DavState>, src_path: &str, destination: &str) -> Response {
-    // Strip any http://host prefix from the Destination header to get a bare path
-    let dst_path = if let Some(pos) = destination.find("://") {
-        let after_scheme = &destination[pos + 3..];
-        after_scheme.find('/').map(|i| &after_scheme[i..]).unwrap_or("/")
-    } else {
-        destination
-    };
-
-    let src = match resolve_path(state, src_path).await {
-        Ok(r) => r,
-        Err(e) => return (StatusCode::NOT_FOUND, e).into_response(),
-    };
-    let file_id = match &src.file_id {
-        Some(id) => id.clone(),
-        None => return (StatusCode::FORBIDDEN, "cannot move root").into_response(),
-    };
-
-    // Determine new name and new parent
-    let new_name = dst_path
-        .trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .unwrap_or(&src.display_name)
-        .to_string();
-
-    let dst_parent_path = {
-        let trimmed = dst_path.trim_end_matches('/');
-        match trimmed.rfind('/') {
-            Some(0) => "/",
-            Some(i) => &trimmed[..i],
-            None => "/",
-        }
-    };
-
-    // Resolve source parent for comparison
-    let src_parent_path = {
-        let trimmed = src_path.trim_end_matches('/');
-        match trimmed.rfind('/') {
-            Some(0) => "/",
-            Some(i) => &trimmed[..i],
-            None => "/",
-        }
-    };
-
-    let same_parent = src_parent_path == dst_parent_path;
-
-    // Compute new_name_encrypted if the name changed
-    let new_name_encrypted = if new_name != src.display_name {
-        let mime_for_rename = if src.is_collection {
-            None
-        } else {
-            beebeeb_core::media::guess_mime_type(&new_name)
-        };
-        match beebeeb_core::encrypt::encrypt_name(&state.master_key, &file_id, &new_name, mime_for_rename) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-            }
-        }
-    } else {
-        None
-    };
-
-    // Resolve only changed, non-root destinations; lookup failure cannot mean root.
-    let destination_parent = if !same_parent && !dst_parent_path.trim_matches('/').is_empty() {
-        match resolve_path(state, dst_parent_path).await {
-            Ok(entry) => Some(entry),
-            Err(e) => {
-                return (StatusCode::CONFLICT, format!("destination parent not found: {e}")).into_response();
-            }
-        }
-    } else {
-        None
-    };
-    let patch_parent = match move_parent_target(same_parent, dst_parent_path, destination_parent.as_ref()) {
-        Ok(target) => target,
-        Err(e) => {
-            use super::move_target::ParentError;
-            let status = match e {
-                ParentError::NotFound | ParentError::NotFolder => StatusCode::CONFLICT,
-                ParentError::MissingId | ParentError::InvalidId => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            return (status, e.to_string()).into_response();
-        }
-    };
-
-    match state
-        .api
-        .move_file(&file_id, new_name_encrypted.as_deref(), patch_parent)
-        .await
-    {
-        Ok(_) => {
-            // Invalidate both source and destination parent directories
-            invalidate_cache(state, &normalise_cache_key(src_parent_path)).await;
-            invalidate_cache(state, &normalise_cache_key(dst_parent_path)).await;
-            (StatusCode::CREATED, "").into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-    }
-}
-
-fn move_parent_target(
-    same_parent: bool,
-    parent_path: &str,
-    entry: Option<&ResolvedEntry>,
-) -> Result<Option<Option<Uuid>>, super::move_target::ParentError> {
-    use super::move_target::{DestinationParent, parent_target};
-    let target = if parent_path.trim_matches('/').is_empty() {
-        DestinationParent::Root
-    } else {
-        match entry {
-            Some(e) if e.is_collection => DestinationParent::Folder(e.file_id.as_deref()),
-            Some(_) => DestinationParent::NotFolder,
-            None => DestinationParent::Missing,
-        }
-    };
-    parent_target(!same_parent, target)
-}
-
 // ─── LOCK ─────────────────────────────────────────────────────────────────────
-
-/// Parse the lock scope from the LOCK request XML body.
-/// Returns `(exclusive, owner_string)` — tolerant of malformed bodies.
-fn parse_lock_body(body: &[u8]) -> (bool, String) {
-    let text = std::str::from_utf8(body).unwrap_or("");
-    // Extract exclusivity from the XML (simple string search — no full XML parse)
-    let exclusive = !text.contains("shared");
-    // Try to extract owner from <D:owner><D:href>...</D:href></D:owner>
-    let owner = if let Some(start) = text.find("<D:href>") {
-        let after = &text[start + 8..];
-        if let Some(end) = after.find("</D:href>") {
-            after[..end].trim().to_string()
-        } else {
-            "unknown".to_string()
-        }
-    } else {
-        "client".to_string()
-    };
-    (exclusive, owner)
-}
-
-/// Parse `Timeout: Second-N` or `Timeout: Infinite` header.
-fn parse_timeout_header(headers: &HeaderMap) -> u64 {
-    headers
-        .get("timeout")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Second-").and_then(|rest| rest.parse::<u64>().ok()))
-        .unwrap_or(300) // 5 minutes default
-}
-
-/// Parse `If: (<urn:uuid:TOKEN>)` header and return the raw token string.
-fn parse_if_token(if_header: &str) -> Option<String> {
-    // Format: (<urn:uuid:...>) or (<urn:uuid:...> [etag])
-    let inner = if_header.trim().trim_start_matches('(').trim_end_matches(')');
-    if inner.is_empty() {
-        return None;
-    }
-    // Take the first bracketed token
-    let token = inner.split_whitespace().next()?;
-    Some(token.trim_matches(|c: char| c == '<' || c == '>').to_string())
-}
-
-/// LOCK /path — issue a synthetic lock token.
-async fn lock_response(state: &Arc<DavState>, path: &str, body: &[u8], timeout_secs: u64) -> Response {
-    let (exclusive, owner) = parse_lock_body(body);
-    let token_uuid = Uuid::new_v4();
-    let token = format!("urn:uuid:{token_uuid}");
-    let scope_label = if exclusive { "exclusive" } else { "shared" };
-
-    // Clean up expired locks lazily
-    {
-        let mut locks = state.locks.lock().await;
-        locks.retain(|_, v| v.expires_at > Instant::now());
-        // Check for conflict: existing exclusive lock on same path
-        if let Some(existing) = locks.get(path) {
-            if existing.expires_at > Instant::now() && existing.exclusive {
-                return (StatusCode::LOCKED, "resource is already exclusively locked").into_response();
-            }
-        }
-        locks.insert(
-            path.to_string(),
-            LockEntry {
-                token: token.clone(),
-                owner: owner.clone(),
-                exclusive,
-                expires_at: Instant::now() + Duration::from_secs(timeout_secs),
-            },
-        );
-    }
-
-    let href = xml_escape(path);
-    let owner_escaped = xml_escape(&owner);
-    let body = format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-         <D:prop xmlns:D=\"DAV:\">\n\
-           <D:lockdiscovery>\n\
-             <D:activelock>\n\
-               <D:locktype><D:write/></D:locktype>\n\
-               <D:lockscope><D:{scope_label}/></D:lockscope>\n\
-               <D:depth>0</D:depth>\n\
-               <D:owner><D:href>{owner_escaped}</D:href></D:owner>\n\
-               <D:timeout>Second-{timeout_secs}</D:timeout>\n\
-               <D:locktoken><D:href>{token}</D:href></D:locktoken>\n\
-               <D:lockroot><D:href>{href}</D:href></D:lockroot>\n\
-             </D:activelock>\n\
-           </D:lockdiscovery>\n\
-         </D:prop>"
-    );
-
-    let lock_token_header = format!("<{token}>");
-    let mut headers = HeaderMap::new();
-    headers.insert("Content-Type", "application/xml; charset=utf-8".parse().unwrap());
-    headers.insert(
-        "Lock-Token",
-        lock_token_header.parse().unwrap_or_else(|_| "".parse().unwrap()),
-    );
-    (StatusCode::OK, headers, body).into_response()
-}
-
-/// UNLOCK /path — remove the lock identified by the Lock-Token header.
-async fn unlock_response(state: &Arc<DavState>, path: &str, lock_token_header: &str) -> Response {
-    // Extract the URN from the angle-bracket wrapper: <urn:uuid:...>
-    let token = lock_token_header.trim().trim_matches(|c| c == '<' || c == '>');
-
-    let mut locks = state.locks.lock().await;
-    if let Some(entry) = locks.get(path) {
-        if entry.token == token {
-            locks.remove(path);
-            return (StatusCode::NO_CONTENT, "").into_response();
-        }
-        // Token mismatch — still return 204 (permissive stub)
-    }
-    // Lock not found — return 204 anyway (idempotent)
-    (StatusCode::NO_CONTENT, "").into_response()
-}
-
-/// Verify that a locked resource's token matches what the client provided.
-///
-/// If the resource is not locked, the request proceeds normally (no lock needed).
-/// If the resource IS locked and the client provides no/wrong token → 423 Locked.
-/// If the resource IS locked and the client provides the correct token → OK.
-///
-/// This is permissive: if the lock has expired, we treat it as unlocked.
-async fn check_lock(state: &Arc<DavState>, path: &str, client_token: Option<&str>) -> Result<(), Response> {
-    let mut locks = state.locks.lock().await;
-    let entry = match locks.get(path) {
-        Some(e) => e.clone(),
-        None => return Ok(()), // not locked
-    };
-
-    if entry.expires_at <= Instant::now() {
-        locks.remove(path); // expired
-        return Ok(());
-    }
-
-    match client_token {
-        Some(tok) if tok == entry.token => Ok(()),
-        Some(_) => Err((StatusCode::LOCKED, "lock token mismatch").into_response()),
-        None => Err((StatusCode::LOCKED, "resource is locked — provide If: (<token>) header").into_response()),
-    }
-}
 
 // ─── Path cache helpers ───────────────────────────────────────────────────────
 
-/// Check whether a WebDAV path targets a macOS/Windows metadata file that
-/// should never be stored in the vault.
-fn is_os_metadata_path(path: &str) -> bool {
-    let filename = path.trim_end_matches('/').rsplit('/').next().unwrap_or(path);
-    if filename.is_empty() {
-        return false;
-    }
-    matches!(
-        filename,
-        ".DS_Store"
-            | ".Spotlight-V100"
-            | ".Trashes"
-            | "Thumbs.db"
-            | "desktop.ini"
-            | ".hidden"
-            | ".metadata_never_index"
-            | ".metadata_never_index_unless_rootfs"
-            | ".metadata_direct_scope_only"
-            | ".ql_disablethumbnails"
-            | ".ql_disablecache"
-    ) || filename.starts_with("._")
-}
-
-fn normalise_cache_key(path: &str) -> String {
-    let t = path.trim_end_matches('/');
-    if t.is_empty() { "/".to_string() } else { t.to_string() }
-}
-
-fn parent_of(path: &str) -> &str {
-    let trimmed = path.trim_end_matches('/');
-    match trimmed.rfind('/') {
-        Some(0) => "/",
-        Some(i) => &trimmed[..i],
-        None => "/",
-    }
-}
-
-async fn get_from_cache(state: &DavState, key: &str) -> Option<Vec<ResolvedEntry>> {
-    if state.cache_ttl.is_zero() {
-        return None;
-    }
-    let cache = state.dir_cache.lock().await;
-    if let Some(entry) = cache.get(key) {
-        if entry.cached_at.elapsed() < state.cache_ttl {
-            return Some(entry.children.clone());
-        }
-    }
-    None
-}
-
-async fn store_in_cache(state: &DavState, key: String, children: Vec<ResolvedEntry>) {
-    if state.cache_ttl.is_zero() {
-        return;
-    }
-    let mut cache = state.dir_cache.lock().await;
-    cache.insert(
-        key,
-        CachedDir {
-            children,
-            cached_at: Instant::now(),
-        },
-    );
-}
-
-async fn invalidate_cache(state: &DavState, key: &str) {
-    let mut cache = state.dir_cache.lock().await;
-    cache.remove(key);
-}
-
 // ─── ETag helpers ─────────────────────────────────────────────────────────────
-
-/// Produce a quoted ETag string for a file.
-///
-/// Format: `"<file_id>-<modified_epoch>"` — changes on every overwrite
-/// (new file_id) and also when modified_at changes.
-fn make_etag(file_id: &str, modified: Option<&str>) -> String {
-    let suffix = modified
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .map(|dt| dt.timestamp().to_string())
-        .unwrap_or_default();
-    if suffix.is_empty() {
-        format!("\"{file_id}\"")
-    } else {
-        format!("\"{file_id}-{suffix}\"")
-    }
-}
 
 // ─── Path resolution ─────────────────────────────────────────────────────────
 
-/// A resolved vault entry (file or collection).
-#[derive(Clone)]
-struct ResolvedEntry {
-    file_id: Option<String>,
-    display_name: String,
-    is_collection: bool,
-    size_bytes: Option<u64>,
-    chunk_count: u32,
-    modified: Option<String>,
-    /// The content's read pin from the file's authenticated metadata
-    /// (`crypto::content_pin`, task 1943). `Err` for a collection, or for a file
-    /// whose metadata cannot be read (its content is then refused, never guessed).
-    pin: Result<beebeeb_core::chunk_stream::ExpectedChunkFormat, String>,
-}
-
-/// What a collection carries in [`ResolvedEntry::pin`].
-fn no_content() -> Result<beebeeb_core::chunk_stream::ExpectedChunkFormat, String> {
-    Err("a collection has no content".to_string())
-}
-
-/// Decode a single API file object into a `ResolvedEntry`.
-fn decode_file_entry(
-    file: &serde_json::Value,
-    master_key: &beebeeb_core::kdf::MasterKey,
-    _parent_href: &str,
-) -> Option<ResolvedEntry> {
-    let file_id = file.get("id")?.as_str()?.to_string();
-    let is_folder = file.get("is_folder").and_then(|v| v.as_bool()).unwrap_or(false);
-    let size_bytes = file.get("size_bytes").and_then(|v| v.as_u64());
-    let chunk_count = file.get("chunk_count").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
-    let modified = file.get("updated_at").and_then(|v| v.as_str()).map(|s| s.to_string());
-
-    // Decrypt name
-    let name_encrypted = file.get("name_encrypted").and_then(|v| v.as_str())?;
-    let display_name =
-        decrypt_name(master_key, &file_id, name_encrypted).unwrap_or_else(|| format!("[{}]", &file_id[..8]));
-    let pin = if is_folder {
-        no_content()
-    } else {
-        crate::crypto::content_pin(master_key, &file_id, name_encrypted)
-    };
-
-    Some(ResolvedEntry {
-        file_id: Some(file_id),
-        display_name,
-        is_collection: is_folder,
-        size_bytes,
-        chunk_count,
-        modified,
-        pin,
-    })
-}
-
-/// Resolve a WebDAV path like `/Documents/2025/report.pdf` to a vault entry.
-///
-/// Walks the vault tree one segment at a time, decrypting folder names at each
-/// level to find the matching child. O(depth × breadth) — no cache yet (Day 4).
-async fn resolve_path(state: &Arc<DavState>, path: &str) -> Result<ResolvedEntry, String> {
-    // Normalise: strip leading slash, trim trailing slash
-    let trimmed = path.trim_start_matches('/').trim_end_matches('/');
-
-    if trimmed.is_empty() {
-        // Root
-        return Ok(ResolvedEntry {
-            file_id: None,
-            display_name: "vault".to_string(),
-            is_collection: true,
-            size_bytes: None,
-            chunk_count: 0,
-            modified: None,
-            pin: no_content(),
-        });
-    }
-
-    let segments: Vec<&str> = trimmed.split('/').collect();
-    let mut current_parent: Option<String> = None; // None = root
-
-    for (i, segment) in segments.iter().enumerate() {
-        let is_last = i == segments.len() - 1;
-
-        // List children of current_parent
-        let resp = state
-            .api
-            .list_files(current_parent.as_deref())
-            .await
-            .map_err(|e| format!("list failed: {e}"))?;
-
-        let files = resp
-            .get("files")
-            .and_then(|f| f.as_array())
-            .ok_or("malformed files response")?;
-
-        // Find the child whose decrypted name matches the path segment
-        let mut matched: Option<ResolvedEntry> = None;
-        for file in files {
-            if let Some(entry) = decode_file_entry(file, &state.master_key, "") {
-                let decoded_segment = crate::path::percent_decode(segment);
-                if entry.display_name.to_lowercase() == decoded_segment.to_lowercase() {
-                    matched = Some(entry);
-                    break;
-                }
-            }
-        }
-
-        let entry = matched.ok_or_else(|| format!("'{segment}' not found"))?;
-
-        if is_last {
-            return Ok(entry);
-        }
-
-        // Must be a folder to descend into
-        if !entry.is_collection {
-            return Err(format!("'{segment}' is a file, not a folder"));
-        }
-        current_parent = entry.file_id;
-    }
-
-    Err("empty path after trimming".to_string())
-}
-
 // ─── Decryption helpers ───────────────────────────────────────────────────────
 
-fn decrypt_name(master_key: &beebeeb_core::kdf::MasterKey, file_id: &str, name_encrypted: &str) -> Option<String> {
-    crate::crypto::decrypt_name(master_key, file_id, name_encrypted)
-}
-
 // ─── XML helpers ─────────────────────────────────────────────────────────────
-
-fn child_href(parent: &str, name: &str, is_dir: bool) -> String {
-    let parent = parent.trim_end_matches('/');
-    let suffix = if is_dir { "/" } else { "" };
-    let encoded = percent_encode(name.as_bytes(), NON_ALPHANUMERIC).to_string();
-    format!("{parent}/{encoded}{suffix}")
-}
-
-fn prop_entry(href: &str, entry: &ResolvedEntry) -> String {
-    let display_name = xml_escape(&entry.display_name);
-    let resource_type = if entry.is_collection {
-        "<D:resourcetype><D:collection/></D:resourcetype>".to_string()
-    } else {
-        "<D:resourcetype/>".to_string()
-    };
-
-    let content_length = entry
-        .size_bytes
-        .map(|s| format!("<D:getcontentlength>{s}</D:getcontentlength>"))
-        .unwrap_or_default();
-
-    let last_modified = entry
-        .modified
-        .as_deref()
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .map(|dt| {
-            format!(
-                "<D:getlastmodified>{}</D:getlastmodified>",
-                dt.format("%a, %d %b %Y %H:%M:%S GMT")
-            )
-        })
-        .unwrap_or_default();
-
-    // ETag for PROPFIND responses (helps clients detect modifications)
-    let etag_prop = entry
-        .file_id
-        .as_deref()
-        .map(|fid| {
-            let etag = make_etag(fid, entry.modified.as_deref());
-            format!("<D:getetag>{}</D:getetag>", xml_escape(&etag))
-        })
-        .unwrap_or_default();
-
-    // Content-Type for non-folders
-    let content_type = if !entry.is_collection {
-        let mime = resolve_mime(&entry.display_name);
-        format!("<D:getcontenttype>{mime}</D:getcontenttype>")
-    } else {
-        "<D:getcontenttype>httpd/unix-directory</D:getcontenttype>".to_string()
-    };
-
-    let href_escaped = xml_escape(href);
-
-    format!(
-        "  <D:response>\n\
-             <D:href>{href_escaped}</D:href>\n\
-             <D:propstat>\n\
-               <D:prop>\n\
-                 <D:displayname>{display_name}</D:displayname>\n\
-                 {resource_type}\n\
-                 {content_length}\n\
-                 {last_modified}\n\
-                 {etag_prop}\n\
-                 {content_type}\n\
-               </D:prop>\n\
-               <D:status>HTTP/1.1 200 OK</D:status>\n\
-             </D:propstat>\n\
-           </D:response>"
-    )
-}
-
-fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
-
-/// Resolve a MIME type for a filename using the mime_guess crate.
-/// Falls back to application/octet-stream for unknown extensions.
-fn resolve_mime(filename: &str) -> String {
-    mime_guess::from_path(filename).first_or_octet_stream().to_string()
-}
 
 #[cfg(test)]
 mod parent_target_tests {
@@ -1470,12 +98,20 @@ mod parent_target_tests {
     fn folder(id: Option<&str>) -> ResolvedEntry {
         ResolvedEntry {
             file_id: id.map(str::to_owned),
+            parent_id: None,
+            plaintext_name: false,
             display_name: "Target".into(),
             is_collection: true,
             size_bytes: None,
             chunk_count: 0,
             modified: None,
             pin: no_content(),
+            read_only: false,
+            key: None,
+            read_only_reason: None,
+            write_target: None,
+            rename_target: None,
+            origin: beebeeb_core::owned_keys::KeyOrigin::Derived,
         }
     }
 
@@ -1528,34 +164,56 @@ mod parent_target_tests {
         };
         use serde_json::json;
         use std::sync::atomic::{AtomicUsize, Ordering};
+        // 2275 L12: only a canonical id resolves, so a destination row with an
+        // invalid id is an unresolvable parent - 409 "destination parent not
+        // found", never a 500 and never a PATCH.
         for (id, status) in [
-            (json!("not-a-uuid"), StatusCode::INTERNAL_SERVER_ERROR),
-            (json!(""), StatusCode::INTERNAL_SERVER_ERROR),
+            (json!("not-a-uuid"), StatusCode::CONFLICT),
+            (json!(""), StatusCode::CONFLICT),
             (serde_json::Value::Null, StatusCode::CONFLICT),
         ] {
             let patches = Arc::new(AtomicUsize::new(0));
             let reads = Arc::new(AtomicUsize::new(0));
             let get_reads = reads.clone();
             let patch_count = patches.clone();
+            // 2275 L12: an owner (v4) file's name is sealed under the key its id
+            // derives; a plaintext name would make the row unreadable.
+            let src = "33333333-3333-4333-8333-33333333333c";
+            let src_key =
+                beebeeb_core::kdf::derive_file_key(&beebeeb_core::kdf::MasterKey::from_bytes([0; 32]), src.as_bytes());
+            let src_name = beebeeb_core::encrypt::encrypt_name_for(
+                &src_key,
+                "file.txt",
+                None,
+                beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+            )
+            .unwrap();
             let app = Router::new()
-                .route("/api/v1/files", get(move || {
-                    let id = id.clone();
-                    let reads = get_reads.clone();
-                    async move {
-                        reads.fetch_add(1, Ordering::SeqCst);
-                        Json(json!({"files": [
-                            {"id": "33333333-3333-4333-8333-333333333333", "name_encrypted": "file.txt", "is_folder": false},
-                            {"id": id, "name_encrypted": "Target", "is_folder": true}
-                        ]}))
-                    }
-                }))
-                .route("/api/v1/files/:id", patch(move || {
-                    let count = patch_count.clone();
-                    async move {
-                        count.fetch_add(1, Ordering::SeqCst);
-                        Json(json!({"ok": true}))
-                    }
-                }));
+                .route(
+                    "/api/v1/files",
+                    get(move || {
+                        let id = id.clone();
+                        let reads = get_reads.clone();
+                        let src_name = src_name.clone();
+                        async move {
+                            reads.fetch_add(1, Ordering::SeqCst);
+                            Json(json!({"files": [
+                                {"id": src, "name_encrypted": src_name, "is_folder": false},
+                                {"id": id, "name_encrypted": "Target", "is_folder": true}
+                            ]}))
+                        }
+                    }),
+                )
+                .route(
+                    "/api/v1/files/:id",
+                    patch(move || {
+                        let count = patch_count.clone();
+                        async move {
+                            count.fetch_add(1, Ordering::SeqCst);
+                            Json(json!({"ok": true}))
+                        }
+                    }),
+                );
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let state = Arc::new(DavState {
                 api: ApiClient::new_for_test(format!("http://{}", listener.local_addr().unwrap())),
@@ -1607,6 +265,407 @@ mod windows_hint_tests {
             assert!(WINDOWS_EXPLORER_HINT.contains(needle), "hint lacks {needle:?}");
         }
         assert_eq!(windows_explorer_hint().is_some(), cfg!(windows));
+    }
+}
+
+/// SF-0002 round 2: WebDAV asks the one write check before a PUT-overwrite or a
+/// rename. These run the real handlers against an in-process API mock that
+/// counts every request that is not a GET (a write).
+#[cfg(test)]
+mod sf_0002_write_check_tests {
+    use super::*;
+    use axum::{Json, routing::get};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
+
+    const OWNED: &str = "11111111-1111-4111-8111-111111111111";
+
+    fn master() -> beebeeb_core::kdf::MasterKey {
+        beebeeb_core::kdf::MasterKey::from_bytes([7u8; 32])
+    }
+
+    /// A root-level file row: `name` and its single legacy frame sealed under `key`.
+    fn file_row(id: &str, name: &str, key: &beebeeb_core::kdf::FileKey, plaintext: &[u8]) -> serde_json::Value {
+        let sealed = beebeeb_core::encrypt::encrypt_name_for(
+            key,
+            name,
+            Some("text/plain"),
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+        )
+        .unwrap();
+        json!({"id": id, "parent_id": null, "name_encrypted": sealed, "is_folder": false,
+               "size_bytes": plaintext.len(), "chunk_count": 1, "updated_at": "2026-10-31T10:00:00Z"})
+    }
+
+    struct Mock {
+        state: Arc<DavState>,
+        download_status: Arc<AtomicU16>,
+        downloads: Arc<AtomicUsize>,
+        writes: Arc<AtomicUsize>,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    async fn mock(rows: Vec<serde_json::Value>, frame: Vec<u8>) -> Mock {
+        let download_status = Arc::new(AtomicU16::new(200));
+        let downloads = Arc::new(AtomicUsize::new(0));
+        let writes = Arc::new(AtomicUsize::new(0));
+        let (status, served, written) = (download_status.clone(), downloads.clone(), writes.clone());
+        let app = Router::new()
+            .route(
+                "/api/v1/files",
+                get(move || {
+                    let rows = rows.clone();
+                    async move { Json(json!({ "files": rows })) }
+                }),
+            )
+            .route(
+                "/api/v1/files/:id/download",
+                get(move || {
+                    let (frame, status, served) = (frame.clone(), status.clone(), served.clone());
+                    async move {
+                        served.fetch_add(1, Ordering::SeqCst);
+                        match status.load(Ordering::SeqCst) {
+                            200 => frame.into_response(),
+                            s => StatusCode::from_u16(s).unwrap().into_response(),
+                        }
+                    }
+                }),
+            )
+            .fallback(move |req: Request| {
+                let written = written.clone();
+                async move {
+                    if req.method() != Method::GET {
+                        written.fetch_add(1, Ordering::SeqCst);
+                    }
+                    (StatusCode::INTERNAL_SERVER_ERROR, "mock: unhandled")
+                }
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let state = Arc::new(DavState {
+            api: ApiClient::new_for_test(format!("http://{}", listener.local_addr().unwrap())),
+            master_key: master(),
+            read_only: false,
+            dir_cache: Mutex::new(HashMap::new()),
+            cache_ttl: Duration::ZERO,
+            locks: Mutex::new(HashMap::new()),
+            request_count: std::sync::atomic::AtomicU64::new(0),
+            error_count: std::sync::atomic::AtomicU64::new(0),
+            verbose: false,
+        });
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        Mock {
+            state,
+            download_status,
+            downloads,
+            writes,
+            server,
+        }
+    }
+
+    async fn body_text(r: Response) -> String {
+        String::from_utf8_lossy(&axum::body::to_bytes(r.into_body(), 4096).await.unwrap()).into_owned()
+    }
+
+    /// C1: a 5xx probe refuses a PUT-overwrite and a rename with 503 and the
+    /// retryable message, and no write is sent. With the version readable, the
+    /// same PUT gets past the check (it reaches the upload init).
+    #[tokio::test]
+    async fn put_and_rename_refuse_with_503_when_the_check_cannot_read_the_version() {
+        let key = beebeeb_core::kdf::derive_file_key(&master(), OWNED.as_bytes());
+        let plaintext = b"an ordinary owner file";
+        let frame = beebeeb_core::encrypt::encrypt_chunk_raw(&key, plaintext).unwrap();
+        let m = mock(vec![file_row(OWNED, "owned.txt", &key, plaintext)], frame).await;
+        m.download_status.store(503, Ordering::SeqCst);
+
+        let put = put_response(&m.state, "/owned.txt", b"edited".to_vec(), None).await;
+        assert_eq!(put.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body_text(put).await, crate::owned_keys::WRITE_CHECK_UNKNOWN);
+        let rename = move_response(&m.state, "/owned.txt", "/renamed.txt").await;
+        assert_eq!(rename.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(m.writes.load(Ordering::SeqCst), 0, "a refused write sent a request");
+        assert_eq!(m.downloads.load(Ordering::SeqCst), 2, "each write asked the check once");
+
+        m.download_status.store(200, Ordering::SeqCst);
+        let put = put_response(&m.state, "/owned.txt", b"edited".to_vec(), None).await;
+        assert_ne!(put.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_ne!(put.status(), StatusCode::FORBIDDEN);
+        assert!(
+            m.writes.load(Ordering::SeqCst) >= 1,
+            "a readable ordinary row must get past the check to the upload"
+        );
+        m.server.abort();
+    }
+
+    /// N3 (P3): a request row whose name was sealed under the legacy BINARY
+    /// convention lists by its real name. Re-deriving the string convention
+    /// would lose it and show `[xxxxxxxx]`.
+    #[tokio::test]
+    async fn a_request_row_named_under_the_binary_convention_lists_its_real_name() {
+        use beebeeb_core::chunk_stream::ExpectedChunkFormat;
+        const REQUEST: &str = "33333333-3333-4333-8333-333333333333";
+        let binary = beebeeb_core::kdf::derive_file_key(&master(), Uuid::parse_str(REQUEST).unwrap().as_bytes());
+        let sealed =
+            beebeeb_core::encrypt::encrypt_name_for(&binary, "renamed.txt", None, ExpectedChunkFormat::Unrecorded)
+                .unwrap();
+        let row = json!({"id": REQUEST, "parent_id": null, "name_encrypted": sealed, "is_folder": false,
+               "size_bytes": 12, "chunk_count": 1, "updated_at": "2026-10-31T10:00:00Z",
+               "file_request_id": REQUEST, "sender_ephemeral_pubkey": "AA", "wrapped_content_key": "AA"});
+        let entry = decode_file_entry(&row, &master(), "", None).expect("the row decodes");
+        assert_eq!(entry.display_name, "renamed.txt");
+        let key = entry.key.expect("core resolved the name key");
+        assert_eq!(
+            beebeeb_core::encrypt::decrypt_name_metadata_with_key(&key, &sealed)
+                .unwrap()
+                .name,
+            "renamed.txt"
+        );
+    }
+
+    /// N1 (P2): a v2-pinned file whose name envelope the server swapped for
+    /// plain text carries no readable pin. Reading it as `Unrecorded` would let
+    /// the server re-enable frame-0 detection for a v2 file (core round 3,
+    /// P1-B); pull refuses such a row, so a WebDAV GET refuses it too.
+    #[tokio::test]
+    async fn a_v2_file_whose_name_is_plain_text_is_refused_on_read() {
+        use beebeeb_core::chunk_stream::{ChunkEncryptor, ExpectedChunkFormat};
+        const PLAINTEXT_NAME: &str = "owned.txt";
+        let key = beebeeb_core::kdf::derive_file_key(&master(), OWNED.as_bytes());
+        let plaintext = b"v2 content under an owner key";
+        let mut row = file_row(OWNED, PLAINTEXT_NAME, &key, plaintext);
+        // The server swapped the authenticated name for plain text.
+        row["name_encrypted"] = json!(PLAINTEXT_NAME);
+        let mut enc = ChunkEncryptor::from_reader_with_file_key(
+            key,
+            OWNED,
+            plaintext.len() as u64,
+            plaintext.len() as u64,
+            std::io::Cursor::new(plaintext.to_vec()),
+        )
+        .unwrap()
+        .with_recorded_pin(ExpectedChunkFormat::V2)
+        .unwrap();
+        let mut frame = Vec::new();
+        while let Some(chunk) = enc.next_chunk().unwrap() {
+            frame.extend_from_slice(&chunk.data);
+        }
+        enc.finish().unwrap();
+        let m = mock(vec![row], frame).await;
+
+        let response = get_response(&m.state, &format!("/{PLAINTEXT_NAME}"), &HeaderMap::new()).await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_text(response).await;
+        assert!(
+            body.contains("refusing to guess") && body.contains(OWNED),
+            "the plaintext name carries no pin, so the read refuses: {body}"
+        );
+        assert_eq!(m.downloads.load(Ordering::SeqCst), 0, "refused before downloading");
+        m.server.abort();
+    }
+
+    /// C5: the owner-wrap-of-uppercase row `bb mv` refuses
+    /// (`owner_read_repair::an_owner_wrap_of_the_uppercase_key_is_read_only`) is
+    /// refused here as well: 403 by its name, no probe, no write.
+    ///
+    /// 2275 L12: an owner item's key comes from its id, so a served L8 envelope
+    /// for an owner id is ignored (and core refuses to build one); the row is
+    /// read-only because its name is sealed under the uppercase repair
+    /// convention, not because of a wrap.
+    #[tokio::test]
+    async fn an_owner_wrap_of_the_uppercase_key_is_read_only() {
+        const UPPER: &str = "5f0c2a9e-3b1d-4c7e-9a2f-6d8e1b4c7a30";
+        let upper = beebeeb_core::kdf::derive_file_key(&master(), UPPER.to_ascii_uppercase().as_bytes());
+        let plaintext = b"SF-0002 read-only repair content";
+        let mut row = file_row(UPPER, "uppercase-repair.pdf", &upper, plaintext);
+        row["owner_wrapped_file_key"] = serde_json::Value::Null;
+        let frame = beebeeb_core::encrypt::encrypt_chunk_raw(&upper, plaintext).unwrap();
+        let m = mock(vec![row], frame).await;
+        m.download_status.store(503, Ordering::SeqCst);
+
+        let put = put_response(&m.state, "/uppercase-repair.pdf", b"edited".to_vec(), None).await;
+        assert_eq!(put.status(), StatusCode::FORBIDDEN);
+        assert_eq!(body_text(put).await, crate::crypto::OWNER_REPAIR_READ_ONLY);
+        let rename = move_response(&m.state, "/uppercase-repair.pdf", "/renamed.pdf").await;
+        assert_eq!(rename.status(), StatusCode::FORBIDDEN);
+        assert_eq!(m.writes.load(Ordering::SeqCst), 0, "a refused write sent a request");
+        assert_eq!(m.downloads.load(Ordering::SeqCst), 0, "the name decides; no probe");
+        m.server.abort();
+    }
+}
+
+/// A9 + L13 (P1): a WebDAV MOVE of a pre-2236 request row. Reading its current
+/// name still uses the content key `C` (the uploader's key); the NEW name is
+/// sealed under the string-convention key derived from the row id, never under
+/// `C` — otherwise the anonymous uploader and the server could read the
+/// owner's new name.
+#[cfg(test)]
+mod a9_request_rename_tests {
+    use super::*;
+    use axum::extract::Path;
+    use axum::{Json, routing::get};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const SUB: &str = "33333333-3333-4333-8333-333333333333";
+    const BODY: &[u8] = b"request body";
+    const B64: base64::engine::general_purpose::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+
+    fn master() -> beebeeb_core::kdf::MasterKey {
+        beebeeb_core::kdf::MasterKey::from_bytes([7u8; 32])
+    }
+    fn content_key() -> beebeeb_core::kdf::FileKey {
+        beebeeb_core::kdf::FileKey::from_bytes([160u8; 32])
+    }
+
+    struct RenameMock {
+        state: Arc<DavState>,
+        patches: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        writes: Arc<AtomicUsize>,
+        /// The row's current name envelope (sealed under `C`) and its content.
+        sealed_name: String,
+        frame: Vec<u8>,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    /// A pre-2236 request row: the R5 legacy request envelope (empty wrap and
+    /// seal contexts), its NAME and its content both sealed under `C`.
+    async fn rename_mock() -> RenameMock {
+        let private = [31u8; 32];
+        let public = beebeeb_core::opaque::derive_x25519_public(&private);
+        let (wrapped, nonce) = beebeeb_core::file_request::wrap_request_private(&master(), b"", &private).unwrap();
+        let seal = beebeeb_core::file_request::seal_to_request(&public, b"", content_key().as_bytes()).unwrap();
+        let sealed_name =
+            serde_json::to_string(&beebeeb_core::encrypt::encrypt_metadata(&content_key(), "request.txt").unwrap())
+                .unwrap();
+        let rows = vec![json!({
+            "id": SUB, "parent_id": null, "name_encrypted": sealed_name,
+            "is_folder": false, "size_bytes": BODY.len(), "chunk_count": 1,
+            "updated_at": "2026-11-01T10:00:00Z",
+            "file_request_id": SUB,
+            "sender_ephemeral_pubkey": B64.encode(seal.e_pub),
+            "wrapped_content_key": B64.encode(seal.wrapped_key),
+        })];
+        let requests_doc = json!({"file_requests": [{"id": SUB, "wrapped_private_key": B64.encode(wrapped), "wrap_nonce": B64.encode(nonce)}]});
+        let frame = beebeeb_core::encrypt::encrypt_chunk_raw(&content_key(), BODY).unwrap();
+        let served_frame = frame.clone();
+
+        let patches = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writes = Arc::new(AtomicUsize::new(0));
+        let recorded = patches.clone();
+        let counted = writes.clone();
+        let app = Router::new()
+            .route(
+                "/api/v1/files",
+                get(move || {
+                    let rows = rows.clone();
+                    async move { Json(json!({ "files": rows })) }
+                }),
+            )
+            .route(
+                "/api/v1/file-requests",
+                get(move || {
+                    let doc = requests_doc.clone();
+                    async move { Json(doc) }
+                }),
+            )
+            .route(
+                "/api/v1/files/:id/download",
+                get(move || {
+                    let frame = served_frame.clone();
+                    async move { axum::body::Body::from(frame) }
+                }),
+            )
+            .route(
+                "/api/v1/files/:id",
+                axum::routing::patch(
+                    |State(p): State<Arc<std::sync::Mutex<Vec<serde_json::Value>>>>,
+                     Path(fid): Path<String>,
+                     Json(body): Json<serde_json::Value>| async move {
+                        p.lock().unwrap().push(json!({ "id": fid, "body": body }));
+                        Json(json!({ "id": fid })).into_response()
+                    },
+                )
+                .with_state(recorded),
+            )
+            .fallback(move |req: Request| {
+                let counted = counted.clone();
+                async move {
+                    if req.method() != Method::GET {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                    }
+                    (StatusCode::INTERNAL_SERVER_ERROR, "mock: unhandled").into_response()
+                }
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let state = Arc::new(DavState {
+            api: ApiClient::new_for_test(format!("http://{}", listener.local_addr().unwrap())),
+            master_key: master(),
+            read_only: false,
+            dir_cache: Mutex::new(HashMap::new()),
+            cache_ttl: Duration::ZERO,
+            locks: Mutex::new(HashMap::new()),
+            request_count: std::sync::atomic::AtomicU64::new(0),
+            error_count: std::sync::atomic::AtomicU64::new(0),
+            verbose: false,
+        });
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        RenameMock {
+            state,
+            patches,
+            writes,
+            sealed_name,
+            frame,
+            server,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_move_seals_a_pre_2236_request_rows_new_name_under_the_string_key() {
+        use beebeeb_core::chunk_stream::ExpectedChunkFormat;
+        let m = rename_mock().await;
+        let response = move_response(&m.state, "/request.txt", "/renamed.txt").await;
+        assert_eq!(
+            response.status(),
+            StatusCode::CREATED,
+            "MOVE refused: {}",
+            String::from_utf8_lossy(&axum::body::to_bytes(response.into_body(), 4096).await.unwrap())
+        );
+
+        let patches = m.patches.lock().unwrap().clone();
+        assert_eq!(patches.len(), 1, "one PATCH renames the row");
+        assert_eq!(patches[0]["id"], SUB);
+        let sealed = patches[0]["body"]["name_encrypted"]
+            .as_str()
+            .expect("the rename sends a sealed name");
+        let string_key = beebeeb_core::kdf::derive_file_key(&master(), SUB.as_bytes());
+        let after = beebeeb_core::encrypt::decrypt_name_metadata_with_key(&string_key, sealed)
+            .expect("the new name opens under the string-convention key");
+        assert_eq!(after.name, "renamed.txt");
+        let before = beebeeb_core::encrypt::decrypt_name_metadata_with_key(&content_key(), &m.sealed_name)
+            .expect("the current name still opens under C");
+        assert_eq!(
+            after.chunk_format, before.chunk_format,
+            "the rename carries the pin the current name records"
+        );
+        assert_eq!(before.chunk_format, ExpectedChunkFormat::Unrecorded);
+        assert!(
+            beebeeb_core::encrypt::decrypt_name_metadata_with_key(&content_key(), sealed).is_err(),
+            "the uploader's content key must not open the owner's new name"
+        );
+        assert_eq!(
+            beebeeb_core::encrypt::decrypt_chunk_raw(&content_key(), &m.frame).unwrap(),
+            BODY,
+            "the content stays under C, untouched"
+        );
+        assert_eq!(
+            m.writes.load(Ordering::SeqCst),
+            0,
+            "no owner-key POST: a rename publishes nothing"
+        );
+        m.server.abort();
     }
 }
 
@@ -1711,5 +770,380 @@ mod item_id_echo_tests {
         assert_eq!(minted.get_version(), Some(uuid::Version::Random));
         assert_eq!(m.completed.len(), 1);
         assert!(m.abandons.is_empty());
+    }
+}
+
+mod server;
+use server::*;
+pub use server::{WebdavOptions, run};
+
+mod verbs;
+use verbs::*;
+
+mod lock;
+use lock::*;
+
+mod cache;
+use cache::*;
+
+mod entry;
+use entry::*;
+
+/// A19 (P2-5): WebDAV MOVE takes the same adopt-then-move path. When the
+/// source's shared ancestry cannot be read, the move is REFUSED (fail closed) and
+/// no PATCH is sent — an unreadable ancestor is never "not shared".
+#[cfg(test)]
+mod a19_move_tests {
+    use super::*;
+    use axum::{Json, routing::get};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const ROOT: &str = "22222222-2222-4222-8222-222222222222";
+    const SRC: &str = "33333333-3333-4333-8333-333333333333";
+
+    fn master() -> beebeeb_core::kdf::MasterKey {
+        beebeeb_core::kdf::MasterKey::from_bytes([7u8; 32])
+    }
+
+    async fn body_text(r: Response) -> String {
+        String::from_utf8_lossy(&axum::body::to_bytes(r.into_body(), 4096).await.unwrap()).into_owned()
+    }
+
+    #[tokio::test]
+    async fn a_move_refuses_when_shared_ancestry_cannot_be_read() {
+        let patches = Arc::new(AtomicUsize::new(0));
+        let patch_count = patches.clone();
+        let key = beebeeb_core::kdf::derive_file_key(&master(), SRC.as_bytes());
+        let name = beebeeb_core::encrypt::encrypt_name_for(
+            &key,
+            "file.txt",
+            None,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+        )
+        .unwrap();
+        let root_key = beebeeb_core::kdf::derive_file_key(&master(), ROOT.as_bytes());
+        let root_name = beebeeb_core::encrypt::encrypt_name_for(
+            &root_key,
+            "Shared",
+            None,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+        )
+        .unwrap();
+        let app = Router::new()
+            .route(
+                "/api/v1/files",
+                get(move || async move {
+                    Json(json!({"files": [
+                        {"id": SRC, "parent_id": ROOT, "name_encrypted": name, "is_folder": false},
+                        {"id": ROOT, "parent_id": null, "name_encrypted": root_name, "is_folder": true}
+                    ]}))
+                }),
+            )
+            // Custody is unreadable: doubt, never an owner folder.
+            .route(
+                "/api/v1/shared-folders/:id",
+                get(|| async { (StatusCode::INTERNAL_SERVER_ERROR, "custody store down") }),
+            )
+            .route(
+                "/api/v1/files/:id",
+                axum::routing::patch(move || {
+                    let patches = patch_count.clone();
+                    async move {
+                        patches.fetch_add(1, Ordering::SeqCst);
+                        Json(json!({"ok": true}))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let state = Arc::new(DavState {
+            api: ApiClient::new_for_test(format!("http://{}", listener.local_addr().unwrap())),
+            master_key: master(),
+            read_only: false,
+            dir_cache: Mutex::new(HashMap::new()),
+            cache_ttl: Duration::ZERO,
+            locks: Mutex::new(HashMap::new()),
+            request_count: std::sync::atomic::AtomicU64::new(0),
+            error_count: std::sync::atomic::AtomicU64::new(0),
+            verbose: false,
+        });
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let response = move_response(&state, "/Shared/file.txt", "/file.txt").await;
+        server.abort();
+        let status = response.status();
+        let body = body_text(response).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.starts_with("move refused:"), "the refusal says why: {body}");
+        assert_eq!(patches.load(Ordering::SeqCst), 0, "an unreadable ancestry sent a move");
+    }
+}
+
+/// P2-6 (L13): renaming needs the key the name authenticates under. A guest's
+/// folder is listed but not resolvable on this device: a rename is refused with
+/// 409 and an explanation, never sealed under a derived guess and PATCHed.
+#[cfg(test)]
+mod rename_key_tests {
+    use super::*;
+    use axum::{Json, routing::get};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const ROOT: &str = "22222222-2222-4222-8222-222222222222";
+    const GUEST: &str = "33333333-3333-8333-8333-333333333333";
+
+    #[tokio::test]
+    async fn renaming_a_guest_folder_is_refused_without_a_patch() {
+        let master = beebeeb_core::kdf::MasterKey::from_bytes([7u8; 32]);
+        let root_key = beebeeb_core::kdf::derive_file_key(&master, ROOT.as_bytes());
+        let root_name = beebeeb_core::encrypt::encrypt_name_for(
+            &root_key,
+            "Shared",
+            None,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+        )
+        .unwrap();
+        // The guest folder's name is sealed under a key this device never holds.
+        let guest_name = beebeeb_core::encrypt::encrypt_name_for(
+            &beebeeb_core::kdf::FileKey::from_bytes([160; 32]),
+            "Guest",
+            None,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+        )
+        .unwrap();
+        let patches = Arc::new(AtomicUsize::new(0));
+        let patch_count = patches.clone();
+        let rows = Arc::new((
+            json!({"id": ROOT, "parent_id": null, "name_encrypted": root_name, "is_folder": true}),
+            json!({"id": GUEST, "parent_id": ROOT, "name_encrypted": guest_name, "is_folder": true}),
+        ));
+        let listing_rows = rows.clone();
+        let id_rows = rows.clone();
+        let app = Router::new()
+            // No approved legacy invites: the ancestry walk ends at the root.
+            .route(
+                "/api/v1/shares/invites/sent",
+                get(|| async { Json(json!({"invites": []})) }),
+            )
+            .route(
+                "/api/v1/files",
+                get(move || {
+                    let rows = listing_rows.clone();
+                    async move { Json(json!({"files": [rows.0.clone(), rows.1.clone()]})) }
+                }),
+            )
+            .route(
+                "/api/v1/files/:id",
+                get(move |axum::extract::Path(id): axum::extract::Path<String>| {
+                    let rows = id_rows.clone();
+                    async move { Json(if id == ROOT { rows.0.clone() } else { rows.1.clone() }) }
+                })
+                .patch(move || {
+                    let patches = patch_count.clone();
+                    async move {
+                        patches.fetch_add(1, Ordering::SeqCst);
+                        Json(json!({"ok": true}))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let state = Arc::new(DavState {
+            api: ApiClient::new_for_test(format!("http://{}", listener.local_addr().unwrap())),
+            master_key: master,
+            read_only: false,
+            dir_cache: Mutex::new(HashMap::new()),
+            cache_ttl: Duration::ZERO,
+            locks: Mutex::new(HashMap::new()),
+            request_count: std::sync::atomic::AtomicU64::new(0),
+            error_count: std::sync::atomic::AtomicU64::new(0),
+            verbose: false,
+        });
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        // The unresolved row keeps its place in the listing under a short id.
+        let listed = format!("/Shared/[{}]", &GUEST[..8]);
+        let response = move_response(&state, &listed, "/Shared/Guest2").await;
+        server.abort();
+        let status = response.status();
+        let body =
+            String::from_utf8_lossy(&axum::body::to_bytes(response.into_body(), 4096).await.unwrap()).into_owned();
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body, crate::owned_keys::RENAME_UNKNOWN_KEY);
+        assert_eq!(patches.load(Ordering::SeqCst), 0, "a refused rename sent a PATCH");
+    }
+}
+
+/// P2-7 (A9b): a request row is recognised by its request fields, so a WebDAV
+/// PUT over it is saved as a NEW owner item — never a new version of the request
+/// row, never sealed under the request row's id.
+#[cfg(test)]
+mod a9b_webdav_tests {
+    use super::*;
+    use axum::{
+        Json,
+        routing::{get, post, put},
+    };
+    use serde_json::json;
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const ROOT: &str = "22222222-2222-4222-8222-222222222222";
+    const REQUEST: &str = "33333333-3333-4333-8333-333333333333";
+
+    #[tokio::test]
+    async fn a_put_over_a_request_row_creates_a_new_owner_item() {
+        let master = beebeeb_core::kdf::MasterKey::from_bytes([7u8; 32]);
+        let root_key = beebeeb_core::kdf::derive_file_key(&master, ROOT.as_bytes());
+        let root_name = beebeeb_core::encrypt::encrypt_name_for(
+            &root_key,
+            "Shared",
+            None,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+        )
+        .unwrap();
+        // P2-9: the row must RESOLVE as a request row, not merely carry the
+        // fields. Build the unbound (pre-2236) envelope the R5 reader opens.
+        let content = crate::crypto::key_from_bytes(&[160u8; 32]);
+        let r_priv = [31u8; 32];
+        let r_pub = beebeeb_core::opaque::derive_x25519_public(&r_priv);
+        let (wrapped, nonce) = beebeeb_core::file_request::wrap_request_private(&master, b"", &r_priv).unwrap();
+        let sealed = beebeeb_core::file_request::seal_to_request(&r_pub, b"", content.as_bytes()).unwrap();
+        let request_name = beebeeb_core::encrypt::encrypt_name_for(
+            &content,
+            "request.txt",
+            None,
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+        )
+        .unwrap();
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let (wrapped_b64, nonce_b64) = (b64(&wrapped), b64(&nonce));
+        let (e_pub_b64, wrapped_key_b64) = (b64(&sealed.e_pub), b64(&sealed.wrapped_key));
+        let rows = Arc::new((
+            json!({"id": ROOT, "parent_id": null, "name_encrypted": root_name, "is_folder": true}),
+            json!({
+                "id": REQUEST, "parent_id": ROOT, "name_encrypted": request_name, "is_folder": false,
+                "size_bytes": 12, "chunk_count": 1,
+                "file_request_id": REQUEST, "sender_ephemeral_pubkey": e_pub_b64,
+                "wrapped_content_key": wrapped_key_b64
+            }),
+        ));
+        let inits: Arc<StdMutex<Vec<serde_json::Value>>> = Arc::new(StdMutex::new(Vec::new()));
+        let requested: Arc<StdMutex<Option<String>>> = Arc::new(StdMutex::new(None));
+        let patches = Arc::new(AtomicUsize::new(0));
+        let (listing_rows, listing_inits, init_requested) = (rows.clone(), inits.clone(), requested.clone());
+        let (chunk_requested, complete_requested) = (requested.clone(), requested.clone());
+        let patch_count = patches.clone();
+        let app = Router::new()
+            .route(
+                "/api/v1/files",
+                get(move || {
+                    let rows = listing_rows.clone();
+                    async move { Json(json!({"files": [rows.0.clone(), rows.1.clone()]})) }
+                }),
+            )
+            .route(
+                "/api/v1/uploads/init",
+                post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                    let inits = listing_inits.clone();
+                    let requested = init_requested.clone();
+                    async move {
+                        let id = body["file_id"].as_str().unwrap_or_default().to_string();
+                        inits.lock().unwrap().push(body.clone());
+                        *requested.lock().unwrap() = Some(id.clone());
+                        Json(json!({
+                            "upload_session_id": "sess-1",
+                            "file_id": id,
+                            "chunk_size_bytes": body["chunk_size_bytes"],
+                            "chunk_count": body["chunk_count"],
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/api/v1/uploads/:session/chunks/:idx",
+                put(
+                    move |axum::extract::Path((_s, idx)): axum::extract::Path<(String, u32)>| {
+                        let _ = chunk_requested.clone();
+                        async move { Json(json!({"index": idx, "size": 1, "skipped": false})) }
+                    },
+                ),
+            )
+            .route(
+                "/api/v1/uploads/:session/complete",
+                post(move || {
+                    let requested = complete_requested.clone();
+                    async move {
+                        let id = requested.lock().unwrap().clone().unwrap_or_default();
+                        Json(json!({"id": id, "size_bytes": 8, "chunk_count": 1}))
+                    }
+                }),
+            )
+            .route(
+                "/api/v1/files/:id/upload/abandon",
+                post(|| async { Json(json!({"status": "abandoned"})) }),
+            )
+            .route(
+                "/api/v1/shares/invites/sent",
+                get(|| async { Json(json!({"invites": []})) }),
+            )
+            .route(
+                "/api/v1/file-requests",
+                get(move || {
+                    let (wrapped, nonce) = (wrapped_b64.clone(), nonce_b64.clone());
+                    async move {
+                        Json(json!({"file_requests": [{
+                            "id": REQUEST,
+                            "wrapped_private_key": wrapped,
+                            "wrap_nonce": nonce,
+                        }]}))
+                    }
+                }),
+            )
+            .route(
+                "/api/v1/files/:id",
+                axum::routing::patch(move || {
+                    let patches = patch_count.clone();
+                    async move {
+                        patches.fetch_add(1, Ordering::SeqCst);
+                        Json(json!({"ok": true}))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let state = Arc::new(DavState {
+            api: ApiClient::new_for_test(format!("http://{}", listener.local_addr().unwrap())),
+            master_key: master,
+            read_only: false,
+            dir_cache: Mutex::new(HashMap::new()),
+            cache_ttl: Duration::ZERO,
+            locks: Mutex::new(HashMap::new()),
+            request_count: std::sync::atomic::AtomicU64::new(0),
+            error_count: std::sync::atomic::AtomicU64::new(0),
+            verbose: false,
+        });
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let response = put_response(&state, "/Shared/request.txt", b"edited body".to_vec(), None).await;
+        server.abort();
+        let status = response.status();
+        let body =
+            String::from_utf8_lossy(&axum::body::to_bytes(response.into_body(), 4096).await.unwrap()).into_owned();
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+
+        let init = inits.lock().unwrap()[0].clone();
+        assert_ne!(
+            init["file_id"].as_str(),
+            Some(REQUEST),
+            "the edit is a new item, not a version of the request row"
+        );
+        assert_eq!(
+            init["base_version_number"],
+            json!(null),
+            "no version of the request row: {init}"
+        );
+        assert_eq!(patches.load(Ordering::SeqCst), 0, "the request row was renamed");
     }
 }
