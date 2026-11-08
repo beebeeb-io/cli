@@ -396,6 +396,81 @@ async fn a_file_that_shrank_before_it_was_read_waits_for_the_next_run() {
     a_file_changed_before_it_is_read_waits_for_the_next_run(b"abc").await;
 }
 
+/// Restores the permissions of a folder the test took away, also when the test panics.
+#[cfg(unix)]
+struct Restore(PathBuf);
+
+#[cfg(unix)]
+impl Drop for Restore {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+/// Two files, `a.txt` then `z/b.txt` (the pass queues them in key order, and the drain uploads one at a time). The
+/// run is held at the init of `a.txt`, `change` is applied to `z/b.txt` meanwhile, then the run goes on.
+async fn the_second_file_is_changed_while_the_first_uploads(change: impl FnOnce(&Path)) -> Output {
+    let (vault, api, home, env) = setup().await;
+    write_file(&home, "solo/a.txt", b"first");
+    write_file(&home, "solo/z/b.txt", b"second");
+    let out = backup(&home, &api, &env, &["add", "solo"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+
+    vault.lock().unwrap().hold_init_named.insert("a.txt".to_string());
+    let run = {
+        let (home, api, env) = (home.clone(), api.clone(), env.clone());
+        tokio::spawn(async move { backup(&home, &api, &env, &["run"]).await })
+    };
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while vault.lock().unwrap().held_inits == 0 {
+        assert!(Instant::now() < deadline, "the upload never reached its init");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    change(&home.join("solo/z"));
+    vault.lock().unwrap().hold_init_named.clear();
+    run.await.unwrap()
+}
+
+/// A file that went away between the pass and its upload is a change: it waits for the next run.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_that_went_away_waits_for_the_next_run() {
+    let out =
+        the_second_file_is_changed_while_the_first_uploads(|dir| std::fs::remove_file(dir.join("b.txt")).unwrap())
+            .await;
+    assert_eq!(out.status.code(), Some(0), "gone, not failed: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(
+        text.contains("1 uploaded \u{b7} 0 failed") && text.contains("1 waiting for the next run"),
+        "{text}"
+    );
+}
+
+/// A file the backup cannot even look at (a dropped mount, a folder that lost its search permission) is NOT known to
+/// have changed: it is a failure, exit 3, and the person sees it. Only "not found" is a change.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_that_cannot_be_looked_at_fails_it_does_not_wait() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut restore = None;
+    let out = the_second_file_is_changed_while_the_first_uploads(|dir| {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        restore = Some(Restore(dir.to_path_buf()));
+    })
+    .await;
+    // As root the permission does not bite and there is nothing to test.
+    if std::fs::metadata(restore.as_ref().unwrap().0.join("b.txt")).is_ok() {
+        eprintln!("skipped: the permission is not enforced for this user");
+        return;
+    }
+    assert_eq!(out.status.code(), Some(3), "unreadable is a failure: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(
+        text.contains("1 uploaded \u{b7} 1 failed") && text.contains("0 waiting for the next run"),
+        "{text}"
+    );
+}
+
 /// The other side of the two tests above: only a source that broke the upload is asked whether the file changed.
 /// A failure of the upload itself (here the server refusing the chunk) is a failure, whatever the file did
 /// meanwhile; it is the person's to see, not "waiting for the next run".

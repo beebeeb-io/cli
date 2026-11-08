@@ -129,7 +129,8 @@ impl<'a> CliHost<'a> {
     /// `Ok(false)`: the file changed after the pass fingerprinted it, so it
     /// waits for the next run (nothing landed).
     async fn upload_one(&self, req: &UploadRequest) -> Result<bool, String> {
-        if !unchanged(&req.source_path, &req.fingerprint) {
+        // An unknown file goes on: the upload fails on its own if it really cannot be read.
+        if matches!(compare(&req.source_path, &req.fingerprint), Compared::Changed) {
             return Ok(false);
         }
         let guard = SourceGuard {
@@ -199,8 +200,31 @@ impl<'a> CliHost<'a> {
 /// What a guard refusal says; the drain counts it as "changed meanwhile".
 const CHANGED_WHILE_READ: &str = "the file changed while it was read; it is backed up on the next run";
 
-fn unchanged(path: &Path, expected: &Fingerprint) -> bool {
-    beebeeb_backup::fingerprint(path).is_ok_and(|now| now == *expected)
+/// How the file at a path compares with the fingerprint the pass took.
+enum Compared {
+    Same,
+    /// Another file now, or none: it waits for the next run.
+    Changed,
+    /// The file could not be looked at (a dropped mount, a folder that lost its search permission): nothing is known
+    /// about it, so it is not "changed" and its upload is a failure, which the person sees.
+    Unknown(String),
+}
+
+fn compare(path: &Path, expected: &Fingerprint) -> Compared {
+    match beebeeb_backup::fingerprint(path) {
+        Ok(now) if now == *expected => Compared::Same,
+        Ok(_) => Compared::Changed,
+        // Gone, or no longer a regular file (core's own refusal, `InvalidInput`): not the file the pass saw.
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
+            ) =>
+        {
+            Compared::Changed
+        }
+        Err(e) => Compared::Unknown(e.to_string()),
+    }
 }
 
 /// The upload driver's hook: before a version completes, the file must still
@@ -222,10 +246,12 @@ impl ChunkProgress for SourceGuard {
     }
 
     fn before_complete(&self, path: &Path) -> Result<(), String> {
-        if unchanged(path, &self.fingerprint) {
-            Ok(())
-        } else {
-            Err(CHANGED_WHILE_READ.to_string())
+        match compare(path, &self.fingerprint) {
+            Compared::Same => Ok(()),
+            Compared::Changed => Err(CHANGED_WHILE_READ.to_string()),
+            // The driver stops here as it does for a change, but these words are not CHANGED_WHILE_READ: the drain
+            // counts the file as failed.
+            Compared::Unknown(why) => Err(format!("cannot check that the file is unchanged: {why}")),
         }
     }
 }
