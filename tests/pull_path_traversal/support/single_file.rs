@@ -104,7 +104,11 @@ fn sync_download_skips_hostile_remote_names() {
         let new: Vec<_> = after
             .difference(&before)
             // `home/` is bb's own config dir (device.json); `cwd/local/` is the sync root.
-            .filter(|p| !p.starts_with("cwd/local/") && !p.starts_with("home/"))
+            // Normalise separators to `/` so the filter works on Windows (display() uses `\`).
+            .filter(|p| {
+                let norm = p.replace('\\', "/");
+                !norm.starts_with("cwd/local/") && !norm.starts_with("home/")
+            })
             .cloned()
             .collect();
         if !new.is_empty() {

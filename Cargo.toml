@@ -1,7 +1,7 @@
 [package]
 name = "beebeeb-cli"
 description = "bb — Beebeeb CLI for end-to-end encrypted cloud storage"
-version = "0.17.3"
+version = "0.17.4"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/beebeeb-io/cli"
@@ -15,9 +15,9 @@ name = "bb"
 path = "src/main.rs"
 
 [dependencies]
-beebeeb-core = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-core", rev = "124389a82755970b5ec1722c323a0c08fa909e43" }
-beebeeb-types = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-types", rev = "124389a82755970b5ec1722c323a0c08fa909e43" }
-beebeeb-backup = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-backup", rev = "124389a82755970b5ec1722c323a0c08fa909e43" }
+beebeeb-core = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-core", rev = "f76ccfc32429d80b6c66ba02c44e9959c9afa93d" }
+beebeeb-types = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-types", rev = "f76ccfc32429d80b6c66ba02c44e9959c9afa93d" }
+beebeeb-backup = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-backup", rev = "f76ccfc32429d80b6c66ba02c44e9959c9afa93d" }
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 tokio = { version = "1", features = ["full"] }

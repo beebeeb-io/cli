@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.4] - 2026-11-08
+
+### Fixed
+- Windows: `bb pull --zip` now rewrites Windows-unsafe names (device names such as `CON`, trailing dot or space, `:` stream names, `?`/`*`/`<`/`>`/`|`/`"` characters, bidi overrides) instead of refusing the entry. Names that cannot be made safe (traversal, empty, control characters) are still refused and flagged. Beebeeb core v0.2.8 (`f76ccfc`), was v0.2.7. Clears the known limit noted in 0.17.3.
+
+### Changed
+- Uses Beebeeb core v0.2.8 (`f76ccfc`), was v0.2.7. The 17 API-hardening changes in core v0.2.8 (passkey ceremony, auth step-up, share-flow, account flows) are not called by the CLI; no CLI source changes.
+
 ## [0.17.3] - 2026-11-08
 
 ### Fixed
@@ -16,7 +24,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known limits
 - An interrupted download leaves `<name>.tmp`, which the next `bb sync` uploads; delete it by hand.
-- On Windows, `bb pull --zip` refuses names with `:`, a trailing dot or a reserved name instead of rewriting them (core v0.3.0 fixes this).
 
 ## [0.17.2] - 2026-11-08
 
