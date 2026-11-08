@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.2] - 2026-11-08
+
+### Security
+- `zip` 9.4.1 (was 8.6.0), through Beebeeb core v0.2.4 (`1d1a335`) and the CLI's own dependency. This clears the four `zip` advisories 0.17.1 still reported (RUSTSEC-2026-0429, -0367, -0368, -0369). They were about extracting archives; `bb` only writes them (`bb pull --zip`), so nobody was exposed. `cargo audit`: 5 vulnerabilities before, 1 after (RUSTSEC-2026-0387, through the password-login library, unchanged).
+- The archive `bb pull --zip` writes is the same bytes as before for the five entries checked (a one-off comparison, not a test).
+
+### Fixed
+- `bb backup`: a file that grows, shrinks or goes away while it is being backed up now waits for the next run (counted as "waiting for the next run", exit 0) instead of failing the run (exit 3), and its half-finished upload is ended. A file the backup cannot look at (a dropped network drive, a folder it may no longer open) still fails and says so.
+- `bb push` and `bb sync`: a file that grows or shrinks while it is being uploaded still fails, and its upload session is now ended at once.
+
+### Changed
+- Uses Beebeeb core v0.2.4 (`1d1a335`), was v0.2.2. Core v0.2.3 and v0.2.4 add nothing the CLI calls.
+
 ## [0.17.1] - 2026-11-08
 
 ### Security
