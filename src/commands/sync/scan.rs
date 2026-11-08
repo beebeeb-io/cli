@@ -58,6 +58,7 @@ pub(super) fn scan_local_files(
     scan: Option<&indicatif::ProgressBar>,
 ) -> Result<HashMap<String, LocalFile>, String> {
     let mut out = HashMap::new();
+    let (recorded, root_abs) = recorded_temps(root);
     for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
         if !path.is_file() {
@@ -73,7 +74,7 @@ pub(super) fn scan_local_files(
         {
             continue;
         }
-        if is_random_download_temp(&path.file_name().unwrap_or_default().to_string_lossy()) {
+        if recorded.contains(&root_abs.join(rel)) {
             continue;
         }
         let meta = std::fs::metadata(path).map_err(|e| format!("stat {}: {e}", path.display()))?;
@@ -120,6 +121,7 @@ pub(super) fn scan_local_files(
 
 pub(super) fn walk_local_files(root: &Path) -> Result<HashMap<String, LocalFile>, String> {
     let mut out = HashMap::new();
+    let (recorded, root_abs) = recorded_temps(root);
     for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
         if !path.is_file() {
@@ -135,7 +137,7 @@ pub(super) fn walk_local_files(root: &Path) -> Result<HashMap<String, LocalFile>
         {
             continue;
         }
-        if is_random_download_temp(&path.file_name().unwrap_or_default().to_string_lossy()) {
+        if recorded.contains(&root_abs.join(rel)) {
             continue;
         }
         let meta = std::fs::metadata(path).map_err(|e| format!("stat {}: {e}", path.display()))?;
@@ -346,65 +348,12 @@ pub(super) async fn refresh_watch_reads(
     Ok(blocked)
 }
 
-/// The download writer's unambiguous temp names: core's `TempSibling` random
-/// form `{out}.{16 lowercase hex}.tmp`, and the older `{out}.bbtmp`. A plain
-/// `{out}.tmp` is also a name other tools give their own files, so it is never
-/// treated as ours: not skipped, not swept.
-fn is_own_download_temp_name(name: &str) -> bool {
-    if let Some(base) = name.strip_suffix(".bbtmp") {
-        return !base.is_empty();
-    }
-    let Some(stem) = name.strip_suffix(".tmp") else {
-        return false;
-    };
-    stem.rsplit_once('.').is_some_and(|(base, hex)| {
-        !base.is_empty() && hex.len() == 16 && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    })
+/// The download temps on record, and `root` in the same absolute form, so a
+/// walked path is compared with them whatever name it has. Nothing but a
+/// recorded path is ever left out of a walk.
+fn recorded_temps(root: &Path) -> (std::collections::HashSet<PathBuf>, PathBuf) {
+    let root_abs = root
+        .canonicalize()
+        .unwrap_or_else(|_| crate::temp_record::absolute(root));
+    (crate::temp_record::recorded_paths(), root_abs)
 }
-
-pub(super) fn is_random_download_temp(name: &str) -> bool {
-    is_own_download_temp_name(name)
-}
-
-fn is_own_download_temp(rel: &str) -> bool {
-    is_own_download_temp_name(rel.rsplit_once('/').map_or(rel, |(_, n)| n))
-}
-
-/// Take the download writer's temps out of the upload candidates.
-pub(super) fn drop_download_temps(local: &mut HashMap<String, LocalFile>, _remote: &HashMap<String, RemoteFile>) {
-    local.retain(|rel, _| !is_own_download_temp(rel));
-}
-
-/// Remove stale temps of our own pattern left by an interrupted download. Only
-/// files untouched for [`STALE_TEMP_AGE`] go, so a download running right now
-/// (this process or another `bb pull`) keeps its temp.
-pub(super) fn sweep_download_temps(root: &Path, _remote: &HashMap<String, RemoteFile>) {
-    for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let Ok(rel) = path.strip_prefix(root) else { continue };
-        if rel
-            .components()
-            .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
-        {
-            continue;
-        }
-        let rel_str = rel_path_str(rel);
-        if !is_own_download_temp(&rel_str) {
-            continue;
-        }
-        let stale = entry
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|m| m.elapsed().ok())
-            .is_some_and(|age| age >= STALE_TEMP_AGE);
-        if stale {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-}
-
-pub(super) const STALE_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(600);

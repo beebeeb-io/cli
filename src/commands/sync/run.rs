@@ -195,6 +195,9 @@ pub async fn run(
     let scan_active = ui::is_rich() && std::io::stdout().is_terminal();
 
     let local_spinner = make_scan_spinner(scan_active, "scanning local", "files");
+    if !dry_run {
+        crate::temp_record::sweep();
+    }
     let mut local_files = scan_local_files(&local_dir, &state.files, rehash, local_spinner.as_ref())?;
     if let Some(pb) = &local_spinner {
         pb.finish_and_clear();
@@ -222,10 +225,6 @@ pub async fn run(
         pb.finish_and_clear();
     }
     scan_result?;
-    if !dry_run {
-        sweep_download_temps(&local_dir, &remote_files);
-    }
-    drop_download_temps(&mut local_files, &remote_files);
 
     // Register this device with the server (best-effort, non-fatal)
     let device_info = crate::device::load_or_create();
@@ -362,7 +361,6 @@ pub async fn run(
     };
     if !dry_run {
         local_files = walk_local_files(&local_dir)?;
-        drop_download_temps(&mut local_files, &remote_files);
     }
     // Which absent files may be treated as deleted? Only those the server itself
     // reports trashed, from a listing that is not empty/partial/unreadable.

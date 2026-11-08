@@ -433,6 +433,8 @@ pub(super) struct TempArchive {
     // Declared first, so the file is closed before the temp is removed.
     file: Option<std::fs::File>,
     temp: Option<TempSibling>,
+    /// Declared after `temp`: the entry goes once the temp is published or removed.
+    record: Option<crate::temp_record::TempRecord>,
     /// The path the archive was created for, and the only one it publishes to.
     dest: PathBuf,
 }
@@ -441,11 +443,12 @@ impl TempArchive {
     /// Create the temp archive beside `dest` (same directory, so the publish
     /// never crosses a filesystem).
     pub(super) fn create(dest: &std::path::Path) -> Result<Self, String> {
-        let (temp, file) = TempSibling::create(dest)
+        let (temp, file, record) = crate::temp_record::create_recorded(dest)
             .map_err(|e| format!("failed to create the archive next to {}: {e}", dest.display()))?;
         Ok(Self {
             file: Some(file),
             temp: Some(temp),
+            record,
             dest: dest.to_path_buf(),
         })
     }
@@ -474,8 +477,11 @@ impl TempArchive {
         // Closed before the publish: Windows renames a file nobody holds open.
         self.file.take();
         let temp = self.temp.take().ok_or("the archive was already published")?;
-        temp.publish()
-            .map_err(|e| format!("failed to write {}: {e}", dest.display()))
+        let published = temp
+            .publish()
+            .map_err(|e| format!("failed to write {}: {e}", dest.display()));
+        self.record.take();
+        published
     }
 }
 

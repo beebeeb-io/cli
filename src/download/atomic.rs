@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::safe_path::TempSibling;
+use crate::temp_record::TempRecord;
 
 /// Writes a download to a temp sibling and publishes it at `out_path` only on
 /// [`commit`](Self::commit), so an interrupted or failed download never leaves
@@ -17,6 +18,8 @@ use crate::safe_path::TempSibling;
 pub(crate) struct AtomicFile {
     writer: Option<std::io::BufWriter<std::fs::File>>,
     temp: Option<TempSibling>,
+    /// Declared after `temp`: the entry goes once the temp is published or removed.
+    record: Option<TempRecord>,
     final_path: std::path::PathBuf,
 }
 
@@ -28,11 +31,12 @@ impl AtomicFile {
                     .map_err(|e| DownloadError::Other(format!("mkdir {}: {e}", parent.display())))?;
             }
         }
-        let (temp, file) = TempSibling::create(out_path)
+        let (temp, file, record) = crate::temp_record::create_recorded(out_path)
             .map_err(|e| DownloadError::Other(format!("create {}: {e}", out_path.display())))?;
         Ok(Self {
             writer: Some(std::io::BufWriter::new(file)),
             temp: Some(temp),
+            record,
             final_path: out_path.to_path_buf(),
         })
     }
@@ -59,8 +63,21 @@ impl AtomicFile {
         // Closed before the publish: Windows renames a file nobody holds open.
         drop(w);
         let temp = self.temp.take().expect("temp present until commit/abort");
-        temp.publish()
-            .map_err(|e| DownloadError::Other(format!("rename {}: {e}", self.final_path.display())))
+        let published = temp
+            .publish()
+            .map_err(|e| DownloadError::Other(format!("rename {}: {e}", self.final_path.display())));
+        self.record.take();
+        published
+    }
+
+    /// Test only: the process dies mid-write. The temp stays, its writer is gone.
+    #[cfg(test)]
+    pub(crate) fn simulate_kill(mut self) {
+        self.writer.take();
+        std::mem::forget(self.temp.take());
+        if let Some(record) = self.record.take() {
+            record.simulate_kill();
+        }
     }
 
     /// Explicitly abort before falling back to another writer for the same path.
@@ -76,6 +93,7 @@ impl Drop for AtomicFile {
         // The file is closed before its temp is removed.
         self.writer.take();
         self.temp.take();
+        self.record.take();
     }
 }
 
