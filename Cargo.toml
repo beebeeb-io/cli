@@ -15,9 +15,9 @@ name = "bb"
 path = "src/main.rs"
 
 [dependencies]
-beebeeb-core = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-core", rev = "2d89adc1e2e3b9c0b3e2d76c295cbd10df4812c3" }
-beebeeb-types = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-types", rev = "2d89adc1e2e3b9c0b3e2d76c295cbd10df4812c3" }
-beebeeb-backup = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-backup", rev = "2d89adc1e2e3b9c0b3e2d76c295cbd10df4812c3" }
+beebeeb-core = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-core", rev = "1d1a335fabd1d8ed7bfa3573cdb5e50c0749643d" }
+beebeeb-types = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-types", rev = "1d1a335fabd1d8ed7bfa3573cdb5e50c0749643d" }
+beebeeb-backup = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-backup", rev = "1d1a335fabd1d8ed7bfa3573cdb5e50c0749643d" }
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 tokio = { version = "1", features = ["full"] }
@@ -41,7 +41,7 @@ hostname = "0.4"
 rand = "0.8"
 base64 = "0.22"
 # Archive writer for `bb pull --zip` (same version/features as beebeeb-core: no new crate in the lockfile).
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 # Login handshake crypto (P-256 ECDH + HKDF-SHA256 + AES-256-GCM) now lives in
 # beebeeb-core::cli_auth — the CLI no longer pulls p256/aes-gcm/hkdf directly.

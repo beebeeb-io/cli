@@ -571,6 +571,12 @@ fn describe(out: &Output) -> String {
 // Tests
 // ---------------------------------------------------------------------------
 
+/// An entry's name as the test reads it: the raw bytes, lossily (zip 9's `name()` is a `Result` and would panic on a name
+/// that is not UTF-8, hiding the name the assertion should report).
+fn entry_name(raw: &[u8]) -> String {
+    String::from_utf8_lossy(raw).into_owned()
+}
+
 /// Read every entry of a zip archive into `name -> bytes`.
 fn read_zip(path: &Path) -> HashMap<String, Vec<u8>> {
     use std::io::Read;
@@ -581,7 +587,7 @@ fn read_zip(path: &Path) -> HashMap<String, Vec<u8>> {
             let mut e = z.by_index(i).unwrap();
             let mut buf = Vec::new();
             e.read_to_end(&mut buf).unwrap();
-            (e.name().to_string(), buf)
+            (entry_name(e.name_raw()), buf)
         })
         .collect()
 }
@@ -591,7 +597,7 @@ fn zip_names(path: &Path) -> Vec<String> {
     let f = std::fs::File::open(path).unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
     let mut z = zip::ZipArchive::new(f).expect("valid zip archive");
     let mut names: Vec<String> = (0..z.len())
-        .map(|i| z.by_index(i).unwrap().name().to_string())
+        .map(|i| entry_name(z.by_index(i).unwrap().name_raw()))
         .collect();
     names.sort();
     names
