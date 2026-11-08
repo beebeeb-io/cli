@@ -222,6 +222,10 @@ pub async fn run(
         pb.finish_and_clear();
     }
     scan_result?;
+    if !dry_run {
+        sweep_download_temps(&local_dir, &remote_files);
+    }
+    drop_download_temps(&mut local_files, &remote_files);
 
     // Register this device with the server (best-effort, non-fatal)
     let device_info = crate::device::load_or_create();
@@ -358,6 +362,7 @@ pub async fn run(
     };
     if !dry_run {
         local_files = walk_local_files(&local_dir)?;
+        drop_download_temps(&mut local_files, &remote_files);
     }
     // Which absent files may be treated as deleted? Only those the server itself
     // reports trashed, from a listing that is not empty/partial/unreadable.

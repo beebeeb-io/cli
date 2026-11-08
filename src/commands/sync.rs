@@ -76,3 +76,7 @@ mod live_stats_tests;
 #[cfg(test)]
 #[path = "sync/tests/short_name_tests.rs"]
 mod short_name_tests;
+
+#[cfg(test)]
+#[path = "sync/tests/download_temp_tests.rs"]
+mod download_temp_tests;

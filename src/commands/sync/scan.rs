@@ -73,6 +73,9 @@ pub(super) fn scan_local_files(
         {
             continue;
         }
+        if is_random_download_temp(&path.file_name().unwrap_or_default().to_string_lossy()) {
+            continue;
+        }
         let meta = std::fs::metadata(path).map_err(|e| format!("stat {}: {e}", path.display()))?;
         let mtime = meta
             .modified()
@@ -130,6 +133,9 @@ pub(super) fn walk_local_files(root: &Path) -> Result<HashMap<String, LocalFile>
             .components()
             .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
         {
+            continue;
+        }
+        if is_random_download_temp(&path.file_name().unwrap_or_default().to_string_lossy()) {
             continue;
         }
         let meta = std::fs::metadata(path).map_err(|e| format!("stat {}: {e}", path.display()))?;
@@ -339,3 +345,79 @@ pub(super) async fn refresh_watch_reads(
     *local = walk_local_files(root)?;
     Ok(blocked)
 }
+
+/// The download writer's own temp names (`src/download/atomic.rs`, core's
+/// `TempSibling`): `{out}.tmp`, else `{out}.{16 lowercase hex}.tmp`. Returns the
+/// base name `{out}` and whether it is the random form. A user's own `notes.tmp`
+/// is the plain form too, so that form is only ever treated as ours when its
+/// base is a file of the synced tree.
+fn download_temp_parts(name: &str) -> Option<(&str, bool)> {
+    let stem = name.strip_suffix(".tmp")?;
+    if let Some((base, hex)) = stem.rsplit_once('.') {
+        if !base.is_empty() && hex.len() == 16 && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Some((base, true));
+        }
+    }
+    (!stem.is_empty()).then_some((stem, false))
+}
+
+pub(super) fn is_random_download_temp(name: &str) -> bool {
+    matches!(download_temp_parts(name), Some((_, true)))
+}
+
+/// Is `rel` (a `/`-joined path) a temp of the download writer, given
+/// `known(base)`: true for a path the synced tree is known to hold.
+fn is_own_download_temp(rel: &str, known: &dyn Fn(&str) -> bool) -> bool {
+    let (dir, name) = rel.rsplit_once('/').unwrap_or(("", rel));
+    match download_temp_parts(name) {
+        Some((_, true)) => true,
+        Some((base, false)) => known(&if dir.is_empty() {
+            base.to_string()
+        } else {
+            format!("{dir}/{base}")
+        }),
+        None => false,
+    }
+}
+
+/// Take the download writer's temps out of the upload candidates.
+pub(super) fn drop_download_temps(local: &mut HashMap<String, LocalFile>, remote: &HashMap<String, RemoteFile>) {
+    let tracked: HashSet<String> = local.keys().cloned().collect();
+    local.retain(|rel, _| !is_own_download_temp(rel, &|base| remote.contains_key(base) || tracked.contains(base)));
+}
+
+/// Remove stale temps of our own pattern left by an interrupted download. Only
+/// files untouched for [`STALE_TEMP_AGE`] go, so a download running right now
+/// (this process or another `bb pull`) keeps its temp.
+pub(super) fn sweep_download_temps(root: &Path, remote: &HashMap<String, RemoteFile>) {
+    for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(rel) = path.strip_prefix(root) else { continue };
+        if rel
+            .components()
+            .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+        {
+            continue;
+        }
+        let rel_str = rel_path_str(rel);
+        let known = |base: &str| remote.contains_key(base) || root.join(base).is_file();
+        if !is_own_download_temp(&rel_str, &known) {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|m| m.elapsed().ok())
+            .is_some_and(|age| age >= STALE_TEMP_AGE);
+        if stale {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+pub(super) const STALE_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(600);
