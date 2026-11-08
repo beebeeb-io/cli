@@ -200,9 +200,7 @@ pub(super) async fn run_pipeline(
         let admission = admission;
         // The plan every sealed chunk is held to: all frames are one chunk plus the AEAD overhead, the last holds
         // the rest of the declared size.
-        let plan_chunks = enc.chunk_plan().chunk_count;
-        let framed = enc.chunk_plan().chunk_size_bytes + beebeeb_core::chunk_stream::CHUNK_OVERHEAD;
-        let plan_total = enc.expected_total_ciphertext();
+        let framed = chunk_size + beebeeb_core::chunk_stream::CHUNK_OVERHEAD;
         let handle = tokio::runtime::Handle::current();
         loop {
             // spawn_blocking can't be aborted mid-chunk, so check at the top of each iteration.
@@ -223,7 +221,7 @@ pub(super) async fn run_pipeline(
                     // A chunk of another length than the plan's is a source that grew or shrank while it was read
                     // (the last chunk reads to the end of the file). It is not sent: the server would refuse the
                     // long one (413, `chunk_body_limit`) and that answer would hide why (LD-0137).
-                    let planned = planned_frame_len(framed, plan_chunks, plan_total, chunk.index);
+                    let planned = planned_frame_len(framed, u64::from(chunk_count), expected_total, chunk.index);
                     if chunk.data.len() as u64 != planned {
                         return Err(ProducerErr::Plan(format!(
                             "integrity check failed: chunk {} is {} bytes, the plan says {planned} (the source changed while it was read)",

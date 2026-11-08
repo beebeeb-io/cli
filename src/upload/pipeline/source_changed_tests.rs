@@ -140,7 +140,13 @@ async fn a_failed_read_keeps_its_session_unless_the_caller_says_the_file_changed
 }
 
 /// The attempt itself, with the size its plan was made for: before init, so no request goes out.
-async fn attempt(scratch_tag: &str, planned_size: u64, remove_file: bool, says_changed: bool) -> (String, Shared) {
+async fn attempt(
+    scratch_tag: &str,
+    planned_size: u64,
+    remove_file: bool,
+    says_changed: bool,
+    resumed: bool,
+) -> (String, Shared) {
     let scratch = Scratch::new(scratch_tag);
     let (path, _, _) = scratch.file(2000);
     if remove_file {
@@ -150,11 +156,20 @@ async fn attempt(scratch_tag: &str, planned_size: u64, remove_file: bool, says_c
     let api = api_for(&state).await;
     let mk = Arc::new(MasterKey::from_bytes([9u8; 32]));
     let spec = spec(&path, Uuid::new_v4());
-    let plan = SessionPlan::Init {
-        file_id: spec.file_id,
-        fallback_file_id: None,
-        is_recovery: false,
-        resume_tag: None,
+    let plan = if resumed {
+        SessionPlan::Resume {
+            file_id: spec.file_id,
+            session_id: Uuid::new_v4(),
+            direct: false,
+            recorded_chunk_size: None,
+        }
+    } else {
+        SessionPlan::Init {
+            file_id: spec.file_id,
+            fallback_file_id: None,
+            is_recovery: false,
+            resume_tag: None,
+        }
     };
     let progress = InPlace {
         rewrite: None,
@@ -183,18 +198,36 @@ async fn attempt(scratch_tag: &str, planned_size: u64, remove_file: bool, says_c
 
 #[tokio::test]
 async fn a_size_that_moved_since_the_plan_is_a_change_for_a_caller_that_says_so() {
-    let (message, state) = attempt("stale-guard", 1500, false, true).await;
+    let (message, state) = attempt("stale-guard", 1500, false, true, false).await;
     assert_eq!(message, GUARD_WORDS);
     assert!(state.lock().unwrap().inits.is_empty(), "no session was opened");
-    let (message, _) = attempt("stale-push", 1500, false, false).await;
+    assert!(state.lock().unwrap().abandons.is_empty(), "and none was there to end");
+    let (message, _) = attempt("stale-push", 1500, false, false, false).await;
     assert!(message.contains("changed size during scan"), "{message}");
+}
+
+/// A RESUMED attempt does have a session (and a record) before init: a change found then ends it, or a replace meets
+/// its own lease at the next run.
+#[tokio::test]
+async fn a_change_found_before_init_ends_a_resumed_session() {
+    let (message, state) = attempt("stale-resumed", 1500, false, true, true).await;
+    assert_eq!(message, GUARD_WORDS);
+    assert_eq!(state.lock().unwrap().abandons.len(), 1);
+    let (message, state) = attempt("gone-resumed", 2000, true, true, true).await;
+    assert_eq!(message, GUARD_WORDS);
+    assert_eq!(state.lock().unwrap().abandons.len(), 1);
+    let (_, state) = attempt("stale-resumed-push", 1500, false, false, true).await;
+    assert!(
+        state.lock().unwrap().abandons.is_empty(),
+        "a caller that does not say it changed keeps the session"
+    );
 }
 
 #[tokio::test]
 async fn a_file_that_went_away_is_a_change_for_a_caller_that_says_so() {
-    let (message, _) = attempt("gone-guard", 2000, true, true).await;
+    let (message, _) = attempt("gone-guard", 2000, true, true, false).await;
     assert_eq!(message, GUARD_WORDS);
-    let (message, _) = attempt("gone-push", 2000, true, false).await;
+    let (message, _) = attempt("gone-push", 2000, true, false, false).await;
     assert!(message.starts_with("open "), "{message}");
 }
 

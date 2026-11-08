@@ -14,7 +14,9 @@ use crate::api::InitTransport;
 use crate::upload::limits::used_in_flight;
 
 mod parallel;
+mod source_guard;
 use parallel::run_pipeline;
+use source_guard::{changed_before_init, end_session, source_changed};
 
 /// Look-ahead channel depth. `1` keeps peak memory tight while still
 /// overlapping "encrypt N+1" with "PUT N"; bump to `2` for a touch more
@@ -568,10 +570,18 @@ pub(super) async fn upload_attempt(
     if spec.shutdown.load(Ordering::Relaxed) {
         return Err(AttemptErr::Other(INTERRUPTED.to_string()));
     }
-    // A file that went away since the caller looked at it is a change, not a failure (LD-0137). No session exists yet.
-    let file = std::fs::File::open(&spec.path).map_err(|e| {
-        source_changed(progress, &spec.path).unwrap_or_else(|| format!("open {}: {e}", spec.path.display()))
-    })?;
+    // A file that went away since the caller looked at it is a change, not a failure (LD-0137).
+    let file = match std::fs::File::open(&spec.path) {
+        Ok(file) => file,
+        Err(e) => {
+            if let Some(stop) =
+                changed_before_init(api, progress, &spec.path, &file_id_str, resumed_session.is_some()).await
+            {
+                return Err(stop);
+            }
+            return Err(format!("open {}: {e}", spec.path.display()).into());
+        }
+    };
     let encryptor = match &spec.replace_file_key {
         Some(key) => ChunkEncryptor::from_reader_with_file_key(
             crate::crypto::key_copy(key),
@@ -619,9 +629,11 @@ pub(super) async fn upload_attempt(
     //    stale, so bail and let the next run pick it up.
     if let Ok(m2) = std::fs::metadata(&spec.path) {
         if m2.len() != size {
-            // The caller that reads a file in place calls this a change, not a failure (LD-0137); no session yet.
-            if let Some(why) = source_changed(progress, &spec.path) {
-                return Err(AttemptErr::Other(why));
+            // The caller that reads a file in place calls this a change, not a failure (LD-0137).
+            if let Some(stop) =
+                changed_before_init(api, progress, &spec.path, &file_id_str, resumed_session.is_some()).await
+            {
+                return Err(stop);
             }
             return Err(AttemptErr::Other(format!(
                 "{} changed size during scan ({size} → {}); will retry next run",
@@ -1011,19 +1023,6 @@ pub(super) async fn upload_attempt(
         transport: if direct.is_some() { "direct" } else { "api" },
         transferred_bytes: *transferred,
     })
-}
-
-/// The caller's words when it says (`ChunkProgress::before_complete`) that the file at `path` changed while it was
-/// read; `None` when it does not (the default for `push` and `sync`).
-fn source_changed(progress: &dyn ChunkProgress, path: &Path) -> Option<String> {
-    progress.before_complete(path).err()
-}
-
-/// Ends the attempt's session, so nothing completes and no lease is left to refuse the next run, and drops its
-/// resume record (the file is no longer the one it was made for).
-async fn end_session(api: &ApiClient, path: &Path, file_id: &str) {
-    let _ = api.upload_abandon(file_id).await;
-    crate::resume::clear(path);
 }
 
 /// Generate + encrypt + upload a thumbnail for image files, best-effort. Does
