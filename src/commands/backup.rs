@@ -425,17 +425,17 @@ async fn run_folder(
         None => None,
     };
     let mut records = store.records(source.records_file)?;
-    // Records lost (a reinstall): core's rebuild rule marks what the server
-    // already holds, so nothing is uploaded twice (spec §4.2 rule 10). The
-    // listing's clock is not measured (the API client does not hand back the
-    // response's `Date` header yet), so core's 10-minute floor applies: a copy
-    // made within 10 minutes of its file's last change is uploaded again
-    // rather than trusted on this device's clock (LD-0123).
+    // Records lost (a reinstall): core's rebuild rule marks the server copies it
+    // trusts, and those are not uploaded again (spec §4.2 rule 10). A copy it does
+    // not trust (made within 10 minutes of its file's last change, LD-0123) is
+    // uploaded again as a new version of that same server file (`CliHost::upload_one`),
+    // never as a second row.
     if records.len() == 0
         && let Some(tree) = tree.as_ref().filter(|t| !t.files.is_empty())
     {
         let walk = beebeeb_backup::walk_source(&source.path, excluded)
             .map_err(|e| format!("cannot read {} ({:?})", folder, e.kind()))?;
+        // No measured listing clock until LD-0143, so core's 10-minute floor applies.
         for record in records_from_remote_with_clock(&tree.files, &walk.entries, RebuildClock::UNKNOWN) {
             records.put(record)?;
         }
@@ -446,6 +446,13 @@ async fn run_folder(
         .map_err(|e| e.0)?;
     let queued = host.queued();
     let drained: Drained = host.drain().await;
+    if drained.ambiguous > 0 && !ui::is_quiet() {
+        eprintln!(
+            "note: {} file(s) were uploaded as new files, not new versions: more than one copy on the server \
+             has the same name in the same folder",
+            drained.ambiguous
+        );
+    }
     let turned_off = host.turned_off().and_then(OffReason::from_presence);
     host.into_records().compact()?;
     let last = LastPass {

@@ -54,6 +54,7 @@ src/test_server.rs        shared loopback mock for tests; tests/ = integration b
   call unless `$HOME` is the account's home.
 - **Core pin:** `beebeeb-core` + `beebeeb-types` are Cargo git deps on a full 40-char SHA; bump `rev` ONLY together with `repos/server/CORE_REV`
   in the SAME commit, then fix what the compiler flags (non-exhaustive `match` on core enums is intentional). Local `[patch]` snippet: `docs/agent-notes.md` → "Dependencies".
+- Exception (Guus, 2026-11-08): cli 0.17.1 pins core v0.2.2 (security, RUSTSEC-2026-0387 / task 2378) before repos/server/CORE_REV moves; v0.2.2 is additive. The server bump is task LD-0142.
 
 ## Never break
 

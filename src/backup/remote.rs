@@ -373,6 +373,8 @@ pub(crate) async fn ensure_folder(
 pub(crate) struct Tree {
     pub folders: HashMap<String, Uuid>,
     pub files: Vec<RemoteEntry>,
+    /// The folder each listed file sits in, by file id: a key alone cannot tell two same-named folders apart.
+    pub parents: HashMap<Uuid, Uuid>,
     pub complete: bool,
 }
 
@@ -382,6 +384,7 @@ pub(crate) async fn tree(api: &ApiClient, master_key: &MasterKey, top: Uuid) -> 
     let mut tree = Tree {
         folders: HashMap::from([(String::new(), top)]),
         files: Vec::new(),
+        parents: HashMap::new(),
         complete: true,
     };
     let mut stack = vec![(top, String::new())];
@@ -410,6 +413,7 @@ pub(crate) async fn tree(api: &ApiClient, master_key: &MasterKey, top: Uuid) -> 
                     None => tree.complete = false,
                 }
             } else {
+                tree.parents.insert(id, folder);
                 tree.files.push(RemoteEntry {
                     key: key.unwrap_or_default(),
                     remote_id: id,
