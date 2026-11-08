@@ -581,7 +581,7 @@ fn read_zip(path: &Path) -> HashMap<String, Vec<u8>> {
             let mut e = z.by_index(i).unwrap();
             let mut buf = Vec::new();
             e.read_to_end(&mut buf).unwrap();
-            (e.name().to_string(), buf)
+            (e.name().expect("a UTF-8 entry name").to_string(), buf)
         })
         .collect()
 }
@@ -591,7 +591,7 @@ fn zip_names(path: &Path) -> Vec<String> {
     let f = std::fs::File::open(path).unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
     let mut z = zip::ZipArchive::new(f).expect("valid zip archive");
     let mut names: Vec<String> = (0..z.len())
-        .map(|i| z.by_index(i).unwrap().name().to_string())
+        .map(|i| z.by_index(i).unwrap().name().expect("a UTF-8 entry name").to_string())
         .collect();
     names.sort();
     names
