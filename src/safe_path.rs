@@ -119,8 +119,24 @@ mod tests {
         ] {
             assert!(check_component(ok, Rules::Portable).is_ok(), "{ok:?} must be accepted");
         }
-        // `...` ends in a dot: a Windows host refuses it (Windows strips trailing dots), others accept it.
-        assert_eq!(check_component("...", Rules::Portable).is_ok(), !cfg!(windows));
+        // core v0.2.8: Rules::Portable is host-independent; check_component never passes windows=true,
+        // so `...` (ends in a dot) is accepted everywhere.  The write-path guard inside safe_child
+        // calls check_component_to_write, which does apply Windows' trailing-dot rule, refusing `...`
+        // on Windows while allowing it on Unix.
+        assert!(check_component("...", Rules::Portable).is_ok());
+        let dir = tmp("dots");
+        if cfg!(windows) {
+            assert!(
+                safe_child(&dir, "...", Rules::Portable).is_err(),
+                "... must be refused on Windows"
+            );
+        } else {
+            assert!(
+                safe_child(&dir, "...", Rules::Portable).is_ok(),
+                "... must be allowed on Unix"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
