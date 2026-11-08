@@ -176,6 +176,9 @@ async fn try_update(
                 executable,
             });
         }
+        if is_homebrew_path(current_exe) {
+            return Err(HOMEBREW_MESSAGE.into());
+        }
         let target = current_target();
         let asset_name = format!("beebeeb-cli-{target}.tar.xz");
         eprintln!("  Updating bb v{CURRENT_VERSION} -> v{remote}...");
@@ -266,6 +269,28 @@ fn verify_installed_version(executable: &std::path::Path, expected: &semver::Ver
 // Package-manager updates: preserve ownership and verify the linked executable.
 // ---------------------------------------------------------------------------
 
+/// Shown instead of self-overwriting a Homebrew-managed `bb`.
+#[cfg(not(windows))]
+const HOMEBREW_MESSAGE: &str = "Installed with Homebrew: run `brew upgrade bb`";
+
+/// True when the binary lives where Homebrew owns it: inside a Cellar, under a
+/// Homebrew prefix, or behind a symlink that resolves into one. Self-update must
+/// never write there, since it replaces Homebrew's symlink with a plain file.
+#[cfg(not(windows))]
+fn is_homebrew_path(executable: &std::path::Path) -> bool {
+    fn owned(path: &std::path::Path) -> bool {
+        path.components().any(|part| part.as_os_str() == "Cellar")
+            || path.starts_with("/opt/homebrew")
+            || path.starts_with("/home/linuxbrew/.linuxbrew")
+    }
+    if owned(executable) {
+        return true;
+    }
+    std::fs::canonicalize(executable)
+        .map(|real| owned(&real))
+        .unwrap_or(false)
+}
+
 #[cfg(not(windows))]
 fn homebrew_executable(executable: &std::path::Path, brew: &std::path::Path) -> UpdateResult<Option<PathBuf>> {
     let cellar = executable.components().any(|part| part.as_os_str() == "Cellar");
@@ -315,7 +340,12 @@ fn update_via_homebrew(
             .stdout(std::process::Stdio::from(std::io::stderr()))
             .status()?;
         if !status.success() {
-            return Err(format!("brew {} failed; retry after fixing Homebrew", args[0]).into());
+            let recovery = if args[0] == "link" {
+                "; recover with `brew link --overwrite bb`"
+            } else {
+                "; retry after fixing Homebrew"
+            };
+            return Err(format!("brew {} failed{recovery}", args[0]).into());
         }
     }
     verify_installed_version(linked, version)
@@ -585,6 +615,21 @@ mod tests {
             Some(PathBuf::from("/users/test/scoop/apps/bb/current/bb.exe"))
         );
         assert_eq!(scoop_executable(std::path::Path::new("/downloads/bb.exe")), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn homebrew_installs_are_recognised_and_others_are_not() {
+        for path in [
+            "/opt/homebrew/bin/bb",
+            "/usr/local/Cellar/bb/0.17.2/bin/bb",
+            "/home/linuxbrew/.linuxbrew/bin/bb",
+        ] {
+            assert!(is_homebrew_path(std::path::Path::new(path)), "{path}");
+        }
+        for path in ["/usr/local/bin/bb", "/home/me/.cargo/bin/bb"] {
+            assert!(!is_homebrew_path(std::path::Path::new(path)), "{path}");
+        }
     }
 
     #[cfg(unix)]
@@ -887,6 +932,38 @@ esac
             assert!(log.contains("update --quiet"));
             assert!(log.contains("upgrade beebeeb-io/tap/bb"));
             assert!(log.contains("link --overwrite beebeeb-io/tap/bb"));
+        }
+
+        #[test]
+        fn a_symlink_into_a_cellar_is_homebrew_managed() {
+            let scratch = Scratch::new();
+            let real = scratch.path("Cellar/bb/1.0.0/bin");
+            std::fs::create_dir_all(&real).unwrap();
+            write_executable(&real.join("bb"), b"x");
+            let link = scratch.path("bin-bb");
+            std::os::unix::fs::symlink(real.join("bb"), &link).unwrap();
+            assert!(is_homebrew_path(&link));
+            let plain = scratch.path("plain-bb");
+            write_executable(&plain, b"x");
+            assert!(!is_homebrew_path(&plain));
+        }
+
+        #[tokio::test]
+        async fn homebrew_managed_binary_is_never_overwritten() {
+            let scratch = Scratch::new();
+            let dir = scratch.path("Cellar/bb/1.0.0");
+            std::fs::create_dir_all(&dir).unwrap();
+            write_executable(&dir.join("bb"), b"old");
+            let exe = scratch.path("bin-bb");
+            std::os::unix::fs::symlink(dir.join("bb"), &exe).unwrap();
+            let server = server("999.0.0", Some("00"), b"new", 200).await;
+            let error = try_update(&scratch.path("state"), &exe, &server.url, &scratch.path("no-brew"))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("brew upgrade bb"), "{error}");
+            assert_eq!(std::fs::read(dir.join("bb")).unwrap(), b"old");
+            assert!(std::fs::symlink_metadata(&exe).unwrap().file_type().is_symlink());
         }
 
         #[test]
