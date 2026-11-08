@@ -5,6 +5,8 @@
 //! come from files in the scratch home (the `BB_BACKUP_MACHINE_*_FILE` seams), so the device folder is
 //! `Backups/nas01`.
 
+#[path = "support/config_dir.rs"]
+mod state_dirs;
 #[path = "support/push_vault.rs"]
 mod support;
 
@@ -122,9 +124,11 @@ async fn a_changed_file_uploads_as_a_new_version() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_source_under_an_excluded_dir_is_refused() {
     let (_vault, api, home, env) = setup().await;
-    // The CLI's own state dir (the session and key live there).
-    std::fs::create_dir_all(home.join(".config/beebeeb/inside")).unwrap();
-    let out = backup(&home, &api, &env, &["add", ".config/beebeeb/inside"]).await;
+    // The CLI's own state dir (the session and key live there), wherever this platform keeps it.
+    let inside = state_dirs::config_dir(&home).join("inside");
+    std::fs::create_dir_all(&inside).unwrap();
+    let inside = inside.strip_prefix(&home).unwrap().to_str().unwrap().to_string();
+    let out = backup(&home, &api, &env, &["add", &inside]).await;
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
     assert!(stderr(&out).contains("one of bb's own folders"), "{}", stderr(&out));
     // A `bb sync` folder, or a folder inside one.
