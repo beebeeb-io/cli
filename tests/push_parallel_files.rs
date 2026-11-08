@@ -3,6 +3,7 @@
 //! most N chunks in flight across them, each file taking its upload lock on admission and re-checking under it
 //! what stage 1 saw. Black box: the real `bb` against the in-process vault mock, scratch `HOME`, loopback only;
 //! signals go to the pid the test recorded.
+#![cfg_attr(not(unix), allow(dead_code))]
 
 #[path = "support/push_vault.rs"]
 mod vault;
@@ -33,6 +34,7 @@ async fn wait_until(vault: &Shared, child: &mut std::process::Child, what: &str,
     }
 }
 
+#[cfg(unix)]
 /// Send SIGINT to the child the test spawned (its own recorded pid, never a name).
 fn ctrl_c(child: &std::process::Child) {
     let status = Command::new("kill")
@@ -168,6 +170,7 @@ fn spawn_at_terminal(home: &Path, args: &[&str]) -> (std::process::Child, std::f
         .current_dir(home)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("BB_CONFIG_DIR", home.join(".config").join("beebeeb"))
         .env("BB_NO_UPDATE", "1")
         .env("NO_COLOR", "1")
         .stdin(Stdio::from(slave))
@@ -318,6 +321,7 @@ fn spawn_with_fd_limit(home: &Path, args: &[&str], limit: u64) -> std::process::
         .current_dir(home)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("BB_CONFIG_DIR", home.join(".config").join("beebeeb"))
         .env("BB_NO_UPDATE", "1")
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
@@ -439,6 +443,8 @@ async fn changed_while_preparing_fails_that_file() {
     assert_eq!(files_named(&v, "c.bin").len(), 1, "only the other device's c.bin");
 }
 
+// Ctrl-C is delivered with `kill -INT <pid>`, a unix signal: no equivalent for a spawned child on Windows (2431).
+#[cfg(unix)]
 /// Ctrl-C with two files in flight (N = 2): both stop, the files not started are never inited, one interrupt line
 /// naming the folder, exit 130; the same command then finishes all four.
 #[tokio::test(flavor = "multi_thread")]
@@ -485,6 +491,8 @@ async fn ctrl_c_stops_every_file() {
     each_completed_once(&v, &names);
 }
 
+// Ctrl-C is delivered with `kill -INT <pid>`, a unix signal: no equivalent for a spawned child on Windows (2431).
+#[cfg(unix)]
 /// Review P2 (#141): a Ctrl-C while stage 2's re-checks wait out a rate-limit pause stops the push as an interrupt
 /// (one line, exit 130), never as failed files, and no internal sentinel reaches the person.
 #[tokio::test(flavor = "multi_thread")]

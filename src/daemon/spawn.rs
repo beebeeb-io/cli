@@ -159,12 +159,19 @@ mod transport_tests {
     fn a_config_dir_that_is_not_the_services_is_refused() {
         // XDG_CONFIG_HOME pointing elsewhere with the real HOME: the HOME check passes, this must not.
         let account = Path::new("/home/dev");
-        assert!(check_config_dir(Some(Path::new("/home/dev/.config")), Some(account), None).is_ok());
+        // The service's config dir is `<home>/.config`, joined with the host's separator.
+        let expected = if cfg!(windows) {
+            r"/home/dev\.config"
+        } else {
+            "/home/dev/.config"
+        };
+        let expected = Path::new(expected);
+        assert!(check_config_dir(Some(expected), Some(account), None).is_ok());
         let refused = check_config_dir(Some(Path::new("/tmp/scratch/xdg")), Some(account), None).unwrap_err();
         assert!(
             refused.contains("XDG_CONFIG_HOME")
                 && refused.contains("/tmp/scratch/xdg")
-                && refused.contains("/home/dev/.config"),
+                && refused.contains(&expected.display().to_string()),
             "{refused}"
         );
         assert!(refused.contains("BB_SERVICE_INSTALL_ALLOW_CUSTOM_HOME=1"), "{refused}");
@@ -173,6 +180,30 @@ mod transport_tests {
         // Nothing to compare when either side is unknown (the HOME check has its own rule for that).
         assert!(check_config_dir(None, Some(account), None).is_ok());
         assert!(check_config_dir(Some(Path::new("/x")), None, None).is_ok());
+    }
+
+    #[test]
+    fn a_set_bb_config_dir_is_refused_like_a_relocated_xdg_dir() {
+        let refused = check_config_override(Some(std::ffi::OsStr::new("/tmp/scratch/bb")), None).unwrap_err();
+        assert!(
+            refused.contains("BB_CONFIG_DIR") && refused.contains("/tmp/scratch/bb"),
+            "{refused}"
+        );
+        assert!(refused.contains("BB_SERVICE_INSTALL_ALLOW_CUSTOM_HOME=1"), "{refused}");
+        assert!(check_config_override(Some(std::ffi::OsStr::new("/tmp/scratch/bb")), Some("1")).is_ok());
+        assert!(check_config_override(Some(std::ffi::OsStr::new("/tmp/scratch/bb")), Some("0")).is_err());
+        assert!(check_config_override(Some(std::ffi::OsStr::new("")), None).is_ok());
+        assert!(check_config_override(None, None).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_bb_config_dir_is_refused_too() {
+        use std::os::unix::ffi::OsStrExt;
+        let odd = std::ffi::OsStr::from_bytes(b"/tmp/\xff/bb");
+        let refused = check_config_override(Some(odd), None).unwrap_err();
+        assert!(refused.contains("BB_CONFIG_DIR"), "{refused}");
+        assert!(check_config_override(Some(odd), Some("1")).is_ok());
     }
 
     #[test]

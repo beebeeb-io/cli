@@ -3,7 +3,7 @@
 //! every install/remove/migrate is refused unless HOME is the account's home.
 //!
 //! Owns: `account_home`, `CUSTOM_HOME_OVERRIDE`, `same_dir`, `check_home`,
-//! `check_config_dir`, `ensure_real_home`.
+//! `check_config_dir`, `check_config_override`, `ensure_real_home`.
 //! Must not: call `launchctl`/`systemctl` itself (see `daemon::spawn`).
 //! Tests: the guard's cases live in `daemon::spawn`'s `transport_tests`.
 
@@ -99,12 +99,34 @@ pub(super) fn check_home(home: Option<&Path>, account: Option<&Path>, allow: Opt
     }
 }
 
+/// A set `BB_CONFIG_DIR` redirects the config like a relocated `XDG_CONFIG_HOME` does: the service would not see it.
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+pub(super) fn check_config_override(over: Option<&std::ffi::OsStr>, allow: Option<&str>) -> Result<(), DaemonError> {
+    match over {
+        Some(dir) if !dir.is_empty() && allow != Some("1") => Err(DaemonError::Refused(format!(
+            "refusing to touch the background-service manager: this run reads its config from {dir} \
+             (BB_CONFIG_DIR is set) but the service would read the account's default config directory. \
+             If this is intended, run the command again with {CUSTOM_HOME_OVERRIDE}=1",
+            dir = dir.to_string_lossy()
+        ))),
+        _ => Ok(()),
+    }
+}
+
 #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 pub(super) fn ensure_real_home() -> Result<(), DaemonError> {
     let allow = std::env::var(CUSTOM_HOME_OVERRIDE).ok();
     let account = account_home();
     check_home(dirs::home_dir().as_deref(), account.as_deref(), allow.as_deref())?;
+    check_config_override(
+        std::env::var_os(crate::paths::CONFIG_DIR_OVERRIDE).as_deref(),
+        allow.as_deref(),
+    )?;
     #[cfg(target_os = "linux")]
-    check_config_dir(dirs::config_dir().as_deref(), account.as_deref(), allow.as_deref())?;
+    check_config_dir(
+        crate::paths::platform_config_dir().as_deref(),
+        account.as_deref(),
+        allow.as_deref(),
+    )?;
     Ok(())
 }

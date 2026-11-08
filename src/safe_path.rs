@@ -110,7 +110,6 @@ mod tests {
             "report.pdf",
             "rapport Q3 \u{00e9}\u{00e8}.pdf",
             ".gitignore",
-            "...",
             "..hidden",
             "a b c",
             "2026-10-04T10:30:00.log",
@@ -120,6 +119,8 @@ mod tests {
         ] {
             assert!(check_component(ok, Rules::Portable).is_ok(), "{ok:?} must be accepted");
         }
+        // `...` ends in a dot: a Windows host refuses it (Windows strips trailing dots), others accept it.
+        assert_eq!(check_component("...", Rules::Portable).is_ok(), !cfg!(windows));
     }
 
     #[test]

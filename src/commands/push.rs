@@ -488,10 +488,16 @@ async fn push_directory(
     for (entry_path, _) in entries.iter().filter(|(_, is_dir)| *is_dir) {
         let entry_parent = entry_path.parent().unwrap_or(dir_path);
         let entry_parent_id = folder_map.get(entry_parent).copied().unwrap_or(root_id);
-        let shown = std::path::Path::new(&dir_name)
-            .join(entry_path.strip_prefix(dir_path).unwrap_or(entry_path))
-            .display()
-            .to_string();
+        // A vault path is shown with `/` on every OS, never an OS path's separator.
+        let relative = entry_path.strip_prefix(dir_path).unwrap_or(entry_path);
+        let shown = std::iter::once(dir_name.to_string())
+            .chain(
+                relative
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned()),
+            )
+            .collect::<Vec<_>>()
+            .join("/");
         let folder_id = match entry_path.file_name().and_then(|n| n.to_str()) {
             Some(name) => folders.child(Some(entry_parent_id), name, &shown).await?,
             None => folders.new_folder(Some(entry_parent_id), "folder").await?,
@@ -535,8 +541,10 @@ async fn push_directory(
         let rel = entry_path
             .strip_prefix(dir_path)
             .unwrap_or(entry_path)
-            .display()
-            .to_string();
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/");
         let ready = push_file::prepare(api, &upload_key, entry_path, parent, strategy, true, &progress).await;
         // A Ctrl-C during its lookup: the file is left undone (not started), not failed.
         if matches!(&ready, Err(e) if was_interrupted(e) && ctl.interrupt.is_set()) {

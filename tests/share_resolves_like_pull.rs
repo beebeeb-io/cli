@@ -134,6 +134,7 @@ fn bb(home: &Path, api: &str, args: &[&str]) -> std::process::Output {
         .arg("--json")
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("BB_CONFIG_DIR", home.join(".config").join("beebeeb"))
         .env("BB_NO_UPDATE", "1")
         .env_remove("APP_URL")
         .output()

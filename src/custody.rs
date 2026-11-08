@@ -26,7 +26,7 @@ pub struct CustodyStore {
 
 // Next to `config.json`, wherever `config::config_path` puts it.
 fn directory() -> PathBuf {
-    dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("beebeeb")
+    crate::paths::config_dir()
 }
 
 // One lock covers read/union/replace. The lock file is never replaced: all processes must lock the same inode.

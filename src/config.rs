@@ -118,7 +118,7 @@ impl ConfigFile {
 }
 
 fn config_dir() -> PathBuf {
-    dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("beebeeb")
+    crate::paths::config_dir()
 }
 
 /// `config.json` (macOS `~/Library/Application Support/beebeeb`, Linux `~/.config/beebeeb`).

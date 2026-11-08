@@ -52,6 +52,7 @@ fn bb(home: &Path, cwd: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> Out
         .current_dir(cwd)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("BB_CONFIG_DIR", home.join(".config").join("beebeeb"))
         .env("BB_NO_UPDATE", "1")
         .env("NO_COLOR", "1")
         .stdin(Stdio::null());

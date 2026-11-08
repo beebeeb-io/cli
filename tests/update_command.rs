@@ -17,6 +17,12 @@ fn update_help_is_available_without_authentication() {
             "XDG_CONFIG_HOME",
             std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("update-command-no-config"),
         )
+        .env(
+            "BB_CONFIG_DIR",
+            std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+                .join("update-command-no-config")
+                .join("beebeeb"),
+        )
         .env("PATH", "")
         .stdin(Stdio::null())
         .output()
@@ -40,6 +46,12 @@ fn explicit_update_is_not_silently_disabled_by_auto_update_opt_out() {
         .env(
             "XDG_CONFIG_HOME",
             std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("update-command-no-config"),
+        )
+        .env(
+            "BB_CONFIG_DIR",
+            std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+                .join("update-command-no-config")
+                .join("beebeeb"),
         )
         .env("PATH", "")
         .stdin(Stdio::null())

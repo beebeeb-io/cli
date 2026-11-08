@@ -16,12 +16,11 @@
 //! on SIGKILL, so a crashed push never blocks the re-run that resumes it.
 //!
 //! Lock files live at `<config_dir>/beebeeb/upload-locks/<sha256 of the
-//! canonical path>.lock` and hold the holder's pid (shown in the refusal). They
+//! canonical path>.lock` and are empty; the holder's pid (shown in the refusal) is in a `.pid` sidecar. They
 //! are never deleted: unlinking a lock file another process has open would let
 //! two holders lock two different files for one path.
 
 use std::fs::{File, OpenOptions, TryLockError};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -50,13 +49,18 @@ fn lock_path(path: &Path) -> PathBuf {
         .join(format!("{name}.lock"))
 }
 
+/// The unlocked sidecar that carries the holder's pid next to the lock file.
+fn pid_path(lock: &Path) -> PathBuf {
+    lock.with_extension("pid")
+}
+
 /// Take the upload lock for `path` without waiting.
 pub fn try_acquire(path: &Path) -> Result<UploadLock, LockError> {
     let lock = lock_path(path);
     if let Some(dir) = lock.parent() {
         std::fs::create_dir_all(dir).map_err(|e| LockError::Io(format!("create {}: {e}", dir.display())))?;
     }
-    let mut file = OpenOptions::new()
+    let file = OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
@@ -70,16 +74,17 @@ pub fn try_acquire(path: &Path) -> Result<UploadLock, LockError> {
     match locked {
         Ok(()) => {}
         Err(TryLockError::WouldBlock) => {
-            // Windows refuses reads of a locked file: no pid then.
-            let pid = std::fs::read_to_string(&lock).ok().and_then(|s| s.trim().parse().ok());
+            // The pid lives in a sidecar: Windows locks are mandatory, so the locked file itself is unreadable.
+            let pid = std::fs::read_to_string(pid_path(&lock))
+                .ok()
+                .and_then(|s| s.trim().parse().ok());
             return Err(LockError::Held { pid });
         }
         Err(TryLockError::Error(e)) => return Err(LockError::Io(format!("lock {}: {e}", lock.display()))),
     }
     // Best effort: the pid only makes the refusal more helpful.
     let _ = file.set_len(0);
-    let _ = write!(file, "{}", std::process::id());
-    let _ = file.flush();
+    let _ = std::fs::write(pid_path(&lock), std::process::id().to_string());
     Ok(UploadLock { _file: file })
 }
 
@@ -105,9 +110,7 @@ mod tests {
         let first = try_acquire(&a).expect("first push takes the lock");
         match try_acquire(&a) {
             Err(LockError::Held { pid }) => {
-                if cfg!(unix) {
-                    assert_eq!(pid, Some(std::process::id()), "the refusal names the holder");
-                }
+                assert_eq!(pid, Some(std::process::id()), "the refusal names the holder");
             }
             other => panic!("a second push of the same file must be refused, got {other:?}"),
         }
