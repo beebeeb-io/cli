@@ -10,6 +10,10 @@ pub use std::process::{Command, Output, Stdio};
 pub use std::sync::{Arc, Mutex};
 pub use std::time::{Duration, Instant};
 
+// The one source of where `bb` keeps its state under a scratch home (LD-0145); `backup_command` calls it too.
+#[path = "config_dir.rs"]
+pub mod config_dir;
+
 pub use axum::body::Bytes;
 pub use axum::extract::{Path as UrlPath, Query, State};
 pub use axum::http::StatusCode;
@@ -642,6 +646,17 @@ pub async fn start_mock(vault: Shared) -> String {
                         v.skipped += 1;
                         return Json(json!({ "index": idx, "size": body.len(), "skipped": true })).into_response();
                     }
+                    // As on the server (`chunk_body_limit`, task 1786): a chunk body may carry at most one chunk of the
+                    // declared geometry, and at most what the declared size leaves after the other chunks.
+                    let stored_other: u64 = s.frames.values().map(|f| f.len() as u64).sum();
+                    let total_cap = s.size + 28 * u64::from(s.chunk_count);
+                    let limit = (s.chunk_size + 28).min(total_cap.saturating_sub(stored_other));
+                    if body.len() as u64 > limit {
+                        return err(
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            "chunk body past the size the upload declared",
+                        );
+                    }
                     s.frames.insert(idx, body.to_vec());
                     Json(json!({ "index": idx, "size": body.len(), "skipped": false })).into_response()
                 },
@@ -872,10 +887,7 @@ pub fn scratch_home(api: &str) -> PathBuf {
         "email": "push-folder@beebeeb.io",
         "master_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
     });
-    for dir in [
-        home.join("Library/Application Support/beebeeb"),
-        home.join(".config/beebeeb"),
-    ] {
+    for dir in config_dir::login_dirs(&home) {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
     }
@@ -964,14 +976,12 @@ pub fn spawn_bb_piped(home: &Path, args: &[&str]) -> std::process::Child {
 
 /// Whether the resume sidecar in `home` names an in-progress upload (either config dir the harness writes).
 pub fn record_exists(home: &Path) -> bool {
-    [
-        home.join(".config/beebeeb/pending-uploads.json"),
-        home.join("Library/Application Support/beebeeb/pending-uploads.json"),
-    ]
-    .iter()
-    .filter_map(|p| std::fs::read_to_string(p).ok())
-    .filter_map(|text| serde_json::from_str::<Value>(&text).ok())
-    .any(|db| db["uploads"].as_object().is_some_and(|m| !m.is_empty()))
+    config_dir::login_dirs(home)
+        .iter()
+        .map(|dir| dir.join("pending-uploads.json"))
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .filter_map(|text| serde_json::from_str::<Value>(&text).ok())
+        .any(|db| db["uploads"].as_object().is_some_and(|m| !m.is_empty()))
 }
 
 /// Run `bb <args>` with chunk PUTs stalled until the server holds chunk 0 of a

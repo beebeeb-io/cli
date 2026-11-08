@@ -5,8 +5,6 @@
 //! come from files in the scratch home (the `BB_BACKUP_MACHINE_*_FILE` seams), so the device folder is
 //! `Backups/nas01`.
 
-#[path = "support/config_dir.rs"]
-mod state_dirs;
 #[path = "support/push_vault.rs"]
 mod support;
 
@@ -125,7 +123,7 @@ async fn a_changed_file_uploads_as_a_new_version() {
 async fn a_source_under_an_excluded_dir_is_refused() {
     let (_vault, api, home, env) = setup().await;
     // The CLI's own state dir (the session and key live there), wherever this platform keeps it.
-    let inside = state_dirs::config_dir(&home).join("inside");
+    let inside = support::config_dir::config_dir(&home).join("inside");
     std::fs::create_dir_all(&inside).unwrap();
     let inside = inside.strip_prefix(&home).unwrap().to_str().unwrap().to_string();
     let out = backup(&home, &api, &env, &["add", &inside]).await;
@@ -369,6 +367,10 @@ async fn a_file_changed_before_it_is_read_waits_for_the_next_run(after: &[u8]) {
     );
     {
         let v = vault.lock().unwrap();
+        assert_eq!(
+            v.abandons, 1,
+            "the session that could not complete was ended, or its lease would refuse the retry"
+        );
         assert!(
             !files_named(&v, "c.txt").iter().any(|(_, _, done)| *done),
             "c.txt never completed"

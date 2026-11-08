@@ -29,10 +29,13 @@ use tokio::sync::OwnedSemaphorePermit;
 /// Distinct producer failure causes, kept separate so the driver can surface an
 /// honest reason rather than a generic "upload failed".
 pub(super) enum ProducerErr {
-    /// A `CoreError` from `next_chunk` (read/encrypt).
+    /// A read of the source file failed (`CoreError::Io` from `next_chunk`).
+    Read(String),
+    /// Any other `CoreError` from `next_chunk` (sealing, framing): not the file's doing.
     Core(String),
-    /// The `finish()` integrity guard tripped — the source shrank mid-stream.
-    Finish(String),
+    /// The bytes read do not fit the plan: a sealed chunk whose length differs from the plan's, or the `finish()`
+    /// integrity guard (the source grew or shrank mid-stream).
+    Plan(String),
     /// The shutdown flag tripped at the top of an iteration.
     Cancelled,
     /// The receiver closed — the consumer hit its own error first (which wins).
@@ -195,6 +198,11 @@ pub(super) async fn run_pipeline(
     let producer = tokio::task::spawn_blocking(move || -> Result<(), ProducerErr> {
         let mut enc = encryptor;
         let admission = admission;
+        // The plan every sealed chunk is held to: all frames are one chunk plus the AEAD overhead, the last holds
+        // the rest of the declared size.
+        let plan_chunks = enc.chunk_plan().chunk_count;
+        let framed = enc.chunk_plan().chunk_size_bytes + beebeeb_core::chunk_stream::CHUNK_OVERHEAD;
+        let plan_total = enc.expected_total_ciphertext();
         let handle = tokio::runtime::Handle::current();
         loop {
             // spawn_blocking can't be aborted mid-chunk, so check at the top of each iteration.
@@ -212,6 +220,17 @@ pub(super) async fn run_pipeline(
             };
             match enc.next_chunk() {
                 Ok(Some(chunk)) => {
+                    // A chunk of another length than the plan's is a source that grew or shrank while it was read
+                    // (the last chunk reads to the end of the file). It is not sent: the server would refuse the
+                    // long one (413, `chunk_body_limit`) and that answer would hide why (LD-0137).
+                    let planned = planned_frame_len(framed, plan_chunks, plan_total, chunk.index);
+                    if chunk.data.len() as u64 != planned {
+                        return Err(ProducerErr::Plan(format!(
+                            "integrity check failed: chunk {} is {} bytes, the plan says {planned} (the source changed while it was read)",
+                            chunk.index,
+                            chunk.data.len()
+                        )));
+                    }
                     // The AEAD copy is freed now; the frame keeps its `C` until its PUT settles.
                     seal_share.shrink_to(chunk_size);
                     if tx.blocking_send((chunk, seal_share)).is_err() {
@@ -219,11 +238,16 @@ pub(super) async fn run_pipeline(
                     }
                 }
                 Ok(None) => break, // `seal_share` drops, returning `2 C`.
+                Err(beebeeb_core::CoreError::Io(e)) => {
+                    return Err(ProducerErr::Read(format!("encrypt chunk: I/O error: {e}")));
+                }
                 Err(e) => return Err(ProducerErr::Core(format!("encrypt chunk: {e}"))),
             }
         }
         // Integrity guard: detects a source that shrank mid-stream.
-        enc.finish().map(|_| ()).map_err(|e| ProducerErr::Finish(e.to_string()))
+        enc.finish()
+            .map(|_| ())
+            .map_err(|e| ProducerErr::Plan(format!("integrity check failed: {e}")))
     });
 
     // Consumer: up to `used` PUTs in flight from one `FuturesUnordered`. It reports `chunk_done` on each 200
@@ -311,9 +335,10 @@ pub(super) async fn run_pipeline(
         Ok(Err(ProducerErr::ChannelClosed)) => Some(AttemptErr::Other(
             "internal: chunk channel closed before completion".to_string(),
         )),
-        // The source file could not be read as planned (LD-0137): the caller may know it changed.
-        Ok(Err(ProducerErr::Core(e))) => Some(AttemptErr::Source(e)),
-        Ok(Err(ProducerErr::Finish(e))) => Some(AttemptErr::Source(format!("integrity check failed: {e}"))),
+        // The source file broke the attempt (LD-0137): the caller may know it changed.
+        Ok(Err(ProducerErr::Read(e))) => Some(AttemptErr::SourceRead(e)),
+        Ok(Err(ProducerErr::Plan(e))) => Some(AttemptErr::SourceChanged(e)),
+        Ok(Err(ProducerErr::Core(e))) => Some(AttemptErr::Other(e)),
         Err(join_err) => Some(AttemptErr::Other(format!("encrypt task failed: {join_err}"))),
     };
     if let Some(e) = producer_err {
@@ -334,6 +359,16 @@ pub(super) async fn run_pipeline(
         )));
     }
     Ok(confirmed)
+}
+
+/// The length of the frame the plan has for chunk `index`: a whole chunk plus the AEAD overhead (`framed`) for every
+/// chunk but the last, which holds what is left of `total` (the plan's ciphertext total) over `chunks` chunks.
+pub(super) fn planned_frame_len(framed: u64, chunks: u64, total: u64, index: u32) -> u64 {
+    if u64::from(index) + 1 == chunks {
+        total.saturating_sub(framed * (chunks - 1))
+    } else {
+        framed
+    }
 }
 
 /// `false` once the push's interrupt has fired (so the consumer takes no new chunk); always `true` when there is

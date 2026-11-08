@@ -30,13 +30,13 @@ pub trait ChunkProgress: Send + Sync {
     fn rollback(&self, _ciphertext_bytes: u64) {}
     /// Asks whether the file changed while it was read. Called once every chunk
     /// of a file is confirmed, just before its version is completed, and when
-    /// the SOURCE FILE broke an attempt (LD-0137: the encryptor's integrity
-    /// check on a file that grew or shrank, a failed read; a failure of the
+    /// the SOURCE FILE broke an attempt (LD-0137: a file that went away or grew
+    /// or shrank before the upload read it, a failed read; a failure of the
     /// network or the server never asks). An `Err` stops the upload there
-    /// instead: its session is abandoned, so nothing lands, and the error is the
-    /// caller's (LD-0113: a backup reads the person's file in place and never
-    /// completes a copy of a file that changed while it was read). `Ok` by
-    /// default.
+    /// instead: its session is abandoned, so nothing lands, and the error is
+    /// the caller's (LD-0113: a backup reads the person's file in place and
+    /// never completes a copy of a file that changed while it was read). `Ok`
+    /// by default.
     fn before_complete(&self, _path: &std::path::Path) -> Result<(), String> {
         Ok(())
     }

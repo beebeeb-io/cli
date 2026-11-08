@@ -78,12 +78,16 @@ pub(super) enum AttemptErr {
     /// `already_completed`) and clears the record, re-creating the file only if the server's row says it finished
     /// elsewhere or is gone.
     SessionCompleted { confirmed: Tally },
-    /// LD-0137: the SOURCE FILE broke the attempt, not the upload: it could not be read as planned (core's
-    /// integrity check on a file that grew or shrank, a failed read). Never leaves `upload_attempt`: it asks the
-    /// caller whether the file changed (`ChunkProgress::before_complete`) and reports that if so, else the
-    /// message as [`AttemptErr::Other`]. Other failures (the network, the server's answers, Ctrl-C) never take
-    /// this route, whatever the file did meanwhile.
-    Source(String),
+    /// LD-0137: the bytes read from the source no longer fit the plan the session was opened with (core's integrity
+    /// check, or a sealed chunk whose length differs from the plan's): the file grew or shrank while it was read.
+    /// The session can never complete, so `upload_attempt` always ends it, then asks the caller's guard
+    /// (`ChunkProgress::before_complete`) for the words: "changed" if the guard says so, this message if not.
+    /// Never leaves `upload_attempt`.
+    SourceChanged(String),
+    /// LD-0137: reading the source file failed (an I/O error from the encryptor). The file may simply be unreadable,
+    /// so the session is kept for a resume unless the caller's guard says the file changed, as above. Never leaves
+    /// `upload_attempt`.
+    SourceRead(String),
     /// Anything else — surfaced to the caller unchanged.
     Other(String),
 }
@@ -93,7 +97,8 @@ impl AttemptErr {
         match self {
             AttemptErr::SessionGone { message, .. }
             | AttemptErr::InitRefused { message, .. }
-            | AttemptErr::Source(message)
+            | AttemptErr::SourceChanged(message)
+            | AttemptErr::SourceRead(message)
             | AttemptErr::Other(message) => message,
             AttemptErr::DirectUnavailable { .. } => "the direct upload is unavailable for this file".to_string(),
             AttemptErr::SessionCompleted { .. } => "the upload session is already completed".to_string(),
