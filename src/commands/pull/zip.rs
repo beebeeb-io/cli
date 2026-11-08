@@ -2,7 +2,7 @@
 //! holding the archive in memory, and keep hostile entry names from escaping
 //! the destination.
 //!
-//! Owns: `run_zip`, the `ZipSink` writer, `ZipWalk`/`TempArchive`, entry-name
+//! Owns: `run_zip`, the `ZipSink` writer, `ZipWalk`/`TempArchive`/`StagedEntry`, entry-name
 //! sanitising (`zip_root_name`, `check_archive_path`, `unique_name`) and the
 //! nesting cap.
 //! Must not: fetch folder listings (see `pull::folder`).
@@ -13,6 +13,7 @@ use std::path::PathBuf;
 
 use crate::api::ApiClient;
 use crate::commands::push::load_master_key;
+use crate::safe_path::TempSibling;
 
 use super::{guard_existing_output, report, resolve_request_key, warn_skipped};
 use crate::transfer_stats::FileEnd;
@@ -132,9 +133,7 @@ pub(super) async fn run_zip(
     for (i, item) in items.iter().enumerate() {
         progress.next_file(plans[i].bytes, plans[i].chunks);
         if let Some(key) = &item.explicit_key {
-            let staging_dest = out_path.with_file_name(format!(".bb-entry-{}", uuid::Uuid::new_v4()));
-            let mut staged = TempArchive::create(&staging_dest)?;
-            drop(staged.take_file());
+            let staged = StagedEntry::create(&out_path)?;
             let result = crate::download::stream_download_decrypt_with_file_key(
                 api,
                 key.clone(),
@@ -420,34 +419,31 @@ pub(super) fn check_archive_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The archive under construction: a sibling temp file that is removed on drop
-/// unless [`TempArchive::commit`] renamed it into place.
+/// The archive under construction: core's [`TempSibling`] beside `dest`
+/// (task 2408), published only by [`TempArchive::commit`]. Dropped
+/// unpublished, it removes its temp and nothing else.
+///
+/// The temp is created exclusively (`{dest}.tmp`, or a random name when that
+/// is taken), so a leftover temp or a file of the user's own is never opened.
+/// A `dest` that reaches a DIFFERENT existing file through another of its
+/// names (on Windows an 8.3 short name, `REPORT~1.ZIP` for
+/// `Report for 2026.zip`) is refused when the archive is created and again at
+/// the publish, `--force` or not.
 pub(super) struct TempArchive {
-    pub(super) path: PathBuf,
-    pub(super) file: Option<std::fs::File>,
-    pub(super) done: bool,
+    // Declared first, so the file is closed before the temp is removed.
+    file: Option<std::fs::File>,
+    temp: Option<TempSibling>,
 }
 
 impl TempArchive {
-    /// Create `.<name>.<pid>.partial` next to `dest` (same directory, so the
-    /// final rename cannot cross a filesystem). `create_new`: never reuses or
-    /// writes through something that is already there.
+    /// Create the temp archive beside `dest` (same directory, so the publish
+    /// never crosses a filesystem).
     pub(super) fn create(dest: &std::path::Path) -> Result<Self, String> {
-        let dir = match dest.parent() {
-            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-            _ => PathBuf::from("."),
-        };
-        let name = dest.file_name().and_then(|n| n.to_str()).unwrap_or("archive.zip");
-        let path = dir.join(format!(".{name}.{}.partial", std::process::id()));
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|e| format!("failed to create {}: {e}", path.display()))?;
+        let (temp, file) = TempSibling::create(dest)
+            .map_err(|e| format!("failed to create the archive next to {}: {e}", dest.display()))?;
         Ok(Self {
-            path,
             file: Some(file),
-            done: false,
+            temp: Some(temp),
         })
     }
 
@@ -455,8 +451,9 @@ impl TempArchive {
         self.file.take().expect("temp archive file already taken")
     }
 
-    /// Move the finished archive to `dest`. Without `--force` an archive that
-    /// appeared at `dest` while this run was working is not replaced.
+    /// Publish the finished archive as `dest` (the path it was created for).
+    /// Without `--force` an archive that appeared at `dest` while this run was
+    /// working is not replaced.
     pub(super) fn commit(&mut self, dest: &std::path::Path, force: bool) -> Result<(), String> {
         if !force && std::fs::symlink_metadata(dest).is_ok() {
             return Err(format!(
@@ -464,17 +461,36 @@ impl TempArchive {
                 dest.display()
             ));
         }
-        std::fs::rename(&self.path, dest).map_err(|e| format!("failed to write {}: {e}", dest.display()))?;
-        self.done = true;
-        Ok(())
+        // Closed before the publish: Windows renames a file nobody holds open.
+        self.file.take();
+        let temp = self.temp.take().ok_or("the archive was already published")?;
+        temp.publish()
+            .map_err(|e| format!("failed to write {}: {e}", dest.display()))
     }
 }
 
-impl Drop for TempArchive {
+/// A scratch file beside the archive for one file-request upload, removed on
+/// drop: `.bb-entry-<uuid>`, created exclusively, so nothing that is already
+/// there is opened.
+pub(super) struct StagedEntry {
+    pub(super) path: PathBuf,
+}
+
+impl StagedEntry {
+    pub(super) fn create(archive: &std::path::Path) -> Result<Self, String> {
+        let path = archive.with_file_name(format!(".bb-entry-{}", uuid::Uuid::new_v4()));
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| format!("failed to create {}: {e}", path.display()))?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for StagedEntry {
     fn drop(&mut self) {
-        if !self.done {
-            let _ = std::fs::remove_file(&self.path);
-        }
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 

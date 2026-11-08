@@ -52,6 +52,10 @@ pub(super) fn ask_once(
 /// Before this guard `bb pull note.txt` replaced a local `note.txt` with the
 /// remote content — exit 0, no prompt, no backup — so unsaved local edits were
 /// lost. Now:
+/// - `out_path` reaches a DIFFERENT existing file through another of its names
+///   (on Windows an 8.3 short name, `REPORT~1.PDF` for `Report for 2026.pdf`,
+///   task 2408) → always an error naming both, before anything is fetched:
+///   overwriting it would replace that other file, `--force` or not;
 /// - nothing at `out_path` → proceed;
 /// - a directory at `out_path` → always an error (a file cannot replace it);
 /// - `--force` → proceed (the atomic `.tmp` + rename replaces the file);
@@ -60,6 +64,8 @@ pub(super) fn ask_once(
 ///   with a non-zero exit, naming `--force` and `-o <path>`. A piped `y` is not
 ///   consent (same rule as `bb passkey remove`, Codex PR #24).
 pub(super) fn guard_existing_output(out_path: &std::path::Path, force: bool) -> Result<(), String> {
+    crate::safe_path::refuse_short_name_alias(out_path)
+        .map_err(|e| format!("{e}; pass -o <path> to save elsewhere"))?;
     let meta = match std::fs::symlink_metadata(out_path) {
         Ok(m) => m,
         // Not there (or unreadable metadata): nothing to clobber here; any real

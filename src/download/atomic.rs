@@ -1,14 +1,23 @@
-//! The write-to-tmp-then-rename helper that publishes a download atomically.
+//! The write-to-temp-then-publish helper that lands a download in one step.
 
 use super::*;
+use crate::safe_path::TempSibling;
 
-/// Write-to-`.tmp`-then-atomic-rename helper so an interrupted/failed download
-/// never leaves a corrupt file at `out_path`.
+/// Writes a download to a temp sibling and publishes it at `out_path` only on
+/// [`commit`](Self::commit), so an interrupted or failed download never leaves
+/// a corrupt file there.
+///
+/// The temp and the publish are core's [`TempSibling`] (task 2408): the temp is
+/// created exclusively (`{out_path}.tmp`, or a random name when that is taken),
+/// so a leftover temp or a file of the user's own is never opened. An
+/// `out_path` that reaches a DIFFERENT existing file through another of its
+/// names (on Windows an 8.3 short name, `REPORT~1.PDF` for
+/// `Report for 2026.pdf`) is refused when the download starts and again at the
+/// publish; the refusal names both.
 pub(crate) struct AtomicFile {
-    pub(super) writer: Option<std::io::BufWriter<std::fs::File>>,
-    pub(super) tmp: std::path::PathBuf,
-    pub(super) final_path: std::path::PathBuf,
-    pub(super) committed: bool,
+    writer: Option<std::io::BufWriter<std::fs::File>>,
+    temp: Option<TempSibling>,
+    final_path: std::path::PathBuf,
 }
 
 impl AtomicFile {
@@ -19,22 +28,21 @@ impl AtomicFile {
                     .map_err(|e| DownloadError::Other(format!("mkdir {}: {e}", parent.display())))?;
             }
         }
-        let tmp = out_path.with_extension(format!(
-            "{}bbtmp",
-            out_path
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| format!("{e}."))
-                .unwrap_or_default()
-        ));
-        let file =
-            std::fs::File::create(&tmp).map_err(|e| DownloadError::Other(format!("create {}: {e}", tmp.display())))?;
+        let (temp, file) = TempSibling::create(out_path)
+            .map_err(|e| DownloadError::Other(format!("create {}: {e}", out_path.display())))?;
         Ok(Self {
             writer: Some(std::io::BufWriter::new(file)),
-            tmp,
+            temp: Some(temp),
             final_path: out_path.to_path_buf(),
-            committed: false,
         })
+    }
+
+    /// Write `data` (a whole file that is already in memory) to `out_path` the
+    /// same way: through the temp, published only once it is all written.
+    pub(crate) fn write_whole(out_path: &Path, data: &[u8]) -> Result<(), DownloadError> {
+        let mut writer = Self::create(out_path)?;
+        writer.write_all(data)?;
+        writer.commit()
     }
 
     pub(crate) fn write_all(&mut self, data: &[u8]) -> Result<(), DownloadError> {
@@ -48,27 +56,26 @@ impl AtomicFile {
     pub(crate) fn commit(mut self) -> Result<(), DownloadError> {
         let mut w = self.writer.take().expect("writer present");
         w.flush().map_err(|e| DownloadError::Other(format!("flush: {e}")))?;
+        // Closed before the publish: Windows renames a file nobody holds open.
         drop(w);
-        std::fs::rename(&self.tmp, &self.final_path)
-            .map_err(|e| DownloadError::Other(format!("rename {}: {e}", self.final_path.display())))?;
-        self.committed = true;
-        Ok(())
+        let temp = self.temp.take().expect("temp present until commit/abort");
+        temp.publish()
+            .map_err(|e| DownloadError::Other(format!("rename {}: {e}", self.final_path.display())))
     }
 
     /// Explicitly abort before falling back to another writer for the same path.
     pub(crate) fn abort(&mut self) {
         self.writer.take();
-        let _ = std::fs::remove_file(&self.tmp);
-        self.committed = true; // suppress Drop cleanup (already handled)
+        // Dropped unpublished, the temp removes itself (and only itself).
+        self.temp.take();
     }
 }
 
 impl Drop for AtomicFile {
     fn drop(&mut self) {
-        if !self.committed {
-            self.writer.take();
-            let _ = std::fs::remove_file(&self.tmp);
-        }
+        // The file is closed before its temp is removed.
+        self.writer.take();
+        self.temp.take();
     }
 }
 

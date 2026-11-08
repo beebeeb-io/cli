@@ -86,10 +86,11 @@ Account-less links for uploads into your vault; crypto via core's `file_request`
 Names come from the server — for file-request uploads from an anonymous stranger — so `out_dir.join(name)` is never used directly:
 
 - `safe_path::safe_child(dir, name, Rules::Portable)` (bb pull folder items): ONE plain component, no symlink target, canonical inside `dir`; unsafe item = skip + warning + exit 3, the rest still pulls.
-- `safe_path::default_output_path(name)` (bb pull without `-o`): same check, failure says "pass -o <path>"; explicit `-o` is never checked.
+- `safe_path::default_output_path(name)` (bb pull without `-o`): same check, failure says "pass -o <path>"; explicit `-o` is not checked against the name rules (but see the 8.3 line below).
 - `bb pull --zip`: `check_component` per entry; unsafe entries left out of the archive (exit 3).
 - `bb sync`: `Rules::Host` in `walk_remote` + `safe_rel_join` before local mkdir/download/unlink.
 - Windows reserved names/`:`/trailing dots enforced on Windows hosts only. Covered by `tests/pull_path_traversal.rs` + unit tests.
+- **Windows 8.3 short names (core v0.2.7, task 2408).** Windows also resolves a name through a folder's short names (`REPORT~1.PDF` for `Report for 2026.pdf`). The three helpers above refuse such a name. Every other write by name checks first: `download::AtomicFile` and the `--zip` archive write through core's `TempSibling` (exclusive temp `{out}.tmp`, publish without replacing a new name), `pull::guard_existing_output` refuses an `-o`/default output that reaches another file (even with `--force`), the `.bb-trash` move refuses a folder reached that way and numbers a taken file name, and a remote move applied locally (`reconcile_moves`) is held as a conflict. Windows-only tests (`src/short_name_test_support.rs`) run natively; CI is Linux.
 
 ## Download pipeline (`src/download.rs`)
 

@@ -130,21 +130,40 @@ pub async fn confirm_tombstones(api: &ApiClient, candidates: &[Uuid], stop_after
 /// `<root>/.bb-trash/<UTC stamp>/<rel>`. Same filesystem, so this is a rename:
 /// the bytes are not copied and not lost. Never falls back to deleting - if the
 /// move fails the file stays where it is.
+///
+/// `rel` must be a relative path of plain names, so the move stays inside the
+/// recovery folder. A taken name gets the next free number (`<name>.1`, ...);
+/// a name that reaches a different existing entry through another of its names
+/// (on Windows an 8.3 short name, `REPORT~1.PDF` for `Report for 2026.pdf`,
+/// task 2408) is a taken name too. A folder on the way that is reached that way
+/// is a different folder: the move is refused, naming both, and nothing is
+/// moved into it.
 pub fn move_to_recovery(root: &Path, src: &Path, rel: &str) -> Result<PathBuf, String> {
+    let aside = |why: &dyn std::fmt::Display| format!("move {} aside: {why}", src.display());
     let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
-    let base = root.join(RECOVERY_DIR).join(stamp).join(rel);
-    let mut dest = base.clone();
+    let wanted = Path::new(RECOVERY_DIR).join(stamp).join(rel);
+    let (Some(folder), Some(name)) = (wanted.parent(), wanted.file_name()) else {
+        return Err(aside(&format!("{rel:?} is not a file path")));
+    };
+    // Checked before anything is created: plain names only (a `..` or a root
+    // would leave the recovery folder) and no folder that reaches another one.
+    match crate::safe_path::short_name_alias(root, folder) {
+        Ok(None) => {}
+        Ok(Some(conflict)) => return Err(aside(&conflict)),
+        Err(e) => return Err(aside(&e)),
+    }
+    let dir = root.join(folder);
+    // `symlink_metadata` follows no link: any entry the name reaches is taken.
+    let mut dest = dir.join(name);
     let mut n = 1u32;
-    while dest.exists() {
-        let mut name = base.file_name().map(|s| s.to_os_string()).unwrap_or_default();
-        name.push(format!(".{n}"));
-        dest = base.with_file_name(name);
+    while std::fs::symlink_metadata(&dest).is_ok() {
+        let mut numbered = name.to_os_string();
+        numbered.push(format!(".{n}"));
+        dest = dir.join(numbered);
         n += 1;
     }
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
-    }
-    std::fs::rename(src, &dest).map_err(|e| format!("move {} aside: {e}", src.display()))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    std::fs::rename(src, &dest).map_err(|e| aside(&e))?;
     Ok(dest)
 }
 

@@ -29,10 +29,40 @@
 //! The rules live in `beebeeb_core::path_safety` (spec §16.2), so the CLI,
 //! desktop and web share one answer; this module re-exports them under the
 //! names the CLI call sites already use, and keeps the CLI's fixture tests.
+//!
+//! Windows also resolves a name through a folder's 8.3 short names (task 2408):
+//! the three helpers above refuse such a name, and a write by a name built
+//! anywhere else calls [`short_name_alias`] (or [`refuse_short_name_alias`])
+//! first, or writes through [`TempSibling`].
 
 pub use beebeeb_core::path_safety::{
-    Rules, archive_component, check_component, default_output_path, safe_child, safe_rel_join,
+    Rules, TempSibling, archive_component, check_component, default_output_path, safe_child, safe_rel_join,
+    short_name_alias,
 };
+
+/// Refuse a write (a create or a replace) to `path` whose last component
+/// reaches a DIFFERENT existing entry through another of its names: on Windows
+/// an 8.3 short name, `REPORT~1.PDF` for `Report for 2026.pdf` (task 2408).
+/// Replacing it would replace that other file. The folder part is the
+/// caller's choice and is not looked at. The refusal names both entries;
+/// other hosts answer without touching the disk.
+pub fn refuse_short_name_alias(path: &std::path::Path) -> Result<(), String> {
+    let Some(name) = path.file_name() else {
+        return Ok(());
+    };
+    let dir = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => std::path::Path::new("."),
+    };
+    match short_name_alias(dir, std::path::Path::new(name)) {
+        Ok(None) => Ok(()),
+        Ok(Some(conflict)) => Err(conflict.to_string()),
+        Err(e) => Err(format!(
+            "{}: cannot check the name against the existing entries ({e})",
+            path.display()
+        )),
+    }
+}
 
 #[cfg(test)]
 mod tests {
