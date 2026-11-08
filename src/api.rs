@@ -275,6 +275,16 @@ impl ApiClient {
         Self::with_config(load_config())
     }
 
+    /// A client for one session that is not (or not yet) the stored sign-in: `bb login` ends the session it was
+    /// just given when this machine cannot keep it (LD-0029).
+    pub(crate) fn for_session(api_url: &str, session_token: &str) -> Self {
+        Self::with_config(crate::config::Config {
+            api_url: api_url.to_string(),
+            session_token: Some(session_token.to_string()),
+            ..crate::config::Config::default()
+        })
+    }
+
     /// [`from_config`](Self::from_config) for a config already in hand.
     fn with_config(config: crate::config::Config) -> Self {
         // 300s per-request timeout, matching beebeeb-upload, so a stalled chunk

@@ -1,18 +1,27 @@
 use colored::Colorize;
 use zeroize::Zeroizing;
 
-use crate::config::{load_config, save_config};
+use crate::config::{keyring_reachable, load_config, save_login};
+use crate::credentials::{CredentialStore, Notice, Secrets};
 use crate::env_detect::is_headless;
 
 // ─── WebSocket device-auth login ─────────────────────────────────────────────
 
-async fn browser_login(headless_flag: bool) -> Result<(), String> {
+async fn browser_login(headless_flag: bool, store_secrets_in_file: bool) -> Result<(), String> {
     use base64::{Engine, engine::general_purpose::STANDARD as B64};
     use beebeeb_core::cli_auth::CliEphemeralKey;
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::{connect_async, tungstenite::Message};
 
     let headless = headless_flag || is_headless();
+
+    // 0. LD-0029 (F3): the key will live in the OS keyring. Without one, and without the opt-in, refuse NOW,
+    //    before anyone approves a sign-in in the browser that this machine would then refuse to keep.
+    if !store_secrets_in_file {
+        if let Err(reason) = keyring_reachable() {
+            return Err(crate::credentials::refusal(&reason));
+        }
+    }
 
     // 1. Generate ephemeral P-256 key pair (handshake crypto lives in beebeeb-core).
     let cli_key = CliEphemeralKey::generate();
@@ -129,9 +138,11 @@ async fn browser_login(headless_flag: bool) -> Result<(), String> {
             .map_err(|_| "Decryption failed — ECDH key mismatch or corrupted ciphertext")?,
     );
 
-    // 8. Parse credentials and persist — unchanged.
+    // 8. Parse credentials and persist them (LD-0029): the key and the session go into the OS keyring (or, on the
+    //    opt-in, credentials.json); config.json gets only the API URL, the email and where they went. A parse error
+    //    names no content: serde_json's messages can quote the input, and this input is the master key.
     let creds: serde_json::Value =
-        serde_json::from_slice(&plaintext).map_err(|e| format!("Invalid credentials JSON: {e}"))?;
+        serde_json::from_slice(&plaintext).map_err(|_| "Invalid credentials JSON from the browser".to_string())?;
 
     let session_token = creds["session_token"]
         .as_str()
@@ -141,11 +152,18 @@ async fn browser_login(headless_flag: bool) -> Result<(), String> {
         .ok_or("Missing master_key_b64 in credentials")?;
     let email = creds["email"].as_str().ok_or("Missing email in credentials")?;
 
-    let mut config = load_config();
-    config.session_token = Some(session_token.to_string());
-    config.master_key = Some(master_key_b64.to_string());
-    config.email = Some(email.to_string());
-    save_config(&config)?;
+    let secrets = Secrets {
+        master_key: Some(Zeroizing::new(master_key_b64.to_string())),
+        session_token: Some(Zeroizing::new(session_token.to_string())),
+    };
+    let store = match save_login(&api_url, email, &secrets, store_secrets_in_file) {
+        Ok(store) => store,
+        Err(e) => {
+            // The server already made a 30-day session for this sign-in; nothing here keeps it, so end it.
+            let _ = crate::api::ApiClient::for_session(&api_url, session_token).logout().await;
+            return Err(e);
+        }
+    };
 
     println!();
     println!(
@@ -153,6 +171,11 @@ async fn browser_login(headless_flag: bool) -> Result<(), String> {
         "✓".green(),
         email.custom_color(crate::colors::AMBER)
     );
+    if store == CredentialStore::File {
+        crate::credentials::print_once(&[Notice::Unencrypted {
+            path: crate::config::credentials_path(),
+        }]);
+    }
 
     Ok(())
 }
@@ -307,7 +330,7 @@ fn spawn_countdown(total_secs: u64) -> tokio::task::JoinHandle<()> {
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
-pub async fn run(headless: bool) -> Result<(), String> {
+pub async fn run(headless: bool, store_secrets_in_file: bool) -> Result<(), String> {
     // If already logged in with a valid session, say so and return early.
     let config = load_config();
     if let Some(email) = &config.email {
@@ -336,7 +359,7 @@ pub async fn run(headless: bool) -> Result<(), String> {
         }
     }
 
-    browser_login(headless).await
+    browser_login(headless, store_secrets_in_file).await
 }
 
 #[cfg(test)]

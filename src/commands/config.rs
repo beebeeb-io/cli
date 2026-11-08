@@ -1,14 +1,22 @@
 use colored::Colorize;
 
-use crate::config::load_config;
+use crate::config::{SecretsLocation, load_config};
+
+/// Where the key and session are, in words (LD-0029). The unencrypted cases say so.
+fn secrets_location(location: Option<&SecretsLocation>) -> (&'static str, String) {
+    match location {
+        Some(SecretsLocation::Keyring) => ("keyring", format!("OS keyring ({})", crate::credentials::SERVICE)),
+        Some(SecretsLocation::File(path)) => ("file", format!("{} (unencrypted)", path.display())),
+        Some(SecretsLocation::LegacyConfig(path)) => ("config", format!("{} (unencrypted, not moved yet)", path.display())),
+        None => ("none", "(none)".to_string()),
+    }
+}
 
 pub async fn run() -> Result<(), String> {
     let config = load_config();
 
-    let config_path = dirs::config_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("beebeeb")
-        .join("config.json");
+    let config_path = crate::config::config_path();
+    let (store_key, store_text) = secrets_location(config.secrets_location.as_ref());
 
     // ── JSON output ──────────────────────────────────────────────────────
     if crate::ui::is_json() {
@@ -25,6 +33,7 @@ pub async fn run() -> Result<(), String> {
             "email": config.email,
             "session_token": truncated_token,
             "master_key_set": config.master_key.is_some(),
+            "credential_store": store_key,
             "config_path": config_path.display().to_string(),
         });
         println!("{}", serde_json::to_string_pretty(&json).unwrap_or_default());
@@ -69,6 +78,16 @@ pub async fn run() -> Result<(), String> {
         match &config.master_key {
             Some(_) => "(set, hidden)".custom_color(crate::colors::GREEN_OK),
             None => "(none)".custom_color(crate::colors::INK_DIM),
+        },
+    );
+
+    println!(
+        "  {}  {}",
+        dim("stored in    "),
+        match config.secrets_location {
+            Some(SecretsLocation::Keyring) => store_text.custom_color(crate::colors::GREEN_OK),
+            Some(_) => store_text.custom_color(crate::colors::RED_ERR),
+            None => store_text.custom_color(crate::colors::INK_DIM),
         },
     );
 
