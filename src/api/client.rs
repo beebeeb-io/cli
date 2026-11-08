@@ -15,6 +15,16 @@ impl ApiClient {
         Self::with_config_and_origin(load_config(), Some(beebeeb_types::backup::ORIGIN_BACKUP))
     }
 
+    /// A client for one session that is not (or not yet) the stored sign-in: `bb login` ends the session it was
+    /// just given when this machine cannot keep it (LD-0029).
+    pub(crate) fn for_session(api_url: &str, session_token: &str) -> Self {
+        Self::with_config(crate::config::Config {
+            api_url: api_url.to_string(),
+            session_token: Some(zeroize::Zeroizing::new(session_token.to_string())),
+            ..crate::config::Config::default()
+        })
+    }
+
     /// [`from_config`](Self::from_config) for a config already in hand.
     pub(super) fn with_config(config: crate::config::Config) -> Self {
         Self::with_config_and_origin(config, None)
@@ -86,7 +96,7 @@ impl ApiClient {
         Self {
             client: build_client_with_origin(std::time::Duration::from_secs(300), None),
             base_url,
-            token: token.map(str::to_string),
+            token: token.map(|t| zeroize::Zeroizing::new(t.to_string())),
             refusal_account_state: tokio::sync::OnceCell::new(),
             direct: state,
             storage_client: std::sync::OnceLock::new(),
@@ -96,7 +106,8 @@ impl ApiClient {
 
     pub fn require_auth(&self) -> Result<&str, ApiError> {
         self.token
-            .as_deref()
+            .as_ref()
+            .map(|t| t.as_str())
             .ok_or_else(|| NOT_LOGGED_IN_MESSAGE.to_string().into())
     }
 

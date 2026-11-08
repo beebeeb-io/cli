@@ -12,6 +12,7 @@ use cli_help::*;
 mod colors;
 mod commands;
 mod config;
+mod credentials;
 mod crypto;
 mod custody;
 pub mod daemon;
@@ -26,6 +27,7 @@ mod item_id;
 mod loopback;
 mod owned_keys;
 mod path;
+mod private_file;
 mod region;
 mod resume;
 mod safe_path;
@@ -159,6 +161,11 @@ enum Commands {
         /// (use this on SSH or boxes without a window server)
         #[arg(long)]
         headless: bool,
+
+        /// Where no OS keyring is reachable (a server without a Secret Service): keep the key and session
+        /// unencrypted in credentials.json, readable only by you. Also settable with BB_STORE_SECRETS_IN_FILE=1.
+        #[arg(long)]
+        store_secrets_in_file: bool,
     },
 
     /// Create an account — opens the web signup (the CLI signs in, it doesn't sign up)
@@ -665,9 +672,12 @@ async fn main() {
 
     let result = match cli.command {
         Commands::Update => update::run_manual().await,
-        Commands::Login { headless } => {
+        Commands::Login {
+            headless,
+            store_secrets_in_file,
+        } => {
             daemon::migrate_sync_services();
-            commands::login::run(headless).await
+            commands::login::run(headless, store_secrets_in_file || credentials::opted_in_by_env()).await
         }
         Commands::Signup => commands::signup::run().await,
         Commands::Whoami => commands::whoami::run().await,

@@ -124,7 +124,7 @@ pub async fn run() -> Result<(), String> {
         .unwrap_or(0);
 
     // Auth method
-    let token = config.session_token.as_deref().unwrap_or("");
+    let token = config.session_token.as_deref().map(String::as_str).unwrap_or("");
     let auth_label = if token.starts_with("bb_pat_") {
         "personal access token \u{00b7} e2ee"
     } else {
