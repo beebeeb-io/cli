@@ -1,5 +1,5 @@
 //! Task 2420: `bb sync` never uploads the download writer's own temp files
-//! (`{out}.tmp`, else `{out}.{16 hex}.tmp`), sweeps stale ones of that pattern at
+//! (`{out}.{16 hex}.tmp`, `{out}.bbtmp`), sweeps stale ones of that pattern at
 //! sync start, and still syncs a user's own `.tmp` files.
 
 use super::*;
@@ -53,17 +53,6 @@ fn names(local: &HashMap<String, LocalFile>) -> Vec<String> {
 }
 
 #[test]
-fn a_killed_downloads_temp_is_not_an_upload_candidate() {
-    let root = scratch_dir("plain");
-    std::fs::write(root.join("keep.txt"), b"mine").unwrap();
-    interrupted_download(&root.join("report.pdf"));
-    let mut local = walk_local_files(&root).unwrap();
-    drop_download_temps(&mut local, &remote_of(&["report.pdf"]));
-    assert_eq!(names(&local), ["keep.txt"], "{:?}", names(&local));
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[test]
 fn the_random_temp_name_is_never_walked() {
     let root = scratch_dir("random");
     std::fs::write(root.join("a.txt.tmp"), b"user's own").unwrap();
@@ -88,19 +77,43 @@ fn a_users_own_tmp_files_still_sync() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+const RANDOM_TEMP: &str = "big.bin.0123456789abcdef.tmp";
+
 #[test]
-fn the_sweep_removes_only_stale_temps_of_our_pattern() {
+fn a_plain_tmp_next_to_its_base_is_neither_skipped_nor_swept() {
+    let root = scratch_dir("plain-user");
+    std::fs::write(root.join("notes.txt"), b"a").unwrap();
+    std::fs::write(root.join("notes.txt.tmp"), b"user's own").unwrap();
+    age(&root.join("notes.txt.tmp"), 3600);
+    let remote = remote_of(&["notes.txt"]);
+    let mut local = walk_local_files(&root).unwrap();
+    drop_download_temps(&mut local, &remote);
+    assert_eq!(names(&local), ["notes.txt", "notes.txt.tmp"], "{:?}", names(&local));
+    sweep_download_temps(&root, &remote);
+    assert!(root.join("notes.txt.tmp").exists(), "a user's plain .tmp was deleted");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn the_random_and_bbtmp_shapes_are_skipped_and_swept() {
     let root = scratch_dir("sweep");
     std::fs::create_dir_all(root.join("d")).unwrap();
-    interrupted_download(&root.join("d/old.bin"));
-    interrupted_download(&root.join("d/fresh.bin"));
+    for n in [RANDOM_TEMP, "d/old.bin.bbtmp", "d/fresh.bin.bbtmp"] {
+        std::fs::write(root.join(n), b"partial").unwrap();
+    }
     std::fs::write(root.join("user.tmp"), b"mine").unwrap();
-    age(&root.join("d/old.bin.tmp"), 3600);
-    age(&root.join("user.tmp"), 3600);
-    sweep_download_temps(&root, &remote_of(&["d/old.bin", "d/fresh.bin"]));
-    assert!(!root.join("d/old.bin.tmp").exists(), "stale own temp stays");
+    for n in [RANDOM_TEMP, "d/old.bin.bbtmp", "user.tmp"] {
+        age(&root.join(n), 3600);
+    }
+    let remote = remote_of(&["big.bin", "d/old.bin", "d/fresh.bin"]);
+    let mut local = walk_local_files(&root).unwrap();
+    drop_download_temps(&mut local, &remote);
+    assert_eq!(names(&local), ["user.tmp"], "{:?}", names(&local));
+    sweep_download_temps(&root, &remote);
+    assert!(!root.join(RANDOM_TEMP).exists(), "stale random temp stays");
+    assert!(!root.join("d/old.bin.bbtmp").exists(), "stale bbtmp stays");
     assert!(
-        root.join("d/fresh.bin.tmp").exists(),
+        root.join("d/fresh.bin.bbtmp").exists(),
         "a running download's temp was removed"
     );
     assert!(root.join("user.tmp").exists(), "a user's file was removed");

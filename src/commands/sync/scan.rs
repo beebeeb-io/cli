@@ -346,51 +346,39 @@ pub(super) async fn refresh_watch_reads(
     Ok(blocked)
 }
 
-/// The download writer's own temp names (`src/download/atomic.rs`, core's
-/// `TempSibling`): `{out}.tmp`, else `{out}.{16 lowercase hex}.tmp`. Returns the
-/// base name `{out}` and whether it is the random form. A user's own `notes.tmp`
-/// is the plain form too, so that form is only ever treated as ours when its
-/// base is a file of the synced tree.
-fn download_temp_parts(name: &str) -> Option<(&str, bool)> {
-    let stem = name.strip_suffix(".tmp")?;
-    if let Some((base, hex)) = stem.rsplit_once('.') {
-        if !base.is_empty() && hex.len() == 16 && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        {
-            return Some((base, true));
-        }
+/// The download writer's unambiguous temp names: core's `TempSibling` random
+/// form `{out}.{16 lowercase hex}.tmp`, and the older `{out}.bbtmp`. A plain
+/// `{out}.tmp` is also a name other tools give their own files, so it is never
+/// treated as ours: not skipped, not swept.
+fn is_own_download_temp_name(name: &str) -> bool {
+    if let Some(base) = name.strip_suffix(".bbtmp") {
+        return !base.is_empty();
     }
-    (!stem.is_empty()).then_some((stem, false))
+    let Some(stem) = name.strip_suffix(".tmp") else {
+        return false;
+    };
+    stem.rsplit_once('.').is_some_and(|(base, hex)| {
+        !base.is_empty() && hex.len() == 16 && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
 }
 
 pub(super) fn is_random_download_temp(name: &str) -> bool {
-    matches!(download_temp_parts(name), Some((_, true)))
+    is_own_download_temp_name(name)
 }
 
-/// Is `rel` (a `/`-joined path) a temp of the download writer, given
-/// `known(base)`: true for a path the synced tree is known to hold.
-fn is_own_download_temp(rel: &str, known: &dyn Fn(&str) -> bool) -> bool {
-    let (dir, name) = rel.rsplit_once('/').unwrap_or(("", rel));
-    match download_temp_parts(name) {
-        Some((_, true)) => true,
-        Some((base, false)) => known(&if dir.is_empty() {
-            base.to_string()
-        } else {
-            format!("{dir}/{base}")
-        }),
-        None => false,
-    }
+fn is_own_download_temp(rel: &str) -> bool {
+    is_own_download_temp_name(rel.rsplit_once('/').map_or(rel, |(_, n)| n))
 }
 
 /// Take the download writer's temps out of the upload candidates.
-pub(super) fn drop_download_temps(local: &mut HashMap<String, LocalFile>, remote: &HashMap<String, RemoteFile>) {
-    let tracked: HashSet<String> = local.keys().cloned().collect();
-    local.retain(|rel, _| !is_own_download_temp(rel, &|base| remote.contains_key(base) || tracked.contains(base)));
+pub(super) fn drop_download_temps(local: &mut HashMap<String, LocalFile>, _remote: &HashMap<String, RemoteFile>) {
+    local.retain(|rel, _| !is_own_download_temp(rel));
 }
 
 /// Remove stale temps of our own pattern left by an interrupted download. Only
 /// files untouched for [`STALE_TEMP_AGE`] go, so a download running right now
 /// (this process or another `bb pull`) keeps its temp.
-pub(super) fn sweep_download_temps(root: &Path, remote: &HashMap<String, RemoteFile>) {
+pub(super) fn sweep_download_temps(root: &Path, _remote: &HashMap<String, RemoteFile>) {
     for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
         if !path.is_file() {
@@ -404,8 +392,7 @@ pub(super) fn sweep_download_temps(root: &Path, remote: &HashMap<String, RemoteF
             continue;
         }
         let rel_str = rel_path_str(rel);
-        let known = |base: &str| remote.contains_key(base) || root.join(base).is_file();
-        if !is_own_download_temp(&rel_str, &known) {
+        if !is_own_download_temp(&rel_str) {
             continue;
         }
         let stale = entry
