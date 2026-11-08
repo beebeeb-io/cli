@@ -218,6 +218,8 @@ async fn mkdir_under_backups_refused() {
     let _ = tree.root;
 }
 
+// Unix only: the prompt is answered through a pty (`bb_at_terminal`), which has no Windows twin here.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn rm_of_a_device_folder_asks_and_yes_answers_for_scripts() {
     let (vault, api, home, tree) = vault_with_backups().await;

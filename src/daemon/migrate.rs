@@ -339,6 +339,8 @@ mod restart_policy_tests {
         }
     }
 
+    // Unix only: the children are `sleep` and `true`, which Windows does not ship.
+    #[cfg(unix)]
     #[test]
     fn run_bounded_kills_and_reaps_a_slow_child() {
         let t = std::time::Instant::now();

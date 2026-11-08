@@ -11,8 +11,10 @@
 //! can find.
 
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::{Command, Stdio};
 
+#[cfg(unix)]
 fn scratch(name: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("service-guard-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -21,6 +23,7 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 /// `#!/bin/sh` stubs for `launchctl` and `systemctl` that append their command line to `log`.
+#[cfg(unix)]
 fn stub_tools(dir: &Path, log: &Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let bin = dir.join("stub-bin");
@@ -38,6 +41,7 @@ fn stub_tools(dir: &Path, log: &Path) -> PathBuf {
 }
 
 /// A scratch HOME with a config that points at a closed port: the run under test must not need the API.
+#[cfg(unix)]
 fn scratch_home(dir: &Path) -> PathBuf {
     let home = dir.join("home");
     let config = r#"{"api_url":"http://127.0.0.1:9","session_token":"scratch","email":"guard@beebeeb.io","master_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}"#;
@@ -53,6 +57,7 @@ fn scratch_home(dir: &Path) -> PathBuf {
 
 /// An API that answers every request `200 {}`: the run under test only needs `bb sync` to get past
 /// its connectivity check to the code that would touch the service manager.
+#[cfg(unix)]
 async fn any_api() -> String {
     let app = axum::Router::new().fallback(|| async { axum::Json(serde_json::json!({})) });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -140,6 +145,7 @@ async fn a_scratch_home_never_reaches_launchctl_or_systemctl() {
 }
 
 /// An API that lists one sync session named `zzguard` and answers everything else `200 {}`.
+#[cfg(unix)]
 async fn api_with_a_session() -> String {
     let app = axum::Router::new()
         .route(

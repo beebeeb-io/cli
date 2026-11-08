@@ -159,12 +159,14 @@ mod transport_tests {
     fn a_config_dir_that_is_not_the_services_is_refused() {
         // XDG_CONFIG_HOME pointing elsewhere with the real HOME: the HOME check passes, this must not.
         let account = Path::new("/home/dev");
-        assert!(check_config_dir(Some(Path::new("/home/dev/.config")), Some(account), None).is_ok());
+        // The service's config dir is `<home>/.config`, joined with the host's separator.
+        let expected = account.join(".config");
+        assert!(check_config_dir(Some(&expected), Some(account), None).is_ok());
         let refused = check_config_dir(Some(Path::new("/tmp/scratch/xdg")), Some(account), None).unwrap_err();
         assert!(
             refused.contains("XDG_CONFIG_HOME")
                 && refused.contains("/tmp/scratch/xdg")
-                && refused.contains("/home/dev/.config"),
+                && refused.contains(&expected.display().to_string()),
             "{refused}"
         );
         assert!(refused.contains("BB_SERVICE_INSTALL_ALLOW_CUSTOM_HOME=1"), "{refused}");
