@@ -178,8 +178,11 @@ impl KeyringCache {
         let result = backend
             .get(account)
             .and_then(|bytes| bytes.map(|b| credentials::decode(&b)).transpose());
-        if let Some(stamp) = stamp {
-            *cached = Some((account.to_string(), stamp, result.clone()));
+        // Only a sign-in that was read is kept: a locked keyring or a missing entry is asked again next time, so a
+        // long-running process (`bb sync --daemon`, `bb webdav`) recovers once the keyring is unlocked.
+        match (&result, stamp) {
+            (Ok(Some(_)), Some(stamp)) => *cached = Some((account.to_string(), stamp, result.clone())),
+            _ => *cached = None,
         }
         result
     }
@@ -441,10 +444,19 @@ pub fn keyring_reachable() -> Result<(), String> {
     probe(credentials::os_backend())
 }
 
+/// A store, a read-back and a delete of a throwaway entry: a keyring that only answers reads (a locked collection
+/// with no one to unlock it) must fail here, before the browser approval, not after it.
 pub(crate) fn probe(backend: &dyn SecretBackend) -> Result<(), String> {
-    backend
-        .get(&credentials::account("reachability check", None))
-        .map(|_| ())
+    let account = credentials::account("reachability check", None);
+    let marker = b"bb reachability check";
+    backend.set(&account, marker)?;
+    let read = backend.get(&account);
+    let _ = backend.delete(&account);
+    match read? {
+        Some(bytes) if bytes.as_slice() == marker => Ok(()),
+        Some(_) => Err("the OS keyring reads back a different value".to_string()),
+        None => Err("the OS keyring did not keep a value".to_string()),
+    }
 }
 
 /// `bb login`'s save (F1–F4): the secrets go into the keyring entry for `email` on `api_url`, are read back and
@@ -486,20 +498,33 @@ pub(crate) fn save_login_in(
     let previous = read_file(dir);
     let encoded = credentials::encode(secrets);
     let credentials_path = dir.join(CREDENTIALS_FILE);
-    let store = match backend
-        .set(&account, &encoded)
-        .and_then(|()| credentials::verify(backend, &account, secrets))
-    {
+    let store = match backend.set(&account, &encoded) {
         Ok(()) => {
-            write_file(dir, &file.pointing_at(CredentialStore::Keyring))?;
-            // An earlier opt-in sign-in's file: its secret must not outlive this one.
-            private_file::remove(&credentials_path)?;
+            // The keyring answered: from here on a failure is an error, never a fall-back to the plaintext file.
+            let published = credentials::verify(backend, &account, secrets)
+                .map_err(|reason| {
+                    format!("bb stored your sign-in in the OS keyring but could not read it back ({reason})")
+                })
+                // An earlier opt-in sign-in's file: its secret must not outlive this one. Removed BEFORE config.json
+                // points at the keyring, so a failure leaves the previous sign-in as it was.
+                .and_then(|()| private_file::remove(&credentials_path).map(|_| ()))
+                .and_then(|()| write_file(dir, &file.pointing_at(CredentialStore::Keyring)));
+            if let Err(e) = published {
+                // Roll back: nothing points at this entry, so it must not stay behind.
+                let _ = backend.delete(&account);
+                return Err(e);
+            }
             CredentialStore::Keyring
         }
         Err(_) if opt_in => {
-            private_file::write(&credentials_path, &encoded)?;
-            verify_file(&credentials_path, secrets)?;
-            write_file(dir, &file.pointing_at(CredentialStore::File))?;
+            let published = private_file::write(&credentials_path, &encoded)
+                .and_then(|()| verify_file(&credentials_path, secrets))
+                .and_then(|()| write_file(dir, &file.pointing_at(CredentialStore::File)));
+            if let Err(e) = published {
+                // Roll back: a plaintext key that config.json does not point at would outlive `bb logout`.
+                let _ = private_file::remove(&credentials_path);
+                return Err(e);
+            }
             CredentialStore::File
         }
         Err(reason) => return Err(credentials::refusal(&reason)),
@@ -514,10 +539,16 @@ pub(crate) fn save_login_in(
     Ok(store)
 }
 
-/// Does `config.json` point at a stored sign-in (a marker, or an older file's secrets), whether or not this run
-/// could read it?
+/// Is there a stored sign-in (a marker, an older file's secrets, a `credentials.json`, or a `config.json` that does
+/// not parse), whether or not this run could read it?
 pub fn has_stored_sign_in() -> bool {
-    read_file(&config_dir()).is_some_and(|f| f.credential_store.is_some() || f.legacy_secrets().is_some())
+    let dir = config_dir();
+    // A credentials.json, or a config.json that no longer parses, is still something `bb logout` must remove.
+    dir.join(CREDENTIALS_FILE).exists()
+        || match read_file(&dir) {
+            Some(f) => f.credential_store.is_some() || f.legacy_secrets().is_some(),
+            None => dir.join(CONFIG_FILE).exists(),
+        }
 }
 
 /// `bb logout`'s local half (F6): the keyring entry, `credentials.json` and `config.json` all go. A keyring entry
@@ -997,6 +1028,73 @@ mod credential_store_tests {
             matches!(loaded.notices.as_slice(), [Notice::Unreadable { .. }]),
             "{:?}",
             loaded.notices
+        );
+    }
+
+    /// A failed keyring read is not kept: once the keyring answers again, the same process is signed in again.
+    #[test]
+    fn a_failed_keyring_read_is_asked_again_and_recovers() {
+        let dir = tempdir();
+        let mock = MockKeyring::new();
+        save_login_in(&dir, &mock, API, EMAIL, &both(), false).unwrap();
+        let cache = KeyringCache::new();
+        let declined = Declined::new();
+        mock.set_fault(Fault::Gets);
+        let locked = load_from(&dir, &mock, false, true, &cache, &declined);
+        assert!(locked.config.master_key.is_none(), "a locked keyring signs the run out");
+        mock.set_fault(Fault::None);
+        assert_signed_in(&load_from(&dir, &mock, false, true, &cache, &declined).config);
+    }
+
+    /// A login whose config.json cannot be written leaves no secret behind: no keyring entry, no credentials.json.
+    #[test]
+    fn a_login_that_cannot_write_config_json_rolls_back_the_stored_secrets() {
+        let blocked = |dir: &Path| {
+            // config.json is a non-empty directory: the rename over it fails after the secrets were stored.
+            std::fs::create_dir(dir.join(CONFIG_FILE)).unwrap();
+            std::fs::write(dir.join(CONFIG_FILE).join("x"), b"").unwrap();
+        };
+        let dir = tempdir();
+        blocked(&dir);
+        let mock = MockKeyring::new();
+        assert!(save_login_in(&dir, &mock, API, EMAIL, &both(), false).is_err());
+        assert!(
+            mock.stored(&account()).is_none(),
+            "the keyring entry must be rolled back"
+        );
+        let dir = tempdir();
+        blocked(&dir);
+        assert!(save_login_in(&dir, &Unavailable("no keyring"), API, EMAIL, &both(), true).is_err());
+        assert!(
+            !dir.join(CREDENTIALS_FILE).exists(),
+            "credentials.json must be rolled back"
+        );
+    }
+
+    /// A keyring that answers but reads back wrong is an error, never a fall-back to the plaintext file.
+    #[test]
+    fn a_reachable_keyring_that_reads_back_wrong_never_falls_back_to_the_file() {
+        let dir = tempdir();
+        let mock = MockKeyring::with_fault(Fault::Corrupt);
+        let err = save_login_in(&dir, &mock, API, EMAIL, &both(), true).unwrap_err();
+        assert!(err.contains("could not read it back"), "unexpected error text");
+        assert!(!dir.join(CREDENTIALS_FILE).exists() && !dir.join(CONFIG_FILE).exists());
+        mock.set_fault(Fault::None);
+        assert!(
+            mock.stored(&account()).is_none(),
+            "the unverified entry must be removed"
+        );
+    }
+
+    /// The pre-approval probe stores, not only reads: a keyring that answers reads but refuses a store fails it.
+    #[test]
+    fn the_probe_fails_on_a_keyring_that_refuses_a_store() {
+        assert!(probe(&MockKeyring::with_fault(Fault::Sets)).is_err());
+        let mock = MockKeyring::new();
+        assert!(probe(&mock).is_ok());
+        assert!(
+            mock.stored(&credentials::account("reachability check", None)).is_none(),
+            "the probe leaves no entry"
         );
     }
 

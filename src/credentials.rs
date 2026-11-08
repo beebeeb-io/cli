@@ -215,26 +215,47 @@ impl OsKeyring {
         keyring::Entry::new(SERVICE, account).map(Arc::new)
     }
 
-    fn on_own_thread<T: Send>(op: impl FnOnce() -> Result<T, String> + Send) -> Result<T, String> {
-        std::thread::scope(|scope| {
-            scope
-                .spawn(op)
-                .join()
-                .unwrap_or_else(|_| Err("the OS keyring call failed unexpectedly".to_string()))
-        })
+    /// Runs `op` on a thread of its own and waits at most [`KEYRING_TIMEOUT`]: a keyring waiting on an unlock prompt
+    /// nobody answers (a locked collection on a headless box) must end in an error, not hang the command. A call
+    /// that times out is left to finish on its own thread.
+    fn on_own_thread<T: Send + 'static>(op: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name("bb-keyring".to_string())
+            .spawn(move || {
+                let _ = tx.send(op());
+            })
+            .map_err(|e| format!("could not start the OS keyring call: {e}"))?;
+        match rx.recv_timeout(KEYRING_TIMEOUT) {
+            Ok(result) => result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(format!(
+                "the OS keyring did not answer within {} seconds (is it locked?)",
+                KEYRING_TIMEOUT.as_secs()
+            )),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                Err("the OS keyring call failed unexpectedly".to_string())
+            }
+        }
     }
 }
+
+/// How long one OS keyring call may take, including an unlock prompt a person answers.
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+const KEYRING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 impl SecretBackend for OsKeyring {
     fn set(&self, account: &str, secret: &[u8]) -> Result<(), String> {
-        Self::on_own_thread(|| Keyring(Self::entry).set(account, secret))
+        let (account, secret) = (account.to_string(), Zeroizing::new(secret.to_vec()));
+        Self::on_own_thread(move || Keyring(Self::entry).set(&account, &secret))
     }
     fn get(&self, account: &str) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
-        Self::on_own_thread(|| Keyring(Self::entry).get(account))
+        let account = account.to_string();
+        Self::on_own_thread(move || Keyring(Self::entry).get(&account))
     }
     fn delete(&self, account: &str) -> Result<bool, String> {
-        Self::on_own_thread(|| Keyring(Self::entry).delete(account))
+        let account = account.to_string();
+        Self::on_own_thread(move || Keyring(Self::entry).delete(&account))
     }
 }
 
@@ -561,18 +582,29 @@ mod tests {
     #[ignore = "touches the real OS keyring; run by hand on the machine whose keyring is under test"]
     fn the_os_keyring_round_trips_on_this_machine() {
         let service = format!("io.beebeeb.cli.selftest-{}", uuid::Uuid::new_v4());
-        let entry = |a: &str| keyring::Entry::new(&service, a).map(Arc::new);
         let account = account("http://127.0.0.1:3001", Some("selftest@beebeeb.io"));
-        let backend = Keyring(entry);
-        let run = || -> Result<(), String> {
-            backend.set(&account, &encode(&both()))?;
-            verify(&backend, &account, &both())?;
-            assert!(backend.delete(&account)?);
-            assert!(backend.get(&account)?.is_none());
-            Ok(())
+        let backend = move || {
+            let service = service.clone();
+            Keyring(move |a: &str| keyring::Entry::new(&service, a).map(Arc::new))
         };
-        let result = OsKeyring::on_own_thread(run);
-        let _ = OsKeyring::on_own_thread(|| backend.delete(&account));
-        result.unwrap();
+        let (b1, b2, a1, a2) = (backend.clone(), backend, account.clone(), account);
+        let result = OsKeyring::on_own_thread(move || -> Result<(), String> {
+            let backend = b1();
+            backend.set(&a1, &encode(&both()))?;
+            verify(&backend, &a1, &both())?;
+            if !backend.delete(&a1)? {
+                return Err("the entry was not there to delete".to_string());
+            }
+            if backend.get(&a1)?.is_some() {
+                return Err("the entry is still there after the delete".to_string());
+            }
+            Ok(())
+        });
+        let _ = OsKeyring::on_own_thread(move || b2().delete(&a2));
+        assert!(
+            result.is_ok(),
+            "the OS keyring round trip failed: {}",
+            result.unwrap_err()
+        );
     }
 }
