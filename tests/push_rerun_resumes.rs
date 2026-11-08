@@ -14,6 +14,9 @@
 //! request, answers already-stored chunks with `skipped`, and serves the
 //! completed file back. Scratch `HOME`, stdin not a terminal.
 
+#[path = "support/config_dir.rs"]
+mod state_dirs;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -461,7 +464,7 @@ async fn an_interrupted_push_records_the_core_resume_tag() {
         v.sessions.values().next().expect("the interrupted session").id.clone()
     };
     let record: Value = serde_json::from_slice(
-        &std::fs::read(home.join(".config/beebeeb/pending-uploads.json")).expect("a pending record"),
+        &std::fs::read(state_dirs::config_dir(&home).join("pending-uploads.json")).expect("a pending record"),
     )
     .unwrap();
     let entry = record["uploads"]
@@ -510,7 +513,7 @@ async fn a_reinit_records_the_pending_ids_own_resume_tag() {
         session.frames.clear();
     }
     // Force `RestartWithFreshSession`: a create writes v1, the record says v2.
-    let path = home.join(".config/beebeeb/pending-uploads.json");
+    let path = state_dirs::config_dir(&home).join("pending-uploads.json");
     let mut record: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     for entry in record["uploads"].as_object_mut().unwrap().values_mut() {
         entry["chunk_format"] = json!(2);
