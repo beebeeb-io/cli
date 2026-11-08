@@ -171,7 +171,10 @@ fn a_recorded_link_is_never_followed() {
     std::fs::write(&target, b"mine").unwrap();
     let link = root.join("x.tmp");
     std::os::unix::fs::symlink(&target, &link).unwrap();
-    crate::temp_record::TempRecord::register(&link).unwrap().simulate_kill();
+    let handle = std::fs::File::open(&target).unwrap();
+    crate::temp_record::TempRecord::register(&link, &handle)
+        .unwrap()
+        .simulate_kill();
     sweep(&root);
     assert!(target.exists(), "the sweep followed a link");
     let _ = std::fs::remove_dir_all(&root);
