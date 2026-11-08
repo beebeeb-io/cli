@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.1] - 2026-11-08
+
+### Security
+- The one-time key exchange used when a browser approves `bb login` now runs on `p256` 0.14 (was 0.13.2), which clears the timing issues of RUSTSEC-2026-0387 for that code. The login's wire format is unchanged.
+- TLS and certificate checks updated: `rustls` 0.23.46, `rustls-webpki` 0.103.16, `webpki-roots` 1.0.11 (RUSTSEC-2026-0346, -0285, -0348, -0349, -0382, -0381). Also `quinn-proto` 0.11.19 (five advisories) and `crossbeam-epoch` 0.9.21 (RUSTSEC-2026-0204).
+- `cargo audit`: 17 vulnerabilities before, 5 after. Still reported: RUSTSEC-2026-0387 through the password-login library (OPAQUE, `opaque-ke` 4.0.1; Beebeeb's Ristretto255 suite does not use that code, checked by reading the code, not by a runtime test) and four `zip` advisories about extracting archives (`bb` only writes zip archives; the fix is a major update of `zip`, planned).
+
+### Changed
+- `bb backup` after a reinstall (records lost): a file whose server copy was made within 10 minutes of its last change is uploaded again, because the computer's clock can't be compared with the server's. The re-upload is a new version of that same server file, never a second copy. With two or more server files of that exact name in the folder, `bb backup` uploads a new file and prints one note.
+- Uses Beebeeb core v0.2.2 (`2d89adc`), was v0.2.1.
+
+### Known issues
+- `bb sync --json` still prints a `+ remote folder <name>` line on stdout before the JSON on a run that creates a server folder (unchanged since 0.16.0).
+
 ## [0.17.0] - 2026-11-07
 
 ### Added
