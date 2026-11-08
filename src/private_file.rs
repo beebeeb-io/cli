@@ -90,6 +90,8 @@ pub(crate) fn write_observed(path: &Path, bytes: &[u8], written: &mut dyn FnMut(
         std::fs::rename(&temporary, path).map_err(|e| format!("failed to replace {}: {e}", path.display()))?;
         sync_directory(&directory).map_err(|e| format!("failed to sync {}: {e}", directory.display()))
     })();
+    // Temporaries a crash left behind (review P3-2); a recent one may be another process's write in progress.
+    sweep_temporaries(&directory, Some(STALE_TEMPORARY));
     if result.is_err() {
         let _ = std::fs::remove_file(&temporary);
     }
@@ -147,6 +149,65 @@ fn sync_directory(directory: &Path) -> std::io::Result<()> {
     #[cfg(not(unix))]
     let _ = directory;
     Ok(())
+}
+
+/// How old a temporary must be before a write sweeps it: no write takes this long.
+const STALE_TEMPORARY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Read a secret file only if no other user can read it (review P3-8): with group or other bits set it is refused,
+/// as ssh refuses such a key file, and the error names the path and the `chmod 600` that fixes it.
+pub fn read_private(path: &Path) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, ReadError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            if meta.permissions().mode() & 0o077 != 0 {
+                return Err(ReadError::TooOpen);
+            }
+        }
+    }
+    read(path).map_err(ReadError::Failed)
+}
+
+/// Why [`read_private`] did not return the file.
+#[derive(Debug)]
+pub enum ReadError {
+    /// Group or others may read it.
+    TooOpen,
+    Failed(String),
+}
+
+/// The files this module writes; their stale temporaries are swept (review P3-2).
+pub const SECRET_FILES: [&str; 2] = ["config.json", "credentials.json"];
+
+/// Remove the temporaries of [`SECRET_FILES`] in `directory` (`.<name>.<uuid>.tmp`, left by a crash between create
+/// and rename; they may hold secrets). With `min_age`, only those not modified for that long: another process may be
+/// between its create and its rename right now.
+pub fn sweep_temporaries(directory: &Path, min_age: Option<std::time::Duration>) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let ours = SECRET_FILES.iter().any(|file| {
+            name.strip_prefix('.')
+                .and_then(|n| n.strip_prefix(file))
+                .is_some_and(|rest| rest.starts_with('.') && rest.ends_with(".tmp"))
+        });
+        if !ours {
+            continue;
+        }
+        let old_enough = min_age.is_none_or(|age| {
+            entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .is_ok_and(|modified| modified.elapsed().is_ok_and(|elapsed| elapsed >= age))
+        });
+        if old_enough {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Read a file written by [`write`]. `Ok(None)` when there is none.
@@ -293,6 +354,31 @@ mod tests {
         assert!(write(&blocked, b"new").is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"old");
         assert_no_temporaries(&dir);
+    }
+
+    /// Review P3-2: each write sweeps stale temporaries of both secret files, and leaves a fresh one alone (it may
+    /// be another process's write in progress).
+    #[test]
+    fn a_write_sweeps_stale_temporaries_and_keeps_fresh_ones() {
+        let dir = tempdir();
+        let stale = [
+            dir.join(format!(".credentials.json.{}.tmp", uuid::Uuid::new_v4())),
+            dir.join(format!(".config.json.{}.tmp", uuid::Uuid::new_v4())),
+        ];
+        let fresh = dir.join(format!(".credentials.json.{}.tmp", uuid::Uuid::new_v4()));
+        let other = dir.join(".other.json.0.tmp");
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        for path in &stale {
+            File::create(path).unwrap().set_modified(old).unwrap();
+        }
+        std::fs::write(&fresh, b"").unwrap();
+        File::create(&other).unwrap().set_modified(old).unwrap();
+        write(&dir.join("config.json"), b"{}").unwrap();
+        for path in &stale {
+            assert!(!path.exists(), "{} survived a write", path.display());
+        }
+        assert!(fresh.exists(), "a fresh temporary was swept");
+        assert!(other.exists(), "a file that is not ours was swept");
     }
 
     fn assert_no_temporaries(dir: &Path) {

@@ -179,6 +179,9 @@ where
 /// it is what tells a person why their keyring did not answer.
 pub(crate) fn describe(error: &keyring::Error) -> String {
     match error {
+        keyring::Error::PlatformFailure(inner) | keyring::Error::NoStorageAccess(inner) if platform_refused(error) => {
+            format!("{ACCESS_REFUSED} ({inner})")
+        }
         keyring::Error::PlatformFailure(inner) | keyring::Error::NoStorageAccess(inner) => inner.to_string(),
         keyring::Error::NoEntry => "no entry".to_string(),
         keyring::Error::BadEncoding(_) => "the entry is not in a format bb understands".to_string(),
@@ -187,6 +190,29 @@ pub(crate) fn describe(error: &keyring::Error) -> String {
         keyring::Error::Ambiguous(items) => format!("{} keyring entries match", items.len()),
         _ => "an unknown keyring error".to_string(),
     }
+}
+
+/// Is this a keyring that is there and said no, as opposed to no keyring at all? Per platform, from what `keyring`
+/// 3.6 maps each OS status to:
+/// - macOS: errSecAuthFailed (-25293), errSecUserCanceled (-128) and errSecInteractionNotAllowed (-25308) arrive as
+///   `PlatformFailure` (a keychain item whose access list does not trust this binary, asked over SSH or from a
+///   LaunchAgent where no prompt can show). `NoStorageAccess` there means no keychain (errSecNotAvailable,
+///   errSecNoSuchKeychain), so: not reachable.
+/// - Linux Secret Service: `NoStorageAccess` is a locked collection or a dismissed prompt.
+/// - Windows: `NoStorageAccess` is ERROR_NO_SUCH_LOGON_SESSION, a logon with no credential store: not reachable.
+///
+/// The OS status is only in the inner error's `Debug` (`Error { code: -25293, .. }`); it is matched, never printed.
+fn platform_refused(error: &keyring::Error) -> bool {
+    if cfg!(target_os = "macos") {
+        let keyring::Error::PlatformFailure(inner) = error else {
+            return false;
+        };
+        let debug = format!("{inner:?}");
+        return ["-25293", "-128", "-25308"]
+            .iter()
+            .any(|code| debug.contains(&format!("code: {code},")) || debug.contains(&format!("code: {code} }}")));
+    }
+    !cfg!(target_os = "windows") && matches!(error, keyring::Error::NoStorageAccess(_))
 }
 
 /// "No keyring here": every call fails with the reason.
@@ -204,34 +230,99 @@ impl SecretBackend for Unavailable {
     }
 }
 
-/// The OS keyring. Every call runs on a thread of its own: with zbus on tokio (the Linux Secret Service backend),
-/// a keyring call made on a runtime thread can deadlock (keyring-rs#132), and `bb` makes them from async code.
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-struct OsKeyring;
+/// How a keyring error that came from a keyring which exists but refused begins (a denied or locked keychain).
+pub(crate) const ACCESS_REFUSED: &str = "the OS keyring did not allow access";
+/// How a keyring error begins when the keyring did not answer in time (a prompt nobody answers).
+pub(crate) const NO_ANSWER: &str = "the OS keyring did not answer";
 
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-impl OsKeyring {
-    fn entry(account: &str) -> keyring::Result<Arc<keyring::Entry>> {
-        keyring::Entry::new(SERVICE, account).map(Arc::new)
+/// Did the keyring exist and refuse, or not answer (as opposed to: no keyring reachable at all)? Asked of a reason
+/// exactly as a [`SecretBackend`] returned it. The plaintext opt-in is never the fix for this case (review P2-1).
+pub(crate) fn keyring_refused(reason: &str) -> bool {
+    reason.starts_with(ACCESS_REFUSED) || reason.starts_with(NO_ANSWER)
+}
+
+/// A keyring call guard: every call runs on a thread of its own (with zbus on tokio, the Linux Secret Service
+/// backend, a keyring call made on a runtime thread can deadlock, keyring-rs#132), one call at a time per process,
+/// for at most `timeout`. A call that times out is left to finish on its own thread, and for `backoff` after it
+/// every call returns the same error at once instead of starting another blocking call (review P3-1): a locked
+/// keyring must not stall each `load_config` of `bb sync` for a minute, nor pile up threads.
+pub(crate) struct Guarded<B> {
+    inner: Arc<B>,
+    timeout: std::time::Duration,
+    backoff: std::time::Duration,
+    /// Held for the whole call: a second caller waits for the first instead of starting a parallel call.
+    turn: Mutex<()>,
+    state: Arc<Mutex<GuardState>>,
+}
+
+fn lock(state: &Mutex<GuardState>) -> std::sync::MutexGuard<'_, GuardState> {
+    state.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[derive(Default)]
+struct GuardState {
+    /// A call's thread has not returned yet (it may have timed out).
+    in_flight: bool,
+    /// The last timeout: when, and the reason every call gets until the back-off is over.
+    failed: Option<(std::time::Instant, String)>,
+}
+
+impl<B: SecretBackend + Send + 'static> Guarded<B> {
+    pub(crate) fn new(inner: B, timeout: std::time::Duration, backoff: std::time::Duration) -> Self {
+        Self {
+            inner: Arc::new(inner),
+            timeout,
+            backoff,
+            turn: Mutex::new(()),
+            state: Arc::new(Mutex::new(GuardState::default())),
+        }
     }
 
-    /// Runs `op` on a thread of its own and waits at most [`KEYRING_TIMEOUT`]: a keyring waiting on an unlock prompt
-    /// nobody answers (a locked collection on a headless box) must end in an error, not hang the command. A call
-    /// that times out is left to finish on its own thread.
-    fn on_own_thread<T: Send + 'static>(op: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    fn call<T: Send + 'static>(&self, op: impl FnOnce(&B) -> Result<T, String> + Send + 'static) -> Result<T, String> {
+        let _turn = self.turn.lock().unwrap_or_else(|e| e.into_inner());
+        {
+            let mut state = lock(&self.state);
+            if let Some((since, reason)) = &state.failed {
+                if since.elapsed() < self.backoff {
+                    return Err(reason.clone());
+                }
+            }
+            if state.in_flight {
+                // The back-off is over but the call that timed out still has not returned: do not start another
+                // one beside it, and wait out another back-off.
+                let reason = state
+                    .failed
+                    .as_ref()
+                    .map_or_else(|| format!("{NO_ANSWER} yet"), |(_, r)| r.clone());
+                state.failed = Some((std::time::Instant::now(), reason.clone()));
+                return Err(reason);
+            }
+            state.failed = None;
+            state.in_flight = true;
+        }
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        std::thread::Builder::new()
+        let (inner, state) = (self.inner.clone(), self.state.clone());
+        let spawned = std::thread::Builder::new()
             .name("bb-keyring".to_string())
             .spawn(move || {
-                let _ = tx.send(op());
-            })
-            .map_err(|e| format!("could not start the OS keyring call: {e}"))?;
-        match rx.recv_timeout(KEYRING_TIMEOUT) {
+                let result = op(&inner);
+                lock(&state).in_flight = false;
+                let _ = tx.send(result);
+            });
+        if let Err(e) = spawned {
+            lock(&self.state).in_flight = false;
+            return Err(format!("could not start the OS keyring call: {e}"));
+        }
+        match rx.recv_timeout(self.timeout) {
             Ok(result) => result,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(format!(
-                "the OS keyring did not answer within {} seconds (is it locked?)",
-                KEYRING_TIMEOUT.as_secs()
-            )),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                let reason = format!(
+                    "{NO_ANSWER} within {} seconds (is it locked, or waiting on a prompt?)",
+                    self.timeout.as_secs()
+                );
+                lock(&self.state).failed = Some((std::time::Instant::now(), reason.clone()));
+                Err(reason)
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 Err("the OS keyring call failed unexpectedly".to_string())
             }
@@ -239,24 +330,34 @@ impl OsKeyring {
     }
 }
 
-/// How long one OS keyring call may take, including an unlock prompt a person answers.
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-const KEYRING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-impl SecretBackend for OsKeyring {
+impl<B: SecretBackend + Send + 'static> SecretBackend for Guarded<B> {
     fn set(&self, account: &str, secret: &[u8]) -> Result<(), String> {
         let (account, secret) = (account.to_string(), Zeroizing::new(secret.to_vec()));
-        Self::on_own_thread(move || Keyring(Self::entry).set(&account, &secret))
+        self.call(move |b| b.set(&account, &secret))
     }
     fn get(&self, account: &str) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
         let account = account.to_string();
-        Self::on_own_thread(move || Keyring(Self::entry).get(&account))
+        self.call(move |b| b.get(&account))
     }
     fn delete(&self, account: &str) -> Result<bool, String> {
         let account = account.to_string();
-        Self::on_own_thread(move || Keyring(Self::entry).delete(&account))
+        self.call(move |b| b.delete(&account))
     }
+}
+
+/// How long one OS keyring call may take, including an unlock prompt a person answers.
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+const KEYRING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// After a call timed out, how long every call fails at once with the same reason.
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+const KEYRING_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+#[cfg(all(not(test), any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+type OsEntry = fn(&str) -> keyring::Result<Arc<keyring::Entry>>;
+
+#[cfg(all(not(test), any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+fn os_entry(account: &str) -> keyring::Result<Arc<keyring::Entry>> {
+    keyring::Entry::new(SERVICE, account).map(Arc::new)
 }
 
 /// The backend this process uses.
@@ -280,8 +381,10 @@ pub(crate) fn os_backend() -> &'static dyn SecretBackend {
         }
         #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
-            static OS: OsKeyring = OsKeyring;
-            &OS
+            static OS: std::sync::LazyLock<Guarded<Keyring<OsEntry>>> = std::sync::LazyLock::new(|| {
+                Guarded::new(Keyring(os_entry as OsEntry), KEYRING_TIMEOUT, KEYRING_BACKOFF)
+            });
+            &*OS
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
@@ -304,8 +407,27 @@ pub fn unencrypted_warning(path: &Path) -> String {
     )
 }
 
-/// F3: `bb login` without a keyring and without the opt-in.
+/// What to do when the keyring exists but refused or did not answer: allow it once, where it can ask. A keychain
+/// prompt cannot reach a person over SSH or from a background job, which is where this happens after `bb update`
+/// replaced the binary (review P2-1).
+fn allow_access_hint(command: &str) -> String {
+    let machine = if cfg!(target_os = "macos") {
+        "that Mac"
+    } else {
+        "that machine"
+    };
+    format!("Run `{command}` once from a terminal on {machine} and allow bb access when the keyring asks.")
+}
+
+/// F3: `bb login` without a keyring and without the opt-in. A keyring that exists but refused gets no opt-in
+/// sentence: the fix is to allow access, not to store the key unencrypted.
 pub fn refusal(reason: &str) -> String {
+    if keyring_refused(reason) {
+        return format!(
+            "The OS keyring on this machine did not allow bb to store your Beebeeb key ({reason}). {}",
+            allow_access_hint("bb login")
+        );
+    }
     format!(
         "No OS keyring is reachable on this machine ({reason}), so bb will not store your Beebeeb key here. To \
          store it unencrypted in a file only you can read, run `bb login {OPT_IN_FLAG}` (or set {OPT_IN_ENV}=1)."
@@ -325,14 +447,25 @@ pub(crate) enum Notice {
     RewriteFailed { path: PathBuf, reason: String },
     /// F5 done: the secrets left `config.json`.
     Migrated { to: CredentialStore },
-    /// The keyring (or the credentials file) could not be read, so this run is signed out.
-    Unreadable { reason: String },
+    /// F5 on a `config.json` that is a symlink: the link was replaced by a file without the secrets, but the file it
+    /// pointed to was not touched and still holds them (review P3-3).
+    MigratedFromLink { to: CredentialStore, target: PathBuf },
+    /// `credentials.json` can be read by group or others: refused, as ssh refuses such a key file (review P3-8).
+    TooOpen { path: PathBuf },
+    /// The keyring (or the credentials file) could not be read, so this run is signed out. `keyring_refused`: the
+    /// keyring exists but refused or did not answer ([`keyring_refused`]).
+    Unreadable { reason: String, keyring_refused: bool },
 }
 
 impl Notice {
     pub(crate) fn text(&self) -> String {
         match self {
             Notice::Unencrypted { path } => unencrypted_warning(path),
+            Notice::NotMigrated { path, reason } if keyring_refused(reason) => format!(
+                "{} The OS keyring did not allow bb to move it there ({reason}). {}",
+                unencrypted_warning(path),
+                allow_access_hint("bb ls")
+            ),
             Notice::NotMigrated { path, reason } => format!(
                 "{} bb could not move it into the OS keyring ({reason}). To move it into a file only you can read, \
                  run a bb command once with {OPT_IN_ENV}=1; or sign in with `bb login` on a machine with a keyring.",
@@ -357,7 +490,30 @@ impl Notice {
             } => format!(
                 "Moved your Beebeeb key and session out of config.json into {CREDENTIALS_FILE}, readable only by you."
             ),
-            Notice::Unreadable { reason } => format!(
+            Notice::MigratedFromLink { to, target } => format!(
+                "Your Beebeeb key and session are now in {}, and config.json was a link, so bb replaced the link \
+                 with a file without them. The file it pointed to, {}, still holds your key: remove the \
+                 \"master_key\" and \"session_token\" lines from it, or delete it.",
+                match to {
+                    CredentialStore::Keyring => "the OS keyring".to_string(),
+                    CredentialStore::File => format!("{CREDENTIALS_FILE}, readable only by you"),
+                },
+                target.display()
+            ),
+            Notice::TooOpen { path } => format!(
+                "{} can be read by other users, so bb will not use it and this run is signed out. Run `chmod 600 {}` \
+                 to make it readable only by you.",
+                path.display(),
+                path.display()
+            ),
+            Notice::Unreadable {
+                reason,
+                keyring_refused: true,
+            } => format!(
+                "bb could not read your sign-in ({reason}). Commands that need it will fail. {}",
+                allow_access_hint("bb ls")
+            ),
+            Notice::Unreadable { reason, .. } => format!(
                 "bb could not read your sign-in ({reason}). Commands that need it will fail; run `bb login` to sign \
                  in again."
             ),
@@ -398,11 +554,35 @@ pub(crate) mod mock {
         Corrupt,
         /// Every delete fails.
         Deletes,
+        /// A keyring that exists but refuses access (a denied keychain): stores and reads fail.
+        Denied,
     }
+
+    /// An OS status as `security-framework` shows it (`Error { code: -25293 }`).
+    pub struct MockOsStatus(pub i32);
+    impl std::fmt::Debug for MockOsStatus {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("Error").field("code", &self.0).finish()
+        }
+    }
+    impl std::fmt::Display for MockOsStatus {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "mock: the user denied access to the keychain item (OSStatus {})",
+                self.0
+            )
+        }
+    }
+    impl std::error::Error for MockOsStatus {}
 
     pub struct MockKeyring {
         entries: Mutex<HashMap<String, Arc<keyring::Entry>>>,
         pub fault: Mutex<Fault>,
+        /// Every call first sleeps this long (a keyring waiting on a prompt).
+        pub delay: Mutex<std::time::Duration>,
+        /// How many calls reached the mock.
+        pub calls: std::sync::atomic::AtomicUsize,
     }
 
     impl MockKeyring {
@@ -410,6 +590,8 @@ pub(crate) mod mock {
             Self {
                 entries: Mutex::new(HashMap::new()),
                 fault: Mutex::new(Fault::None),
+                delay: Mutex::new(std::time::Duration::ZERO),
+                calls: std::sync::atomic::AtomicUsize::new(0),
             }
         }
 
@@ -437,9 +619,27 @@ pub(crate) mod mock {
         fn fail_next(&self, account: &str) {
             let entry = self.entry(account).unwrap();
             let credential: &MockCredential = entry.get_credential().downcast_ref().unwrap();
-            credential.set_error(keyring::Error::NoStorageAccess(
-                "mock: org.freedesktop.secrets is not provided by any .service files".into(),
-            ));
+            credential.set_error(if *self.fault.lock().unwrap() == Fault::Denied {
+                // What this platform's keyring returns for a store that is there and said no.
+                if cfg!(target_os = "macos") {
+                    keyring::Error::PlatformFailure(Box::new(MockOsStatus(-25293)))
+                } else {
+                    keyring::Error::NoStorageAccess("mock: the user denied access to the keychain item".into())
+                }
+            } else {
+                keyring::Error::PlatformFailure(
+                    "mock: org.freedesktop.secrets is not provided by any .service files".into(),
+                )
+            });
+        }
+
+        /// The delay and the call count every call goes through.
+        fn arrive(&self) {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let delay = *self.delay.lock().unwrap();
+            if !delay.is_zero() {
+                std::thread::sleep(delay);
+            }
         }
 
         /// The stored secrets for `account`, straight from the mock (no fault applied).
@@ -453,15 +653,18 @@ pub(crate) mod mock {
 
     impl SecretBackend for MockKeyring {
         fn set(&self, account: &str, secret: &[u8]) -> Result<(), String> {
-            if *self.fault.lock().unwrap() == Fault::Sets {
+            self.arrive();
+            if matches!(*self.fault.lock().unwrap(), Fault::Sets | Fault::Denied) {
                 self.fail_next(account);
             }
             Keyring(|a: &str| self.entry(a)).set(account, secret)
         }
 
         fn get(&self, account: &str) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
-            match *self.fault.lock().unwrap() {
-                Fault::Gets => self.fail_next(account),
+            self.arrive();
+            let fault = *self.fault.lock().unwrap();
+            match fault {
+                Fault::Gets | Fault::Denied => self.fail_next(account),
                 Fault::Corrupt => {
                     let other = Secrets {
                         master_key: Some(Zeroizing::new("b3RoZXI=".to_string())),
@@ -475,6 +678,7 @@ pub(crate) mod mock {
         }
 
         fn delete(&self, account: &str) -> Result<bool, String> {
+            self.arrive();
             if *self.fault.lock().unwrap() == Fault::Deletes {
                 self.fail_next(account);
             }
@@ -485,7 +689,7 @@ pub(crate) mod mock {
 
 #[cfg(test)]
 mod tests {
-    use super::mock::{Fault, MockKeyring};
+    use super::mock::{Fault, MockKeyring, MockOsStatus};
     use super::*;
 
     fn both() -> Secrets {
@@ -575,6 +779,88 @@ mod tests {
         assert!(refusal.contains("BB_STORE_SECRETS_IN_FILE=1"), "{refusal}");
     }
 
+    /// Review P3-1: after a call times out, the next calls fail at once with the same reason and never reach the
+    /// keyring again until the back-off is over.
+    #[test]
+    fn a_keyring_call_that_timed_out_is_not_retried_during_the_back_off() {
+        let mock = MockKeyring::new();
+        *mock.delay.lock().unwrap() = std::time::Duration::from_millis(400);
+        let guarded = Guarded::new(
+            mock,
+            std::time::Duration::from_millis(50),
+            std::time::Duration::from_secs(5 * 60),
+        );
+        let a = account("http://127.0.0.1:3001", Some("a@beebeeb.io"));
+        let first = guarded.get(&a).unwrap_err();
+        assert!(first.starts_with(NO_ANSWER), "unexpected error text: {first}");
+        let started = std::time::Instant::now();
+        let second = guarded.get(&a).unwrap_err();
+        let third = guarded.set(&a, b"x").unwrap_err();
+        let waited = started.elapsed();
+        assert_eq!(second, first, "a call during the back-off gets the same reason");
+        assert_eq!(third, first);
+        assert!(
+            waited < std::time::Duration::from_millis(40),
+            "a call during the back-off blocked for {waited:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let calls = guarded.inner.calls.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(calls, 1, "the keyring was called again during the back-off");
+    }
+
+    /// Review P2-1: a keyring that exists but refused never sends the person to the plaintext opt-in; one that is
+    /// not reachable at all still does.
+    #[test]
+    fn a_refusing_keyring_is_not_answered_with_the_plaintext_opt_in() {
+        let a = account("http://127.0.0.1:3001", Some("a@beebeeb.io"));
+        let timed_out = format!("{NO_ANSWER} within 60 seconds (is it locked, or waiting on a prompt?)");
+        let mut reasons = vec![timed_out];
+        // Windows Credential Manager has no "there but refused" answer; a timeout is the only such case there.
+        if !cfg!(target_os = "windows") {
+            reasons.push(MockKeyring::with_fault(Fault::Denied).set(&a, b"x").unwrap_err());
+        }
+        let path = PathBuf::from("/home/x/.config/beebeeb/config.json");
+        for reason in reasons.iter().map(String::as_str) {
+            let texts = [
+                refusal(reason),
+                Notice::NotMigrated {
+                    path: path.clone(),
+                    reason: reason.to_string(),
+                }
+                .text(),
+                Notice::Unreadable {
+                    reason: reason.to_string(),
+                    keyring_refused: keyring_refused(reason),
+                }
+                .text(),
+            ];
+            for text in texts {
+                assert!(
+                    !text.contains(OPT_IN_FLAG) && !text.contains(OPT_IN_ENV),
+                    "a refusing keyring is answered with the opt-in: {text}"
+                );
+                assert!(
+                    text.contains("did not allow access") || text.contains("did not answer"),
+                    "{text}"
+                );
+                assert!(text.contains("from a terminal"), "{text}");
+            }
+        }
+        let missing = MockKeyring::with_fault(Fault::Sets).set(&a, b"x").unwrap_err();
+        assert!(!keyring_refused(&missing));
+        // macOS: no keychain at all (errSecNoSuchKeychain) is "not reachable", not "refused".
+        if cfg!(target_os = "macos") {
+            let none = describe(&keyring::Error::NoStorageAccess(Box::new(MockOsStatus(-25294))));
+            assert!(!keyring_refused(&none), "{none}");
+        }
+        assert!(refusal(&missing).contains(OPT_IN_FLAG));
+        assert!(
+            Notice::NotMigrated { path, reason: missing }
+                .text()
+                .contains(OPT_IN_ENV)
+        );
+    }
+
     /// The real keychain, on purpose and only when asked: `cargo test --bin bb credentials -- --ignored`. It uses
     /// a service name of its own and removes its entry, so it never meets a real sign-in.
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
@@ -583,24 +869,23 @@ mod tests {
     fn the_os_keyring_round_trips_on_this_machine() {
         let service = format!("io.beebeeb.cli.selftest-{}", uuid::Uuid::new_v4());
         let account = account("http://127.0.0.1:3001", Some("selftest@beebeeb.io"));
-        let backend = move || {
-            let service = service.clone();
-            Keyring(move |a: &str| keyring::Entry::new(&service, a).map(Arc::new))
-        };
-        let (b1, b2, a1, a2) = (backend.clone(), backend, account.clone(), account);
-        let result = OsKeyring::on_own_thread(move || -> Result<(), String> {
-            let backend = b1();
-            backend.set(&a1, &encode(&both()))?;
-            verify(&backend, &a1, &both())?;
-            if !backend.delete(&a1)? {
+        let backend = Guarded::new(
+            Keyring(move |a: &str| keyring::Entry::new(&service, a).map(Arc::new)),
+            KEYRING_TIMEOUT,
+            KEYRING_BACKOFF,
+        );
+        let result = (|| -> Result<(), String> {
+            backend.set(&account, &encode(&both()))?;
+            verify(&backend, &account, &both())?;
+            if !backend.delete(&account)? {
                 return Err("the entry was not there to delete".to_string());
             }
-            if backend.get(&a1)?.is_some() {
+            if backend.get(&account)?.is_some() {
                 return Err("the entry is still there after the delete".to_string());
             }
             Ok(())
-        });
-        let _ = OsKeyring::on_own_thread(move || b2().delete(&a2));
+        })();
+        let _ = backend.delete(&account);
         assert!(
             result.is_ok(),
             "the OS keyring round trip failed: {}",

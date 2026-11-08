@@ -1,4 +1,4 @@
-//! `bb config`: show the stored config, with the session token truncated.
+//! `bb config`: show the stored config; the session token only as "(set)".
 
 use colored::Colorize;
 
@@ -16,6 +16,11 @@ fn secrets_location(location: Option<&SecretsLocation>) -> (&'static str, String
     }
 }
 
+/// What `bb config` shows for the session token: only whether there is one, never any of its characters.
+fn token_display(token: Option<&str>) -> Option<String> {
+    token.map(|_| "(set)".to_string())
+}
+
 pub async fn run() -> Result<(), String> {
     let config = load_config();
 
@@ -24,13 +29,7 @@ pub async fn run() -> Result<(), String> {
 
     // ── JSON output ──────────────────────────────────────────────────────
     if crate::ui::is_json() {
-        let truncated_token = config.session_token.as_deref().map(String::as_str).map(|t| {
-            if t.len() > 16 {
-                format!("{}...{}", &t[..8], &t[t.len() - 4..])
-            } else {
-                "(set)".to_string()
-            }
-        });
+        let truncated_token = token_display(config.session_token.as_deref().map(String::as_str));
 
         let json = serde_json::json!({
             "api_url": config.api_url,
@@ -63,15 +62,8 @@ pub async fn run() -> Result<(), String> {
     println!(
         "  {}  {}",
         dim("session_token"),
-        match &config.session_token {
-            Some(t) => {
-                // Show first 8 and last 4 chars, mask the rest
-                if t.len() > 16 {
-                    format!("{}...{}", &t[..8], &t[t.len() - 4..]).custom_color(crate::colors::INK)
-                } else {
-                    "(set)".custom_color(crate::colors::INK)
-                }
-            }
+        match token_display(config.session_token.as_deref().map(String::as_str)) {
+            Some(shown) => shown.custom_color(crate::colors::INK),
             None => "(none)".custom_color(crate::colors::INK_DIM),
         },
     );
@@ -104,4 +96,22 @@ pub async fn run() -> Result<(), String> {
 
     println!();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::token_display;
+
+    /// Review (on main): `bb config` showed the token's first 8 and last 4 characters. No character of it may show.
+    #[test]
+    fn no_character_of_the_session_token_is_shown() {
+        // Upper case and digits: none occurs in "(set)", so any of them in the output came from the token.
+        let token: String = ('A'..='Z').chain('0'..='9').collect();
+        for shown in [token_display(Some(&token)), token_display(Some(&token[..12]))] {
+            let shown = shown.expect("a token is shown as set");
+            assert!(!shown.chars().any(|c| token.contains(c)), "a token character is shown");
+            assert_eq!(shown, "(set)");
+        }
+        assert_eq!(token_display(None), None);
+    }
 }
