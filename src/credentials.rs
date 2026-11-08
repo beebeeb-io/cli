@@ -328,10 +328,12 @@ impl Notice {
                  ({reason}); bb will try again next time.",
                 unencrypted_warning(path)
             ),
-            Notice::Migrated { to: CredentialStore::Keyring } => {
-                "Moved your Beebeeb key and session out of config.json into the OS keyring.".to_string()
-            }
-            Notice::Migrated { to: CredentialStore::File } => format!(
+            Notice::Migrated {
+                to: CredentialStore::Keyring,
+            } => "Moved your Beebeeb key and session out of config.json into the OS keyring.".to_string(),
+            Notice::Migrated {
+                to: CredentialStore::File,
+            } => format!(
                 "Moved your Beebeeb key and session out of config.json into {CREDENTIALS_FILE}, readable only by you."
             ),
             Notice::Unreadable { reason } => format!(
@@ -467,7 +469,9 @@ mod tests {
 
     fn both() -> Secrets {
         Secrets {
-            master_key: Some(Zeroizing::new("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string())),
+            master_key: Some(Zeroizing::new(
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+            )),
             session_token: Some(Zeroizing::new("fixture-session-token".to_string())),
         }
     }
@@ -479,16 +483,22 @@ mod tests {
         assert_eq!(decode(&bytes).unwrap(), secrets);
         let broken = br#"{"v":1,"master_key":12,"session_token":"fixture-session-token"}"#;
         let err = decode(broken).unwrap_err();
-        assert!(!err.contains("fixture-session-token"), "{err}");
+        assert!(!err.contains("fixture-session-token"), "the error quotes the input");
         let future = br#"{"v":2,"session_token":"fixture-session-token"}"#;
         let err = decode(future).unwrap_err();
-        assert!(err.contains("version 2") && !err.contains("fixture"), "{err}");
+        assert!(
+            err.contains("version 2") && !err.contains("fixture"),
+            "the error must name the version and not quote the input"
+        );
     }
 
     #[test]
     fn debug_output_hides_both_secrets() {
         let text = format!("{:?}", both());
-        assert!(!text.contains("AAAA") && !text.contains("fixture-session-token"), "{text}");
+        assert!(
+            !text.contains("AAAA") && !text.contains("fixture-session-token"),
+            "Debug shows a secret"
+        );
     }
 
     /// F7 (b): the keyring path against `keyring`'s mock credentials: store, read back, delete.
@@ -503,13 +513,13 @@ mod tests {
             account("http://127.0.0.1:4001", Some("a@beebeeb.io")),
             "nor two servers"
         );
-        assert_eq!(mock.get(&a).unwrap(), None);
+        assert!(mock.get(&a).unwrap().is_none());
         mock.set(&a, &encode(&both())).unwrap();
         verify(&mock, &a, &both()).unwrap();
-        assert_eq!(mock.get(&b).unwrap(), None);
+        assert!(mock.get(&b).unwrap().is_none());
         assert!(mock.delete(&a).unwrap());
         assert!(!mock.delete(&a).unwrap(), "a second delete finds nothing");
-        assert_eq!(mock.get(&a).unwrap(), None);
+        assert!(mock.get(&a).unwrap().is_none());
     }
 
     #[test]
@@ -517,16 +527,19 @@ mod tests {
         let mock = MockKeyring::with_fault(Fault::Sets);
         let a = account("http://127.0.0.1:3001", Some("a@beebeeb.io"));
         let err = mock.set(&a, &encode(&both())).unwrap_err();
-        assert!(err.contains("org.freedesktop.secrets"), "{err}");
+        assert!(err.contains("org.freedesktop.secrets"), "unexpected error text");
         mock.set_fault(Fault::None);
         mock.set(&a, &encode(&both())).unwrap();
         mock.set_fault(Fault::Corrupt);
         let err = verify(&mock, &a, &both()).unwrap_err();
-        assert!(err.contains("reads back different"), "{err}");
-        assert!(!err.contains("fixture-session-token"), "{err}");
+        assert!(err.contains("reads back different"), "unexpected error text");
+        assert!(!err.contains("fixture-session-token"), "the error quotes the input");
         // A BadEncoding error carries the stored bytes; its description must not.
         let described = describe(&keyring::Error::BadEncoding(b"fixture-session-token".to_vec()));
-        assert!(!described.contains("fixture"), "{described}");
+        assert!(
+            !described.contains("fixture"),
+            "the description quotes the stored bytes"
+        );
     }
 
     #[test]
@@ -555,7 +568,7 @@ mod tests {
             backend.set(&account, &encode(&both()))?;
             verify(&backend, &account, &both())?;
             assert!(backend.delete(&account)?);
-            assert_eq!(backend.get(&account)?, None);
+            assert!(backend.get(&account)?.is_none());
             Ok(())
         };
         let result = OsKeyring::on_own_thread(run);

@@ -178,7 +178,7 @@ const CHUNK_RETRY: beebeeb_core::retry::RetryPolicy = beebeeb_core::retry::Retry
 pub struct ApiClient {
     client: Client,
     base_url: String,
-    token: Option<String>,
+    token: Option<zeroize::Zeroizing<String>>,
     /// Task 1037: the account state off `GET /billing/subscription`, fetched
     /// lazily on the first account-state refusal and reused for every later
     /// one this client sees (`None`: the fetch failed). See

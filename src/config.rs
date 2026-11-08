@@ -23,7 +23,8 @@ static API_URL_OVERRIDE: OnceLock<String> = OnceLock::new();
 #[derive(Clone)]
 pub struct Config {
     pub api_url: String,
-    pub session_token: Option<String>,
+    /// Wiped from memory on drop, like the key.
+    pub session_token: Option<Zeroizing<String>>,
     pub email: Option<String>,
     /// Base64-encoded 32-byte master key derived during login. Used to derive per-file encryption keys for
     /// push/pull. Wiped from memory on drop.
@@ -69,7 +70,7 @@ impl std::fmt::Debug for Config {
 
 impl Config {
     fn with_secrets(mut self, secrets: Secrets, location: SecretsLocation) -> Self {
-        self.session_token = secrets.session_token.map(|t| t.as_str().to_string());
+        self.session_token = secrets.session_token;
         self.master_key = secrets.master_key;
         self.secrets_location = Some(location);
         self
@@ -162,7 +163,12 @@ impl KeyringCache {
         Self(Mutex::new(None))
     }
 
-    fn read(&self, backend: &dyn SecretBackend, account: &str, stamp: Option<Stamp>) -> Result<Option<Secrets>, String> {
+    fn read(
+        &self,
+        backend: &dyn SecretBackend,
+        account: &str,
+        stamp: Option<Stamp>,
+    ) -> Result<Option<Secrets>, String> {
         let mut cached = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if let (Some((cached_account, cached_stamp, result)), Some(stamp)) = (cached.as_ref(), stamp.as_ref()) {
             if cached_account == account && cached_stamp == stamp {
@@ -446,7 +452,14 @@ pub(crate) fn probe(backend: &dyn SecretBackend) -> Result<(), String> {
 /// sign-in is removed, and so is the keyring entry of a previous, different account. No keyring: with `opt_in`
 /// the secrets go to `credentials.json` instead; without it, the refusal that names the opt-in.
 pub fn save_login(api_url: &str, email: &str, secrets: &Secrets, opt_in: bool) -> Result<CredentialStore, String> {
-    save_login_in(&config_dir(), credentials::os_backend(), api_url, email, secrets, opt_in)
+    save_login_in(
+        &config_dir(),
+        credentials::os_backend(),
+        api_url,
+        email,
+        secrets,
+        opt_in,
+    )
 }
 
 /// The opt-in `credentials.json` of this machine's config dir.
@@ -650,8 +663,15 @@ mod credential_store_tests {
     }
 
     fn assert_signed_in(config: &Config) {
-        assert_eq!(config.master_key.as_deref().map(String::as_str), Some(MASTER_KEY));
-        assert_eq!(config.session_token.as_deref(), Some(TOKEN));
+        // `assert!`, not `assert_eq!`: a failure must never print a secret, not even a fixture.
+        assert!(
+            config.master_key.as_deref().map(String::as_str) == Some(MASTER_KEY),
+            "the master key is not the one stored"
+        );
+        assert!(
+            config.session_token.as_deref().map(String::as_str) == Some(TOKEN),
+            "the session token is not the one stored"
+        );
         assert_eq!(config.email.as_deref(), Some(EMAIL));
     }
 
@@ -674,7 +694,11 @@ mod credential_store_tests {
         drop(mask);
         assert_eq!(store.unwrap(), CredentialStore::File);
         let seen = seen.borrow();
-        assert_eq!(seen.len(), 2, "credentials.json and config.json, each seen once with its bytes");
+        assert_eq!(
+            seen.len(),
+            2,
+            "credentials.json and config.json, each seen once with its bytes"
+        );
         let (secret_path, _, _) = seen
             .iter()
             .find(|(_, _, bytes)| String::from_utf8_lossy(bytes).contains(MASTER_KEY))
@@ -723,12 +747,17 @@ mod credential_store_tests {
         mock.set_fault(Fault::None);
         // A new sign-in replaces config.json: the cached answer is not used for it.
         let other = Secrets {
-            master_key: Some(Zeroizing::new("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=".to_string())),
+            master_key: Some(Zeroizing::new(
+                "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=".to_string(),
+            )),
             session_token: Some(Zeroizing::new("second-token".to_string())),
         };
         save_login_in(&dir, &mock, API, EMAIL, &other, false).unwrap();
         let again = load_from(&dir, &mock, false, true, &cache, &declined).config;
-        assert_eq!(again.session_token.as_deref(), Some("second-token"));
+        assert!(
+            again.session_token.as_deref().map(String::as_str) == Some("second-token"),
+            "the second sign-in's token was not read"
+        );
     }
 
     #[test]
@@ -737,12 +766,18 @@ mod credential_store_tests {
         let err = save_login_in(&dir, &MockKeyring::with_fault(Fault::Sets), API, EMAIL, &both(), false).unwrap_err();
         assert!(
             err.contains("--store-secrets-in-file") && err.contains("BB_STORE_SECRETS_IN_FILE=1"),
-            "{err}"
+            "unexpected error text"
         );
-        assert!(!err.contains(MASTER_KEY) && !err.contains(TOKEN), "{err}");
+        assert!(
+            !err.contains(MASTER_KEY) && !err.contains(TOKEN),
+            "the error quotes a secret"
+        );
         assert!(!dir.join(CONFIG_FILE).exists() && !dir.join(CREDENTIALS_FILE).exists());
         assert!(probe(&MockKeyring::with_fault(Fault::Gets)).is_err());
-        assert!(probe(&MockKeyring::new()).is_ok(), "an empty keyring is a reachable keyring");
+        assert!(
+            probe(&MockKeyring::new()).is_ok(),
+            "an empty keyring is a reachable keyring"
+        );
     }
 
     #[test]
@@ -831,9 +866,8 @@ mod credential_store_tests {
             let before = legacy(&dir);
             let mock = MockKeyring::with_fault(fault);
             let loaded = load(&dir, &mock, true);
-            assert_eq!(
-                std::fs::read(dir.join(CONFIG_FILE)).unwrap(),
-                before,
+            assert!(
+                std::fs::read(dir.join(CONFIG_FILE)).unwrap() == before,
                 "{fault:?}: config.json must be unchanged"
             );
             assert!(!dir.join(CREDENTIALS_FILE).exists(), "{fault:?}");
@@ -852,7 +886,10 @@ mod credential_store_tests {
         let dir = tempdir();
         let before = legacy(&dir);
         let loaded = load(&dir, &MockKeyring::with_fault(Fault::Sets), false);
-        assert_eq!(std::fs::read(dir.join(CONFIG_FILE)).unwrap(), before);
+        assert!(
+            std::fs::read(dir.join(CONFIG_FILE)).unwrap() == before,
+            "config.json must be unchanged"
+        );
         assert!(!dir.join(CREDENTIALS_FILE).exists());
         assert_signed_in(&loaded.config);
         let [notice] = loaded.notices.as_slice() else {
@@ -861,13 +898,16 @@ mod credential_store_tests {
         let text = notice.text();
         assert!(
             text.starts_with(&unencrypted_warning(&dir.join(CONFIG_FILE))),
-            "{text}"
+            "unexpected notice text"
         );
         assert!(
             text.contains("BB_STORE_SECRETS_IN_FILE=1") && text.contains("bb login"),
-            "{text}"
+            "unexpected notice text"
         );
-        assert!(!text.contains(MASTER_KEY) && !text.contains(TOKEN), "{text}");
+        assert!(
+            !text.contains(MASTER_KEY) && !text.contains(TOKEN),
+            "the text quotes a secret"
+        );
     }
 
     /// F7 (c), no keyring with the opt-in: `credentials.json` at 0600, and `config.json` scrubbed.
@@ -934,8 +974,14 @@ mod credential_store_tests {
         save_login_in(&dir, &mock, API, EMAIL, &both(), false).unwrap();
         mock.set_fault(Fault::Deletes);
         let err = clear_in(&dir, &mock).unwrap_err();
-        assert!(err.contains(credentials::SERVICE) && err.contains("by hand"), "{err}");
-        assert!(!err.contains(MASTER_KEY) && !err.contains(TOKEN), "{err}");
+        assert!(
+            err.contains(credentials::SERVICE) && err.contains("by hand"),
+            "unexpected error text"
+        );
+        assert!(
+            !err.contains(MASTER_KEY) && !err.contains(TOKEN),
+            "the error quotes a secret"
+        );
         assert!(!dir.join(CONFIG_FILE).exists());
     }
 
@@ -959,6 +1005,9 @@ mod credential_store_tests {
         let dir = tempdir();
         legacy(&dir);
         let text = format!("{:?}", load(&dir, &MockKeyring::new(), false).config);
-        assert!(!text.contains(MASTER_KEY) && !text.contains(TOKEN), "{text}");
+        assert!(
+            !text.contains(MASTER_KEY) && !text.contains(TOKEN),
+            "the text quotes a secret"
+        );
     }
 }

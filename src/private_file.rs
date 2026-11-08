@@ -23,15 +23,19 @@ pub fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     write_observed(path, bytes, &mut |_| {})
 }
 
+/// A test's look at a file between its write and its rename.
+#[cfg(test)]
+type Observer = Box<dyn FnMut(&Path)>;
+
 #[cfg(test)]
 thread_local! {
     /// A test's look at every [`write`] made on its own thread (see [`observe`]).
-    static OBSERVER: std::cell::RefCell<Option<Box<dyn FnMut(&Path)>>> = const { std::cell::RefCell::new(None) };
+    static OBSERVER: std::cell::RefCell<Option<Observer>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Tests: call `observer` at the seam of every [`write`] this thread makes, until [`stop_observing`].
 #[cfg(test)]
-pub(crate) fn observe(observer: Box<dyn FnMut(&Path)>) {
+pub(crate) fn observe(observer: Observer) {
     OBSERVER.with(|o| *o.borrow_mut() = Some(observer));
 }
 
@@ -258,14 +262,17 @@ mod tests {
         .unwrap();
         assert_eq!(seen.len(), 1, "the seam must have run once, with the bytes on disk");
         let (mode_while_written, bytes) = &seen[0];
-        assert_eq!(bytes.as_slice(), secret, "the seam must see the written bytes");
+        assert!(bytes.as_slice() == secret, "the seam must see the written bytes");
         assert_eq!(
             mode_while_written & 0o077,
             0,
             "group/other bits set while the secret was on disk: {mode_while_written:o}"
         );
         assert_eq!(mode(&path), 0o600, "the published file must be 0600");
-        assert_eq!(std::fs::read(&path).unwrap(), secret);
+        assert!(
+            std::fs::read(&path).unwrap() == secret,
+            "the published file holds other bytes"
+        );
         // Replacing an existing, wider file: the result is 0600 too (a new inode, not the old one chmodded).
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();

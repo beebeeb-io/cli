@@ -144,26 +144,34 @@ async fn browser_login(headless_flag: bool, store_secrets_in_file: bool) -> Resu
     // 8. Parse credentials and persist them (LD-0029): the key and the session go into the OS keyring (or, on the
     //    opt-in, credentials.json); config.json gets only the API URL, the email and where they went. A parse error
     //    names no content: serde_json's messages can quote the input, and this input is the master key.
-    let creds: serde_json::Value =
+    //    The payload is parsed straight into wiped-on-drop strings: no `serde_json::Value` copy of either secret.
+    #[derive(serde::Deserialize)]
+    struct BrowserCredentials {
+        #[serde(default)]
+        session_token: Option<Zeroizing<String>>,
+        #[serde(default)]
+        master_key_b64: Option<Zeroizing<String>>,
+        #[serde(default)]
+        email: Option<String>,
+    }
+    let creds: BrowserCredentials =
         serde_json::from_slice(&plaintext).map_err(|_| "Invalid credentials JSON from the browser".to_string())?;
-
-    let session_token = creds["session_token"]
-        .as_str()
-        .ok_or("Missing session_token in credentials")?;
-    let master_key_b64 = creds["master_key_b64"]
-        .as_str()
-        .ok_or("Missing master_key_b64 in credentials")?;
-    let email = creds["email"].as_str().ok_or("Missing email in credentials")?;
+    let session_token = creds.session_token.ok_or("Missing session_token in credentials")?;
+    let master_key = creds.master_key_b64.ok_or("Missing master_key_b64 in credentials")?;
+    let email = creds.email.ok_or("Missing email in credentials")?;
+    let email = email.as_str();
 
     let secrets = Secrets {
-        master_key: Some(Zeroizing::new(master_key_b64.to_string())),
-        session_token: Some(Zeroizing::new(session_token.to_string())),
+        master_key: Some(master_key),
+        session_token: Some(session_token),
     };
     let store = match save_login(&api_url, email, &secrets, store_secrets_in_file) {
         Ok(store) => store,
         Err(e) => {
             // The server already made a 30-day session for this sign-in; nothing here keeps it, so end it.
-            let _ = crate::api::ApiClient::for_session(&api_url, session_token).logout().await;
+            if let Some(token) = secrets.session_token.as_deref() {
+                let _ = crate::api::ApiClient::for_session(&api_url, token).logout().await;
+            }
             return Err(e);
         }
     };

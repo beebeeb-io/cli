@@ -9,7 +9,9 @@ fn secrets_location(location: Option<&SecretsLocation>) -> (&'static str, String
     match location {
         Some(SecretsLocation::Keyring) => ("keyring", format!("OS keyring ({})", crate::credentials::SERVICE)),
         Some(SecretsLocation::File(path)) => ("file", format!("{} (unencrypted)", path.display())),
-        Some(SecretsLocation::LegacyConfig(path)) => ("config", format!("{} (unencrypted, not moved yet)", path.display())),
+        Some(SecretsLocation::LegacyConfig(path)) => {
+            ("config", format!("{} (unencrypted, not moved yet)", path.display()))
+        }
         None => ("none", "(none)".to_string()),
     }
 }
@@ -22,7 +24,7 @@ pub async fn run() -> Result<(), String> {
 
     // ── JSON output ──────────────────────────────────────────────────────
     if crate::ui::is_json() {
-        let truncated_token = config.session_token.as_deref().map(|t| {
+        let truncated_token = config.session_token.as_deref().map(String::as_str).map(|t| {
             if t.len() > 16 {
                 format!("{}...{}", &t[..8], &t[t.len() - 4..])
             } else {

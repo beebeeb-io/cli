@@ -20,7 +20,7 @@ impl ApiClient {
     pub(crate) fn for_session(api_url: &str, session_token: &str) -> Self {
         Self::with_config(crate::config::Config {
             api_url: api_url.to_string(),
-            session_token: Some(session_token.to_string()),
+            session_token: Some(zeroize::Zeroizing::new(session_token.to_string())),
             ..crate::config::Config::default()
         })
     }
@@ -96,7 +96,7 @@ impl ApiClient {
         Self {
             client: build_client_with_origin(std::time::Duration::from_secs(300), None),
             base_url,
-            token: token.map(str::to_string),
+            token: token.map(|t| zeroize::Zeroizing::new(t.to_string())),
             refusal_account_state: tokio::sync::OnceCell::new(),
             direct: state,
             storage_client: std::sync::OnceLock::new(),
@@ -106,7 +106,8 @@ impl ApiClient {
 
     pub fn require_auth(&self) -> Result<&str, ApiError> {
         self.token
-            .as_deref()
+            .as_ref()
+            .map(|t| t.as_str())
             .ok_or_else(|| NOT_LOGGED_IN_MESSAGE.to_string().into())
     }
 

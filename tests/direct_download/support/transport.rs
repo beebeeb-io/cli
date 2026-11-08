@@ -91,11 +91,14 @@ fn servers_without_direct_transport_are_served_over_the_api() {
         assert!(out.status.success(), "{}", describe(&out));
         assert_identical(&env, &out);
         assert_eq!(json["transport"], "api", "{}", describe(&out));
-        assert!(
-            String::from_utf8_lossy(&out.stderr).trim().is_empty(),
-            "{}",
-            describe(&out)
-        );
+        // The fixture's config.json is the pre-LD-0029 layout and this harness run has no OS keyring, so bb warns
+        // that the key is still in that file (decision F3/F5). That warning is the only stderr allowed here.
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let other: Vec<&str> = stderr
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("Your Beebeeb key is stored unencrypted"))
+            .collect();
+        assert!(other.is_empty(), "{}", describe(&out));
         let log = env.mock.log.lock().unwrap();
         assert_eq!(log.discovery_hits, 1, "one discovery request for one file");
         assert!(log.grant_bodies.is_empty());
