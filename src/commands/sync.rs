@@ -72,3 +72,7 @@ mod a9b_request_edit_tests;
 #[cfg(test)]
 #[path = "sync/tests/live_stats_tests.rs"]
 mod live_stats_tests;
+
+#[cfg(test)]
+#[path = "sync/tests/short_name_tests.rs"]
+mod short_name_tests;

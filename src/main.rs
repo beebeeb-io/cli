@@ -44,6 +44,8 @@ mod web_url;
 
 #[cfg(test)]
 mod readme_flags_tests;
+#[cfg(all(test, windows))]
+mod short_name_test_support;
 #[cfg(test)]
 mod test_server;
 

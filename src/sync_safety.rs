@@ -304,4 +304,123 @@ mod tests {
         );
         std::fs::remove_dir_all(&root).ok();
     }
+
+    /// Task 2408: the move aside never leaves the recovery folder, whatever the
+    /// manifest path says. A `..` or an absolute path (a damaged or hand-edited
+    /// state file) is refused, and the file stays where it is.
+    #[test]
+    fn move_to_recovery_never_leaves_the_recovery_folder() {
+        let outer = std::env::temp_dir().join(format!("bb-recovery-escape-{}", Uuid::new_v4()));
+        let root = outer.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let src = root.join("keep.txt");
+        std::fs::write(&src, b"precious").unwrap();
+        let absolute = outer.join("absolute.txt").to_string_lossy().into_owned();
+
+        for rel in [
+            "../../escaped.txt",
+            "../../../escaped.txt",
+            "sub/../../../escaped.txt",
+            absolute.as_str(),
+        ] {
+            assert!(move_to_recovery(&root, &src, rel).is_err(), "{rel:?} must be refused");
+            assert_eq!(std::fs::read(&src).unwrap(), b"precious", "{rel:?} moved the file");
+        }
+        assert!(!root.join("escaped.txt").exists());
+        assert!(!outer.join("escaped.txt").exists());
+        assert!(!outer.join("absolute.txt").exists());
+        std::fs::remove_dir_all(&outer).ok();
+    }
+
+    /// Wait until the clock is early in a second, so the moves that follow
+    /// share one `.bb-trash/<stamp>` folder (each test also checks it did).
+    #[cfg(windows)]
+    fn early_in_a_second() -> String {
+        let millis = chrono::Utc::now().timestamp_subsec_millis();
+        if millis > 300 {
+            std::thread::sleep(std::time::Duration::from_millis(u64::from(1010 - millis)));
+        }
+        chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string()
+    }
+
+    /// Task 2408: a folder on the recovery path that an 8.3 short name reaches
+    /// is a different folder. The move is refused, naming both, nothing is
+    /// moved into that folder, and the file stays where it is.
+    #[cfg(windows)]
+    #[test]
+    fn move_to_recovery_never_moves_into_a_folder_a_short_name_reaches() {
+        use crate::short_name_test_support::{Scratch, entries, short_name};
+        for _attempt in 0..3 {
+            let scratch = Scratch::new("recovery-folder");
+            let root = scratch.path();
+            std::fs::create_dir_all(root.join("Photos 2026")).unwrap();
+            std::fs::write(root.join("Photos 2026").join("a.jpg"), b"first").unwrap();
+            let src = root.join("b.jpg");
+            std::fs::write(&src, b"second").unwrap();
+
+            let stamp = early_in_a_second();
+            // An earlier removal of the pass made `.bb-trash/<stamp>/Photos 2026/`.
+            let first = move_to_recovery(root, &root.join("Photos 2026").join("a.jpg"), "Photos 2026/a.jpg").unwrap();
+            let trash_folder = first.parent().unwrap().to_path_buf();
+            let Some(alias) = short_name(&trash_folder) else {
+                return;
+            };
+            // The next one's sync path starts with a real folder named like that short name.
+            let result = move_to_recovery(root, &src, &format!("{alias}/b.jpg"));
+            if chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string() != stamp {
+                continue; // the two moves may have used two stamps: try again
+            }
+
+            let message = result.expect_err("a folder a short name reaches must not be moved into");
+            assert!(
+                message.contains(&alias) && message.contains("Photos 2026"),
+                "the refusal names both folders: {message}"
+            );
+            assert_eq!(std::fs::read(&src).unwrap(), b"second", "the file stays where it is");
+            assert_eq!(
+                entries(&trash_folder),
+                ["a.jpg"],
+                "nothing was moved into the other folder"
+            );
+            return;
+        }
+        panic!("three attempts could not keep two moves within one second");
+    }
+
+    /// Control (task 2408): a file name on the recovery path that a short name
+    /// reaches is a taken name, so the move takes the numbered name, as for
+    /// any taken name, and the file it reaches keeps its bytes.
+    #[cfg(windows)]
+    #[test]
+    fn move_to_recovery_numbers_a_file_name_a_short_name_reaches() {
+        use crate::short_name_test_support::{Scratch, short_name};
+        for _attempt in 0..3 {
+            let scratch = Scratch::new("recovery-file");
+            let root = scratch.path();
+            std::fs::write(root.join("Report for 2026.pdf"), b"first").unwrap();
+            let src = root.join("other.pdf");
+            std::fs::write(&src, b"second").unwrap();
+
+            let stamp = early_in_a_second();
+            let first = move_to_recovery(root, &root.join("Report for 2026.pdf"), "Report for 2026.pdf").unwrap();
+            let Some(alias) = short_name(&first) else {
+                return;
+            };
+            let result = move_to_recovery(root, &src, &alias);
+            if chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string() != stamp {
+                continue;
+            }
+
+            let second = result.expect("a taken name takes the numbered name");
+            assert_eq!(second.file_name().unwrap().to_string_lossy(), format!("{alias}.1"));
+            assert_eq!(std::fs::read(&second).unwrap(), b"second");
+            assert_eq!(
+                std::fs::read(&first).unwrap(),
+                b"first",
+                "the file the short name reaches is untouched"
+            );
+            return;
+        }
+        panic!("three attempts could not keep two moves within one second");
+    }
 }

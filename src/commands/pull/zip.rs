@@ -739,3 +739,63 @@ mod tests {
         assert!(sink.add(0, "d/ok.txt", b"x", &on_progress).is_ok());
     }
 }
+
+/// Task 2408: `bb pull --zip --force` never replaces a different file that the
+/// output name reaches through an 8.3 short name (`REPORT~1.ZIP` for
+/// `Report for 2026.zip`). The folder names here avoid `CON`, `:` and a
+/// trailing dot on purpose (core v0.2.7 refuses those on Windows instead of
+/// rewriting them; core #74).
+#[cfg(all(test, windows))]
+mod short_name_tests {
+    use super::{TempArchive, guard_existing_output};
+    use crate::short_name_test_support::{Scratch, aliased_file, entries};
+
+    /// The overwrite check refuses the name before anything is fetched, even
+    /// with `--force`, and names both files.
+    #[test]
+    fn the_overwrite_check_refuses_a_short_name_even_with_force() {
+        let scratch = Scratch::new("zip-guard");
+        let dir = scratch.path();
+        let Some(alias) = aliased_file(dir, "Report for 2026.zip", b"PRECIOUS EXISTING ARCHIVE") else {
+            return;
+        };
+
+        let message = guard_existing_output(&dir.join(&alias), true)
+            .expect_err("--force must not reach a different file through a short name");
+
+        assert!(
+            message.contains(&alias) && message.contains("Report for 2026.zip"),
+            "the refusal names both files: {message}"
+        );
+    }
+
+    /// The finished archive is never moved onto the file the short name
+    /// reaches, `--force` or not, and no temp is left behind.
+    #[test]
+    fn the_archive_never_replaces_a_file_a_short_name_reaches() {
+        let scratch = Scratch::new("zip-commit");
+        let dir = scratch.path();
+        let Some(alias) = aliased_file(dir, "Report for 2026.zip", b"PRECIOUS EXISTING ARCHIVE") else {
+            return;
+        };
+        let dest = dir.join(&alias);
+
+        let result = TempArchive::create(&dest).and_then(|mut temp| {
+            let mut file = temp.take_file();
+            std::io::Write::write_all(&mut file, b"new archive").map_err(|e| e.to_string())?;
+            drop(file);
+            temp.commit(&dest, true)
+        });
+
+        let message = result.expect_err("the archive must not replace a different file");
+        assert!(
+            message.contains(&alias) && message.contains("Report for 2026.zip"),
+            "the refusal names both files: {message}"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("Report for 2026.zip")).unwrap(),
+            b"PRECIOUS EXISTING ARCHIVE"
+        );
+        assert_eq!(entries(dir), ["Report for 2026.zip"], "a temp file was left behind");
+    }
+}
