@@ -181,4 +181,36 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("Report for 2026.pdf")).unwrap(), b"precious");
         assert_eq!(entries(dir), ["Report for 2026.pdf"]);
     }
+
+    /// Task 2408: a file that appears while the download is written, and that
+    /// the output name reaches through its 8.3 short name, is never replaced.
+    /// The publish is refused, naming both, and only the temp goes.
+    #[cfg(windows)]
+    #[test]
+    fn never_publishes_onto_a_file_that_appears_under_a_short_name() {
+        use crate::short_name_test_support::{Scratch, aliased_file, entries};
+        let scratch = Scratch::new("atomic-publish");
+        let dir = scratch.path();
+        // The first `REPORT*.pdf` in this folder gets `REPORT~1.PDF`; checked
+        // below, once that file exists.
+        let out = dir.join("REPORT~1.PDF");
+        let mut writer = AtomicFile::create(&out).expect("nothing is there yet");
+        writer.write_all(b"downloaded").unwrap();
+        let Some(alias) = aliased_file(dir, "Report for 2026.pdf", b"precious") else {
+            return;
+        };
+        assert_eq!(alias, "REPORT~1.PDF", "the fixture must alias the output name");
+
+        let message = writer
+            .commit()
+            .expect_err("a file that appeared under the short name must not be replaced")
+            .to_string();
+
+        assert!(
+            message.contains("REPORT~1.PDF") && message.contains("Report for 2026.pdf"),
+            "the refusal names both files: {message}"
+        );
+        assert_eq!(std::fs::read(dir.join("Report for 2026.pdf")).unwrap(), b"precious");
+        assert_eq!(entries(dir), ["Report for 2026.pdf"], "only the temp went");
+    }
 }

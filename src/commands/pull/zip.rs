@@ -814,4 +814,38 @@ mod short_name_tests {
         );
         assert_eq!(entries(dir), ["Report for 2026.zip"], "a temp file was left behind");
     }
+
+    /// An archive that appears while this one is written, and that the output
+    /// name reaches through its short name, is never replaced at the publish.
+    #[test]
+    fn the_archive_never_replaces_a_file_that_appears_under_a_short_name() {
+        let scratch = Scratch::new("zip-publish");
+        let dir = scratch.path();
+        // The first `REPORT*.zip` in this folder gets `REPORT~1.ZIP`; checked
+        // below, once that file exists.
+        let dest = dir.join("REPORT~1.ZIP");
+        let mut temp = TempArchive::create(&dest).expect("nothing is there yet");
+        let mut file = temp.take_file();
+        std::io::Write::write_all(&mut file, b"new archive").unwrap();
+        drop(file);
+        let Some(alias) = aliased_file(dir, "Report for 2026.zip", b"PRECIOUS EXISTING ARCHIVE") else {
+            return;
+        };
+        assert_eq!(alias, "REPORT~1.ZIP", "the fixture must alias the output name");
+
+        let message = temp
+            .commit(&dest, true)
+            .expect_err("an archive that appeared under the short name must not be replaced");
+        drop(temp);
+
+        assert!(
+            message.contains("REPORT~1.ZIP") && message.contains("Report for 2026.zip"),
+            "the refusal names both files: {message}"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("Report for 2026.zip")).unwrap(),
+            b"PRECIOUS EXISTING ARCHIVE"
+        );
+        assert_eq!(entries(dir), ["Report for 2026.zip"], "only the temp went");
+    }
 }
