@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.3] - 2026-11-08
+
+### Fixed
+- Windows: a file name `bb` writes, renames or deletes only ever touches the file with that exact name, never another file the folder's 8.3 short names reach. Beebeeb core v0.2.7 (`124389a`); downloads and `bb pull --zip` write through core's exclusive temporary file; `bb sync`'s `.bb-trash` move and remote renames refuse or hold such a name; file-request pulls use the same writer as every other pull.
+- `.bb-trash` only takes plain relative names, on every platform.
+
+### Changed
+- File-request pulls replace the output file instead of writing into it (default permissions with `--force`, a symbolic link is replaced, `-o /dev/stdout` fails), as every other pull already did.
+
+### Known limits
+- An interrupted download leaves `<name>.tmp`, which the next `bb sync` uploads; delete it by hand.
+- On Windows, `bb pull --zip` refuses names with `:`, a trailing dot or a reserved name instead of rewriting them (core v0.3.0 fixes this).
+
 ## [0.17.2] - 2026-11-08
 
 ### Security
