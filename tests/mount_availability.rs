@@ -37,8 +37,8 @@ fn scratch(name: &str) -> PathBuf {
 fn run_bb(home: &Path, args: &[&str]) -> Output {
     let empty_path = home.join("empty-path");
     std::fs::create_dir_all(&empty_path).expect("create empty PATH dir");
-    Command::new(env!("CARGO_BIN_EXE_bb"))
-        .args(args)
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_bb"));
+    cmd.args(args)
         .env_clear()
         // After env_clear: it would wipe the guard. The scan in api_guard.rs refuses a clear after it.
         .env("BB_REFUSE_NON_LOOPBACK_API", "1")
@@ -48,9 +48,15 @@ fn run_bb(home: &Path, args: &[&str]) -> Output {
         .env("PATH", &empty_path)
         .env("BB_NO_UPDATE", "1")
         .env("NO_COLOR", "1")
-        .stdin(Stdio::null())
-        .output()
-        .expect("spawn bb")
+        .stdin(Stdio::null());
+    // Windows: a child without SystemRoot cannot initialise Winsock.
+    #[cfg(windows)]
+    for key in ["SystemRoot", "SYSTEMDRIVE", "WINDIR"] {
+        if let Some(v) = std::env::var_os(key) {
+            cmd.env(key, v);
+        }
+    }
+    cmd.output().expect("spawn bb")
 }
 
 #[cfg(not(feature = "fuse"))]

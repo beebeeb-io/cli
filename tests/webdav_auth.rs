@@ -119,8 +119,8 @@ fn strip_ansi(s: &str) -> String {
 }
 
 fn spawn_bb(home: &Path, args: &[&str]) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_bb"))
-        .args(args)
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_bb"));
+    cmd.args(args)
         .env_clear()
         // After env_clear: it would wipe the guard. The scan in api_guard.rs refuses a clear after it.
         .env("BB_REFUSE_NON_LOOPBACK_API", "1")
@@ -132,9 +132,15 @@ fn spawn_bb(home: &Path, args: &[&str]) -> Child {
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn bb")
+        .stderr(Stdio::piped());
+    // Windows: Winsock cannot initialise (os error 10106) in a child without SystemRoot.
+    #[cfg(windows)]
+    for key in ["SystemRoot", "SYSTEMDRIVE", "WINDIR"] {
+        if let Some(v) = std::env::var_os(key) {
+            cmd.env(key, v);
+        }
+    }
+    cmd.spawn().expect("spawn bb")
 }
 
 /// Start `bb webdav --port 0 <extra...>` and wait until it prints its "Ctrl+C" line
