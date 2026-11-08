@@ -3,6 +3,7 @@
 //! folder push as a whole, waits for a `complete` already in flight; a second exits at once; a completed session
 //! met on resume is finished, never re-sent. Black box: the real `bb` against the in-process vault mock, scratch
 //! `HOME`, loopback only; the signal goes to the pid the test recorded.
+#![cfg_attr(not(unix), allow(dead_code))]
 
 #[path = "support/push_vault.rs"]
 mod vault;
@@ -15,6 +16,7 @@ fn five_chunks() -> Vec<u8> {
         .collect()
 }
 
+#[cfg(unix)]
 /// Send SIGINT to the child the test spawned (its own recorded pid, never a name).
 fn ctrl_c(child: &std::process::Child) {
     let status = Command::new("kill")
@@ -180,6 +182,8 @@ async fn json_keys_are_additive() {
     assert!(json["transfer"]["peak_chunks_in_flight"].as_u64().unwrap() <= 4);
 }
 
+// Ctrl-C is delivered with `kill -INT <pid>`, a unix signal: no equivalent for a spawned child on Windows (2431).
+#[cfg(unix)]
 /// A first Ctrl-C mid-file: the chunks in flight are dropped, the record stays, the line says how far it got,
 /// exit 130; the same command then finishes the file, re-sending only what the server did not hold.
 #[tokio::test(flavor = "multi_thread")]
@@ -227,6 +231,8 @@ async fn ctrl_c_leaves_a_resumable_record() {
     assert!(!record_exists(&home), "the record is cleared");
 }
 
+// Ctrl-C is delivered with `kill -INT <pid>`, a unix signal: no equivalent for a spawned child on Windows (2431).
+#[cfg(unix)]
 /// A folder push stops as a whole at the first Ctrl-C: the files after the interrupted one are never inited,
 /// one interrupt line, exit 130; the same command then finishes the folder. One file at a time (`--parallel 1`),
 /// so "the files after it" are the ones not yet started; `push_parallel_files.rs` covers several files at once.
@@ -268,6 +274,8 @@ async fn ctrl_c_stops_a_folder_push() {
     }
 }
 
+// Ctrl-C is delivered with `kill -INT <pid>`, a unix signal: no equivalent for a spawned child on Windows (2431).
+#[cfg(unix)]
 /// A first Ctrl-C while `complete` is in flight: that request is waited for, the file is reported uploaded, the
 /// record is cleared, exit 0 (nothing was left undone).
 #[tokio::test(flavor = "multi_thread")]
@@ -298,6 +306,8 @@ async fn first_ctrl_c_during_complete_waits_for_it() {
     assert!(files[0].2, "completed");
 }
 
+// Ctrl-C is delivered with `kill -INT <pid>`, a unix signal: no equivalent for a spawned child on Windows (2431).
+#[cfg(unix)]
 /// A second Ctrl-C in that window exits at once (130) and can leave the record: the re-run then meets a session
 /// the server reports completed, and finishes it without sending a chunk (spec §5.2).
 #[tokio::test(flavor = "multi_thread")]
@@ -343,6 +353,8 @@ async fn ctrl_c_during_complete_leaves_no_stuck_record() {
     assert!(!record_exists(&home), "the record is cleared");
 }
 
+// Ctrl-C is delivered with `kill -INT <pid>`, a unix signal: no equivalent for a spawned child on Windows (2431).
+#[cfg(unix)]
 /// `--quiet` prints none of the new lines: no interrupt line, no lowered-N line.
 #[tokio::test(flavor = "multi_thread")]
 async fn quiet_prints_no_new_lines() {
