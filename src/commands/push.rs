@@ -541,8 +541,10 @@ async fn push_directory(
         let rel = entry_path
             .strip_prefix(dir_path)
             .unwrap_or(entry_path)
-            .display()
-            .to_string();
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/");
         let ready = push_file::prepare(api, &upload_key, entry_path, parent, strategy, true, &progress).await;
         // A Ctrl-C during its lookup: the file is left undone (not started), not failed.
         if matches!(&ready, Err(e) if was_interrupted(e) && ctl.interrupt.is_set()) {

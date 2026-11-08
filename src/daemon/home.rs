@@ -101,12 +101,13 @@ pub(super) fn check_home(home: Option<&Path>, account: Option<&Path>, allow: Opt
 
 /// A set `BB_CONFIG_DIR` redirects the config like a relocated `XDG_CONFIG_HOME` does: the service would not see it.
 #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
-pub(super) fn check_config_override(over: Option<&str>, allow: Option<&str>) -> Result<(), DaemonError> {
+pub(super) fn check_config_override(over: Option<&std::ffi::OsStr>, allow: Option<&str>) -> Result<(), DaemonError> {
     match over {
         Some(dir) if !dir.is_empty() && allow != Some("1") => Err(DaemonError::Refused(format!(
             "refusing to touch the background-service manager: this run reads its config from {dir} \
              (BB_CONFIG_DIR is set) but the service would read the account's default config directory. \
-             If this is intended, run the command again with {CUSTOM_HOME_OVERRIDE}=1"
+             If this is intended, run the command again with {CUSTOM_HOME_OVERRIDE}=1",
+            dir = dir.to_string_lossy()
         ))),
         _ => Ok(()),
     }
@@ -118,7 +119,7 @@ pub(super) fn ensure_real_home() -> Result<(), DaemonError> {
     let account = account_home();
     check_home(dirs::home_dir().as_deref(), account.as_deref(), allow.as_deref())?;
     check_config_override(
-        std::env::var(crate::paths::CONFIG_DIR_OVERRIDE).ok().as_deref(),
+        std::env::var_os(crate::paths::CONFIG_DIR_OVERRIDE).as_deref(),
         allow.as_deref(),
     )?;
     #[cfg(target_os = "linux")]

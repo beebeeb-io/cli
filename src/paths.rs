@@ -46,11 +46,13 @@ mod tests {
             let p = e.unwrap().path();
             if p.is_dir() {
                 scan(&p, hits);
-            } else if p.extension().is_some_and(|x| x == "rs") && !p.ends_with("paths.rs") {
+            } else if p.extension().is_some_and(|x| x == "rs")
+                && p != Path::new(env!("CARGO_MANIFEST_DIR")).join("src/paths.rs")
+            {
                 let text = std::fs::read_to_string(&p).unwrap();
                 for (i, l) in text.lines().enumerate() {
                     let t = l.trim_start();
-                    if !t.starts_with("//") && l.contains(concat!("dirs::config", "_dir()")) {
+                    if !t.starts_with("//") && (l.contains("dirs::config") || l.contains(concat!("use dirs", "::"))) {
                         hits.push(format!("{}:{}", p.display(), i + 1));
                     }
                 }
