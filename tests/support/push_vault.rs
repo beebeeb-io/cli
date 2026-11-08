@@ -59,6 +59,12 @@ pub struct Vault {
     pub stall: bool,
     /// Every chunk PUT waits while this is set (a test changes the source file meanwhile), then goes on.
     pub hold_chunks: bool,
+    /// Every chunk PUT answers this status (after any hold) instead of storing the chunk.
+    pub chunk_status: Option<u16>,
+    /// Chunk PUTs that arrived while `hold_chunks` was set. The body of a PUT is the encrypted chunk, so by the time
+    /// one has arrived `bb` has read that part of the file: a test that changes the file "after it was read" waits
+    /// for this, not for the session (which exists from init on, before any byte is read).
+    pub held_chunks: usize,
     /// `--parallel`: `complete` commits the version, then holds its answer while this is set (a Ctrl-C lands
     /// while `complete` is in flight).
     pub hold_complete: bool,
@@ -90,6 +96,9 @@ pub struct Vault {
     pub conflict_429: Option<(usize, usize, u64)>,
     /// Upload inits of files with these (plaintext) names wait while the name is in the set.
     pub hold_init_named: std::collections::HashSet<String>,
+    /// Upload inits that arrived while their name was in `hold_init_named`: `bb` is then between its last look at
+    /// the file and its first read of it.
+    pub held_inits: usize,
     /// `GET /shares/invites/sent` answers this status instead.
     pub invites_status: Option<u16>,
     /// A server without the invite and folder-link routes (both 404).
@@ -137,6 +146,18 @@ pub struct Vault {
 }
 
 pub type Shared = Arc<Mutex<Vault>>;
+
+/// Holds a request while `holding` says so (polled every 10 ms), and counts it with `arrived` once, the first time it
+/// finds the hold set: a test waits for that count to know the request is in the mock's hands.
+async fn hold_while(v: &Shared, holding: impl Fn(&Vault) -> bool, arrived: impl Fn(&mut Vault)) {
+    let mut counted = false;
+    while holding(&v.lock().unwrap()) {
+        if !std::mem::replace(&mut counted, true) {
+            arrived(&mut v.lock().unwrap());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
 
 pub fn err(status: StatusCode, msg: &str) -> Response {
     (status, Json(json!({ "error": msg, "message": msg }))).into_response()
@@ -519,9 +540,7 @@ pub async fn start_mock(vault: Shared) -> String {
                 let held_name =
                     beebeeb_core::encrypt::decrypt_name(&master(), &held_id, body["file_name"].as_str().unwrap_or(""))
                         .unwrap_or_default();
-                while v.lock().unwrap().hold_init_named.contains(&held_name) {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
+                hold_while(&v, |v| v.hold_init_named.contains(&held_name), |v| v.held_inits += 1).await;
                 let mut v = v.lock().unwrap();
                 v.inits += 1;
                 if let Some((n, code)) = v.init_status_after
@@ -608,8 +627,9 @@ pub async fn start_mock(vault: Shared) -> String {
                     if stall {
                         std::future::pending::<()>().await;
                     }
-                    while v.lock().unwrap().hold_chunks {
-                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    hold_while(&v, |v| v.hold_chunks, |v| v.held_chunks += 1).await;
+                    if let Some(code) = v.lock().unwrap().chunk_status {
+                        return err(StatusCode::from_u16(code).unwrap(), "refused by mock");
                     }
                     let mut v = v.lock().unwrap();
                     if v.completed_sessions.contains_key(&sid) {

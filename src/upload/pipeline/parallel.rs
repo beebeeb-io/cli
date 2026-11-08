@@ -307,14 +307,17 @@ pub(super) async fn run_pipeline(
     }
     let producer_err = match producer_join {
         Ok(Ok(())) => None,
-        Ok(Err(ProducerErr::Cancelled)) => Some(INTERRUPTED.to_string()),
-        Ok(Err(ProducerErr::ChannelClosed)) => Some("internal: chunk channel closed before completion".to_string()),
-        Ok(Err(ProducerErr::Core(e))) => Some(e),
-        Ok(Err(ProducerErr::Finish(e))) => Some(format!("integrity check failed: {e}")),
-        Err(join_err) => Some(format!("encrypt task failed: {join_err}")),
+        Ok(Err(ProducerErr::Cancelled)) => Some(AttemptErr::Other(INTERRUPTED.to_string())),
+        Ok(Err(ProducerErr::ChannelClosed)) => Some(AttemptErr::Other(
+            "internal: chunk channel closed before completion".to_string(),
+        )),
+        // The source file could not be read as planned (LD-0137): the caller may know it changed.
+        Ok(Err(ProducerErr::Core(e))) => Some(AttemptErr::Source(e)),
+        Ok(Err(ProducerErr::Finish(e))) => Some(AttemptErr::Source(format!("integrity check failed: {e}"))),
+        Err(join_err) => Some(AttemptErr::Other(format!("encrypt task failed: {join_err}"))),
     };
     if let Some(e) = producer_err {
-        return Err(AttemptErr::Other(e));
+        return Err(e);
     }
 
     // Final client-side guards (hygiene; the server recomputes the total).

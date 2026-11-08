@@ -906,6 +906,16 @@ pub(super) async fn upload_attempt(
                 resume_tag,
             });
         }
+        // LD-0137: the source file broke the attempt (a file that grew or shrank after the plan was made no longer
+        // fits it). The caller that reads a file in place knows whether the file changed: then this is a change,
+        // not a failure of the upload, and the session is ended like at 6b below, or its lease would refuse the
+        // next run. Otherwise the message is what it always was.
+        Err(AttemptErr::Source(message)) => {
+            file_prog.finish(false);
+            return Err(stop_if_source_changed(api, progress, &spec.path, &file_id_str)
+                .await
+                .unwrap_or(AttemptErr::Other(message)));
+        }
         Err(e) => {
             file_prog.finish(false);
             return Err(e);
@@ -914,11 +924,9 @@ pub(super) async fn upload_attempt(
 
     // 6b. LD-0113: the caller may stop a file that changed while it was read;
     //     its session is abandoned before anything completes.
-    if let Err(why) = progress.before_complete(&spec.path) {
-        let _ = api.upload_abandon(&file_id_str).await;
-        crate::resume::clear(&spec.path);
+    if let Some(stop) = stop_if_source_changed(api, progress, &spec.path, &file_id_str).await {
         file_prog.finish(false);
-        return Err(AttemptErr::Other(why));
+        return Err(stop);
     }
 
     // 7. Finalise the version.
@@ -982,6 +990,21 @@ pub(super) async fn upload_attempt(
         transport: if direct.is_some() { "direct" } else { "api" },
         transferred_bytes: *transferred,
     })
+}
+
+/// Asks the caller (`ChunkProgress::before_complete`) whether the file at `path` changed while it was read. If it
+/// did, ends the attempt's session (nothing completes, and no lease is left to refuse the next run), drops its
+/// resume record (the file is not the one it was made for) and returns the error to stop with: the caller's words.
+async fn stop_if_source_changed(
+    api: &ApiClient,
+    progress: &dyn ChunkProgress,
+    path: &Path,
+    file_id: &str,
+) -> Option<AttemptErr> {
+    let why = progress.before_complete(path).err()?;
+    let _ = api.upload_abandon(file_id).await;
+    crate::resume::clear(path);
+    Some(AttemptErr::Other(why))
 }
 
 /// Generate + encrypt + upload a thumbnail for image files, best-effort. Does
