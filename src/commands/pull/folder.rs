@@ -250,10 +250,8 @@ pub(super) async fn pull_single_file(
             counted = Some(body);
             drop(flight);
 
-            if let Some(parent) = out_path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| format!("failed to create dir: {e}"))?;
-            }
-            // Through a temp and a publish, like the streamed path (task 2408).
+            // Through a temp and a publish, like the streamed path (task 2408);
+            // `AtomicFile` creates the parent folder.
             crate::download::AtomicFile::write_whole(out_path, &plaintext)
                 .map_err(|e| format!("failed to write: {e}"))?;
             Ok::<_, PullError>((encrypted_bytes, plaintext, dl_elapsed))

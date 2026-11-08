@@ -433,6 +433,8 @@ pub(super) struct TempArchive {
     // Declared first, so the file is closed before the temp is removed.
     file: Option<std::fs::File>,
     temp: Option<TempSibling>,
+    /// The path the archive was created for, and the only one it publishes to.
+    dest: PathBuf,
 }
 
 impl TempArchive {
@@ -444,6 +446,7 @@ impl TempArchive {
         Ok(Self {
             file: Some(file),
             temp: Some(temp),
+            dest: dest.to_path_buf(),
         })
     }
 
@@ -451,10 +454,17 @@ impl TempArchive {
         self.file.take().expect("temp archive file already taken")
     }
 
-    /// Publish the finished archive as `dest` (the path it was created for).
-    /// Without `--force` an archive that appeared at `dest` while this run was
-    /// working is not replaced.
+    /// Publish the finished archive as `dest`, which must be the path it was
+    /// created for. Without `--force` an archive that appeared at `dest` while
+    /// this run was working is not replaced.
     pub(super) fn commit(&mut self, dest: &std::path::Path, force: bool) -> Result<(), String> {
+        if dest != self.dest {
+            return Err(format!(
+                "the archive was created for {}, not {}",
+                self.dest.display(),
+                dest.display()
+            ));
+        }
         if !force && std::fs::symlink_metadata(dest).is_ok() {
             return Err(format!(
                 "{} appeared while the archive was being written; not replacing it (pass --force to overwrite)",
