@@ -403,6 +403,22 @@ pub(super) fn print_notice(msg: &str) {
     }
 }
 
+/// One `+ <what> <name>` progress line for a folder the pass creates. Under `--json` stdout holds exactly one
+/// JSON document, so the line goes to stderr there (LD-0135); otherwise it stays on stdout.
+pub(super) fn print_folder_line(what: &str, name: &str) {
+    let line = format!(
+        "  {} {} {}",
+        "+".custom_color(crate::colors::GREEN_OK),
+        what.custom_color(crate::colors::INK_DIM),
+        name.custom_color(crate::colors::INK),
+    );
+    if ui::is_json() {
+        eprintln!("{line}");
+    } else {
+        println!("{line}");
+    }
+}
+
 /// Stat + hash a file right now (not from the scan taken at the start of the
 /// pass). Used to re-check a file immediately before it is moved aside.
 pub(super) fn fresh_local_file(path: &Path) -> Result<LocalFile, String> {
