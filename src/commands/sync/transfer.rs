@@ -193,12 +193,7 @@ pub(super) async fn resolve_remote_folder(
                     return Err(format!("remote folder '{seg}' does not exist (dry-run, cannot create)"));
                 }
                 let new_id = crate::item_id::create_owned_folder(api, master_key, seg, current_parent).await?;
-                println!(
-                    "  {} {} {}",
-                    "+".custom_color(crate::colors::GREEN_OK),
-                    "remote folder".custom_color(crate::colors::INK_DIM),
-                    seg.custom_color(crate::colors::INK),
-                );
+                print_folder_line("remote folder", seg);
                 current_parent = Some(new_id);
             }
         }

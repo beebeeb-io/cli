@@ -386,21 +386,11 @@ pub async fn run(
             let parent_id = parent_remote_id(folder_rel, &remote_folders, remote_folder_id);
             let folder_name = folder_rel.rsplit('/').next().unwrap_or(folder_rel);
             if dry_run {
-                println!(
-                    "  {} {} {}",
-                    "+".custom_color(crate::colors::GREEN_OK),
-                    "would create remote folder".custom_color(crate::colors::INK_DIM),
-                    folder_rel.custom_color(crate::colors::INK),
-                );
+                print_folder_line("would create remote folder", folder_rel);
             } else {
                 let new_id = crate::item_id::create_owned_folder(&api, &master_key, folder_name, parent_id).await?;
                 remote_folders.insert(folder_rel.clone(), new_id);
-                println!(
-                    "  {} {} {}",
-                    "+".custom_color(crate::colors::GREEN_OK),
-                    "remote folder".custom_color(crate::colors::INK_DIM),
-                    folder_rel.custom_color(crate::colors::INK),
-                );
+                print_folder_line("remote folder", folder_rel);
             }
         }
         if !local_folders.contains(folder_rel) {
@@ -418,12 +408,7 @@ pub async fn run(
             if !dry_run {
                 std::fs::create_dir_all(&local_path).map_err(|e| format!("mkdir {}: {e}", local_path.display()))?;
             }
-            println!(
-                "  {} {} {}",
-                "+".custom_color(crate::colors::GREEN_OK),
-                "local folder".custom_color(crate::colors::INK_DIM),
-                folder_rel.custom_color(crate::colors::INK),
-            );
+            print_folder_line("local folder", folder_rel);
         }
     }
 
