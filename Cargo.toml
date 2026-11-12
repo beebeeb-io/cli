@@ -72,7 +72,7 @@ ratatui = { version = "0.29", features = ["crossterm"] }
 
 # LD-0029: the owner-only DACL on files that may hold a secret (`src/private_file.rs`). Same version as keyring's.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
 
 [dev-dependencies]
 # Test-only: an independent AES-256-GCM reference so the share-wrap tests can
