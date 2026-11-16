@@ -16,12 +16,11 @@ make check-onboarding-contract         # from the workspace root; drift guard: c
 make test-quiet REPO=cli               # cargo test --locked: one PASS line per binary + log path; check-quiet (clippy -D warnings) and build-quiet (release) likewise
 ```
 
-Truth lines: per test binary `test result: ok. N passed; 0 failed`; clippy and fmt assert the exit code. A CLI task is verified by running
-the command and pasting its output, not by compiling. The CLI gate needs Linux (Legion; workspace `docs/runbook/legion-lane-host.md`).
-
 ## Module map
 
 `MAP.md` is the generated index, one `MAP.md` per directory; `make map` writes them and `make map-check` fails on drift — never hand-edit.
+Task recipes — add a subcommand, an API client method, a progress report: `docs/agents/recipes.md`; `make recipes-check` keeps them true.
+Terminal mockups are `../../design/hifi/hifi-cli.jsx`.
 
 ```
 src/main.rs               clap commands; commands/*.rs = one file per command (push, pull, sync, share, request, region, twofa, ...)
@@ -62,7 +61,7 @@ src/test_server.rs        shared loopback mock for tests; tests/ = integration b
 - Exception (Guus, 2026-11-08): cli 0.17.2 pins core v0.2.4 (`1d1a335`: v0.2.3 plus zip 9, RUSTSEC-2026-0429 / -0367 / -0368 / -0369, task LD-0144) before repos/server/CORE_REV moves (it stays v0.2.1); v0.2.4 is additive. The server bump is task LD-0142, retargeted to v0.2.4.
 - Exception (Guus, 2026-11-08, task 2404 "Fix right away"): the cli pins core v0.2.7 (`124389a`: Windows 8.3 short names, task 2408) before repos/server/CORE_REV moves (it stays v0.2.1); v0.2.7 is additive.
 - Exception (Guus, 2026-11-08, task 2430): the cli pins core v0.2.8 (`f76ccfc`: Windows-unsafe name rewriting in `sanitize_component`, task 2430) before repos/server/CORE_REV moves; v0.2.8's 17 API changes are all in passkey/auth/share flows the CLI does not call.
-- **Windows 8.3 short names (task 2408):** a write, rename or delete by a name built outside core's `safe_child` / `safe_rel_join` / `default_output_path` calls `safe_path::short_name_alias` first (a conflict on `Some`, never the other entry) or writes through `safe_path::TempSibling` (`download::AtomicFile`, the `--zip` archive). Windows-only tests use `src/short_name_test_support.rs`; CI is Linux, so the lead runs them natively.
+- **Windows 8.3 short names (task 2408):** a write, rename or delete by a name built outside core's `safe_child` / `safe_rel_join` / `default_output_path` calls `safe_path::short_name_alias` first (a conflict on `Some`, never the other entry) or writes through `safe_path::TempSibling` (`download::AtomicFile`, the `--zip` archive). Windows-only tests use `src/short_name_test_support.rs`; CI is Linux.
 
 ## Never break
 
@@ -81,17 +80,3 @@ The rules whose breakage costs data, a key, a credential or a user. One line eac
 - Server-provided names are never joined onto a path: `out_dir.join(name)` is never used directly (`safe_path`).
 - Direct S3: `--transport api` / `BB_TRANSPORT=api` force the API; `BB_TRANSPORT_TRACE=1` traces decisions (never a URL); `bb pull --json` reports `transport`.
 - A session's transport never changes after init: a direct session that cannot finish is abandoned and the file inits again WITHOUT the token.
-
-## How we work
-
-Task recipes — add a subcommand, an API client method, a progress report: `docs/agents/recipes.md`; `make recipes-check` keeps them true.
-Workspace `CLAUDE.md` → "How we work" is the rule set (evidence, design before code, done, parallel agents). Here: the truth lines above;
-terminal mockups are `../../design/hifi/hifi-cli.jsx` (design wins over code).
-
-## Graphify and shared docs
-
-Knowledge graph at `graphify-out/`. Architecture question: `graphify query "<question>"` / `graphify explain <symbol>` /
-`graphify path "<A>" "<B>"`; overview: `graphify-out/GRAPH_SUMMARY.md` (at most 3k tokens); never read `GRAPH_REPORT.md` whole.
-Run `graphify update .` for your own navigation; never commit `graphify-out/` on a feature branch (the lead regenerates it on main).
-When you add/change/remove endpoints, types, build commands or dependencies, update the matching skill in the workspace
-`.claude/skills/` (beebeeb-api.md, beebeeb-designs.md, beebeeb-stack.md, beebeeb-dev.md).
