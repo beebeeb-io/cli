@@ -969,7 +969,17 @@ async fn upload_attempt(
         // next run can pick up.
         let session_direct = init.is_direct();
         if let Ok(sid) = init.upload_session_id.parse::<Uuid>() {
-            crate::resume::record_with_transport(&spec.path, file_id, sid, format, size, mtime_ns, session_direct);
+            // L13 (SF-0001 L6): only a create's id is this CLI's own mint.
+            crate::resume::record_with_transport(
+                &spec.path,
+                file_id,
+                sid,
+                format,
+                size,
+                mtime_ns,
+                session_direct,
+                spec.replace_file_key.is_none(),
+            );
         }
         let direct = if session_direct { offer } else { None };
         (init.upload_session_id, init.file_id, direct)
@@ -1528,6 +1538,9 @@ mod swept_session_reinit {
         /// L13 (SF-0001 L7): abandon answers this status instead of ending the
         /// session (a transient failure).
         abandon_status: Option<u16>,
+        /// L13 (SF-0001 L6): complete answers this status and leaves the
+        /// session LIVE (an interrupted upload).
+        complete_status: Option<u16>,
     }
 
     type Shared = Arc<Mutex<Mock>>;
@@ -1643,6 +1656,10 @@ mod swept_session_reinit {
                     let mut m = st.lock().unwrap();
                     if !m.live.contains(&sid) || m.complete_gone.contains(&sid) {
                         return gone_response(m.gone);
+                    }
+                    if let Some(code) = m.complete_status {
+                        let status = StatusCode::from_u16(code).unwrap();
+                        return (status, Json(json!({ "error": "complete refused by mock" }))).into_response();
                     }
                     m.completed.push(sid.clone());
                     let fid = m
@@ -2705,6 +2722,62 @@ mod swept_session_reinit {
             "one abandon attempt per run"
         );
         assert_eq!(m.completed.len(), 1);
+    }
+
+    /// L6: `self_minted` means "THIS CLI minted the id for a create". A record
+    /// left by an interrupted replacement must never be resumed by a later
+    /// create of the same path — that would PUT new content into the listed
+    /// row's session. It is ended and the create mints its own id.
+    #[tokio::test]
+    async fn an_interrupted_replace_record_is_not_resumed_by_a_create() {
+        let s = Scratch::new("l6-replace-not-resumed");
+        let (path, ..) = s.file(64 * 1024);
+        let listed = Uuid::new_v4();
+        let state: Shared = Arc::new(Mutex::new(Mock {
+            complete_status: Some(503),
+            ..Default::default()
+        }));
+
+        let mut replace_spec = spec(&path, listed);
+        replace_spec.base_version_number = Some(2);
+        replace_spec.replace_pin = Some(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded);
+        replace_spec.replace_file_key = Some(Arc::new(beebeeb_core::kdf::FileKey::from_bytes([3u8; 32])));
+        run(&state, replace_spec).await.expect_err("the completion is refused");
+        let replace_sid = {
+            let m = state.lock().unwrap();
+            m.session_file
+                .iter()
+                .find(|(_, f)| **f == listed.to_string())
+                .map(|(sid, _)| sid.clone())
+                .expect("the replace opened a session for the listed row")
+        };
+
+        let puts_before = {
+            let mut m = state.lock().unwrap();
+            m.complete_status = None;
+            m.chunk_puts.len()
+        };
+        let created = Uuid::new_v4();
+        run(&state, spec(&path, created)).await.expect("the create uploads");
+
+        let m = state.lock().unwrap();
+        assert_eq!(
+            m.inits.last().map(String::as_str),
+            Some(created.to_string().as_str()),
+            "a create inits the id it minted, never the replace's"
+        );
+        assert_eq!(m.abandons, vec![listed.to_string()], "the replace session is ended");
+        assert!(
+            m.chunk_puts[puts_before..].iter().all(|(sid, _)| *sid != replace_sid),
+            "the create never PUTs into the replace session: {:?}",
+            &m.chunk_puts[puts_before..]
+        );
+        assert_eq!(m.completed.len(), 1, "only the create's session completed");
+        assert_eq!(
+            m.session_file.get(&m.completed[0]).map(String::as_str),
+            Some(created.to_string().as_str()),
+            "the completed session belongs to the create's id"
+        );
     }
 
     /// Write exactly what a pre-update CLI left behind (or a record whose marker

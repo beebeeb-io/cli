@@ -200,10 +200,13 @@ pub fn record(
     size: u64,
     mtime_ns: u128,
 ) {
-    record_with_transport(path, file_id, upload_session_id, chunk_format, size, mtime_ns, false);
+    record_with_transport(path, file_id, upload_session_id, chunk_format, size, mtime_ns, false, true);
 }
 
-/// [`record`], saying whether the session is a direct upload (task 2173).
+/// [`record`], saying whether the session is a direct upload (task 2173) and
+/// whether THIS CLI minted `file_id` (L13, SF-0001): only a create's id is
+/// self-minted. A replacement's record names a row the user already had, so it
+/// is never resumed by a later create of the same path — it is only ended.
 pub fn record_with_transport(
     path: &Path,
     file_id: Uuid,
@@ -212,6 +215,7 @@ pub fn record_with_transport(
     size: u64,
     mtime_ns: u128,
     direct: bool,
+    minted: bool,
 ) {
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut db = load();
@@ -219,7 +223,7 @@ pub fn record_with_transport(
         key(path),
         PendingEntry {
             file_id,
-            self_minted: Some(file_id),
+            self_minted: minted.then_some(file_id),
             upload_session_id: Some(upload_session_id),
             chunk_format: Some(chunk_format.as_u8()),
             direct,
@@ -281,7 +285,7 @@ mod tests {
         );
 
         // Task 2173: a direct session is remembered as one (a proxy PUT would be refused on it).
-        record_with_transport(&f, id, sid, ChunkFormat::V1Legacy, 5, 100, true);
+        record_with_transport(&f, id, sid, ChunkFormat::V1Legacy, 5, 100, true, true);
         assert_eq!(
             resumable_upload(&f, 5, 100),
             Some(PendingUpload {

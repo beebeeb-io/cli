@@ -962,6 +962,7 @@ mod tests {
             size,
             mtime,
             direct,
+            true,
         );
         (file_id, sid)
     }
