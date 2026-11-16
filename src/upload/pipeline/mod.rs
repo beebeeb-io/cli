@@ -1094,3 +1094,7 @@ mod resume_destination;
 /// Task 2333: what the driver tells its progress sink (chunks in flight, retries, pools, rollbacks).
 #[cfg(test)]
 mod live_stats_tests;
+
+/// `--parallel` Task 1: at one chunk at a time, today's requests in today's order (the golden).
+#[cfg(test)]
+pub(crate) mod request_log_tests;

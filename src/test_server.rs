@@ -118,6 +118,14 @@ pub struct Mock {
     /// Task 2333: the FIRST PUT of each of these indexes answers 429 with
     /// `Retry-After: 0` (a transient refusal the client retries).
     pub chunk_rate_limited_once: HashSet<u32>,
+    /// `--parallel` Task 1: the `Retry-After` of those 429s, in seconds (0 unless a test needs a real pause).
+    pub rate_limit_retry_after: u64,
+    /// `--parallel` Task 1: when set, every request the mock answers is logged here, in order (the recorder
+    /// buffers each body, so a test that aborts a body must not set it).
+    pub requests: Option<RequestLog>,
+    /// `--parallel`: keep only the length of each chunk PUT, not its bytes (a 2 GiB fixture would otherwise be
+    /// held whole in `chunk_bodies`).
+    pub drop_chunk_bodies: bool,
 }
 
 pub type Shared = Arc<Mutex<Mock>>;
@@ -153,7 +161,8 @@ fn not_found() -> Response {
 }
 
 fn router(state: Shared) -> Router {
-    Router::new()
+    let log = state.lock().unwrap().requests.clone();
+    let router = Router::new()
         .route(
             "/api/v1/uploads/init",
             post(
@@ -212,11 +221,13 @@ fn router(state: Shared) -> Router {
                     let mut m = st.lock().unwrap();
                     m.chunk_puts.push((sid.clone(), idx));
                     m.events.push(format!("chunk:{sid}:{idx}"));
-                    m.chunk_bodies.insert((sid.clone(), idx), data);
+                    if !m.drop_chunk_bodies {
+                        m.chunk_bodies.insert((sid.clone(), idx), data);
+                    }
                     if m.chunk_rate_limited_once.remove(&idx) {
                         return (
                             StatusCode::TOO_MANY_REQUESTS,
-                            [("retry-after", "0")],
+                            [("retry-after", m.rate_limit_retry_after.to_string())],
                             Json(json!({ "error": "rate_limited" })),
                         )
                             .into_response();
@@ -355,7 +366,99 @@ fn router(state: Shared) -> Router {
                 }
             }),
         )
-        .with_state(state)
+        .with_state(state);
+    match log {
+        Some(log) => recorded(router, &log),
+        None => router,
+    }
+}
+
+// ── The request recorder (`--parallel` Task 1: the `--parallel 1` golden) ──────────────────────────────────
+
+/// One request a mock answered: what the `--parallel 1` golden compares. The body is its length only: core seals
+/// every chunk under a fresh nonce, so no two runs send the same bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoggedRequest {
+    pub method: String,
+    /// The path with every id replaced by what it is (`{session}`, `{file}`, `{id}`); never a query string.
+    pub path: String,
+    pub status: u16,
+    /// `None` for the init: its body carries the sealed name, whose JSON array encoding varies in length with
+    /// the nonce's digits (core `seal_name_envelope`), so there is nothing stable to pin.
+    pub body_len: Option<u64>,
+}
+
+impl LoggedRequest {
+    /// One line of a golden file: `METHOD path status body_len` (`-` for a length that is not recorded).
+    pub fn line(&self) -> String {
+        let body_len = self.body_len.map_or("-".to_string(), |n| n.to_string());
+        format!("{} {} {} {body_len}", self.method, self.path, self.status)
+    }
+}
+
+/// The requests a mock answered, in the order they were answered.
+#[derive(Clone, Default)]
+pub struct RequestLog(Arc<Mutex<Vec<LoggedRequest>>>);
+
+impl RequestLog {
+    pub fn entries(&self) -> Vec<LoggedRequest> {
+        self.0.lock().unwrap().clone()
+    }
+
+    pub fn lines(&self) -> Vec<String> {
+        self.entries().iter().map(LoggedRequest::line).collect()
+    }
+}
+
+/// `path` with every UUID segment replaced by a placeholder for what it names: `{session}` under `uploads` and
+/// under a storage bucket, `{file}` under `files`, `{id}` elsewhere.
+pub fn placeholders(path: &str) -> String {
+    let segments: Vec<&str> = path.split('/').collect();
+    let mut out: Vec<String> = Vec::with_capacity(segments.len());
+    for (i, segment) in segments.iter().enumerate() {
+        if Uuid::parse_str(segment).is_err() {
+            out.push((*segment).to_string());
+            continue;
+        }
+        let under = i.checked_sub(1).map(|j| segments[j]).unwrap_or("");
+        out.push(
+            match under {
+                "uploads" | "bb-test" => "{session}",
+                "files" => "{file}",
+                _ => "{id}",
+            }
+            .to_string(),
+        );
+    }
+    out.join("/")
+}
+
+/// `router` with every request it answers logged to `log`: method, placeholder path, status and body length.
+/// The body is read whole before the handler runs (so a handler that streams sees one frame).
+pub fn recorded(router: Router, log: &RequestLog) -> Router {
+    router.layer(axum::middleware::from_fn_with_state(log.clone(), record))
+}
+
+async fn record(
+    State(log): State<RequestLog>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let (parts, body) = request.into_parts();
+    let method = parts.method.to_string();
+    let path = placeholders(parts.uri.path());
+    let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap_or_default();
+    let body_len = (path != "/api/v1/uploads/init").then_some(bytes.len() as u64);
+    let response = next
+        .run(axum::extract::Request::from_parts(parts, Body::from(bytes)))
+        .await;
+    log.0.lock().unwrap().push(LoggedRequest {
+        method,
+        path,
+        status: response.status().as_u16(),
+        body_len,
+    });
+    response
 }
 
 /// Serve the mock on the CURRENT tokio runtime; returns its base URL.
@@ -419,6 +522,23 @@ impl Scratch {
     pub fn file(&self, size: usize) -> (std::path::PathBuf, u64, u128) {
         let p = self.dir.join("payload.bin");
         std::fs::write(&p, vec![0x5Au8; size]).unwrap();
+        let meta = std::fs::metadata(&p).unwrap();
+        let mtime = meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        (p, meta.len(), mtime)
+    }
+}
+
+impl Scratch {
+    /// `payload.bin` of `size` bytes, sparse (`set_len`, never written): the fixture for a chunk plan over 2 GiB
+    /// costs no disk I/O. (path, size, mtime_ns), as [`file`](Self::file).
+    pub fn sparse_file(&self, size: u64) -> (std::path::PathBuf, u64, u128) {
+        let p = self.dir.join("payload.bin");
+        std::fs::File::create(&p).unwrap().set_len(size).unwrap();
         let meta = std::fs::metadata(&p).unwrap();
         let mtime = meta
             .modified()

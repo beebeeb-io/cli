@@ -86,3 +86,7 @@ lto = "thin"
 
 # NOTE: local-dev path override for beebeeb-core/types lives in the gitignored
 # .cargo/config.toml (NOT committed). CI builds against the git dependency above.
+
+# Experiment (not for the PR as is): optimised dependencies in test builds.
+[profile.test.package."*"]
+opt-level = 2
