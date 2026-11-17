@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
 
 # Drop all permissions by default; each job grants only what it needs.
@@ -15,6 +16,7 @@ env:
 
 jobs:
   check:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     name: Clippy & Format
     runs-on: ubuntu-latest
     permissions:
@@ -43,6 +45,7 @@ jobs:
         run: ./scripts/openapi-types.sh --check
 
   test:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     name: Tests
     runs-on: ubuntu-latest
     permissions:
@@ -68,6 +71,7 @@ jobs:
         run: cargo test --bin bb help_links_return_200 -- --ignored --nocapture
 
   fuse:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     name: Fuse feature (clippy)
     runs-on: ubuntu-latest
     permissions:
@@ -93,6 +97,7 @@ jobs:
         run: cargo clippy --locked --features fuse --all-targets -- -D warnings
 
   installer:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     name: Installer update regression
     runs-on: ubuntu-latest
     permissions:
