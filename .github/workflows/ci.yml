@@ -29,7 +29,7 @@ jobs:
           toolchain: "1.96.0"
           components: clippy, rustfmt
 
-      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+      - uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
 
       - name: cargo fmt
         run: cargo fmt -- --check
@@ -57,7 +57,7 @@ jobs:
         with:
           toolchain: "1.96.0"
 
-      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+      - uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
 
       - name: cargo build
         run: cargo build --verbose
@@ -89,7 +89,7 @@ jobs:
           toolchain: "1.96.0"
           components: clippy
 
-      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+      - uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
 
       # `mount.rs` is only compiled with `--features fuse`; without this job a
       # broken FUSE port would keep the default-feature CI green.
