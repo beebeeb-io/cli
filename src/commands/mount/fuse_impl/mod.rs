@@ -177,7 +177,7 @@ struct InodeEntry {
     /// The content's read pin from the file's authenticated metadata
     /// (`crypto::content_pin`, task 1943). `Err` for a directory, or for a
     /// file whose metadata cannot be read (its content is then refused).
-    pin: Result<beebeeb_core::chunk_stream::ExpectedChunkFormat, String>,
+    pin: Result<crate::crypto::ReadPin, String>,
     /// SF-0002: the name resolved under the read-only uppercase repair
     /// convention. A rename is refused with EPERM; the content is checked
     /// at rename time as well (the name alone does not decide).
@@ -194,7 +194,7 @@ struct InodeEntry {
 }
 
 /// What a directory carries in [`InodeEntry::pin`].
-fn no_content() -> Result<beebeeb_core::chunk_stream::ExpectedChunkFormat, String> {
+fn no_content() -> Result<crate::crypto::ReadPin, String> {
     Err("a directory has no content".to_string())
 }
 

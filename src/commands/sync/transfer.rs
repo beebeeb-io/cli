@@ -470,7 +470,7 @@ pub(super) async fn do_upload(
             file_id: remote.as_ref().unwrap().id,
             resume_tag: None,
             base_version_number: Some(replacement_version(&r.canonical)?),
-            replace_pin: Some(remote.as_ref().unwrap().pin.clone()?),
+            replace_pin: Some(remote.as_ref().unwrap().pin.clone()?.format),
             replace_file_key: Some(r.key.clone()),
             parent_id,
             concurrency: 1,

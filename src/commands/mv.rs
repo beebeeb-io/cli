@@ -254,12 +254,8 @@ async fn move_single(
             // request name has no target (read-only) and a row with neither is
             // refused instead of sealed under a guess.
             let sealed = if let Some(target) = src_keys.write_target_for(&src_id) {
-                beebeeb_core::encrypt::encrypt_name_for(
-                    &crate::crypto::key_copy(target.key()),
-                    &name,
-                    None,
-                    target.pin(),
-                )
+                // Core carries the row's version commitment into the new name.
+                beebeeb_core::encrypt::encrypt_name_for_target(&target, &name, None)
             } else if let Some(target) = src_keys.rename_target_for(&src_id) {
                 beebeeb_core::rename::encrypt_name_for_rename_target(&target, &name, None)
             } else {

@@ -580,13 +580,14 @@ mod tests {
         for part in plaintext.chunks(chunk_size as usize) {
             wire.extend(enc.push_chunk(part).unwrap().data);
         }
+        let commitment = enc.version_commitment_after(None).unwrap();
         let summary = enc.finish().unwrap();
-        let name_encrypted = beebeeb_core::encrypt::encrypt_name_with_chunk_format(
-            &m,
-            file_id,
+        let name_encrypted = beebeeb_core::encrypt::encrypt_name_for_version(
+            &beebeeb_core::kdf::derive_file_key(&m, file_id.as_bytes()),
             "core-1908-v2.txt",
             Some("text/plain"),
             ExpectedChunkFormat::V2,
+            commitment,
         )
         .unwrap();
         let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
@@ -648,7 +649,8 @@ mod tests {
     fn core_1908_v2_fixture_opens_through_the_pin_aware_reader() {
         let (m, fid, name_enc, wire, count, cs, plaintext) = v2_file();
         let pin = content_pin(&m, &fid, &name_enc).expect("the metadata authenticates");
-        assert_eq!(pin, ExpectedChunkFormat::V2);
+        assert_eq!(pin.format, ExpectedChunkFormat::V2);
+        assert!(pin.version.is_some(), "a v2 record carries its version commitment");
         assert_eq!(decrypt_name(&m, &fid, &name_enc).as_deref(), Some("core-1908-v2.txt"));
         assert_eq!(
             decrypt_file_chunks_with_chunk_size(&m, &fid, pin, &wire, count, Some(cs)).unwrap(),
@@ -718,12 +720,15 @@ mod tests {
     #[test]
     fn content_pin_reads_authenticated_metadata_only() {
         let (m, fid, name_enc, ..) = v2_file();
-        assert_eq!(content_pin(&m, &fid, &name_enc), Ok(ExpectedChunkFormat::V2));
+        assert_eq!(
+            content_pin(&m, &fid, &name_enc).unwrap().format,
+            ExpectedChunkFormat::V2
+        );
         let legacy_key = beebeeb_core::kdf::derive_file_key(&m, fid.as_bytes());
         let legacy =
             beebeeb_core::encrypt::encrypt_name_for(&legacy_key, "old.txt", None, ExpectedChunkFormat::Unrecorded)
                 .unwrap();
-        assert_eq!(content_pin(&m, &fid, &legacy), Ok(ExpectedChunkFormat::Unrecorded));
+        assert_eq!(content_pin(&m, &fid, &legacy), Ok(ReadPin::UNRECORDED));
         let err = content_pin(&m, &fid, "plain-name.txt").unwrap_err();
         assert!(err.to_string().contains("refusing to guess"), "{err}");
         // A key that does not open the envelope is no pin either.
@@ -764,7 +769,7 @@ mod tests {
             Some(v["expected_name"].as_str().unwrap())
         );
         let pin = content_pin(&m, fid, name_enc).expect("the repair metadata authenticates");
-        assert_eq!(pin, ExpectedChunkFormat::Unrecorded);
+        assert_eq!(pin, ReadPin::UNRECORDED);
         assert_eq!(decrypt_file_chunks(&m, fid, pin, &frame, 1).unwrap(), plaintext);
         assert_eq!(
             decrypt_file_chunks_owned(&m, fid, pin, None, &frame, 1, None).unwrap(),
@@ -867,6 +872,7 @@ pub use names::name_is_plaintext;
 #[cfg(feature = "fuse")]
 pub use names::name_is_upper_repair;
 use pins::NONCE_LEN;
+pub use pins::ReadPin;
 use pins::TAG_LEN;
 pub use pins::content_pin;
 pub use pins::content_pin_with_key;

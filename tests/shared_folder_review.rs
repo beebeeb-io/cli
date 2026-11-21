@@ -110,11 +110,8 @@ async fn explicit_replacement_discards_resume_for_a_different_identity() {
             assert_eq!(f.upload_request["base_version_number"], 1);
             assert_eq!(manifest(&d)["files"]["guest.txt"]["remote_id"], FILE);
             let other_key = beebeeb_core::kdf::derive_file_key(&master(), SUB.as_bytes());
-            let pin = if v2 {
-                beebeeb_core::chunk_stream::ExpectedChunkFormat::V2
-            } else {
-                beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded
-            };
+            // A replacement is written in core's current format (v2) whatever the old version's pin was.
+            let pin = beebeeb_core::chunk_stream::ExpectedChunkFormat::V2;
             assert!(opened_with_pin(&other_key, FILE, &f.uploaded_chunks, pin).is_err());
             assert_eq!(
                 opened_with_pin(&item_key(), FILE, &f.uploaded_chunks, pin).unwrap(),
@@ -180,10 +177,18 @@ fn opened_with_pin(
     frames: &[Vec<u8>],
     pin: beebeeb_core::chunk_stream::ExpectedChunkFormat,
 ) -> Result<Vec<u8>, String> {
-    let mut dec = beebeeb_core::chunk_stream::ChunkDecryptor::for_push_with_file_key(
+    // A v2 upload commits to its frame 0's nonce (the sealed name carries it); the mock does not keep names.
+    let version = match (pin, frames.first()) {
+        (beebeeb_core::chunk_stream::ExpectedChunkFormat::V2, Some(frame)) => frame
+            .get(..12)
+            .and_then(|id| beebeeb_core::chunk_stream::VersionCommitment::new(id.try_into().ok()?, 1).ok()),
+        _ => None,
+    };
+    let mut dec = beebeeb_core::chunk_stream::ChunkDecryptor::for_version_with_file_key(
         beebeeb_core::kdf::FileKey::from_bytes(*key.as_bytes()),
         id,
         pin,
+        version,
     );
     let mut bytes = Vec::new();
     for frame in frames {

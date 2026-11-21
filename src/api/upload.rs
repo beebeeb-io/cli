@@ -82,6 +82,7 @@ impl ApiClient {
             chunk_count,
             is_media,
             base_version_number,
+            None,
             InitTransport::Api,
         )
         .await
@@ -103,6 +104,7 @@ impl ApiClient {
         chunk_count: i32,
         is_media: bool,
         base_version_number: Option<i32>,
+        version_metadata: Option<&str>,
         transport: InitTransport,
     ) -> Result<UploadInit, ApiError> {
         let token = self.require_auth()?;
@@ -113,7 +115,7 @@ impl ApiClient {
         // (the profile-derived plan is the fallback for the both-omitted case
         // only), so the wire profile is non-load-bearing here. We send "desktop"
         // — the closest accepted profile (same 256 MiB chunk ceiling).
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "file_id": file_id,
             "file_name": name_encrypted,
             "file_size_bytes": size_bytes,
@@ -124,6 +126,10 @@ impl ApiClient {
             "is_media": is_media,
             "base_version_number": base_version_number,
         });
+        // The sealed name that carries this version's commitment: a replace of a protected version needs it at init.
+        if let Some(metadata) = version_metadata {
+            body["version_metadata_encrypted"] = serde_json::json!(metadata);
+        }
         for _ in 0..3 {
             // After a Ctrl-C no session is opened (a request the run would then abandon).
             if !pace_if_needed(&self.base_url).await {
@@ -134,6 +140,12 @@ impl ApiClient {
                 .post(self.url("/api/v1/uploads/init"))
                 .bearer_auth(token)
                 .json(&body);
+            if version_metadata.is_some() {
+                request = request.header(
+                    beebeeb_core::direct_transfer::CAPABILITIES_HEADER,
+                    super::CAP_VERSION_METADATA_V1,
+                );
+            }
             if transport == InitTransport::Direct {
                 request = request.header(
                     beebeeb_core::direct_transfer::CAPABILITIES_HEADER,
@@ -296,6 +308,7 @@ impl ApiClient {
     /// Verifies all chunks landed, flips the file to the new version, and returns
     /// the full file metadata. Idempotent (a second call on a completed session
     /// returns `{already_completed: true}`).
+    #[cfg_attr(not(feature = "fuse"), allow(dead_code))]
     pub async fn upload_complete(&self, upload_session_id: impl Into<DirectUploadId>) -> Result<Value, ApiError> {
         self.upload_complete_typed(upload_session_id).await
     }
@@ -303,19 +316,39 @@ impl ApiClient {
     /// [`upload_complete`](Self::upload_complete), keeping the HTTP status +
     /// server code (task 1589; see [`upload_chunk_typed`](Self::upload_chunk_typed)).
     pub async fn upload_complete_typed(&self, upload_session_id: impl Into<DirectUploadId>) -> Result<Value, ApiError> {
+        self.upload_complete_sealed_typed(upload_session_id, None).await
+    }
+
+    /// `complete` that also publishes the sealed name + version commitment (`name_encrypted` and
+    /// `version_metadata_encrypted`, one envelope), as core's own uploads do.
+    pub async fn upload_complete_sealed_typed(
+        &self,
+        upload_session_id: impl Into<DirectUploadId>,
+        sealed_name: Option<&str>,
+    ) -> Result<Value, ApiError> {
         let upload_session_id = upload_session_id.into();
         let token = self.require_auth()?;
         for _ in 0..3 {
             if !pace_if_needed(&self.base_url).await {
                 return Err(crate::upload::INTERRUPTED.to_string().into());
             }
-            let resp = self
+            let request = self
                 .client
                 .post(self.url(&format!("/api/v1/uploads/{upload_session_id}/complete")))
-                .bearer_auth(token)
-                .send()
-                .await
-                .map_err(format_request_error)?;
+                .bearer_auth(token);
+            let request = match sealed_name {
+                Some(sealed) => request
+                    .header(
+                        beebeeb_core::direct_transfer::CAPABILITIES_HEADER,
+                        super::CAP_VERSION_METADATA_V1,
+                    )
+                    .json(&serde_json::json!({
+                        "name_encrypted": sealed,
+                        "version_metadata_encrypted": sealed,
+                    })),
+                None => request,
+            };
+            let resp = request.send().await.map_err(format_request_error)?;
             match parse_response_typed(resp).await {
                 Err(e) if e.message == super::RATE_LIMITED_MESSAGE => continue,
                 other => return other,

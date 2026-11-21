@@ -752,7 +752,7 @@ pub(crate) fn build_share_material(
     token: String,
 ) -> Result<ShareMaterial, String> {
     let b64 = base64::engine::general_purpose::STANDARD;
-    let mk: Zeroizing<[u8; 32]> = Zeroizing::new(master_key.to_bytes());
+    let mk: Zeroizing<[u8; 32]> = master_key.to_bytes();
     // R7: only the key the row's NAME authenticated under may travel in the
     // link. A derived-from-the-id guess would hand the recipient a key that
     // does not open a legacy binary-convention item.
@@ -788,7 +788,7 @@ pub(crate) fn recover_share_link(
     app_url: &str,
 ) -> Option<String> {
     let b64 = base64::engine::general_purpose::STANDARD;
-    let mk: Zeroizing<[u8; 32]> = Zeroizing::new(master_key.to_bytes());
+    let mk: Zeroizing<[u8; 32]> = master_key.to_bytes();
     let kc = Zeroizing::new(unwrap_share_blob(&mk, &b64.decode(owner_wrapped_key).ok()?).ok()?);
     if kc.len() != 32 {
         return None;

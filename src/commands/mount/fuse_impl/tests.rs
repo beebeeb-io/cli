@@ -107,10 +107,7 @@ mod truncate_tests {
         file_entry_with_pin(size, Err("this test never reaches the server".to_string()))
     }
 
-    fn file_entry_with_pin(
-        size: u64,
-        pin: Result<beebeeb_core::chunk_stream::ExpectedChunkFormat, String>,
-    ) -> InodeEntry {
+    fn file_entry_with_pin(size: u64, pin: Result<crate::crypto::ReadPin, String>) -> InodeEntry {
         InodeEntry {
             file_id: Some(FILE_ID.to_string()),
             key_uuid: None,
@@ -142,13 +139,9 @@ mod truncate_tests {
 
     /// A filesystem state with one stored file and no cache; `url` is a
     /// local mock server.
-    fn state_with_stored_file(
-        url: String,
-        size: u64,
-        pin: beebeeb_core::chunk_stream::ExpectedChunkFormat,
-    ) -> BeebeebFsState {
+    fn state_with_stored_file(url: String, size: u64, pin: impl Into<crate::crypto::ReadPin>) -> BeebeebFsState {
         let mut fs = BeebeebFsState::new(ApiClient::new_for_test(url), master_key(), Duration::from_secs(5));
-        fs.inodes.insert(INO, file_entry_with_pin(size, Ok(pin)));
+        fs.inodes.insert(INO, file_entry_with_pin(size, Ok(pin.into())));
         fs
     }
 
@@ -162,7 +155,7 @@ mod truncate_tests {
     /// A real v2 frame (`ChunkEncryptor` binds the file id as AAD) for a
     /// single-chunk file: what a v2 download body contains.
     #[allow(deprecated)] // fixture: a fixed id, which the NewItemId writers cannot express
-    fn v2_frame(plaintext: &[u8]) -> Vec<u8> {
+    fn v2_frame(plaintext: &[u8]) -> (Vec<u8>, crate::crypto::ReadPin) {
         let mut encryptor = beebeeb_core::chunk_stream::ChunkEncryptor::for_push(
             &master_key(),
             FILE_ID,
@@ -173,8 +166,13 @@ mod truncate_tests {
         .with_recorded_pin(beebeeb_core::chunk_stream::ExpectedChunkFormat::V2)
         .expect("pin the v2 format");
         let chunk = encryptor.push_chunk(plaintext).expect("v2 frame");
+        let version = encryptor.version_commitment_after(None).expect("version commitment");
         encryptor.finish().expect("complete v2 stream");
-        chunk.data
+        let pin = crate::crypto::ReadPin {
+            format: beebeeb_core::chunk_stream::ExpectedChunkFormat::V2,
+            version: Some(version),
+        };
+        (chunk.data, pin)
     }
 
     /// The shared mock (`crate::test_server`) answering `GET
@@ -532,11 +530,8 @@ mod truncate_tests {
         // is empty, so `fetch_file` must decrypt the stored frame and that
         // content must be what is resized.
         let plaintext = b"hello";
-        let mut fs = state_with_stored_file(
-            spawn_download_server(v2_frame(plaintext)),
-            plaintext.len() as u64,
-            beebeeb_core::chunk_stream::ExpectedChunkFormat::V2,
-        );
+        let (frame, pin) = v2_frame(plaintext);
+        let mut fs = state_with_stored_file(spawn_download_server(frame), plaintext.len() as u64, pin);
         assert!(!fs.file_cache.contains_key(&INO));
 
         assert_eq!(
@@ -556,11 +551,8 @@ mod truncate_tests {
         // cache while the inode says 2 bytes. Growing to 4 must download
         // the real 2 bytes, never resurrect the removed tail.
         let plaintext = b"ab";
-        let mut fs = state_with_stored_file(
-            spawn_download_server(v2_frame(plaintext)),
-            2,
-            beebeeb_core::chunk_stream::ExpectedChunkFormat::V2,
-        );
+        let (frame, pin) = v2_frame(plaintext);
+        let mut fs = state_with_stored_file(spawn_download_server(frame), 2, pin);
         fs.file_cache.insert(INO, b"abcdef".to_vec());
 
         assert_eq!(
@@ -624,7 +616,7 @@ mod truncate_tests {
                 chunk_count: 0,
                 modified: SystemTime::UNIX_EPOCH,
                 parent_ino: ROOT_INO,
-                pin: Ok(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded),
+                pin: Ok(crate::crypto::ReadPin::UNRECORDED),
                 read_only: false,
                 request_class: false,
             },
@@ -874,7 +866,7 @@ mod replace_tests {
             chunk_count: if file_id.is_some() { 1 } else { 0 },
             modified: SystemTime::UNIX_EPOCH,
             parent_ino: ROOT_INO,
-            pin: Ok(ExpectedChunkFormat::Unrecorded),
+            pin: Ok(crate::crypto::ReadPin::UNRECORDED),
             read_only,
             request_class: false,
         }
@@ -957,9 +949,9 @@ mod replace_tests {
     #[test]
     fn an_overwrite_resets_the_pin_and_the_read_only_flag() {
         let (mut fs, _mock) = setup(Mock::default());
-        fs.inodes.get_mut(&OK_INO).unwrap().pin = Ok(ExpectedChunkFormat::V2);
+        fs.inodes.get_mut(&OK_INO).unwrap().pin = Ok(ExpectedChunkFormat::V2.into());
         fs.commit_overwrite(OK_INO, b"new".to_vec()).expect("overwrite");
-        assert_eq!(fs.inodes[&OK_INO].pin, Ok(ExpectedChunkFormat::Unrecorded));
+        assert_eq!(fs.inodes[&OK_INO].pin, Ok(crate::crypto::ReadPin::UNRECORDED));
 
         fs.inodes.get_mut(&OK_INO).unwrap().read_only = true;
         fs.upload_file(OK_INO, "ok.txt", b"again".to_vec(), ROOT_INO)

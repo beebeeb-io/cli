@@ -97,6 +97,10 @@ pub enum ConfirmMethod {
 }
 
 /// What a call that needs a login says when there is none.
+/// The capability token a client declares when it carries the sealed version fields (commitment) through name and
+/// content writes; the server refuses a new name for a version-protected file without it.
+pub(crate) const CAP_VERSION_METADATA_V1: &str = "version-metadata-v1";
+
 pub(crate) const NOT_LOGGED_IN_MESSAGE: &str = "Not logged in. Run `bb login` first.";
 
 pub(crate) const SESSION_EXPIRED_MESSAGE: &str =
@@ -566,7 +570,9 @@ async fn parse_response_typed(resp: reqwest::Response) -> Result<Value, ApiError
         // apart from a dead session (they match is_code("unauthorized"))
         // behave exactly as before.
         let message = if status == reqwest::StatusCode::UNAUTHORIZED
-            && server.details.get("message").and_then(Value::as_str).is_none()
+            && serde_json::from_str::<Value>(&body)
+                .ok()
+                .is_none_or(|parsed| parsed.get("message").and_then(Value::as_str).is_none())
             && code.as_deref().is_none_or(|c| c == "unauthorized")
         {
             SESSION_EXPIRED_MESSAGE.to_string()

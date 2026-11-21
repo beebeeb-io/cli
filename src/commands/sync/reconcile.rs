@@ -569,5 +569,5 @@ pub(super) struct RemoteFile {
     /// The content's read pin from the file's authenticated metadata
     /// (`crypto::content_pin`, task 1943). `Err` when that metadata cannot be
     /// read: the file is still listed, but its content is refused, never guessed.
-    pub(super) pin: Result<beebeeb_core::chunk_stream::ExpectedChunkFormat, String>,
+    pub(super) pin: Result<crate::crypto::ReadPin, String>,
 }

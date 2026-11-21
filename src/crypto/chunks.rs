@@ -22,7 +22,7 @@ use super::*;
 pub fn decrypt_file_chunks(
     master_key: &beebeeb_core::kdf::MasterKey,
     file_id_str: &str,
-    pin: ExpectedChunkFormat,
+    pin: impl Into<ReadPin>,
     encrypted_bytes: &[u8],
     chunk_count: u32,
 ) -> Result<Vec<u8>, CryptoError> {
@@ -36,7 +36,7 @@ pub fn decrypt_file_chunks(
 pub fn decrypt_file_chunks_with_chunk_size(
     master_key: &beebeeb_core::kdf::MasterKey,
     file_id_str: &str,
-    pin: ExpectedChunkFormat,
+    pin: impl Into<ReadPin>,
     encrypted_bytes: &[u8],
     chunk_count: u32,
     chunk_size: Option<u64>,
@@ -66,12 +66,13 @@ pub fn decrypt_file_chunks_with_chunk_size(
 pub fn decrypt_file_chunks_owned(
     master_key: &beebeeb_core::kdf::MasterKey,
     file_id_str: &str,
-    pin: ExpectedChunkFormat,
+    pin: impl Into<ReadPin>,
     explicit_key: Option<&FileKey>,
     encrypted_bytes: &[u8],
     chunk_count: u32,
     chunk_size: Option<u64>,
 ) -> Result<(Vec<u8>, Option<beebeeb_core::kdf::OwnerKeyConvention>), CryptoError> {
+    let pin: ReadPin = pin.into();
     let file_uuid: uuid::Uuid = file_id_str
         .parse()
         .map_err(|e| CryptoError::InvalidId(format!("invalid file ID: {e}")))?;
@@ -85,7 +86,7 @@ pub fn decrypt_file_chunks_owned(
     // sealed under the key the row handed it (SF-0002 review).
     let keys: Vec<FileKey> = match explicit_key {
         Some(key) => vec![key_copy(key)],
-        None => match pin {
+        None => match pin.format {
             ExpectedChunkFormat::V2 => {
                 vec![beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes())]
             }
@@ -113,7 +114,7 @@ pub fn decrypt_file_chunks_owned(
     // this fallback; a row opened with an explicit key must never switch to an
     // owner key.
     if explicit_key.is_some() {
-        return Err(CryptoError::Decrypt(match pin {
+        return Err(CryptoError::Decrypt(match pin.format {
             ExpectedChunkFormat::V2 => format!(
                 "failed to decrypt file {file_id_str}: its metadata records chunk format v2 and the content does not open under the key this row supplied"
             ),
@@ -135,7 +136,7 @@ pub fn decrypt_file_chunks_owned(
         }
     }
 
-    Err(CryptoError::Decrypt(match pin {
+    Err(CryptoError::Decrypt(match pin.format {
         ExpectedChunkFormat::V2 => format!(
             "failed to decrypt file {file_id_str}: its metadata records chunk format v2 and the content does not open as v2"
         ),
@@ -185,7 +186,7 @@ pub(super) fn first_frame_candidates(encrypted: &[u8], chunk_count: u32, chunk_s
 pub fn try_decrypt_all_chunks(
     file_key: &FileKey,
     file_id_str: &str,
-    pin: ExpectedChunkFormat,
+    pin: impl Into<ReadPin>,
     encrypted_bytes: &[u8],
     chunk_count: u32,
 ) -> Result<Vec<u8>, CryptoError> {
@@ -197,18 +198,19 @@ pub fn try_decrypt_all_chunks(
 pub fn try_decrypt_all_chunks_with_chunk_size(
     file_key: &FileKey,
     file_id_str: &str,
-    pin: ExpectedChunkFormat,
+    pin: impl Into<ReadPin>,
     encrypted_bytes: &[u8],
     chunk_count: u32,
     chunk_size: Option<u64>,
 ) -> Result<Vec<u8>, CryptoError> {
+    let pin = pin.into();
     if encrypted_bytes.is_empty() && chunk_count == 0 {
         return Ok(Vec::new());
     }
     if encrypted_bytes.is_empty() {
         return Err(CryptoError::Malformed("no data but chunk_count > 0".to_string()));
     }
-    if pin == ExpectedChunkFormat::V2 {
+    if pin.is_v2() {
         // v2 frames are raw, always: no JSON parser to fall back to.
         return decrypt_raw_chunks(file_key, file_id_str, pin, encrypted_bytes, chunk_count, chunk_size);
     }
@@ -295,7 +297,7 @@ pub(super) fn decrypt_json_chunks(
 pub(super) fn decrypt_raw_chunks(
     file_key: &FileKey,
     file_id_str: &str,
-    pin: ExpectedChunkFormat,
+    pin: ReadPin,
     encrypted_bytes: &[u8],
     chunk_count: u32,
     chunk_size: Option<u64>,
@@ -325,7 +327,7 @@ pub(super) fn decrypt_raw_chunks(
         raw_frame_size(file_key, file_id_str, pin, encrypted_bytes, count, chunk_size)?
     };
 
-    let mut decryptor = ChunkDecryptor::for_push_with_file_key(key_copy(file_key), file_id_str, pin);
+    let mut decryptor = pin.decryptor_with_key(key_copy(file_key), file_id_str);
     let mut plaintext = Vec::with_capacity(total);
     let mut offset = 0;
 

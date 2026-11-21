@@ -183,10 +183,12 @@ async fn replace_keeps_key_and_history_id() {
             .find(|(m, p, _)| m == "PUT" && p.contains("/chunks/"))
             .unwrap()
             .2;
-        let mut dec = beebeeb_core::chunk_stream::ChunkDecryptor::for_push_with_file_key(
+        let version = beebeeb_core::chunk_stream::VersionCommitment::new(wire[..12].try_into().unwrap(), 2).unwrap();
+        let mut dec = beebeeb_core::chunk_stream::ChunkDecryptor::for_version_with_file_key(
             item_key(),
             FILE,
             beebeeb_core::chunk_stream::ExpectedChunkFormat::V2,
+            Some(version),
         );
         assert_eq!(dec.push_frame(wire).unwrap().data, b"replacement");
         dec.finish().unwrap();

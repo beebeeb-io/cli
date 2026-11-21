@@ -487,7 +487,10 @@ async fn ctrl_c_stops_every_file() {
     let out = bb(&home, &["--api", &api, "push", "--parallel", "2", "clip"]).await;
     assert_eq!(out.status.code(), Some(0), "the re-run finishes: {}", stderr(&out));
     let v = vault.lock().unwrap();
-    assert_eq!(v.inits, 4, "a and b continued (no init), c and d inited");
+    assert_eq!(
+        v.inits, 6,
+        "a and b restarted (a v2 session is never continued), c and d inited"
+    );
     each_completed_once(&v, &names);
 }
 

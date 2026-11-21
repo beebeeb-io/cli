@@ -65,6 +65,8 @@ pub struct Mock {
     pub chunk_puts: Vec<(String, u32)>,
     /// session of every successful complete.
     pub completed: Vec<String>,
+    /// The JSON body of every `complete` that carried one (the sealed name with the version commitment).
+    pub complete_bodies: Vec<serde_json::Value>,
     /// session -> file_id, for complete's response.
     pub session_file: HashMap<String, String>,
     /// The encrypted name (`file_name`) sent on every init, in order (task
@@ -91,6 +93,8 @@ pub struct Mock {
     pub trashed: Vec<String>,
     /// `GET /files/{id}` answers: id -> metadata. Absent = 404.
     pub files: HashMap<String, serde_json::Value>,
+    /// `GET /files` (the listing) answers this document. Unset = 404 (a WebDAV path resolves as new).
+    pub listing: Option<serde_json::Value>,
     /// Task 2334: `GET /files/{id}` answers this status for every id instead
     /// (a server that cannot say where an upload was going).
     pub file_status: Option<u16>,
@@ -367,11 +371,31 @@ fn router(state: Shared) -> Router {
         )
         .route(
             "/api/v1/uploads/:session/complete",
-            post(|State(st): State<Shared>, Path(sid): Path<String>| async move {
-                let mut m = st.lock().unwrap();
-                // Spec §5.2: a session already completed answers idempotently (`already_completed`), even though
-                // its chunk writes 400. This is BEFORE the gone check so a completed session is not read as swept.
-                if m.completed_sessions.contains(&sid) {
+            post(
+                |State(st): State<Shared>, Path(sid): Path<String>, body: Option<Json<serde_json::Value>>| async move {
+                    let mut m = st.lock().unwrap();
+                    if let Some(Json(body)) = body {
+                        m.complete_bodies.push(body);
+                    }
+                    // Spec §5.2: a session already completed answers idempotently (`already_completed`), even though
+                    // its chunk writes 400. This is BEFORE the gone check so a completed session is not read as swept.
+                    if m.completed_sessions.contains(&sid) {
+                        m.completed.push(sid.clone());
+                        m.events.push(format!("complete:{sid}"));
+                        let fid = m
+                            .complete_echo
+                            .clone()
+                            .or_else(|| m.session_file.get(&sid).cloned())
+                            .unwrap_or_default();
+                        return Json(merged(
+                            json!({ "id": fid, "status": "completed", "already_completed": true }),
+                            &m.complete_extra,
+                        ))
+                        .into_response();
+                    }
+                    if !m.live.contains(&sid) || m.complete_gone.contains(&sid) {
+                        return gone_response(m.gone);
+                    }
                     m.completed.push(sid.clone());
                     m.events.push(format!("complete:{sid}"));
                     let fid = m
@@ -379,28 +403,13 @@ fn router(state: Shared) -> Router {
                         .clone()
                         .or_else(|| m.session_file.get(&sid).cloned())
                         .unwrap_or_default();
-                    return Json(merged(
-                        json!({ "id": fid, "status": "completed", "already_completed": true }),
+                    Json(merged(
+                        json!({ "id": fid, "size_bytes": 0, "chunk_count": 0 }),
                         &m.complete_extra,
                     ))
-                    .into_response();
-                }
-                if !m.live.contains(&sid) || m.complete_gone.contains(&sid) {
-                    return gone_response(m.gone);
-                }
-                m.completed.push(sid.clone());
-                m.events.push(format!("complete:{sid}"));
-                let fid = m
-                    .complete_echo
-                    .clone()
-                    .or_else(|| m.session_file.get(&sid).cloned())
-                    .unwrap_or_default();
-                Json(merged(
-                    json!({ "id": fid, "size_bytes": 0, "chunk_count": 0 }),
-                    &m.complete_extra,
-                ))
-                .into_response()
-            }),
+                    .into_response()
+                },
+            ),
         )
         .route(
             "/api/v1/files/folder",
@@ -421,7 +430,15 @@ fn router(state: Shared) -> Router {
             ),
         )
         // The listing: nothing is listed (a WebDAV path resolves as new).
-        .route("/api/v1/files", get(|| async { not_found() }))
+        .route(
+            "/api/v1/files",
+            get(|State(st): State<Shared>| async move {
+                match st.lock().unwrap().listing.clone() {
+                    Some(doc) => Json(doc).into_response(),
+                    None => not_found(),
+                }
+            }),
+        )
         .route(
             "/api/v1/file-requests",
             get(|State(st): State<Shared>| async move {

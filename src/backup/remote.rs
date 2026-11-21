@@ -464,7 +464,7 @@ pub(crate) async fn upload(
                 .await?;
             let pin = match &resolved.write_target {
                 Some(target) => target.pin(),
-                None => crate::crypto::content_pin_with_key(&resolved.key, &id.to_string(), name_encrypted)?,
+                None => crate::crypto::content_pin_with_key(&resolved.key, &id.to_string(), name_encrypted)?.format,
             };
             (id, None, Some(version), Some(pin), Some(resolved.key))
         }

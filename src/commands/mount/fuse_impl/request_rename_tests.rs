@@ -44,7 +44,7 @@ fn entry(file_id: &str, name: &str, read_only: bool) -> InodeEntry {
         chunk_count: 1,
         modified: SystemTime::UNIX_EPOCH,
         parent_ino: ROOT_INO,
-        pin: Ok(ExpectedChunkFormat::Unrecorded),
+        pin: Ok(crate::crypto::ReadPin::UNRECORDED),
         read_only,
         request_class: true,
     }

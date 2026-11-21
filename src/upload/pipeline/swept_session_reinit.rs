@@ -605,7 +605,7 @@ fn fresh_id_can_fix_classifier() {
 
 // ── Task 1943: the writer pin and the 1908 resume rule ─────────────────
 
-use beebeeb_core::chunk_stream::{ChunkDecryptor, ChunkFormat, ExpectedChunkFormat};
+use beebeeb_core::chunk_stream::{ChunkFormat, ExpectedChunkFormat};
 
 /// The master key [`run`] uploads with.
 fn run_mk() -> MasterKey {
@@ -616,7 +616,14 @@ fn run_mk() -> MasterKey {
 /// pin-aware reader under `pin`; `None` if it does not open at all.
 fn frame0_format(m: &Mock, session: &str, file_id: Uuid, pin: ExpectedChunkFormat) -> Option<ChunkFormat> {
     let frame = m.chunk_bodies.get(&(session.to_string(), 0))?;
-    let mut dec = ChunkDecryptor::for_push(&run_mk(), &file_id.to_string(), pin);
+    // A v2 frame 0's nonce is the version id the metadata would commit to.
+    let version = match pin {
+        ExpectedChunkFormat::V2 => {
+            beebeeb_core::chunk_stream::VersionCommitment::new(frame.get(..12)?.try_into().ok()?, 1).ok()
+        }
+        ExpectedChunkFormat::Unrecorded => None,
+    };
+    let mut dec = crate::crypto::ReadPin { format: pin, version }.decryptor(&run_mk(), &file_id.to_string());
     dec.push_frame(frame).ok()?;
     dec.format()
 }
@@ -663,7 +670,7 @@ async fn new_file_upload_records_no_pin_and_writes_v1() {
 
     let m = state.lock().unwrap();
     assert_eq!(
-        crate::crypto::content_pin(&run_mk(), &fid.to_string(), &m.init_names[0]),
+        crate::crypto::content_pin(&run_mk(), &fid.to_string(), &m.init_names[0]).map(|p| p.format),
         Ok(ExpectedChunkFormat::Unrecorded)
     );
     let sid = &m.chunk_puts[0].0;
@@ -689,7 +696,7 @@ async fn replace_of_a_v2_pinned_file_writes_v2_and_keeps_the_pin() {
 
     let m = state.lock().unwrap();
     assert_eq!(
-        crate::crypto::content_pin(&run_mk(), &fid.to_string(), &m.init_names[0]),
+        crate::crypto::content_pin(&run_mk(), &fid.to_string(), &m.init_names[0]).map(|p| p.format),
         Ok(ExpectedChunkFormat::V2)
     );
     let sid = &m.chunk_puts[0].0;
@@ -1152,4 +1159,41 @@ fn write_raw_record(
     }
     let db = serde_json::json!({"uploads": {crate::resume::key(path): entry}});
     std::fs::write(s.dir.join("pending.json"), db.to_string()).unwrap();
+}
+
+/// Core's default writer (v2): a new file's `complete` publishes the name sealed with the version commitment, which
+/// is frame 0's own id and counter 1, and core's current reader opens the content under it.
+#[tokio::test]
+async fn a_v2_push_publishes_its_version_commitment_with_complete() {
+    let _core_default = super::test_writer::CoreDefault::on();
+    let s = Scratch::new("version-commitment");
+    let (path, _, _) = s.file(64 * 1024);
+    let fid = Uuid::new_v4();
+    let state: Shared = Arc::new(Mutex::new(Mock::default()));
+
+    run(&state, spec(&path, fid)).await.expect("upload succeeds");
+
+    let m = state.lock().unwrap();
+    assert_eq!(m.complete_bodies.len(), 1, "complete carries the sealed name");
+    let sealed = m.complete_bodies[0]["name_encrypted"].as_str().expect("a sealed name");
+    assert_eq!(
+        m.complete_bodies[0]["version_metadata_encrypted"].as_str(),
+        Some(sealed),
+        "the same envelope as the version's metadata"
+    );
+    let pin = crate::crypto::content_pin(&run_mk(), &fid.to_string(), sealed).expect("the sealed name opens");
+    assert_eq!(pin.format, ExpectedChunkFormat::V2);
+    let commitment = pin.version.expect("a commitment");
+    assert_eq!(commitment.counter, 1, "a new file's first version");
+    let frame = &m.chunk_bodies[&(m.chunk_puts[0].0.clone(), 0)];
+    assert_eq!(
+        &commitment.version_id[..],
+        &frame[..12],
+        "frame 0's nonce is the version id"
+    );
+    let mut reader = pin.decryptor(&run_mk(), &fid.to_string());
+    assert!(
+        reader.push_frame(frame).is_ok(),
+        "core's current reader opens the version"
+    );
 }

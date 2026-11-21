@@ -302,14 +302,20 @@ impl ApiClient {
         if let Some(pid) = new_parent_id {
             body["parent_id"] = serde_json::json!(pid);
         }
-        let resp = self
+        let mut request = self
             .client
             .patch(self.url(&format!("/api/v1/files/{file_id}")))
             .bearer_auth(token)
-            .json(&body)
-            .send()
-            .await
-            .map_err(format_request_error)?;
+            .json(&body);
+        // A new name for a version-protected file is accepted only from a client that carries the sealed version
+        // fields through (core's `encrypt_name_for_target` does: the commitment rides in the new name).
+        if new_name_encrypted.is_some() {
+            request = request.header(
+                beebeeb_core::direct_transfer::CAPABILITIES_HEADER,
+                super::CAP_VERSION_METADATA_V1,
+            );
+        }
+        let resp = request.send().await.map_err(format_request_error)?;
         parse_response(resp).await
     }
 

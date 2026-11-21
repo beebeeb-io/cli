@@ -15,7 +15,6 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use beebeeb_core::chunk_stream::ExpectedChunkFormat;
 use beebeeb_core::encrypt::encrypt_chunk_raw;
 use beebeeb_core::kdf::{MasterKey, derive_file_key};
 use serde_json::{Value, json};
@@ -209,7 +208,7 @@ async fn pull(
         &api,
         &master_key(),
         FILE_ID,
-        ExpectedChunkFormat::Unrecorded,
+        crate::crypto::ReadPin::UNRECORDED,
         CHUNKS as u32,
         &out,
         sink,

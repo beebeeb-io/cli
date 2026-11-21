@@ -138,7 +138,10 @@ pub(super) async fn run_zip(
                 api,
                 key.clone(),
                 &item.entry.file_id,
-                item.entry.chunk_format,
+                crate::crypto::ReadPin {
+                    format: item.entry.chunk_format,
+                    version: item.entry.version,
+                },
                 item.entry.chunk_count,
                 &staged.path,
                 &progress,
@@ -600,14 +603,15 @@ impl ZipWalk<'_> {
             } else {
                 // Read pin from the file's authenticated metadata (task 1943).
                 let pin_key = resolved.name_key.as_deref().unwrap_or(&resolved.key);
-                let chunk_format = match crate::crypto::content_pin_with_key(pin_key, item_id, name_enc) {
-                    Ok(pin) => pin,
-                    Err(e) => {
-                        warn_skipped(&format!("{path:?}: {e}"));
-                        self.skipped += 1;
-                        continue;
-                    }
-                };
+                let (chunk_format, version) =
+                    match beebeeb_core::encrypt::decrypt_file_metadata_with_key(pin_key, name_enc) {
+                        Ok(meta) => (meta.chunk_format, meta.version),
+                        Err(e) => {
+                            warn_skipped(&format!("{path:?}: {e}"));
+                            self.skipped += 1;
+                            continue;
+                        }
+                    };
                 self.items.push(ZipItem {
                     entry: beebeeb_core::zip::ZipEntry {
                         path,
@@ -615,6 +619,7 @@ impl ZipWalk<'_> {
                         chunk_count,
                         size_bytes,
                         chunk_format,
+                        version,
                     },
                     content_key,
                     explicit_key,
@@ -664,6 +669,7 @@ mod tests {
                 chunk_count: 1,
                 size_bytes: 1000,
                 chunk_format: ExpectedChunkFormat::V2,
+                version: None,
             },
             content_key,
             explicit_key: None,

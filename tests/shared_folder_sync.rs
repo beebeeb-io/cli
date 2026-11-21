@@ -159,24 +159,28 @@ async fn rename_move_overwrite_converge() {
     bytes(&h, &d, "guest.txt");
     {
         let mut f = h.state.lock().unwrap();
+        // A folder made inside a shared folder is a member of it: its id is the foreign class and the root's
+        // inventory holds its wrap (core 0.3 walks only members it can prove; the old fixture's owner-class
+        // folder with no wrap was skipped as `no_wrap`, so the file under it was never listed).
         f.rows.push(row(
-            SUB,
+            F_SUB,
             Some(ROOT),
             "Nested",
             RowFacts {
                 folder: true,
-                ..Default::default()
+                foreign: true,
             },
         ));
-        f.rows[1]["parent_id"] = json!(SUB);
+        f.inventory
+            .push(json!({"file_id": F_SUB, "encrypted_file_key": wrap(F_SUB, true)}));
+        f.rows[1]["parent_id"] = json!(F_SUB);
+        let current = beebeeb_core::encrypt::decrypt_file_metadata_with_key(
+            &item_key(),
+            f.rows[1]["name_encrypted"].as_str().unwrap(),
+        )
+        .unwrap();
         f.rows[1]["name_encrypted"] = json!(
-            beebeeb_core::encrypt::encrypt_name_for(
-                &item_key(),
-                "renamed.txt",
-                None,
-                beebeeb_core::chunk_stream::ExpectedChunkFormat::V2
-            )
-            .unwrap()
+            beebeeb_core::encrypt::encrypt_name_carrying_version(&item_key(), "renamed.txt", None, &current).unwrap()
         );
     }
     ok(sync(&h, &d).await);
@@ -201,7 +205,19 @@ async fn rename_move_overwrite_converge() {
         while let Some(c) = enc.next_chunk().unwrap() {
             next.frames.push(c.data);
         }
+        let commitment = enc.version_commitment_after(Some(1)).unwrap();
         enc.finish().unwrap();
+        f.rows[1]["name_encrypted"] = json!(
+            beebeeb_core::encrypt::encrypt_name_for_version(
+                &item_key(),
+                // The new version keeps the name the file was renamed to.
+                "renamed.txt",
+                None,
+                beebeeb_core::chunk_stream::ExpectedChunkFormat::V2,
+                commitment
+            )
+            .unwrap()
+        );
         f.frames = next.frames;
         f.plaintext = next.plaintext;
         f.rows[1]["version_number"] = json!(2);
@@ -218,10 +234,19 @@ async fn rename_move_overwrite_converge() {
         let f = h.state.lock().unwrap();
         assert_eq!(f.upload_request["file_id"], FILE);
         assert_eq!(f.upload_request["base_version_number"], 2);
-        let mut dec = beebeeb_core::chunk_stream::ChunkDecryptor::for_push_with_file_key(
+        // Core 0.3 opens v2 content only against the commitment in its metadata: the replacement's sealed name
+        // (sent at init) carries the successor of version 2.
+        let meta = beebeeb_core::encrypt::decrypt_file_metadata_with_key(
+            &item_key(),
+            f.upload_request["version_metadata_encrypted"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(meta.version.expect("committed").counter, 3);
+        let mut dec = beebeeb_core::chunk_stream::ChunkDecryptor::for_version_with_file_key(
             item_key(),
             FILE,
-            beebeeb_core::chunk_stream::ExpectedChunkFormat::V2,
+            meta.chunk_format,
+            meta.version,
         );
         let mut plain = Vec::new();
         for c in &f.uploaded_chunks {

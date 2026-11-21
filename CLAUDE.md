@@ -61,6 +61,7 @@ src/test_server.rs        shared loopback mock for tests; tests/ = integration b
 - Exception (Guus, 2026-11-08): cli 0.17.2 pins core v0.2.4 (`1d1a335`: v0.2.3 plus zip 9, RUSTSEC-2026-0429 / -0367 / -0368 / -0369, task LD-0144) before repos/server/CORE_REV moves (it stays v0.2.1); v0.2.4 is additive. The server bump is task LD-0142, retargeted to v0.2.4.
 - Exception (Guus, 2026-11-08, task 2404 "Fix right away"): the cli pins core v0.2.7 (`124389a`: Windows 8.3 short names, task 2408) before repos/server/CORE_REV moves (it stays v0.2.1); v0.2.7 is additive.
 - Exception (Guus, 2026-11-08, task 2430): the cli pins core v0.2.8 (`f76ccfc`: Windows-unsafe name rewriting in `sanitize_component`, task 2430) before repos/server/CORE_REV moves; v0.2.8's 17 API changes are all in passkey/auth/share flows the CLI does not call.
+- Exception (Guus, 2026-11-21): cli 0.17.5 pins core v0.3.0 (`a78e525`: version commitments, v2 as the write format) before repos/server/CORE_REV moves (it stays `7d5b5f9`); the cli declares `version-metadata-v1`, and a replace or repair of a v2 file needs a server that takes the metadata at init.
 - **Windows 8.3 short names (task 2408):** a write, rename or delete by a name built outside core's `safe_child` / `safe_rel_join` / `default_output_path` calls `safe_path::short_name_alias` first (a conflict on `Some`, never the other entry) or writes through `safe_path::TempSibling` (`download::AtomicFile`, the `--zip` archive). Windows-only tests use `src/short_name_test_support.rs`; CI is Linux.
 
 ## Never break

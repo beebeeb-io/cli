@@ -37,7 +37,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use beebeeb_core::chunk_stream::{ChunkDecryptor, ExpectedChunkFormat, MAX_CHUNK_SIZE};
+use beebeeb_core::chunk_stream::{ChunkDecryptor, MAX_CHUNK_SIZE};
 use beebeeb_core::kdf::MasterKey;
 
 use crate::api::ApiClient;
@@ -125,7 +125,7 @@ mod tests {
             chunk_count,
             m,
             FID,
-            ExpectedChunkFormat::Unrecorded,
+            crate::crypto::ReadPin::UNRECORDED,
             ceiling,
         )
         .await;
@@ -139,7 +139,7 @@ mod tests {
         chunk_count: u32,
         m: &MasterKey,
         file_id: &str,
-        pin: ExpectedChunkFormat,
+        pin: crate::crypto::ReadPin,
         ceiling: u64,
     ) -> (Result<Vec<u8>, String>, usize) {
         let (got, confirmed) = download_inner_typed(body, chunk_size, chunk_count, m, file_id, pin, ceiling).await;
@@ -154,7 +154,7 @@ mod tests {
         chunk_count: u32,
         m: &MasterKey,
         file_id: &str,
-        pin: ExpectedChunkFormat,
+        pin: crate::crypto::ReadPin,
         ceiling: u64,
     ) -> (Result<Vec<u8>, DownloadError>, usize) {
         let app = Router::new()
@@ -218,22 +218,29 @@ mod tests {
         )
     }
 
+    /// The read pin of the fixture's v2 file: its format and version commitment, from its authenticated name.
+    fn v2_pin() -> crate::crypto::ReadPin {
+        let doc: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/core_1908_vectors.json")).unwrap();
+        let v = &doc["v2_file"];
+        let mut mk = [0u8; 32];
+        mk.copy_from_slice(&unhex(v["master_key_hex"].as_str().unwrap()));
+        crate::crypto::content_pin(
+            &MasterKey::from_bytes(mk),
+            v["file_id"].as_str().unwrap(),
+            v["name_encrypted"].as_str().unwrap(),
+        )
+        .unwrap()
+    }
+
     /// The core-written v2 fixture streams through `bb pull`'s real path under
     /// its V2 pin, one confirmation per frame; cut before its last frame it is
     /// rejected and nothing is left at the output path.
     #[tokio::test]
     async fn v2_fixture_streams_under_its_pin_and_truncation_is_rejected() {
         let (m, fid, wire, count, cs, plaintext) = v2_file();
-        let (got, confirmed) = download_inner(
-            wire.clone(),
-            Some(cs),
-            count,
-            &m,
-            &fid,
-            ExpectedChunkFormat::V2,
-            FALLBACK_HARD_CEILING,
-        )
-        .await;
+        let (got, confirmed) =
+            download_inner(wire.clone(), Some(cs), count, &m, &fid, v2_pin(), FALLBACK_HARD_CEILING).await;
         assert_eq!(got.unwrap(), plaintext);
         assert_eq!(confirmed, count as usize, "streamed frame by frame");
 
@@ -244,7 +251,7 @@ mod tests {
             count - 1,
             &m,
             &fid,
-            ExpectedChunkFormat::V2,
+            v2_pin(),
             FALLBACK_HARD_CEILING,
         )
         .await;
@@ -260,16 +267,7 @@ mod tests {
     async fn v2_pin_refuses_v1_frames_on_the_streaming_path() {
         let (m, fid, _, _, _, plaintext) = v2_file();
         let v1 = encrypt_chunk_raw(&derive_file_key(&m, fid.as_bytes()), &plaintext).unwrap();
-        let (got, _) = download_inner(
-            v1.clone(),
-            None,
-            1,
-            &m,
-            &fid,
-            ExpectedChunkFormat::V2,
-            FALLBACK_HARD_CEILING,
-        )
-        .await;
+        let (got, _) = download_inner(v1.clone(), None, 1, &m, &fid, v2_pin(), FALLBACK_HARD_CEILING).await;
         assert!(got.is_err(), "v1 frame opened under a v2 pin");
         let (got, _) = download_inner(
             v1,
@@ -277,7 +275,7 @@ mod tests {
             1,
             &m,
             &fid,
-            ExpectedChunkFormat::Unrecorded,
+            crate::crypto::ReadPin::UNRECORDED,
             FALLBACK_HARD_CEILING,
         )
         .await;
@@ -423,7 +421,7 @@ mod tests {
             &api,
             m,
             FID,
-            ExpectedChunkFormat::Unrecorded,
+            crate::crypto::ReadPin::UNRECORDED,
             chunk_count,
             &out,
             &Counting(confirmed),
@@ -465,16 +463,7 @@ mod tests {
         // Frame 1 flipped: frame 0 authenticates, so this is not a legacy file; it is damaged.
         let mut tampered = wire.clone();
         tampered[frame + 20] ^= 1;
-        let (got, _) = download_inner_typed(
-            tampered,
-            Some(cs),
-            count,
-            &m,
-            &fid,
-            ExpectedChunkFormat::V2,
-            FALLBACK_HARD_CEILING,
-        )
-        .await;
+        let (got, _) = download_inner_typed(tampered, Some(cs), count, &m, &fid, v2_pin(), FALLBACK_HARD_CEILING).await;
         assert!(
             matches!(got, Err(DownloadError::Unreadable(ref m)) if m.contains("decrypt chunk 1")),
             "{got:?}"
@@ -486,7 +475,7 @@ mod tests {
             count - 1,
             &m,
             &fid,
-            ExpectedChunkFormat::V2,
+            v2_pin(),
             FALLBACK_HARD_CEILING,
         )
         .await;
@@ -827,7 +816,7 @@ mod tests {
                 &api,
                 not_this_rows_key,
                 FID,
-                ExpectedChunkFormat::Unrecorded,
+                crate::crypto::ReadPin::UNRECORDED,
                 4,
                 &out,
                 &Counting(Arc::new(AtomicUsize::new(0))),

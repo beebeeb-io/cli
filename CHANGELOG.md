@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.5] - 2026-11-21
+
+### Changed
+- Every new file `bb` writes is now a v2 file (core 0.3's current format), and `bb repair` writes v2 too. Each version is sealed with its version commitment (frame 0's id and a counter that rises by one per replace), published at `init` and with `complete`, as the desktop and web apps do. This covers `bb push`, `bb push --replace`, `bb sync` uploads, `bb backup` (also when it moves a file), `bb webdav` PUT, `bb mv` and `bb repair`. Without the commitment, current readers refuse a v2 version the CLI wrote.
+- Uses Beebeeb core v0.3.0 (`a78e525`), was v0.2.8. `bb pull --zip` passes each entry's commitment to core.
+
+### Removed
+- Resuming an interrupted upload is gone. Core 0.3 never continues a v2 upload session (its version id is bound to the frames already stored), so a push that was killed starts that file again from the beginning.
+
 ## [0.17.4] - 2026-11-08
 
 ### Fixed

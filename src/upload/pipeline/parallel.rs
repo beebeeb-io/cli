@@ -171,6 +171,7 @@ pub(super) async fn run_pipeline(
     upload_session_id: &str,
     direct: Option<&beebeeb_core::direct_transfer::Discovery>,
     encryptor: ChunkEncryptor,
+    first_chunk: Option<EncryptedChunk>,
     chunk_count: u32,
     expected_total: u64,
     shutdown: &Arc<AtomicBool>,
@@ -197,6 +198,8 @@ pub(super) async fn run_pipeline(
     // wait also selects on `tx.closed()`, so a failed consumer never makes it seal one more chunk.
     let producer = tokio::task::spawn_blocking(move || -> Result<(), ProducerErr> {
         let mut enc = encryptor;
+        // Frame 0 of a v2 file is sealed before the init (its nonce is the version id the init publishes).
+        let mut first_chunk = first_chunk;
         let admission = admission;
         // The plan every sealed chunk is held to: all frames are one chunk plus the AEAD overhead, the last holds
         // the rest of the declared size.
@@ -216,7 +219,11 @@ pub(super) async fn run_pipeline(
                 Some(share) => share,
                 None => return Err(ProducerErr::ChannelClosed),
             };
-            match enc.next_chunk() {
+            let sealed = match first_chunk.take() {
+                Some(chunk) => Ok(Some(chunk)),
+                None => enc.next_chunk(),
+            };
+            match sealed {
                 Ok(Some(chunk)) => {
                     // A chunk of another length than the plan's is a source that grew or shrank while it was read
                     // (the last chunk reads to the end of the file). It is not sent: the server would refuse the

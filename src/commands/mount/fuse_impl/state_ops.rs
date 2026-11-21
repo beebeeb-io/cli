@@ -177,7 +177,7 @@ impl BeebeebFsState {
                 parent_ino: parent,
                 // This mount uploads it as a NEW file, which never records a
                 // pin (task 1943: the new-file writer pin is Unrecorded).
-                pin: Ok(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded),
+                pin: Ok(crate::crypto::ReadPin::UNRECORDED),
                 read_only: false,
                 request_class: false,
             },
@@ -1009,7 +1009,7 @@ impl BeebeebFsState {
                 beebeeb_core::media::guess_mime_type(newname)
             };
             let sealed = if let Some(target) = resolved.write_target.clone() {
-                beebeeb_core::encrypt::encrypt_name_for(target.key(), newname, mime, target.pin())
+                beebeeb_core::encrypt::encrypt_name_for_target(&target, newname, mime)
             } else if let Some(target) = resolved.rename_target.clone() {
                 beebeeb_core::rename::encrypt_name_for_rename_target(&target, newname, mime)
             } else {

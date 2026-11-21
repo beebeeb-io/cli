@@ -555,8 +555,18 @@ async fn a9b_sync_request_row_edit_becomes_new_item() {
     );
     // The edit was sealed under the new owner id, never under C.
     let new_key = beebeeb_core::kdf::derive_file_key(&master(), uploaded.as_bytes());
+    // Core writes v2: the frame opens as the upload whose id is its own nonce.
     assert_eq!(
-        beebeeb_core::encrypt::decrypt_chunk_raw(&new_key, &chunks[0]).unwrap(),
+        beebeeb_core::chunk_stream::open_chunk(
+            &new_key,
+            &uploaded,
+            &chunks[0][..12],
+            0,
+            true,
+            beebeeb_core::chunk_stream::ChunkFormat::V2,
+            &chunks[0]
+        )
+        .unwrap(),
         b"edited body"
     );
     assert_eq!(owner_key_posts(&h, SUB), 0);

@@ -242,26 +242,31 @@ async fn start_mock(vault: Shared) -> String {
         )
         .route(
             "/api/v1/uploads/:sid/complete",
-            post(|State(v): State<Shared>, UrlPath(sid): UrlPath<String>| async move {
-                let mut v = v.lock().unwrap();
-                let Some(s) = v.sessions.remove(&sid) else {
-                    return err(StatusCode::NOT_FOUND, "not_found");
-                };
-                if s.frames.len() as u32 != s.chunk_count {
-                    return err(StatusCode::BAD_REQUEST, "missing chunks");
-                }
-                let version = s.base.map_or(1, |b| b + 1);
-                let id = s.id.clone();
-                v.file = Some(Current {
-                    id: s.id,
-                    version,
-                    name_encrypted: s.name_encrypted,
-                    size: s.size,
-                    chunk_size: s.chunk_size,
-                    frames: s.frames.into_values().collect(),
-                });
-                Json(json!({ "id": id, "version_number": version })).into_response()
-            }),
+            post(
+                |State(v): State<Shared>, UrlPath(sid): UrlPath<String>, body: Option<Json<Value>>| async move {
+                    // The sealed name (with the version commitment) the client publishes with `complete`.
+                    let sealed =
+                        body.and_then(|Json(b)| b.get("name_encrypted").and_then(Value::as_str).map(str::to_string));
+                    let mut v = v.lock().unwrap();
+                    let Some(s) = v.sessions.remove(&sid) else {
+                        return err(StatusCode::NOT_FOUND, "not_found");
+                    };
+                    if s.frames.len() as u32 != s.chunk_count {
+                        return err(StatusCode::BAD_REQUEST, "missing chunks");
+                    }
+                    let version = s.base.map_or(1, |b| b + 1);
+                    let id = s.id.clone();
+                    v.file = Some(Current {
+                        id: s.id,
+                        version,
+                        name_encrypted: sealed.unwrap_or(s.name_encrypted),
+                        size: s.size,
+                        chunk_size: s.chunk_size,
+                        frames: s.frames.into_values().collect(),
+                    });
+                    Json(json!({ "id": id, "version_number": version })).into_response()
+                },
+            ),
         )
         .fallback(|| async { err(StatusCode::NOT_FOUND, "not_found") })
         // A 4 MiB chunk frame exceeds axum's 2 MB default body limit.

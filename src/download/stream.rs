@@ -114,7 +114,7 @@ pub async fn stream_download_decrypt(
     api: &ApiClient,
     master_key: &MasterKey,
     file_id: &str,
-    pin: ExpectedChunkFormat,
+    pin: crate::crypto::ReadPin,
     chunk_count: u32,
     out_path: &Path,
     progress: &dyn ChunkProgress,
@@ -141,7 +141,7 @@ pub async fn stream_download_decrypt_with_file_key(
     api: &ApiClient,
     file_key: std::sync::Arc<beebeeb_core::kdf::FileKey>,
     file_id: &str,
-    pin: ExpectedChunkFormat,
+    pin: crate::crypto::ReadPin,
     chunk_count: u32,
     out_path: &Path,
     progress: &dyn ChunkProgress,
@@ -169,11 +169,11 @@ pub(super) enum DownloadKey<'a> {
 }
 
 impl DownloadKey<'_> {
-    pub(super) fn decryptor(&self, id: &str, pin: ExpectedChunkFormat) -> ChunkDecryptor {
+    pub(super) fn decryptor(&self, id: &str, pin: crate::crypto::ReadPin) -> ChunkDecryptor {
         match self {
-            Self::Legacy(master) => ChunkDecryptor::for_push(master, id, pin),
+            Self::Legacy(master) => pin.decryptor(master, id),
             // The decryptor owns its copy; `key_copy` wipes the by-value bytes it passes through.
-            Self::Explicit(key) => ChunkDecryptor::for_push_with_file_key(crate::crypto::key_copy(key), id, pin),
+            Self::Explicit(key) => pin.decryptor_with_key(crate::crypto::key_copy(key), id),
         }
     }
     /// The owner path's master key, for the buffered fallback. An explicit key
@@ -197,7 +197,7 @@ pub(super) async fn stream_download_decrypt_with(
     api: &ApiClient,
     master_key: &MasterKey,
     file_id: &str,
-    pin: ExpectedChunkFormat,
+    pin: crate::crypto::ReadPin,
     chunk_count: u32,
     out_path: &Path,
     progress: &dyn ChunkProgress,
@@ -225,7 +225,7 @@ pub(super) async fn stream_download_key(
     api: &ApiClient,
     key: DownloadKey<'_>,
     file_id: &str,
-    pin: ExpectedChunkFormat,
+    pin: crate::crypto::ReadPin,
     chunk_count: u32,
     out_path: &Path,
     progress: &dyn ChunkProgress,
@@ -346,7 +346,7 @@ pub(super) async fn stream_raw(
     resp: &mut reqwest::Response,
     key: &DownloadKey<'_>,
     file_id: &str,
-    pin: ExpectedChunkFormat,
+    pin: crate::crypto::ReadPin,
     count: u32,
     total: u64,
     chunk_size: Option<u64>,
@@ -469,7 +469,7 @@ pub(super) async fn stream_raw(
 pub(super) fn buffered_fallback(
     master_key: &MasterKey,
     file_id: &str,
-    pin: ExpectedChunkFormat,
+    pin: crate::crypto::ReadPin,
     encrypted: &[u8],
     count: u32,
     chunk_size: Option<u64>,
