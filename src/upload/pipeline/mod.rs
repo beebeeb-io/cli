@@ -15,6 +15,7 @@ use crate::upload::limits::used_in_flight;
 
 mod parallel;
 mod source_guard;
+mod test_writer;
 use parallel::run_pipeline;
 use source_guard::{changed_before_init, end_session, source_changed};
 
@@ -94,7 +95,7 @@ pub async fn stream_encrypt_upload(
     //     are both v1. Otherwise (a v2 writer, or a record that does not say its
     //     format) the session is abandoned — never PUT to again — and the SAME
     //     file id is inited fresh and uploaded from chunk 0.
-    let writing = beebeeb_core::chunk_stream::chunk_format_for_pin(writer_pin(&spec));
+    let writing = test_writer::format_for(writer_pin(&spec));
     // L13 (SF-0001): a create continues only a record of an id this client
     // minted, a replace only this CLI's replace record of the row it lists
     // (`resume::resumable_by`). A record for another destination never
@@ -593,6 +594,7 @@ pub(super) async fn upload_attempt(
         None => ChunkEncryptor::from_reader_with_chunk_size(master_key, &file_id_str, size, chunk_size, file),
     }
     .and_then(|e| e.with_recorded_pin(pin))
+    .and_then(|e| test_writer::apply(e, pin))
     .map_err(|e| format!("init encryptor for {}: {e}", spec.file_name))?;
     let chunk_count = encryptor.chunk_plan().chunk_count as u32;
     let expected_total = encryptor.expected_total_ciphertext();

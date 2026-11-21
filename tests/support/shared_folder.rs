@@ -162,6 +162,7 @@ impl Fixture {
         while let Some(c) = enc.next_chunk().unwrap() {
             f.frames.push(c.data);
         }
+        let commitment = v2.then(|| enc.version_commitment_after(None).unwrap());
         enc.finish().unwrap();
         if !v2 {
             f.frames = f
@@ -170,8 +171,12 @@ impl Fixture {
                 .map(|c| beebeeb_core::encrypt::encrypt_chunk_raw(&item_key(), c).unwrap())
                 .collect();
         }
-        f.rows[1]["name_encrypted"] =
-            json!(beebeeb_core::encrypt::encrypt_name_for(&item_key(), "guest.txt", None, pin).unwrap());
+        f.rows[1]["name_encrypted"] = json!(match commitment {
+            Some(commitment) =>
+                beebeeb_core::encrypt::encrypt_name_for_version(&item_key(), "guest.txt", None, pin, commitment)
+                    .unwrap(),
+            None => beebeeb_core::encrypt::encrypt_name_for(&item_key(), "guest.txt", None, pin).unwrap(),
+        });
         f.rows[1]["size_bytes"] = json!(f.plaintext.len());
         f.rows[1]["chunk_count"] = json!(f.frames.len());
         f

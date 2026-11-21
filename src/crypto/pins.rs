@@ -3,6 +3,55 @@
 use super::*;
 use zeroize::Zeroize;
 
+/// What a reader needs to open one version of a file: the chunk format its AUTHENTICATED metadata records and, for
+/// a v2 file, the version commitment in the same record. Core refuses v2 content without the commitment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadPin {
+    pub format: ExpectedChunkFormat,
+    pub version: Option<beebeeb_core::chunk_stream::VersionCommitment>,
+}
+
+impl ReadPin {
+    /// Legacy content: no recorded format, no commitment.
+    pub const UNRECORDED: Self = Self {
+        format: ExpectedChunkFormat::Unrecorded,
+        version: None,
+    };
+
+    pub fn is_v2(self) -> bool {
+        self.format == ExpectedChunkFormat::V2
+    }
+
+    /// Core's pin-aware reader for this version, under `file_key`.
+    pub fn decryptor_with_key(self, file_key: FileKey, file_id_str: &str) -> ChunkDecryptor {
+        ChunkDecryptor::for_version_with_file_key(file_key, file_id_str, self.format, self.version)
+    }
+
+    /// The same, under the file key derived from the master key (string-UUID convention).
+    pub fn decryptor(self, master_key: &beebeeb_core::kdf::MasterKey, file_id_str: &str) -> ChunkDecryptor {
+        self.decryptor_with_key(
+            beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes()),
+            file_id_str,
+        )
+    }
+}
+
+impl From<ExpectedChunkFormat> for ReadPin {
+    /// A pin with no commitment: legacy content only (v2 is refused by core).
+    fn from(format: ExpectedChunkFormat) -> Self {
+        Self { format, version: None }
+    }
+}
+
+impl From<&beebeeb_core::encrypt::NameMetadata> for ReadPin {
+    fn from(meta: &beebeeb_core::encrypt::NameMetadata) -> Self {
+        Self {
+            format: meta.chunk_format,
+            version: meta.version,
+        }
+    }
+}
+
 /// Resolve the owner's content key for ONE stored version from its first chunk
 /// frame (SF-0002). Only call this after the existing key failed to
 /// authenticate that version's first chunk: it is the read-only repair path,
@@ -21,7 +70,15 @@ pub fn owner_content_key(
 /// the format: v1 legacy or v2, either `is_last`); only the verdict is kept and
 /// the opened bytes are wiped.
 pub fn first_frame_opens(key: &FileKey, file_id_str: &str, frame: &[u8]) -> bool {
-    ChunkDecryptor::for_push_with_file_key(key_copy(key), file_id_str, ExpectedChunkFormat::Unrecorded)
+    // Only the verdict is wanted (which key opens it), not a read of the version: a v2 frame 0 names its own
+    // version id (its nonce), which core's reader would otherwise refuse without the metadata's commitment.
+    let version_id = frame.get(..NONCE_LEN).unwrap_or_default();
+    let v2 = [false, true].into_iter().any(|is_last| {
+        beebeeb_core::chunk_stream::open_chunk(key, file_id_str, version_id, 0, is_last, ChunkFormat::V2, frame)
+            .map(zeroize::Zeroizing::new)
+            .is_ok()
+    });
+    v2 || ChunkDecryptor::for_push_with_file_key(key_copy(key), file_id_str, ExpectedChunkFormat::Unrecorded)
         .push_frame(frame)
         .map(|chunk| zeroize::Zeroizing::new(chunk.data))
         .is_ok()
@@ -60,9 +117,9 @@ pub fn content_pin(
     master_key: &beebeeb_core::kdf::MasterKey,
     file_id_str: &str,
     name_encrypted_str: &str,
-) -> Result<ExpectedChunkFormat, CryptoError> {
+) -> Result<ReadPin, CryptoError> {
     match beebeeb_core::encrypt::decrypt_file_metadata(master_key, file_id_str, name_encrypted_str) {
-        Ok(m) => Ok(m.chunk_format),
+        Ok(m) => Ok(ReadPin::from(&m)),
         Err(e) => {
             // SF-0002: the name may be sealed under the read-only uppercase
             // convention. Resolve it through core's owner helper, then read the
@@ -72,7 +129,7 @@ pub fn content_pin(
                 beebeeb_core::kdf::owner_file_key_for_name(master_key, file_id_str, name_encrypted_str)
             {
                 if let Ok(m) = beebeeb_core::encrypt::decrypt_file_metadata_with_key(&key, name_encrypted_str) {
-                    return Ok(m.chunk_format);
+                    return Ok(ReadPin::from(&m));
                 }
             }
             Err(pin_error(file_id_str, e))
@@ -85,9 +142,9 @@ pub fn content_pin_with_key(
     file_key: &FileKey,
     file_id_str: &str,
     name_encrypted_str: &str,
-) -> Result<ExpectedChunkFormat, CryptoError> {
+) -> Result<ReadPin, CryptoError> {
     beebeeb_core::encrypt::decrypt_file_metadata_with_key(file_key, name_encrypted_str)
-        .map(|m| m.chunk_format)
+        .map(|m| ReadPin::from(&m))
         .map_err(|e| pin_error(file_id_str, e))
 }
 
@@ -98,7 +155,7 @@ pub fn file_row_pin(
     file_id_str: &str,
     name_encrypted_str: &str,
     content_key: Option<&FileKey>,
-) -> Result<ExpectedChunkFormat, CryptoError> {
+) -> Result<ReadPin, CryptoError> {
     match content_key {
         Some(c) => content_pin_with_key(c, file_id_str, name_encrypted_str),
         None => content_pin(master_key, file_id_str, name_encrypted_str),

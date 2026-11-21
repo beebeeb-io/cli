@@ -5,6 +5,7 @@ use super::*;
 /// SF-0002: the one write check for a PUT-overwrite or a rename of `entry`.
 /// `Err` is the response: 403 for a read-only row, 503 when the check could not
 /// decide (retryable; the row is not marked read-only).
+#[allow(clippy::result_large_err)] // the refusal is the HTTP response itself
 pub(super) async fn write_refusal(state: &Arc<DavState>, entry: &ResolvedEntry) -> Result<(), Response> {
     let Some(file_id) = entry.file_id.as_deref() else {
         return Ok(());
@@ -53,7 +54,7 @@ pub(super) struct ResolvedEntry {
     /// The content's read pin from the file's authenticated metadata
     /// (`crypto::content_pin`, task 1943). `Err` for a collection, or for a file
     /// whose metadata cannot be read (its content is then refused, never guessed).
-    pub(super) pin: Result<beebeeb_core::chunk_stream::ExpectedChunkFormat, String>,
+    pub(super) pin: Result<crate::crypto::ReadPin, String>,
     /// SF-0002: the name resolved under the read-only uppercase repair
     /// convention. PUT-overwrite and rename are refused; move-only is allowed.
     pub(super) read_only: bool,
@@ -78,7 +79,7 @@ pub(super) struct ResolvedEntry {
 }
 
 /// What a collection carries in [`ResolvedEntry::pin`].
-pub(super) fn no_content() -> Result<beebeeb_core::chunk_stream::ExpectedChunkFormat, String> {
+pub(super) fn no_content() -> Result<crate::crypto::ReadPin, String> {
     Err("a collection has no content".to_string())
 }
 
@@ -179,8 +180,8 @@ pub(super) fn decode_file_entry(
                 ResolvedName::Plaintext(text) => text.clone(),
             };
             let pin = match &r.name {
-                ResolvedName::Encrypted(meta) => Ok(meta.chunk_format),
-                ResolvedName::Plaintext(_) => Ok(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded),
+                ResolvedName::Encrypted(meta) => Ok(crate::crypto::ReadPin::from(meta)),
+                ResolvedName::Plaintext(_) => Ok(crate::crypto::ReadPin::UNRECORDED),
             };
             (
                 name,

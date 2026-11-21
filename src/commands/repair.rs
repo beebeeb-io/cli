@@ -107,35 +107,63 @@ fn decrypt_chunks_with_binary_key(
     .map_err(String::from)
 }
 
-/// Encrypt all chunks with the string-UUID key, returning serialized blobs.
-fn encrypt_chunks_with_string_key(
+/// Re-encrypt `plaintext` under the string-UUID key as core's current writer does (v2 frames), and seal the name
+/// with the version's commitment (frame 0's id; a legacy row has no earlier version, so counter 1). Returns the
+/// chunks and the name envelope that carries the commitment.
+/// A re-encrypted version: its numbered chunks and the sealed name.
+type SealedVersion = (Vec<(u32, Vec<u8>)>, String);
+
+fn encrypt_version_with_string_key(
     master_key: &beebeeb_core::kdf::MasterKey,
     file_id_str: &str,
+    name: &str,
+    mime_type: Option<&str>,
     plaintext: &[u8],
-) -> Result<Vec<(u32, Vec<u8>)>, String> {
-    let file_key = beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes());
-
+) -> Result<SealedVersion, String> {
+    use beebeeb_core::chunk_stream::{ChunkEncryptor, ExpectedChunkFormat};
     let plan = beebeeb_types::plan_chunks(plaintext.len() as u64, beebeeb_types::ChunkProfile::Cli);
     let chunk_size = plan.chunk_size_bytes as usize;
+    // The row's id is the listed one (L13: repair proposes the file's own id), so core's minted-id writers do not fit.
+    #[allow(deprecated)]
+    let mut encryptor = ChunkEncryptor::for_push(
+        master_key,
+        file_id_str,
+        plaintext.len() as u64,
+        beebeeb_types::ChunkProfile::Cli,
+    )
+    .and_then(|e| e.with_recorded_pin(ExpectedChunkFormat::Unrecorded))
+    .map_err(|e| format!("init encryptor: {e}"))?;
 
     let mut encrypted_chunks = Vec::new();
-
     if plaintext.is_empty() {
-        let bytes = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, &[])
+        let chunk = encryptor
+            .push_chunk(&[])
             .map_err(|e| format!("encrypt empty chunk: {e}"))?;
-        encrypted_chunks.push((0, bytes));
+        encrypted_chunks.push((chunk.index, chunk.data));
     } else {
-        for (i, chunk) in plaintext.chunks(chunk_size).enumerate() {
-            let bytes = beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, chunk)
-                .map_err(|e| format!("encrypt chunk {i}: {e}"))?;
-            encrypted_chunks.push((i as u32, bytes));
+        for chunk in plaintext.chunks(chunk_size) {
+            let chunk = encryptor.push_chunk(chunk).map_err(|e| format!("encrypt chunk: {e}"))?;
+            encrypted_chunks.push((chunk.index, chunk.data));
         }
     }
-
-    Ok(encrypted_chunks)
+    let commitment = encryptor
+        .version_commitment_after(None)
+        .map_err(|e| format!("version commitment: {e}"))?;
+    encryptor.finish().map_err(|e| format!("integrity check failed: {e}"))?;
+    let file_key = beebeeb_core::kdf::derive_file_key(master_key, file_id_str.as_bytes());
+    let name_encrypted = beebeeb_core::encrypt::encrypt_name_for_version(
+        &file_key,
+        name,
+        mime_type,
+        ExpectedChunkFormat::V2,
+        commitment,
+    )
+    .map_err(|e| format!("failed to encrypt name: {e}"))?;
+    Ok((encrypted_chunks, name_encrypted))
 }
 
-/// Encrypt a filename with the string-UUID key (includes MIME type in envelope).
+/// Encrypt a folder name with the string-UUID key (includes MIME type in envelope). A folder has no content, so
+/// its name carries no version commitment.
 fn encrypt_name_with_string_key(
     master_key: &beebeeb_core::kdf::MasterKey,
     file_id_str: &str,
@@ -468,15 +496,14 @@ async fn repair_file(
         .map(|s| s.to_string());
 
     // Step 0: the read pin from the file's authenticated metadata (task 1943).
-    // Repair rewrites a legacy file as v1, so a v2-pinned file is never touched:
-    // that would silently downgrade it (and core never writes v2 under the
-    // binary-UUID key anyway).
+    // A v2-pinned file is never touched: it is already under core's key
+    // convention.
     let name_encrypted = file_meta
         .get("name_encrypted")
         .and_then(|v| v.as_str())
         .ok_or("server response missing name_encrypted")?;
     let pin = crate::crypto::content_pin(master_key, file_id, name_encrypted)?;
-    if pin != beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded {
+    if pin.format != beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded {
         return Err("its metadata records chunk format v2; a v2 file is never rewritten by repair".to_string());
     }
 
@@ -484,8 +511,8 @@ async fn repair_file(
 
     let plaintext = decrypt_chunks_with_binary_key(master_key, file_id, &encrypted_bytes, chunk_count)?;
 
-    let new_name_encrypted = encrypt_name_with_string_key(master_key, file_id, decrypted_name, None)?;
-    let new_chunks = encrypt_chunks_with_string_key(master_key, file_id, &plaintext)?;
+    let (new_chunks, new_name_encrypted) =
+        encrypt_version_with_string_key(master_key, file_id, decrypted_name, None, &plaintext)?;
 
     // Step 4: write it as a new version of the SAME file (see the doc comment:
     // never a trash). The file's current version is the optimistic-concurrency
@@ -528,7 +555,9 @@ async fn repair_file(
     }
 
     // Finalise the upload session; the answer must name the same file.
-    let completed = api.upload_complete(&init.upload_session_id).await?;
+    let completed = api
+        .upload_complete_sealed_typed(&init.upload_session_id, Some(&new_name_encrypted))
+        .await?;
     if let Err(e) = listed.verify(crate::item_id::echoed_id(&completed)) {
         let _ = api.upload_abandon(file_id).await;
         return Err(e.to_string());
@@ -560,12 +589,19 @@ mod l13_repair_tests {
         beebeeb_core::kdf::MasterKey::from_bytes([6u8; 32])
     }
 
+    /// A name as an old CLI sealed it: an `EncryptedBlob` of the name envelope under the key itself (core no longer
+    /// writes this shape).
+    fn legacy_name(key: &beebeeb_core::kdf::FileKey) -> String {
+        let envelope = json!({ "name": "notes.txt", "mime_type": null }).to_string();
+        serde_json::to_string(&beebeeb_core::encrypt::encrypt_metadata(key, &envelope).expect("legacy name"))
+            .expect("serialises")
+    }
+
     /// A file as an old CLI left it (name and content under the binary-UUID
     /// key), at version `BASE_VERSION`, in the mock.
     fn legacy_file(mut mock: Mock, id: Uuid) -> Mock {
         let key = beebeeb_core::kdf::derive_file_key(&master(), id.as_bytes());
-        let name = beebeeb_core::encrypt::encrypt_name_for(&key, "notes.txt", None, ExpectedChunkFormat::Unrecorded)
-            .expect("legacy name");
+        let name = legacy_name(&key);
         mock.files.insert(
             id.to_string(),
             json!({
@@ -653,19 +689,20 @@ mod l13_repair_tests {
         assert_eq!(m.completed.len(), 1);
         assert!(m.abandons.is_empty());
 
-        let (derivation, name) =
-            detect_key_derivation(&master(), &id.to_string(), &m.init_names[0]).expect("the new name decrypts");
-        assert_eq!((derivation, name.as_str()), (KeyDerivation::StringUuid, "notes.txt"));
+        // The new name opens with core's reader under the string-UUID key and carries the version commitment
+        // the content opens under.
+        let pin =
+            crate::crypto::content_pin(&master(), &id.to_string(), &m.init_names[0]).expect("the new name decrypts");
+        assert_eq!(pin.format, ExpectedChunkFormat::V2);
+        assert_eq!(pin.version.expect("a commitment").counter, 1);
+        assert_eq!(
+            crate::crypto::decrypt_name(&master(), &id.to_string(), &m.init_names[0]).as_deref(),
+            Some("notes.txt")
+        );
         let chunk = m.chunk_bodies.values().next().expect("one chunk");
         let string_key = beebeeb_core::kdf::derive_file_key(&master(), id.to_string().as_bytes());
-        let plain = crate::crypto::try_decrypt_all_chunks(
-            &string_key,
-            &id.to_string(),
-            ExpectedChunkFormat::Unrecorded,
-            chunk,
-            1,
-        )
-        .expect("the new content decrypts under the string-UUID key");
+        let plain = crate::crypto::try_decrypt_all_chunks(&string_key, &id.to_string(), pin, chunk, 1)
+            .expect("the new content decrypts under the string-UUID key");
         assert_eq!(plain, PLAINTEXT);
     }
 
@@ -678,8 +715,7 @@ mod l13_repair_tests {
     fn a_request_upload_row_is_never_planned_for_repair() {
         let id = Uuid::new_v4();
         let key = beebeeb_core::kdf::derive_file_key(&master(), id.as_bytes());
-        let name = beebeeb_core::encrypt::encrypt_name_for(&key, "notes.txt", None, ExpectedChunkFormat::Unrecorded)
-            .expect("legacy name");
+        let name = legacy_name(&key);
         let mut row = json!({
             "id": id,
             "name_encrypted": name,

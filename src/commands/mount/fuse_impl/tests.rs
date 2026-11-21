@@ -624,7 +624,7 @@ mod truncate_tests {
                 chunk_count: 0,
                 modified: SystemTime::UNIX_EPOCH,
                 parent_ino: ROOT_INO,
-                pin: Ok(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded),
+                pin: Ok(crate::crypto::ReadPin::UNRECORDED),
                 read_only: false,
                 request_class: false,
             },

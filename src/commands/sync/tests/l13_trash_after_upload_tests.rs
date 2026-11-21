@@ -49,7 +49,7 @@ async fn upload_over(mut mock: Mock, s: &Scratch, old: Uuid) -> (Result<(), Stri
         }),
         chunk_count: 1,
         updated_at: Utc::now(),
-        pin: Ok(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded),
+        pin: Ok(crate::crypto::ReadPin::UNRECORDED),
     };
     let mock = shared(mock);
     let api = ApiClient::new_for_test(spawn(mock.clone()).await);

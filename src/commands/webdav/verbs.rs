@@ -582,12 +582,7 @@ pub(super) async fn move_response(state: &Arc<DavState>, src_path: &str, destina
         // never the content key `C`. An upper-repair request name has no target
         // (read-only) and any other row without one is refused (P2-6).
         let sealed = if let Some(target) = &src.write_target {
-            beebeeb_core::encrypt::encrypt_name_for(
-                &crate::crypto::key_copy(target.key()),
-                &new_name,
-                mime_for_rename,
-                target.pin(),
-            )
+            beebeeb_core::encrypt::encrypt_name_for_target(target, &new_name, mime_for_rename)
         } else if let Some(target) = &src.rename_target {
             beebeeb_core::rename::encrypt_name_for_rename_target(target, &new_name, mime_for_rename)
         } else {

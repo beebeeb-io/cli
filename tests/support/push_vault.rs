@@ -666,43 +666,52 @@ pub async fn start_mock(vault: Shared) -> String {
             "/api/v1/uploads/:sid/complete",
             // As on the server: the version completes in the row init created;
             // its parent is NOT taken from this request (there is none).
-            post(|State(v): State<Shared>, UrlPath(sid): UrlPath<String>| async move {
-                let (file_id, version) = {
-                    let mut v = v.lock().unwrap();
-                    if let Some(file_id) = v.completed_sessions.get(&sid).cloned() {
-                        return Json(json!({ "id": file_id, "status": "completed", "already_completed": true }))
-                            .into_response();
-                    }
-                    let Some(s) = v.sessions.remove(&sid) else {
-                        return err(StatusCode::NOT_FOUND, "not_found");
+            post(
+                |State(v): State<Shared>, UrlPath(sid): UrlPath<String>, body: Option<Json<Value>>| async move {
+                    // The sealed name the client publishes with `complete` (its version commitment), as the server
+                    // stores it; a v1 write sends no body.
+                    let sealed =
+                        body.and_then(|Json(b)| b.get("name_encrypted").and_then(Value::as_str).map(str::to_string));
+                    let (file_id, version) = {
+                        let mut v = v.lock().unwrap();
+                        if let Some(file_id) = v.completed_sessions.get(&sid).cloned() {
+                            return Json(json!({ "id": file_id, "status": "completed", "already_completed": true }))
+                                .into_response();
+                        }
+                        let Some(s) = v.sessions.remove(&sid) else {
+                            return err(StatusCode::NOT_FOUND, "not_found");
+                        };
+                        if s.frames.len() as u32 != s.chunk_count {
+                            return err(StatusCode::BAD_REQUEST, "missing chunks");
+                        }
+                        let version = s.base.map_or(1, |b| b + 1);
+                        let Some(item) = v.items.get_mut(&s.file_id) else {
+                            return err(StatusCode::NOT_FOUND, "not_found");
+                        };
+                        item.uploading = false;
+                        if let Some(sealed) = sealed {
+                            item.name_encrypted = sealed;
+                        }
+                        item.version = version;
+                        item.size = s.size;
+                        item.chunk_count = s.chunk_count;
+                        let file_id = s.file_id.clone();
+                        let stamped = chrono::Utc::now() + chrono::Duration::seconds(v.uploaded_at_offset_secs);
+                        v.uploaded_at.insert(file_id.clone(), stamped.to_rfc3339());
+                        v.contents.insert(
+                            file_id.clone(),
+                            (s.chunk_size, s.frames.into_values().flatten().collect()),
+                        );
+                        v.completed_sessions.insert(sid.clone(), file_id.clone());
+                        (file_id, version)
                     };
-                    if s.frames.len() as u32 != s.chunk_count {
-                        return err(StatusCode::BAD_REQUEST, "missing chunks");
+                    // The version is committed; the answer is held while a test asks (a Ctrl-C mid-`complete`).
+                    while v.lock().unwrap().hold_complete {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
                     }
-                    let version = s.base.map_or(1, |b| b + 1);
-                    let Some(item) = v.items.get_mut(&s.file_id) else {
-                        return err(StatusCode::NOT_FOUND, "not_found");
-                    };
-                    item.uploading = false;
-                    item.version = version;
-                    item.size = s.size;
-                    item.chunk_count = s.chunk_count;
-                    let file_id = s.file_id.clone();
-                    let stamped = chrono::Utc::now() + chrono::Duration::seconds(v.uploaded_at_offset_secs);
-                    v.uploaded_at.insert(file_id.clone(), stamped.to_rfc3339());
-                    v.contents.insert(
-                        file_id.clone(),
-                        (s.chunk_size, s.frames.into_values().flatten().collect()),
-                    );
-                    v.completed_sessions.insert(sid.clone(), file_id.clone());
-                    (file_id, version)
-                };
-                // The version is committed; the answer is held while a test asks (a Ctrl-C mid-`complete`).
-                while v.lock().unwrap().hold_complete {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-                Json(json!({ "id": file_id, "version_number": version })).into_response()
-            }),
+                    Json(json!({ "id": file_id, "version_number": version })).into_response()
+                },
+            ),
         )
         .fallback(|| async { err(StatusCode::NOT_FOUND, "not_found") })
         // A 4 MiB chunk frame exceeds axum's 2 MB default body limit.

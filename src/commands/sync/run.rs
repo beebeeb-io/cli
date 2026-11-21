@@ -830,6 +830,7 @@ pub async fn run(
                                             r.canonical["id"].as_str().unwrap_or(""),
                                             r.canonical["name_encrypted"].as_str().unwrap_or(""),
                                         )
+                                        .map(|pin| pin.format)
                                     })
                                     .transpose()?,
                                 replace_file_key: replacement.as_ref().map(|r| r.key.clone()),

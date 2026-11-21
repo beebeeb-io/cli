@@ -64,7 +64,7 @@ fn remote_file() -> RemoteFile {
         resolved: None,
         chunk_count: 1,
         updated_at: Utc::now(),
-        pin: Ok(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded),
+        pin: Ok(crate::crypto::ReadPin::UNRECORDED),
     }
 }
 

@@ -141,6 +141,7 @@ pub(super) async fn unlock_response(state: &Arc<DavState>, path: &str, lock_toke
 /// If the resource IS locked and the client provides the correct token → OK.
 ///
 /// This is permissive: if the lock has expired, we treat it as unlocked.
+#[allow(clippy::result_large_err)] // the refusal is the HTTP response itself
 pub(super) async fn check_lock(state: &Arc<DavState>, path: &str, client_token: Option<&str>) -> Result<(), Response> {
     let mut locks = state.locks.lock().await;
     let entry = match locks.get(path) {

@@ -138,7 +138,10 @@ pub(super) async fn run_zip(
                 api,
                 key.clone(),
                 &item.entry.file_id,
-                item.entry.chunk_format,
+                crate::crypto::ReadPin {
+                    format: item.entry.chunk_format,
+                    version: item.entry.version,
+                },
                 item.entry.chunk_count,
                 &staged.path,
                 &progress,

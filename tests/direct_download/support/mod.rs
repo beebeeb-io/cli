@@ -56,7 +56,10 @@ struct Fixture {
 fn fixture() -> Fixture {
     let plaintext: Vec<u8> = (0..PLAIN_LEN).map(|i| (i.wrapping_mul(31) % 251) as u8).collect();
     let mk = MasterKey::from_bytes([0u8; 32]);
-    let mut enc = ChunkEncryptor::for_push_with_chunk_size(&mk, FILE_ID, plaintext.len() as u64, STRIDE).unwrap();
+    let mut enc = ChunkEncryptor::for_push_with_chunk_size(&mk, FILE_ID, plaintext.len() as u64, STRIDE)
+        .unwrap()
+        .with_format(beebeeb_core::chunk_stream::ChunkFormat::V1Legacy)
+        .unwrap();
     let frames: Vec<Vec<u8>> = plaintext
         .chunks(STRIDE as usize)
         .map(|c| enc.push_chunk(c).unwrap().data)

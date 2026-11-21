@@ -75,6 +75,8 @@ ratatui = { version = "0.29", features = ["crossterm"] }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
 
 [dev-dependencies]
+# Test-only: `ChunkEncryptor::with_format`, so the resume tests can write the v1 frames a session may continue.
+beebeeb-core = { git = "https://github.com/beebeeb-io/core", package = "beebeeb-core", rev = "a78e5252834ac4976aa14fa164e0fe81618a3e53", features = ["test-support"] }
 # Test-only: an independent AES-256-GCM reference so the share-wrap tests can
 # assert the CLI's wrapped_file_key byte-for-byte against the core
 # `share_key_wrap` KAT vector (core's public API has no fixed-nonce encrypt).

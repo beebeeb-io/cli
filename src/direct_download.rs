@@ -27,7 +27,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::time::Duration;
 
-use beebeeb_core::chunk_stream::{ChunkDecryptor, ExpectedChunkFormat};
+use beebeeb_core::chunk_stream::ChunkDecryptor;
 use beebeeb_core::direct_transfer as dt;
 use beebeeb_core::kdf::MasterKey;
 use bytes::Bytes;
@@ -275,7 +275,7 @@ pub(crate) async fn try_download(
     api: &ApiClient,
     master_key: &MasterKey,
     file_id: &str,
-    pin: ExpectedChunkFormat,
+    pin: crate::crypto::ReadPin,
     chunk_count: u32,
     out_path: &Path,
     progress: &dyn ChunkProgress,
@@ -284,7 +284,7 @@ pub(crate) async fn try_download(
 ) -> Result<DirectResult, DownloadError> {
     try_download_inner(
         api,
-        ChunkDecryptor::for_push(master_key, file_id, pin),
+        pin.decryptor(master_key, file_id),
         pin,
         true,
         file_id,
@@ -301,14 +301,14 @@ pub(crate) async fn try_download_with_file_key(
     api: &ApiClient,
     file_key: std::sync::Arc<beebeeb_core::kdf::FileKey>,
     file_id: &str,
-    pin: ExpectedChunkFormat,
+    pin: crate::crypto::ReadPin,
     chunk_count: u32,
     out_path: &Path,
     progress: &dyn ChunkProgress,
     display_name: &str,
     pool: Option<&PoolLabel>,
 ) -> Result<DirectResult, DownloadError> {
-    let decryptor = ChunkDecryptor::for_push_with_file_key(crate::crypto::key_copy(&file_key), file_id, pin);
+    let decryptor = pin.decryptor_with_key(crate::crypto::key_copy(&file_key), file_id);
     try_download_inner(
         api,
         decryptor,
@@ -327,7 +327,7 @@ pub(crate) async fn try_download_with_file_key(
 async fn try_download_inner(
     api: &ApiClient,
     mut decryptor: ChunkDecryptor,
-    pin: ExpectedChunkFormat,
+    pin: crate::crypto::ReadPin,
     allow_legacy: bool,
     file_id: &str,
     chunk_count: u32,
@@ -536,7 +536,7 @@ async fn try_download_inner(
                         return Ok(out.use_api());
                     }
                 }
-                Err(_) if allow_legacy && next == 0 && pin != ExpectedChunkFormat::V2 => {
+                Err(_) if allow_legacy && next == 0 && !pin.is_v2() => {
                     // Frame 0 under the string-UUID key failed before any plaintext was written. That
                     // is what a pre-`bb repair` file keyed by the BINARY uuid (or a JSON-blob file)
                     // looks like, and only the API path's buffered fallback can read those: a
@@ -727,7 +727,13 @@ mod tests {
         let mk = MasterKey::from_bytes(key);
         let wire = unhex(f["wire_hex"].as_str().unwrap());
         let stride = f["chunk_size"].as_u64().unwrap() as usize + 28;
-        let mut decryptor = ChunkDecryptor::for_push(&mk, f["file_id"].as_str().unwrap(), ExpectedChunkFormat::V2);
+        let pin = crate::crypto::content_pin(
+            &mk,
+            f["file_id"].as_str().unwrap(),
+            f["name_encrypted"].as_str().unwrap(),
+        )
+        .unwrap();
+        let mut decryptor = pin.decryptor(&mk, f["file_id"].as_str().unwrap());
         for frame in wire.chunks(stride).take(3) {
             decryptor.push_frame(frame).unwrap();
         }

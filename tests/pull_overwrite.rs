@@ -84,6 +84,8 @@ fn remote_ciphertext() -> Vec<u8> {
         REMOTE.len() as u64,
         1024 * 1024,
     )
+    .unwrap()
+    .with_format(beebeeb_core::chunk_stream::ChunkFormat::V1Legacy)
     .unwrap();
     let chunk = enc.push_chunk(REMOTE).unwrap();
     enc.finish().unwrap();
