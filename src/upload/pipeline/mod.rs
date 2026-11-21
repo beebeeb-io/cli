@@ -624,6 +624,33 @@ pub(super) async fn upload_attempt(
     }
     .map_err(|e| format!("encrypt name: {e}"))?;
 
+    // 3c. A v2 version commits to its own frame 0 (the nonce is the version id), so frame 0 is sealed now, before the
+    //     init: the sealed name carrying the commitment goes out with the init (a replace of a protected version
+    //     must send it) and again with `complete`.
+    let mut encryptor = encryptor;
+    let mut first_chunk = None;
+    let mut version_metadata = None;
+    if format == beebeeb_core::chunk_stream::ChunkFormat::V2 {
+        match encryptor.next_chunk() {
+            Ok(chunk) => first_chunk = chunk,
+            Err(beebeeb_core::CoreError::Io(e)) => {
+                return Err(AttemptErr::SourceRead(format!("encrypt chunk: I/O error: {e}")));
+            }
+            Err(e) => return Err(AttemptErr::Other(format!("encrypt chunk: {e}"))),
+        }
+        version_metadata = seal_version_name(
+            api,
+            master_key,
+            spec,
+            &file_id_str,
+            mime,
+            format,
+            encryptor.version_id(),
+        )
+        .await
+        .map_err(AttemptErr::Other)?;
+    }
+
     // 4. TOCTOU: re-stat just before init. `finish()` catches a file that
     //    SHRANK; a same-size grow can slip past and is reconciled by
     //    content-hash on the next sync run (documented on
@@ -733,6 +760,7 @@ pub(super) async fn upload_attempt(
                     chunk_count as i32,
                     is_media,
                     spec.base_version_number,
+                    version_metadata.as_deref(),
                     if offer.is_some() {
                         InitTransport::Direct
                     } else {
@@ -824,6 +852,7 @@ pub(super) async fn upload_attempt(
         &upload_session_id,
         direct.as_ref(),
         encryptor,
+        first_chunk,
         chunk_count,
         expected_total,
         &spec.shutdown,
@@ -846,7 +875,7 @@ pub(super) async fn upload_attempt(
     // logical file (Codex thread #2). So a failure at either stage finishes
     // the bar as `false`, and `finish(true)` fires only once both stages of
     // THIS attempt actually succeeded.
-    let (confirmed, version_id) = match result {
+    let confirmed = match result {
         Ok(done) => done,
         // Spec §5.2: a resumed session the server reports already completed is finished, not failed. `complete`
         // answers `already_completed` and the file id; the server's row decides whether the file is done here,
@@ -965,18 +994,8 @@ pub(super) async fn upload_attempt(
     }
 
     // 7. Finalise the version.
-    // The name is sealed now, not at init: the version commitment (frame 0's id, the successor counter) exists only
-    // once frame 0 is sealed. The commitment-bearing name goes out with `complete`, as core's own uploads do.
-    let sealed_name = match seal_version_name(api, master_key, spec, &file_id_str, mime, format, version_id).await {
-        Ok(sealed) => sealed,
-        Err(e) => {
-            file_prog.finish(false);
-            end_session(api, &spec.path, &file_id_str).await;
-            return Err(AttemptErr::Other(e));
-        }
-    };
     let completed = match api
-        .upload_complete_sealed_typed(&upload_session_id, sealed_name.as_deref())
+        .upload_complete_sealed_typed(&upload_session_id, version_metadata.as_deref())
         .await
     {
         Ok(v) => v,

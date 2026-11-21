@@ -97,6 +97,10 @@ pub enum ConfirmMethod {
 }
 
 /// What a call that needs a login says when there is none.
+/// The capability token a client declares when it carries the sealed version fields (commitment) through name and
+/// content writes; the server refuses a new name for a version-protected file without it.
+pub(crate) const CAP_VERSION_METADATA_V1: &str = "version-metadata-v1";
+
 pub(crate) const NOT_LOGGED_IN_MESSAGE: &str = "Not logged in. Run `bb login` first.";
 
 pub(crate) const SESSION_EXPIRED_MESSAGE: &str =

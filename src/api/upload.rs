@@ -82,6 +82,7 @@ impl ApiClient {
             chunk_count,
             is_media,
             base_version_number,
+            None,
             InitTransport::Api,
         )
         .await
@@ -103,6 +104,7 @@ impl ApiClient {
         chunk_count: i32,
         is_media: bool,
         base_version_number: Option<i32>,
+        version_metadata: Option<&str>,
         transport: InitTransport,
     ) -> Result<UploadInit, ApiError> {
         let token = self.require_auth()?;
@@ -113,7 +115,7 @@ impl ApiClient {
         // (the profile-derived plan is the fallback for the both-omitted case
         // only), so the wire profile is non-load-bearing here. We send "desktop"
         // — the closest accepted profile (same 256 MiB chunk ceiling).
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "file_id": file_id,
             "file_name": name_encrypted,
             "file_size_bytes": size_bytes,
@@ -124,6 +126,10 @@ impl ApiClient {
             "is_media": is_media,
             "base_version_number": base_version_number,
         });
+        // The sealed name that carries this version's commitment: a replace of a protected version needs it at init.
+        if let Some(metadata) = version_metadata {
+            body["version_metadata_encrypted"] = serde_json::json!(metadata);
+        }
         for _ in 0..3 {
             // After a Ctrl-C no session is opened (a request the run would then abandon).
             if !pace_if_needed(&self.base_url).await {
@@ -134,6 +140,12 @@ impl ApiClient {
                 .post(self.url("/api/v1/uploads/init"))
                 .bearer_auth(token)
                 .json(&body);
+            if version_metadata.is_some() {
+                request = request.header(
+                    beebeeb_core::direct_transfer::CAPABILITIES_HEADER,
+                    super::CAP_VERSION_METADATA_V1,
+                );
+            }
             if transport == InitTransport::Direct {
                 request = request.header(
                     beebeeb_core::direct_transfer::CAPABILITIES_HEADER,
@@ -324,10 +336,15 @@ impl ApiClient {
                 .post(self.url(&format!("/api/v1/uploads/{upload_session_id}/complete")))
                 .bearer_auth(token);
             let request = match sealed_name {
-                Some(sealed) => request.json(&serde_json::json!({
-                    "name_encrypted": sealed,
-                    "version_metadata_encrypted": sealed,
-                })),
+                Some(sealed) => request
+                    .header(
+                        beebeeb_core::direct_transfer::CAPABILITIES_HEADER,
+                        super::CAP_VERSION_METADATA_V1,
+                    )
+                    .json(&serde_json::json!({
+                        "name_encrypted": sealed,
+                        "version_metadata_encrypted": sealed,
+                    })),
                 None => request,
             };
             let resp = request.send().await.map_err(format_request_error)?;

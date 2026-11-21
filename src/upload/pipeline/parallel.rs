@@ -171,6 +171,7 @@ pub(super) async fn run_pipeline(
     upload_session_id: &str,
     direct: Option<&beebeeb_core::direct_transfer::Discovery>,
     encryptor: ChunkEncryptor,
+    first_chunk: Option<EncryptedChunk>,
     chunk_count: u32,
     expected_total: u64,
     shutdown: &Arc<AtomicBool>,
@@ -181,7 +182,7 @@ pub(super) async fn run_pipeline(
     interrupt: Option<&Interrupt>,
     file_prog: &dyn FileProgress,
     transferred: &mut u64,
-) -> Result<(Tally, Option<[u8; beebeeb_core::chunk_stream::VERSION_ID_LEN]>), AttemptErr> {
+) -> Result<Tally, AttemptErr> {
     use tokio::sync::mpsc;
 
     let upload_id = crate::api::DirectUploadId::from(upload_session_id);
@@ -195,61 +196,64 @@ pub(super) async fn run_pipeline(
     // reserve) for the whole file. Before each seal it takes `2 C` (the frame and the AEAD copy), from the pool or
     // the reserve; once sealed it shrinks to `C` (the copy is freed) and sends the frame with its `C`. The budget
     // wait also selects on `tx.closed()`, so a failed consumer never makes it seal one more chunk.
-    let producer = tokio::task::spawn_blocking(
-        move || -> Result<Option<[u8; beebeeb_core::chunk_stream::VERSION_ID_LEN]>, ProducerErr> {
-            let mut enc = encryptor;
-            let admission = admission;
-            // The plan every sealed chunk is held to: all frames are one chunk plus the AEAD overhead, the last holds
-            // the rest of the declared size.
-            let framed = chunk_size + beebeeb_core::chunk_stream::CHUNK_OVERHEAD;
-            let handle = tokio::runtime::Handle::current();
-            loop {
-                // spawn_blocking can't be aborted mid-chunk, so check at the top of each iteration.
-                if shutdown_p.load(Ordering::Relaxed) {
-                    return Err(ProducerErr::Cancelled);
-                }
-                let mut seal_share = match handle.block_on(async {
-                    tokio::select! {
-                        share = admission.seal_share(&limits_p, 2 * chunk_size) => Some(share),
-                        _ = tx.closed() => None,
-                    }
-                }) {
-                    Some(share) => share,
-                    None => return Err(ProducerErr::ChannelClosed),
-                };
-                match enc.next_chunk() {
-                    Ok(Some(chunk)) => {
-                        // A chunk of another length than the plan's is a source that grew or shrank while it was read
-                        // (the last chunk reads to the end of the file). It is not sent: the server would refuse the
-                        // long one (413, `chunk_body_limit`) and that answer would hide why (LD-0137).
-                        let planned = planned_frame_len(framed, u64::from(chunk_count), expected_total, chunk.index);
-                        if chunk.data.len() as u64 != planned {
-                            return Err(ProducerErr::Plan(format!(
-                                "integrity check failed: chunk {} is {} bytes, the plan says {planned} (the source changed while it was read)",
-                                chunk.index,
-                                chunk.data.len()
-                            )));
-                        }
-                        // The AEAD copy is freed now; the frame keeps its `C` until its PUT settles.
-                        seal_share.shrink_to(chunk_size);
-                        if tx.blocking_send((chunk, seal_share)).is_err() {
-                            return Err(ProducerErr::ChannelClosed);
-                        }
-                    }
-                    Ok(None) => break, // `seal_share` drops, returning `2 C`.
-                    Err(beebeeb_core::CoreError::Io(e)) => {
-                        return Err(ProducerErr::Read(format!("encrypt chunk: I/O error: {e}")));
-                    }
-                    Err(e) => return Err(ProducerErr::Core(format!("encrypt chunk: {e}"))),
-                }
+    let producer = tokio::task::spawn_blocking(move || -> Result<(), ProducerErr> {
+        let mut enc = encryptor;
+        // Frame 0 of a v2 file is sealed before the init (its nonce is the version id the init publishes).
+        let mut first_chunk = first_chunk;
+        let admission = admission;
+        // The plan every sealed chunk is held to: all frames are one chunk plus the AEAD overhead, the last holds
+        // the rest of the declared size.
+        let framed = chunk_size + beebeeb_core::chunk_stream::CHUNK_OVERHEAD;
+        let handle = tokio::runtime::Handle::current();
+        loop {
+            // spawn_blocking can't be aborted mid-chunk, so check at the top of each iteration.
+            if shutdown_p.load(Ordering::Relaxed) {
+                return Err(ProducerErr::Cancelled);
             }
-            // Integrity guard: detects a source that shrank mid-stream.
-            let version_id = enc.version_id();
-            enc.finish()
-                .map(|_| version_id)
-                .map_err(|e| ProducerErr::Plan(format!("integrity check failed: {e}")))
-        },
-    );
+            let mut seal_share = match handle.block_on(async {
+                tokio::select! {
+                    share = admission.seal_share(&limits_p, 2 * chunk_size) => Some(share),
+                    _ = tx.closed() => None,
+                }
+            }) {
+                Some(share) => share,
+                None => return Err(ProducerErr::ChannelClosed),
+            };
+            let sealed = match first_chunk.take() {
+                Some(chunk) => Ok(Some(chunk)),
+                None => enc.next_chunk(),
+            };
+            match sealed {
+                Ok(Some(chunk)) => {
+                    // A chunk of another length than the plan's is a source that grew or shrank while it was read
+                    // (the last chunk reads to the end of the file). It is not sent: the server would refuse the
+                    // long one (413, `chunk_body_limit`) and that answer would hide why (LD-0137).
+                    let planned = planned_frame_len(framed, u64::from(chunk_count), expected_total, chunk.index);
+                    if chunk.data.len() as u64 != planned {
+                        return Err(ProducerErr::Plan(format!(
+                            "integrity check failed: chunk {} is {} bytes, the plan says {planned} (the source changed while it was read)",
+                            chunk.index,
+                            chunk.data.len()
+                        )));
+                    }
+                    // The AEAD copy is freed now; the frame keeps its `C` until its PUT settles.
+                    seal_share.shrink_to(chunk_size);
+                    if tx.blocking_send((chunk, seal_share)).is_err() {
+                        return Err(ProducerErr::ChannelClosed);
+                    }
+                }
+                Ok(None) => break, // `seal_share` drops, returning `2 C`.
+                Err(beebeeb_core::CoreError::Io(e)) => {
+                    return Err(ProducerErr::Read(format!("encrypt chunk: I/O error: {e}")));
+                }
+                Err(e) => return Err(ProducerErr::Core(format!("encrypt chunk: {e}"))),
+            }
+        }
+        // Integrity guard: detects a source that shrank mid-stream.
+        enc.finish()
+            .map(|_| ())
+            .map_err(|e| ProducerErr::Plan(format!("integrity check failed: {e}")))
+    });
 
     // Consumer: up to `used` PUTs in flight from one `FuturesUnordered`. It reports `chunk_done` on each 200
     // (counting an already-stored chunk once, a transferred one once and toward `transferred`); the first final
@@ -330,12 +334,8 @@ pub(super) async fn run_pipeline(
     if let Some(e) = consumer_err {
         return Err(e);
     }
-    let mut version_id = None;
     let producer_err = match producer_join {
-        Ok(Ok(id)) => {
-            version_id = id;
-            None
-        }
+        Ok(Ok(())) => None,
         Ok(Err(ProducerErr::Cancelled)) => Some(AttemptErr::Other(INTERRUPTED.to_string())),
         Ok(Err(ProducerErr::ChannelClosed)) => Some(AttemptErr::Other(
             "internal: chunk channel closed before completion".to_string(),
@@ -363,7 +363,7 @@ pub(super) async fn run_pipeline(
             confirmed.bytes
         )));
     }
-    Ok((confirmed, version_id))
+    Ok(confirmed)
 }
 
 /// The length of the frame the plan has for chunk `index`: a whole chunk plus the AEAD overhead (`framed`) for every
