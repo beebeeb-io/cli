@@ -233,7 +233,7 @@ impl BeebeebFsState {
             // canonical key: it is not read-only, and its frames are the
             // new-file writer's (Unrecorded pin, task 1943), not the old row's.
             entry.read_only = false;
-            entry.pin = Ok(beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded);
+            entry.pin = Ok(crate::crypto::ReadPin::UNRECORDED);
         }
         self.minted.insert(file_id.clone());
         self.id_to_ino.insert(file_id, ino);

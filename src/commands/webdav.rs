@@ -1147,3 +1147,134 @@ mod a9b_webdav_tests {
         assert_eq!(patches.load(Ordering::SeqCst), 0, "the request row was renamed");
     }
 }
+
+/// A WebDAV PUT over a v2-protected file seals what core's current writer seals: v2 frames, the successor
+/// commitment in the name sent at init and again at complete. Without it the new version's name carried a v2 pin and
+/// no commitment over v1 frames, which core's readers refuse.
+#[cfg(test)]
+mod put_version_commitment_tests {
+    use super::*;
+    use crate::test_server::{Mock, Shared, shared, spawn};
+    use beebeeb_core::chunk_stream::{ChunkDecryptor, ChunkEncryptor, ExpectedChunkFormat};
+    use serde_json::json;
+
+    const OWNED: &str = "11111111-1111-4111-8111-111111111111";
+
+    fn master() -> beebeeb_core::kdf::MasterKey {
+        beebeeb_core::kdf::MasterKey::from_bytes([7u8; 32])
+    }
+
+    fn state_for(base: String) -> Arc<DavState> {
+        Arc::new(DavState {
+            api: ApiClient::new_for_test(base),
+            master_key: master(),
+            read_only: false,
+            dir_cache: Mutex::new(HashMap::new()),
+            cache_ttl: Duration::ZERO,
+            locks: Mutex::new(HashMap::new()),
+            request_count: std::sync::atomic::AtomicU64::new(0),
+            error_count: std::sync::atomic::AtomicU64::new(0),
+            verbose: false,
+        })
+    }
+
+    /// Open every chunk the mock took (one session) with core's reader for `name`'s authenticated metadata.
+    fn open_uploaded(m: &Mock, key: &beebeeb_core::kdf::FileKey, sealed_name: &str) -> Vec<u8> {
+        let meta = beebeeb_core::encrypt::decrypt_file_metadata_with_key(key, sealed_name).unwrap();
+        assert_eq!(meta.chunk_format, ExpectedChunkFormat::V2);
+        let mut dec = ChunkDecryptor::for_version_with_file_key(
+            crate::crypto::key_copy(key),
+            OWNED,
+            meta.chunk_format,
+            meta.version,
+        );
+        let mut out = Vec::new();
+        let mut frames: Vec<_> = m.chunk_bodies.iter().collect();
+        frames.sort_by_key(|((_, i), _)| *i);
+        for (_, frame) in frames {
+            out.extend(dec.push_frame(frame).expect("core's reader opens what the PUT wrote").data);
+        }
+        dec.finish().expect("the upload is complete");
+        out
+    }
+
+    #[tokio::test]
+    async fn a_put_over_a_v2_file_commits_to_its_successor_version() {
+        let key = beebeeb_core::kdf::derive_file_key(&master(), OWNED.as_bytes());
+        // The file as it is: one v2 version, counter 1.
+        let old = b"first version";
+        let mut enc = ChunkEncryptor::from_reader_with_file_key(
+            crate::crypto::key_copy(&key),
+            OWNED,
+            old.len() as u64,
+            old.len() as u64,
+            std::io::Cursor::new(old.to_vec()),
+        )
+        .unwrap()
+        .with_recorded_pin(ExpectedChunkFormat::V2)
+        .unwrap();
+        let mut frame = Vec::new();
+        while let Some(chunk) = enc.next_chunk().unwrap() {
+            frame.extend_from_slice(&chunk.data);
+        }
+        let current = enc.version_commitment_after(None).unwrap();
+        enc.finish().unwrap();
+        let sealed_old = beebeeb_core::encrypt::encrypt_name_for_version(
+            &key,
+            "owned.txt",
+            Some("text/plain"),
+            ExpectedChunkFormat::V2,
+            current,
+        )
+        .unwrap();
+        let row = json!({"id": OWNED, "parent_id": null, "name_encrypted": sealed_old, "is_folder": false,
+            "size_bytes": old.len(), "chunk_count": 1, "updated_at": "2026-10-31T10:00:00Z",
+            "owner_wrapped_file_key": null, "acted_via_share_id": null, "uploaded_by": null,
+            "version_number": 1});
+        let mut mock = Mock::default();
+        mock.listing = Some(json!({ "files": [row.clone()] }));
+        mock.files.insert(OWNED.to_string(), row);
+        mock.downloads.insert(OWNED.to_string(), frame);
+        let mock: Shared = shared(mock);
+        let state = state_for(spawn(mock.clone()).await);
+
+        let response = put_response(&state, "/owned.txt", b"second version".to_vec(), None).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let m = mock.lock().unwrap();
+        let init_name = m.init_names[0].clone();
+        let init_meta = beebeeb_core::encrypt::decrypt_file_metadata_with_key(&key, &init_name).unwrap();
+        let version = init_meta.version.expect("the init's name carries the commitment");
+        assert_eq!(version.counter, current.counter + 1, "the successor of the current version");
+        assert_ne!(version.version_id, current.version_id);
+        assert_eq!(
+            m.init_bodies[0]["version_metadata_encrypted"],
+            json!(init_name),
+            "the metadata goes out at init"
+        );
+        assert_eq!(
+            m.complete_bodies[0]["version_metadata_encrypted"],
+            json!(init_name),
+            "and again at complete"
+        );
+        assert_eq!(open_uploaded(&m, &key, &init_name), b"second version");
+    }
+
+    /// A new file is v2 as well, sealed with counter 1 under the string-convention key.
+    #[tokio::test]
+    async fn a_put_that_creates_a_file_seals_its_first_version() {
+        let mock: Shared = shared(Mock::default());
+        let state = state_for(spawn(mock.clone()).await);
+        let response = put_response(&state, "/new.txt", b"hello".to_vec(), None).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let m = mock.lock().unwrap();
+        let id = m.inits[0].clone();
+        let key = beebeeb_core::kdf::derive_file_key(&master(), id.as_bytes());
+        let meta = beebeeb_core::encrypt::decrypt_file_metadata_with_key(&key, &m.init_names[0]).unwrap();
+        assert_eq!(meta.version.expect("committed").counter, 1);
+        let mut dec = ChunkDecryptor::for_version_with_file_key(key, &id, meta.chunk_format, meta.version);
+        let frame = m.chunk_bodies.values().next().unwrap();
+        assert_eq!(dec.push_frame(frame).unwrap().data, b"hello");
+        dec.finish().unwrap();
+    }
+}

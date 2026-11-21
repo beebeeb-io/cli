@@ -268,7 +268,7 @@ pub(crate) struct Records {
 }
 
 impl Records {
-    fn load(path: PathBuf) -> Result<Records, String> {
+    pub(crate) fn load(path: PathBuf) -> Result<Records, String> {
         let mut by_key = BTreeMap::new();
         match std::fs::read_to_string(&path) {
             Ok(text) => {

@@ -93,6 +93,8 @@ pub struct Mock {
     pub trashed: Vec<String>,
     /// `GET /files/{id}` answers: id -> metadata. Absent = 404.
     pub files: HashMap<String, serde_json::Value>,
+    /// `GET /files` (the listing) answers this document. Unset = 404 (a WebDAV path resolves as new).
+    pub listing: Option<serde_json::Value>,
     /// Task 2334: `GET /files/{id}` answers this status for every id instead
     /// (a server that cannot say where an upload was going).
     pub file_status: Option<u16>,
@@ -428,7 +430,15 @@ fn router(state: Shared) -> Router {
             ),
         )
         // The listing: nothing is listed (a WebDAV path resolves as new).
-        .route("/api/v1/files", get(|| async { not_found() }))
+        .route(
+            "/api/v1/files",
+            get(|State(st): State<Shared>| async move {
+                match st.lock().unwrap().listing.clone() {
+                    Some(doc) => Json(doc).into_response(),
+                    None => not_found(),
+                }
+            }),
+        )
         .route(
             "/api/v1/file-requests",
             get(|State(st): State<Shared>| async move {

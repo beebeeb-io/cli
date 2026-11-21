@@ -753,7 +753,9 @@ pub(super) async fn upload_attempt(
             match api
                 .upload_init_for_transport(
                     Some(file_id),
-                    &name_encrypted,
+                    // A v2 create sends the sealed name (with its commitment) as the init's own name, so it
+                    // works without the server's version-metadata flag.
+                    version_metadata.as_deref().unwrap_or(&name_encrypted),
                     spec.parent_id,
                     size as i64,
                     chunk_size as i64,

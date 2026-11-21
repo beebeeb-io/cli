@@ -310,58 +310,81 @@ pub(super) async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8
         },
     };
     let file_uuid = proposed.id();
-    // L13: a replacement seals through the resolver's write target (key and
-    // chunk-format pin). A fresh item uses the string convention. A listed row
-    // this client cannot resolve is never overwritten under a guessed key.
-    let (file_key, name_pin) = match existing.as_ref().and_then(|e| e.write_target.clone()) {
-        Some(target) => (crate::crypto::key_copy(target.key()), target.pin()),
-        None => {
-            if existing_file_id.is_some() {
-                return (StatusCode::CONFLICT, crate::owned_keys::UNREADABLE).into_response();
-            }
-            (
-                beebeeb_core::kdf::derive_file_key(&state.master_key, file_uuid.to_string().as_bytes()),
-                beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
-            )
-        }
+    // L13: a replacement seals through the resolver's write target (key, chunk-format pin and the current
+    // version commitment). A fresh item uses the string convention. A listed row this client cannot resolve is
+    // never overwritten under a guessed key.
+    let target = existing.as_ref().and_then(|e| e.write_target.clone());
+    if target.is_none() && existing_file_id.is_some() {
+        return (StatusCode::CONFLICT, crate::owned_keys::UNREADABLE).into_response();
+    }
+    let (file_key, name_pin, previous) = match &target {
+        Some(t) => (crate::crypto::key_copy(t.key()), t.pin(), t.version()),
+        None => (
+            beebeeb_core::kdf::derive_file_key(&state.master_key, file_uuid.to_string().as_bytes()),
+            beebeeb_core::chunk_stream::ExpectedChunkFormat::Unrecorded,
+            None,
+        ),
     };
 
-    // Encrypt filename (MIME type is now part of the encrypted envelope)
     let mime = beebeeb_core::media::guess_mime_type(&filename);
-    let name_encrypted = match beebeeb_core::encrypt::encrypt_name_for(&file_key, &filename, mime, name_pin) {
-        Ok(s) => s,
-        Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-        }
-    };
-
     let plan = beebeeb_types::plan_chunks(body.len() as u64, beebeeb_types::ChunkProfile::Cli);
     let chunk_size = plan.chunk_size_bytes as usize;
-
     let chunks_raw: Vec<&[u8]> = if body.is_empty() {
         vec![&[]]
     } else {
         body.chunks(chunk_size).collect()
     };
 
+    // Core's current writer: v2 frames, frame 0 sealed first (its id is the version id), then the name sealed
+    // with the successor commitment. Seal order matters: the name is built after the frames.
+    let mut encryptor = match beebeeb_core::chunk_stream::ChunkEncryptor::for_push_with_file_key(
+        crate::crypto::key_copy(&file_key),
+        &file_uuid.to_string(),
+        body.len() as u64,
+        chunk_size as u64,
+    )
+    .and_then(|e| e.with_recorded_pin(name_pin))
+    {
+        Ok(e) => e,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("init encryptor: {e}")).into_response(),
+    };
     let mut encrypted_chunks: Vec<(u32, Vec<u8>)> = Vec::with_capacity(chunks_raw.len());
-    let mut total_encrypted_size: i64 = 0;
-
     for (i, chunk) in chunks_raw.iter().enumerate() {
-        let bytes = match beebeeb_core::encrypt::encrypt_chunk_raw(&file_key, chunk) {
-            Ok(b) => b,
+        match encryptor.push_chunk(chunk) {
+            Ok(c) => encrypted_chunks.push((c.index, c.data)),
             Err(e) => {
                 return (StatusCode::INTERNAL_SERVER_ERROR, format!("encrypt chunk {i}: {e}")).into_response();
             }
-        };
-        total_encrypted_size += bytes.len() as i64;
-        encrypted_chunks.push((i as u32, bytes));
+        }
+    }
+    let format = encryptor.format();
+    let sealed = if format == beebeeb_core::chunk_stream::ChunkFormat::V2 {
+        encryptor
+            .version_commitment_after(previous.map(|v| v.counter))
+            .and_then(|commitment| {
+                beebeeb_core::encrypt::encrypt_name_for_version(
+                    &file_key,
+                    &filename,
+                    mime,
+                    beebeeb_core::chunk_stream::ExpectedChunkFormat::recorded_for(format),
+                    commitment,
+                )
+            })
+    } else {
+        beebeeb_core::encrypt::encrypt_name_for(&file_key, &filename, mime, name_pin)
+    };
+    let name_encrypted = match sealed {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let version_metadata = (format == beebeeb_core::chunk_stream::ChunkFormat::V2).then(|| name_encrypted.clone());
+    if let Err(e) = encryptor.finish() {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("integrity check failed: {e}")).into_response();
     }
 
     let parent_uuid = parent_id.as_deref().and_then(|s| s.parse::<uuid::Uuid>().ok());
     let is_media = beebeeb_core::media::is_media(mime);
     let effective_file_id = Some(file_uuid);
-    let _ = total_encrypted_size; // v2 init takes plaintext size; server recomputes encrypted total
 
     // On a replace (the path already had a file), pass the existing file's
     // current version_number as the v2 optimistic-concurrency base so the server
@@ -379,7 +402,7 @@ pub(super) async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8
     // V2 upload: init (open session) → chunks (by session) → complete (by session).
     let init = match state
         .api
-        .upload_init(
+        .upload_init_for_transport(
             effective_file_id,
             &name_encrypted,
             parent_uuid,
@@ -388,6 +411,8 @@ pub(super) async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8
             encrypted_chunks.len() as i32,
             is_media,
             base_version_number,
+            version_metadata.as_deref(),
+            crate::api::InitTransport::Api,
         )
         .await
     {
@@ -413,7 +438,7 @@ pub(super) async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8
         }
     }
 
-    match state.api.upload_complete(&session_id).await {
+    match state.api.upload_complete_sealed_typed(&session_id, version_metadata.as_deref()).await {
         Ok(answer) => {
             // L13 (SF-0001): the completion answer must name the same item.
             if let Err(e) = proposed.verify(crate::item_id::echoed_id(&answer)) {

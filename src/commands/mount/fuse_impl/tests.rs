@@ -109,7 +109,7 @@ mod truncate_tests {
 
     fn file_entry_with_pin(
         size: u64,
-        pin: Result<beebeeb_core::chunk_stream::ExpectedChunkFormat, String>,
+        pin: Result<crate::crypto::ReadPin, String>,
     ) -> InodeEntry {
         InodeEntry {
             file_id: Some(FILE_ID.to_string()),
@@ -148,7 +148,7 @@ mod truncate_tests {
         pin: beebeeb_core::chunk_stream::ExpectedChunkFormat,
     ) -> BeebeebFsState {
         let mut fs = BeebeebFsState::new(ApiClient::new_for_test(url), master_key(), Duration::from_secs(5));
-        fs.inodes.insert(INO, file_entry_with_pin(size, Ok(pin)));
+        fs.inodes.insert(INO, file_entry_with_pin(size, Ok(pin.into())));
         fs
     }
 
@@ -874,7 +874,7 @@ mod replace_tests {
             chunk_count: if file_id.is_some() { 1 } else { 0 },
             modified: SystemTime::UNIX_EPOCH,
             parent_ino: ROOT_INO,
-            pin: Ok(ExpectedChunkFormat::Unrecorded),
+            pin: Ok(crate::crypto::ReadPin::UNRECORDED),
             read_only,
             request_class: false,
         }
@@ -957,9 +957,9 @@ mod replace_tests {
     #[test]
     fn an_overwrite_resets_the_pin_and_the_read_only_flag() {
         let (mut fs, _mock) = setup(Mock::default());
-        fs.inodes.get_mut(&OK_INO).unwrap().pin = Ok(ExpectedChunkFormat::V2);
+        fs.inodes.get_mut(&OK_INO).unwrap().pin = Ok(ExpectedChunkFormat::V2.into());
         fs.commit_overwrite(OK_INO, b"new".to_vec()).expect("overwrite");
-        assert_eq!(fs.inodes[&OK_INO].pin, Ok(ExpectedChunkFormat::Unrecorded));
+        assert_eq!(fs.inodes[&OK_INO].pin, Ok(crate::crypto::ReadPin::UNRECORDED));
 
         fs.inodes.get_mut(&OK_INO).unwrap().read_only = true;
         fs.upload_file(OK_INO, "ok.txt", b"again".to_vec(), ROOT_INO)
