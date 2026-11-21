@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.5] - 2026-11-21
+
+### Fixed
+- `bb push` and `bb push --replace` seal each version with its version commitment (frame 0's id and a counter that rises by one per replace), published with `complete`, as the desktop and web apps do. Without it, current readers refuse a v2 version the CLI wrote.
+
+### Changed
+- Uses Beebeeb core v0.3.0 (`a78e525`), was v0.2.8. `bb pull --zip` passes each entry's commitment to core.
+
 ## [0.17.4] - 2026-11-08
 
 ### Fixed

@@ -303,19 +303,34 @@ impl ApiClient {
     /// [`upload_complete`](Self::upload_complete), keeping the HTTP status +
     /// server code (task 1589; see [`upload_chunk_typed`](Self::upload_chunk_typed)).
     pub async fn upload_complete_typed(&self, upload_session_id: impl Into<DirectUploadId>) -> Result<Value, ApiError> {
+        self.upload_complete_sealed_typed(upload_session_id, None).await
+    }
+
+    /// `complete` that also publishes the sealed name + version commitment (`name_encrypted` and
+    /// `version_metadata_encrypted`, one envelope), as core's own uploads do.
+    pub async fn upload_complete_sealed_typed(
+        &self,
+        upload_session_id: impl Into<DirectUploadId>,
+        sealed_name: Option<&str>,
+    ) -> Result<Value, ApiError> {
         let upload_session_id = upload_session_id.into();
         let token = self.require_auth()?;
         for _ in 0..3 {
             if !pace_if_needed(&self.base_url).await {
                 return Err(crate::upload::INTERRUPTED.to_string().into());
             }
-            let resp = self
+            let request = self
                 .client
                 .post(self.url(&format!("/api/v1/uploads/{upload_session_id}/complete")))
-                .bearer_auth(token)
-                .send()
-                .await
-                .map_err(format_request_error)?;
+                .bearer_auth(token);
+            let request = match sealed_name {
+                Some(sealed) => request.json(&serde_json::json!({
+                    "name_encrypted": sealed,
+                    "version_metadata_encrypted": sealed,
+                })),
+                None => request,
+            };
+            let resp = request.send().await.map_err(format_request_error)?;
             match parse_response_typed(resp).await {
                 Err(e) if e.message == super::RATE_LIMITED_MESSAGE => continue,
                 other => return other,

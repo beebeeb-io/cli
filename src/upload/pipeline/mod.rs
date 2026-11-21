@@ -844,8 +844,8 @@ pub(super) async fn upload_attempt(
     // logical file (Codex thread #2). So a failure at either stage finishes
     // the bar as `false`, and `finish(true)` fires only once both stages of
     // THIS attempt actually succeeded.
-    let confirmed = match result {
-        Ok(confirmed) => confirmed,
+    let (confirmed, version_id) = match result {
+        Ok(done) => done,
         // Spec §5.2: a resumed session the server reports already completed is finished, not failed. `complete`
         // answers `already_completed` and the file id; the server's row decides whether the file is done here,
         // done in another folder (upload it again here, leaving the finished one), or gone (upload it again).
@@ -963,7 +963,20 @@ pub(super) async fn upload_attempt(
     }
 
     // 7. Finalise the version.
-    let completed = match api.upload_complete_typed(&upload_session_id).await {
+    // The name is sealed now, not at init: the version commitment (frame 0's id, the successor counter) exists only
+    // once frame 0 is sealed. The commitment-bearing name goes out with `complete`, as core's own uploads do.
+    let sealed_name = match seal_version_name(api, master_key, spec, &file_id_str, mime, format, version_id).await {
+        Ok(sealed) => sealed,
+        Err(e) => {
+            file_prog.finish(false);
+            end_session(api, &spec.path, &file_id_str).await;
+            return Err(AttemptErr::Other(e));
+        }
+    };
+    let completed = match api
+        .upload_complete_sealed_typed(&upload_session_id, sealed_name.as_deref())
+        .await
+    {
         Ok(v) => v,
         Err(e) => {
             // Every chunk was confirmed (`run_pipeline` returns `Ok` only once
@@ -1186,3 +1199,106 @@ mod completed_session_tests;
 /// is a change and not a failure.
 #[cfg(test)]
 mod source_changed_tests;
+
+/// The name envelope that carries this version's commitment, for `complete`. `None` for a v1 write (no commitment
+/// exists: the init's name stands). A replace's counter is the successor of the row's current one; a new file's is 1.
+async fn seal_version_name(
+    api: &ApiClient,
+    master_key: &beebeeb_core::kdf::MasterKey,
+    spec: &UploadSpec,
+    file_id: &str,
+    mime: Option<&str>,
+    format: beebeeb_core::chunk_stream::ChunkFormat,
+    version_id: Option<[u8; beebeeb_core::chunk_stream::VERSION_ID_LEN]>,
+) -> Result<Option<String>, String> {
+    use beebeeb_core::chunk_stream::ChunkFormat;
+    if format != ChunkFormat::V2 {
+        return Ok(None);
+    }
+    let version_id = version_id.ok_or("seal version name: no frame 0 was sealed")?;
+    let (file_key, previous) = match (&spec.replace_file_key, replacing(spec)) {
+        (Some(key), Some(row)) => {
+            let meta = api
+                .get_file(&row.to_string())
+                .await
+                .map_err(|e| format!("read the current version: {e}"))?;
+            let current = meta
+                .get("name_encrypted")
+                .and_then(|v| v.as_str())
+                .ok_or("server response missing name_encrypted")?;
+            let current = beebeeb_core::encrypt::decrypt_file_metadata_with_key(key, current)
+                .map_err(|e| format!("read the current version: {e}"))?;
+            (crate::crypto::key_copy(key), current.version)
+        }
+        _ => (beebeeb_core::kdf::derive_file_key(master_key, file_id.as_bytes()), None),
+    };
+    seal_commitment_name(&file_key, &spec.file_name, mime, format, version_id, previous).map(Some)
+}
+
+/// The sealing step alone (no network): this version's commitment, then the envelope core's readers check.
+pub(super) fn seal_commitment_name(
+    file_key: &beebeeb_core::kdf::FileKey,
+    file_name: &str,
+    mime: Option<&str>,
+    format: beebeeb_core::chunk_stream::ChunkFormat,
+    version_id: [u8; beebeeb_core::chunk_stream::VERSION_ID_LEN],
+    previous: Option<beebeeb_core::chunk_stream::VersionCommitment>,
+) -> Result<String, String> {
+    let commitment = beebeeb_core::chunk_stream::VersionCommitment::next(version_id, previous)
+        .map_err(|e| format!("version commitment: {e}"))?;
+    beebeeb_core::encrypt::encrypt_name_for_version(
+        file_key,
+        file_name,
+        mime,
+        ExpectedChunkFormat::recorded_for(format),
+        commitment,
+    )
+    .map_err(|e| format!("encrypt name: {e}"))
+}
+
+#[cfg(test)]
+mod version_name_tests {
+    use super::*;
+    use beebeeb_core::chunk_stream::{ChunkDecryptor, ChunkEncryptor};
+
+    /// A version sealed as `push` / `push --replace` seal it opens with core's current reader (the desktop's
+    /// path): the name carries frame 0's id and the successor counter, and the content opens only as that upload.
+    #[test]
+    fn sealed_version_opens_with_cores_current_reader() {
+        let master = beebeeb_core::kdf::derive_master_key("pw", &[7u8; 16]).unwrap();
+        let file_id = "11111111-1111-4111-8111-111111111111";
+        let file_key = beebeeb_core::kdf::derive_file_key(&master, file_id.as_bytes());
+        let plaintext = b"hello versions".to_vec();
+        let seal = |previous| {
+            let mut enc = ChunkEncryptor::from_reader_with_chunk_size(
+                &master,
+                file_id,
+                plaintext.len() as u64,
+                1 << 20,
+                std::io::Cursor::new(plaintext.clone()),
+            )
+            .unwrap()
+            .with_recorded_pin(ExpectedChunkFormat::V2)
+            .unwrap();
+            let frame = enc.next_chunk().unwrap().unwrap().data;
+            let version_id = enc.version_id().unwrap();
+            let name = seal_commitment_name(&file_key, "a.txt", None, enc.format(), version_id, previous).unwrap();
+            (name, frame, version_id)
+        };
+        // A new file, then a replace of it.
+        let (first_name, first_frame, first_id) = seal(None);
+        let first = beebeeb_core::encrypt::decrypt_file_metadata_with_key(&file_key, &first_name).unwrap();
+        assert_eq!(first.version.unwrap().counter, 1);
+        let (second_name, second_frame, second_id) = seal(first.version);
+        let second = beebeeb_core::encrypt::decrypt_file_metadata_with_key(&file_key, &second_name).unwrap();
+        let commitment = second.version.unwrap();
+        assert_eq!((commitment.counter, commitment.version_id), (2, second_id));
+        assert_ne!(first_id, second_id);
+
+        let mut reader = ChunkDecryptor::for_current_version(&master, file_id, &second);
+        assert_eq!(reader.push_frame(&second_frame).unwrap().data, plaintext);
+        // The old version's content does not open under the replaced row's metadata.
+        let mut stale = ChunkDecryptor::for_current_version(&master, file_id, &second);
+        assert!(stale.push_frame(&first_frame).is_err());
+    }
+}
