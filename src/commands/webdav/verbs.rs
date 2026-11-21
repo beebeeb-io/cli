@@ -379,7 +379,11 @@ pub(super) async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8
     };
     let version_metadata = (format == beebeeb_core::chunk_stream::ChunkFormat::V2).then(|| name_encrypted.clone());
     if let Err(e) = encryptor.finish() {
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("integrity check failed: {e}")).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("integrity check failed: {e}"),
+        )
+            .into_response();
     }
 
     let parent_uuid = parent_id.as_deref().and_then(|s| s.parse::<uuid::Uuid>().ok());
@@ -438,7 +442,11 @@ pub(super) async fn put_response(state: &Arc<DavState>, path: &str, body: Vec<u8
         }
     }
 
-    match state.api.upload_complete_sealed_typed(&session_id, version_metadata.as_deref()).await {
+    match state
+        .api
+        .upload_complete_sealed_typed(&session_id, version_metadata.as_deref())
+        .await
+    {
         Ok(answer) => {
             // L13 (SF-0001): the completion answer must name the same item.
             if let Err(e) = proposed.verify(crate::item_id::echoed_id(&answer)) {

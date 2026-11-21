@@ -287,7 +287,7 @@ impl BackupHost for CliHost<'_> {
             .write_target
             .ok_or_else(|| HostError(crate::owned_keys::RENAME_UNKNOWN_KEY.to_string()))?;
         let sealed = beebeeb_core::encrypt::encrypt_name_for_target(&target, new_name, None)
-        .map_err(|e| HostError(format!("failed to encrypt the new name: {e}")))?;
+            .map_err(|e| HostError(format!("failed to encrypt the new name: {e}")))?;
         self.api
             .move_file(&id.to_string(), Some(&sealed), Some(Some(new_parent)))
             .await
@@ -383,15 +383,12 @@ mod move_tests {
         const ID: &str = "11111111-1111-4111-8111-111111111111";
         let master = Arc::new(MasterKey::from_bytes([7u8; 32]));
         let key = beebeeb_core::kdf::derive_file_key(&master, ID.as_bytes());
-        let commitment = beebeeb_core::chunk_stream::VersionCommitment::new([9u8; beebeeb_core::chunk_stream::VERSION_ID_LEN], 3).unwrap();
-        let sealed = beebeeb_core::encrypt::encrypt_name_for_version(
-            &key,
-            "old.txt",
-            None,
-            ExpectedChunkFormat::V2,
-            commitment,
-        )
-        .unwrap();
+        let commitment =
+            beebeeb_core::chunk_stream::VersionCommitment::new([9u8; beebeeb_core::chunk_stream::VERSION_ID_LEN], 3)
+                .unwrap();
+        let sealed =
+            beebeeb_core::encrypt::encrypt_name_for_version(&key, "old.txt", None, ExpectedChunkFormat::V2, commitment)
+                .unwrap();
         let row = json!({"id": ID, "parent_id": null, "name_encrypted": sealed, "is_folder": false,
             "size_bytes": 3, "chunk_count": 1, "updated_at": "2026-10-31T10:00:00Z",
             "owner_wrapped_file_key": null, "acted_via_share_id": null, "uploaded_by": null});
@@ -402,13 +399,19 @@ mod move_tests {
         let records = Records::load(std::env::temp_dir().join(format!("bb-move-{}.jsonl", Uuid::new_v4()))).unwrap();
         let host = CliHost::new(&api, master, Category::Documents, (true, Some(true)), None, records);
 
-        host.move_file(ID.parse().unwrap(), Uuid::new_v4(), "new.txt").await.unwrap();
+        host.move_file(ID.parse().unwrap(), Uuid::new_v4(), "new.txt")
+            .await
+            .unwrap();
 
         let m = mock.lock().unwrap();
         let name = m.move_bodies[0].1["name_encrypted"].as_str().unwrap();
         let meta = beebeeb_core::encrypt::decrypt_file_metadata_with_key(&key, name).unwrap();
         assert_eq!(meta.name, "new.txt");
         assert_eq!(meta.chunk_format, ExpectedChunkFormat::V2);
-        assert_eq!(meta.version, Some(commitment), "the commitment is carried over, not dropped");
+        assert_eq!(
+            meta.version,
+            Some(commitment),
+            "the commitment is carried over, not dropped"
+        );
     }
 }

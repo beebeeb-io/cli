@@ -1192,7 +1192,11 @@ mod put_version_commitment_tests {
         let mut frames: Vec<_> = m.chunk_bodies.iter().collect();
         frames.sort_by_key(|((_, i), _)| *i);
         for (_, frame) in frames {
-            out.extend(dec.push_frame(frame).expect("core's reader opens what the PUT wrote").data);
+            out.extend(
+                dec.push_frame(frame)
+                    .expect("core's reader opens what the PUT wrote")
+                    .data,
+            );
         }
         dec.finish().expect("the upload is complete");
         out
@@ -1231,8 +1235,10 @@ mod put_version_commitment_tests {
             "size_bytes": old.len(), "chunk_count": 1, "updated_at": "2026-10-31T10:00:00Z",
             "owner_wrapped_file_key": null, "acted_via_share_id": null, "uploaded_by": null,
             "version_number": 1});
-        let mut mock = Mock::default();
-        mock.listing = Some(json!({ "files": [row.clone()] }));
+        let mut mock = Mock {
+            listing: Some(json!({ "files": [row.clone()] })),
+            ..Default::default()
+        };
         mock.files.insert(OWNED.to_string(), row);
         mock.downloads.insert(OWNED.to_string(), frame);
         let mock: Shared = shared(mock);
@@ -1245,7 +1251,11 @@ mod put_version_commitment_tests {
         let init_name = m.init_names[0].clone();
         let init_meta = beebeeb_core::encrypt::decrypt_file_metadata_with_key(&key, &init_name).unwrap();
         let version = init_meta.version.expect("the init's name carries the commitment");
-        assert_eq!(version.counter, current.counter + 1, "the successor of the current version");
+        assert_eq!(
+            version.counter,
+            current.counter + 1,
+            "the successor of the current version"
+        );
         assert_ne!(version.version_id, current.version_id);
         assert_eq!(
             m.init_bodies[0]["version_metadata_encrypted"],

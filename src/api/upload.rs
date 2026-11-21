@@ -308,6 +308,7 @@ impl ApiClient {
     /// Verifies all chunks landed, flips the file to the new version, and returns
     /// the full file metadata. Idempotent (a second call on a completed session
     /// returns `{already_completed: true}`).
+    #[cfg_attr(not(feature = "fuse"), allow(dead_code))]
     pub async fn upload_complete(&self, upload_session_id: impl Into<DirectUploadId>) -> Result<Value, ApiError> {
         self.upload_complete_typed(upload_session_id).await
     }
