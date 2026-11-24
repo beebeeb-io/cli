@@ -14,7 +14,7 @@ const EVIDENCE_DIR = process.env.EVIDENCE_DIR ?? './test-2fa-evidence';
 const TEST_EMAIL = process.env.CLI_AUTH_TEST_EMAIL;
 const TEST_PASSWORD = process.env.CLI_AUTH_TEST_PASSWORD;
 const TEST_TOTP_SECRET = process.env.CLI_AUTH_TEST_TOTP_SECRET;
-// Fresh Playwright sessions have no local vault — recovery phrase is needed
+// Fresh Playwright sessions have no local vault — master key is needed
 // to unlock so the browser can perform the CLI ECDH handshake.
 const TEST_RECOVERY_PHRASE = process.env.CLI_AUTH_TEST_RECOVERY_PHRASE;
 
@@ -63,20 +63,20 @@ try {
 
   // After TOTP, this fresh browser session has no local vault yet —
   // app.tsx will route to /onboarding/setup-device (device-provision
-  // component). We need to restore the vault from the recovery phrase
+  // component). We need to restore the vault from the master key
   // before /cli-auth can complete the ECDH handshake.
   //
   // Task 1528 (web, deployed 2026-09-25): DeviceProvision replaced the single
   // #recovery-phrase textarea with 12 individually-labeled word boxes
-  // ("Recovery word 1".."Recovery word 12"). Box 1 accepts a full
+  // ("Master key word 1".."Recovery word 12"). Box 1 accepts a full
   // space-separated paste and distributes it across all 12
   // (device-provision.tsx applyWords) — same locator pattern web's own e2e
   // helpers use (repos/web/e2e/helpers/auth.ts, e2e/prod-smoke/helpers.ts).
-  const recoveryTextarea = page.getByLabel('Recovery word 1', { exact: true });
+  const recoveryTextarea = page.getByLabel('Master key word 1', { exact: true });
   const cliAuthLanded = page.waitForURL(new RegExp(`/cli-auth\\?code=${USER_CODE}`));
 
   // Race: either we go straight back to /cli-auth (existing vault) or the
-  // device-provision page appears with the recovery-phrase word boxes.
+  // device-provision page appears with the master-key word boxes.
   await Promise.race([
     recoveryTextarea.waitFor({ state: 'visible', timeout: 30000 }),
     cliAuthLanded,
@@ -88,7 +88,7 @@ try {
         'device-provision page shown but CLI_AUTH_TEST_RECOVERY_PHRASE is unset',
       );
     }
-    console.log('  driver: device-provision → entering recovery phrase');
+    console.log('  driver: device-provision → entering master key');
     // .fill() on box 1 with the full space-separated phrase mirrors a user
     // pasting all 12 words at once (device-provision.tsx's onChange path
     // detects whitespace and distributes across all 12 boxes — see

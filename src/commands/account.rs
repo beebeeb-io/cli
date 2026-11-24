@@ -250,9 +250,9 @@ pub async fn show() -> Result<(), String> {
             let ok = f["satisfied"].as_bool().unwrap_or(false);
             let label = match key {
                 "email_verified" => "email verified",
-                "phrase_saved" => "recovery phrase saved",
+                "phrase_saved" => "master key saved",
                 "two_factor_enabled" => "2fa enabled",
-                "phrase_recently_tested" => "recovery phrase tested in last 90d",
+                "phrase_recently_tested" => "master key tested in last 90d",
                 "all_devices_recognized" => "all sessions on recognised devices",
                 other => other,
             };
