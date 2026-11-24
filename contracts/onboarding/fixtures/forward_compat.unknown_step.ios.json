@@ -90,13 +90,13 @@
       }
     },
     {
-      "id": "set_password",
+      "id": "save_recovery_phrase",
       "status": "todo",
       "required": true,
       "ui": "action"
     },
     {
-      "id": "save_recovery_phrase",
+      "id": "set_password",
       "status": "todo",
       "required": true,
       "ui": "action"
