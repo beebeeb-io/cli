@@ -68,11 +68,11 @@ try {
   //
   // Task 1528 (web, deployed 2026-09-25): DeviceProvision replaced the single
   // #recovery-phrase textarea with 12 individually-labeled word boxes
-  // ("Master key word 1".."Recovery word 12"). Box 1 accepts a full
+  // ("Recovery word 1".."Recovery word 12"). Box 1 accepts a full
   // space-separated paste and distributes it across all 12
   // (device-provision.tsx applyWords) — same locator pattern web's own e2e
   // helpers use (repos/web/e2e/helpers/auth.ts, e2e/prod-smoke/helpers.ts).
-  const recoveryTextarea = page.getByLabel('Master key word 1', { exact: true });
+  const recoveryTextarea = page.getByLabel('Recovery word 1', { exact: true });
   const cliAuthLanded = page.waitForURL(new RegExp(`/cli-auth\\?code=${USER_CODE}`));
 
   // Race: either we go straight back to /cli-auth (existing vault) or the
