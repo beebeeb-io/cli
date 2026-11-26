@@ -1018,16 +1018,11 @@ mod tests {
 
     #[test]
     fn signup_block_is_read_from_the_pre_account_fixtures() {
-        // Signup is web-only (tasks 1834/1836): only the web fixture offers a native signup.
+        // Signup is allowed from every app (server: "Allow signup from every app", supersedes 1834/1836).
         for (name, mode, allowed, reason) in [
             ("pre_account.web", SignupMode::Native, true, None),
-            ("pre_account.ios", SignupMode::WebOnly, false, Some("signup_web_only")),
-            (
-                "pre_account.desktop",
-                SignupMode::WebOnly,
-                false,
-                Some("signup_web_only"),
-            ),
+            ("pre_account.ios", SignupMode::Native, true, None),
+            ("pre_account.desktop", SignupMode::Native, true, None),
         ] {
             let info = OnboardingDoc::parse(&fixture(name)).unwrap().signup().unwrap();
             assert_eq!(info.mode, mode, "{name}");
