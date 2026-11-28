@@ -64,6 +64,7 @@ pub(crate) async fn upload_chunk(
         let (failure, status) = match call {
             dt::Call::UploadGrant => match api.upload_grant(session.as_str(), index, size, discovery).await {
                 UploadCall::Ok(dt::UploadGrant::Skipped) => {
+                    pause::answered(api.pause_origin());
                     return Ok(if put_stored {
                         Held::Transferred
                     } else {
@@ -71,6 +72,8 @@ pub(crate) async fn upload_chunk(
                     });
                 }
                 UploadCall::Ok(dt::UploadGrant::Link(link)) => {
+                    // A grant that is not a 429 ends the run of 429 pauses, as on every other API route.
+                    pause::answered(api.pause_origin());
                     state.link_issued();
                     let status = api.put_to_storage(&link, data.clone()).await;
                     if dt::put_stored(status) {
@@ -85,7 +88,10 @@ pub(crate) async fn upload_chunk(
                 UploadCall::SessionCompleted => return Err(DirectUploadError::SessionCompleted),
             },
             dt::Call::UploadCommit => match api.upload_commit(session.as_str(), index, size).await {
-                UploadCall::Ok(_) => return Ok(Held::Transferred),
+                UploadCall::Ok(_) => {
+                    pause::answered(api.pause_origin());
+                    return Ok(Held::Transferred);
+                }
                 UploadCall::Failed { outcome, status } => (dt::UploadFailure::Commit(outcome), status),
                 UploadCall::SessionGone(message) => return Err(DirectUploadError::SessionGone(message)),
                 UploadCall::SessionCompleted => return Err(DirectUploadError::SessionCompleted),
@@ -97,13 +103,14 @@ pub(crate) async fn upload_chunk(
             dt::UploadNext::Retry { after, call: next } => {
                 prog.chunk_retried(index);
                 // A 429 (any route) or a 503 (grant, storage PUT, commit) pauses every request of the process
-                // for the wait the policy ordered (spec §6.1). The shared gate ends on the push's bound interrupt;
+                // through the shared gate (spec §6.1): a 429 by the client pause rule (its floor and jitter, the
+                // policy's wait as the server's hint), a 503 for the wait the policy ordered. The gate lets its
+                // waiters go one by one. It ends on the push's bound interrupt;
                 // this run's shutdown flag (bb sync, or a push before its interrupt is bound) ends it too, raced
                 // alongside, so the wait stops either way. Any other failure keeps this chunk's own jittered wait,
                 // so chunks that fail together do not retry together. Either way the try is spent.
-                let went_on = match pause::reason_for(status) {
-                    Some(why) => {
-                        pause::extend(api.pause_origin(), after, why);
+                let went_on = match pause::chunk_refused(api.pause_origin(), status, after) {
+                    Some(_) => {
                         tokio::select! {
                             open = pause::wait_open(api.pause_origin()) => open,
                             _ = shutdown_set(shutdown) => false,

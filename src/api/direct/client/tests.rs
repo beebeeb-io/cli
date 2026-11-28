@@ -387,13 +387,13 @@ async fn the_pinned_route_retries_what_may_pass_and_gives_the_chunk() {
     let (api, hits) = scripted_api(vec![Reply::Status(503), Reply::Status(500), Reply::Body(vec![9; 5])]).await;
     assert_eq!(pinned(&api, FAST, 5).await.ok(), Some(vec![9; 5]));
     assert_eq!(hits.load(Ordering::SeqCst), 3);
-    // A 429 with Retry-After: 1 waits that second, then the chunk.
+    // A 429 with Retry-After: 1 waits the pause rule's 2 s floor (the hint is shorter), then the chunk.
     let (api, hits) = scripted_api(vec![Reply::Status429(1), Reply::Body(vec![9; 5])]).await;
     let started = Instant::now();
     assert_eq!(pinned(&api, FAST, 5).await.ok(), Some(vec![9; 5]));
     assert!(
-        started.elapsed() >= Duration::from_millis(900),
-        "Retry-After was honoured"
+        started.elapsed() >= Duration::from_millis(1_900),
+        "the shared pause was waited for"
     );
     assert_eq!(hits.load(Ordering::SeqCst), 2);
     // A file held by another operation (409, Retry-After: 1) is waited for the same way.

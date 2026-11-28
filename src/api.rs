@@ -507,27 +507,30 @@ async fn parse_response_typed(resp: reqwest::Response) -> Result<Value, ApiError
     update_rate_state(resp.headers());
 
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        let retry_after = resp
+        let header = resp
             .headers()
             .get("retry-after")
             .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(5);
+            .and_then(|s| s.trim().parse::<u64>().ok());
         let remaining = resp
             .headers()
             .get("x-ratelimit-remaining")
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<u64>().ok());
+        let origin = pause::origin_of(resp.url().as_str());
+        // The server's hint is the larger of the header and the body's `retry_after`; with neither, the
+        // pause rule's floor decides.
+        let in_body = resp
+            .json::<Value>()
+            .await
+            .ok()
+            .and_then(|body| body.get("retry_after").and_then(Value::as_u64));
+        let retry_after = header.max(in_body);
 
         // One pause for every request of this process (spec §6.1): the gate prints the notice when this
         // begins a pause, and this call waits on the gate (not on a sleep of its own), so the workers of a push
         // stop and come back together. Any request of a push, pull or sync can meet a 429.
-        let origin = pause::origin_of(resp.url().as_str());
-        pause::extend(
-            &origin,
-            std::time::Duration::from_secs(retry_after),
-            pause::PauseReason::RateLimited { remaining },
-        );
+        pause::rate_limited(&origin, retry_after, remaining);
         if !pause::wait_open(&origin).await {
             return Err(ApiError {
                 code: None,
@@ -545,6 +548,8 @@ async fn parse_response_typed(resp: reqwest::Response) -> Result<Value, ApiError
             status: status.as_u16(),
         });
     }
+    // Any other answer ends the streak of 429 pauses.
+    pause::answered(resp.url().as_str());
 
     let body = resp.text().await.map_err(|e| ApiError {
         code: None,

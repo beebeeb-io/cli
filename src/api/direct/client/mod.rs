@@ -9,7 +9,7 @@
 //! offer/refusal text, the pinned route and the upload-session fallbacks.
 
 use super::*;
-use crate::api::DirectUploadId;
+use crate::api::{DirectUploadId, pause};
 
 impl ApiClient {
     /// The API origin this client talks to (the authority check needs it).
@@ -175,8 +175,9 @@ impl ApiClient {
     /// authenticate). `expected_len` is the stored length the grant manifest
     /// states for this chunk.
     ///
-    /// A transient failure (429, 5xx, a held file, a network blip) is retried a few times, honouring
-    /// `Retry-After`; only when that is spent does the caller give the file to the API stream.
+    /// A transient failure (5xx, a held file, a network blip) is retried a few times, honouring
+    /// `Retry-After`; a 429 closes the process's pause (`api::pause`) and the next try waits on it. Only
+    /// when the attempts or the budget are spent does the caller give the file to the API stream.
     pub(crate) async fn download_chunk_pinned(
         &self,
         file_id: &str,
@@ -196,15 +197,34 @@ impl ApiClient {
         version: &str,
         expected_len: u64,
     ) -> Result<Vec<u8>, ChunkApiError> {
+        let origin = self.pause_origin();
         let mut waited = Duration::ZERO;
         let mut attempt: u32 = 1;
         loop {
+            // Every try waits out the process's pause first (a 429 on any route, this one's included). Only a
+            // wait that follows this chunk's own failure counts against its budget.
+            let gate = tokio::time::Instant::now();
+            if !pause::wait_open(origin).await {
+                return Err(ChunkApiError::Failed(crate::upload::INTERRUPTED.to_string()));
+            }
+            if attempt > 1 {
+                waited += gate.elapsed();
+            }
             let (wait, message) = match self
                 .pinned_attempt(retry.idle, file_id, index, version, expected_len)
                 .await
             {
                 Ok(bytes) => return Ok(bytes),
                 Err(PinnedFailure::Final(e)) => return Err(e),
+                // The gate is closed for this 429: the next turn of the loop waits on it, if the attempts and
+                // the budget allow that wait.
+                Err(PinnedFailure::RateLimited { message }) => {
+                    if next_wait(retry, attempt, waited, pause::closed_for(origin)).is_none() {
+                        return Err(ChunkApiError::Failed(message));
+                    }
+                    attempt += 1;
+                    continue;
+                }
                 Err(PinnedFailure::Again { wait, message }) => {
                     let doubling = 2u32.saturating_pow(attempt - 1);
                     (wait.unwrap_or_else(|| retry.base.saturating_mul(doubling)), message)
@@ -253,8 +273,27 @@ impl ApiClient {
             }
         };
         let status = resp.status();
+        if status != reqwest::StatusCode::TOO_MANY_REQUESTS {
+            pause::answered(self.pause_origin());
+        }
         if !status.is_success() {
+            let remaining = resp
+                .headers()
+                .get("x-ratelimit-remaining")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok());
             let seen = answer_of(resp, 64 * 1024).await;
+            // A 429 pauses the whole process by the client pause rule; the hint is the larger of the header
+            // and the body's `retry_after`.
+            if seen.answer.status == 429 {
+                let in_body = serde_json::from_slice::<serde_json::Value>(&seen.body)
+                    .ok()
+                    .and_then(|body| body.get("retry_after").and_then(serde_json::Value::as_u64));
+                pause::rate_limited(self.pause_origin(), seen.retry_after_secs.max(in_body), remaining);
+                return Err(PinnedFailure::RateLimited {
+                    message: format!("download chunk {index} failed ({status})"),
+                });
+            }
             // On this route a 409 means the pinned version is gone. The server's body is the
             // sentence "download version unavailable; restart download from fresh metadata" (not
             // the grant route's `version_unavailable` code), so the status decides, whatever the
@@ -267,8 +306,8 @@ impl ApiClient {
             {
                 return Err(PinnedFailure::Final(ChunkApiError::Restart));
             }
-            // Otherwise the same questions as for a grant: authorization is final, "held" and
-            // rate limits wait, a server hiccup is tried again.
+            // Otherwise the same questions as for a grant: authorization is final, "held" waits, a
+            // server hiccup is tried again.
             let failed = format!("download chunk {index} failed ({status})");
             return Err(match dt::classify(dt::Call::DownloadGrant, &seen.answer) {
                 dt::Outcome::Terminal(t) if t.status == 401 => {
