@@ -2,18 +2,18 @@
 //! lowered-N line, the interrupt dropping the chunks in flight, out-of-order resume, and a chunk that fails for
 //! good. Peak in flight is read from 2333's recorder; the budget from `ChunkLimits`.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use beebeeb_core::chunk_stream::ChunkFormat;
 use beebeeb_core::kdf::MasterKey;
 use uuid::Uuid;
 
-use super::{UploadOutcome, UploadSpec, stream_encrypt_upload};
+use super::{stream_encrypt_upload, UploadOutcome, UploadSpec};
 use crate::api::ApiClient;
 use crate::interrupt::Interrupt;
-use crate::test_server::{ChunkHold, Mock, Scratch, Shared, shared, spawn};
+use crate::test_server::{shared, spawn, ChunkHold, Mock, Scratch, Shared};
 use crate::upload::limits::ChunkLimits;
 use crate::upload::{Recording, UploadError};
 
@@ -199,11 +199,16 @@ async fn parallel_3_on_a_big_fresh_file_runs_2() {
 
 /// The interrupt drops every PUT in flight: the mock sees 4 bodies aborted, the run returns interrupted within a
 /// second of real time, and the budget is empty after.
+///
+/// The file is 64 MiB (4 MiB chunks) on purpose: after the PUTs are dropped the run still joins its producer,
+/// which finishes the seal it is in and cannot be aborted. In a test build that is about 60 ms for a 4 MiB
+/// chunk and about 600 ms for a 32 MiB one, which left the one-second bound no room when the whole suite runs.
 #[tokio::test]
 async fn interrupt_drops_in_flight_puts() {
     let s = Scratch::new("parallel-interrupt");
-    let (path, size, _) = s.sparse_file(1024 * MIB);
+    let (path, size, _) = s.sparse_file(64 * MIB);
     let chunks = super::expected_chunks_for(size, 4);
+    assert_eq!(chunks, 16, "premise: 16 chunks of 4 MiB");
     let limits = ChunkLimits::new(4);
     let interrupt = Interrupt::new();
     let rec = Recording::default();
