@@ -1,5 +1,6 @@
 //! The pinned per-chunk API route's backoff: how long a refusal says to wait,
-//! what a failure means, and when the loop gives up.
+//! what a failure means, and when the loop gives up. A 429 is not waited for
+//! here: it closes the process's pause (`api::pause`) and the next try waits on it.
 //!
 //! Owns: `ChunkApiError`, `PinnedRetry`/`PinnedFailure`, `next_wait`,
 //! `stated_wait` and `PINNED_RETRY`.
@@ -58,9 +59,12 @@ pub(super) fn next_wait(retry: PinnedRetry, attempt: u32, waited: Duration, wait
 pub(super) enum PinnedFailure {
     /// Not worth another try (an authorization answer, a gone version, a refusal that will repeat).
     Final(ChunkApiError),
-    /// Could be gone in a moment: a 429, a 5xx, a held file, a network blip, a bad read.
+    /// Could be gone in a moment: a 5xx, a held file, a network blip, a bad read.
     /// `wait` is what the server asked for, if it did.
     Again { wait: Option<Duration>, message: String },
+    /// A 429: the process's pause (`api::pause`) is already closed for it, and the next try waits on that
+    /// gate, not on a sleep of this route's own.
+    RateLimited { message: String },
 }
 
 /// The wait a server names with `Retry-After: <seconds>`, clamped exactly like a 429's: core's

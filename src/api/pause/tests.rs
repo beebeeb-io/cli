@@ -21,14 +21,18 @@ async fn overlapping_pauses_are_counted_once_and_the_gate_opens_at_the_latest_en
     assert_eq!(pauses(origin), 1, "pauses, not extensions");
 
     assert!(wait_open(origin).await);
-    assert_eq!(start.elapsed(), Duration::from_millis(2100));
+    let at = start.elapsed();
+    assert!(
+        (Duration::from_millis(2100)..=Duration::from_millis(2350)).contains(&at),
+        "the latest end, plus the waiter's 0-250 ms: {at:?}"
+    );
 
     assert_eq!(extend(origin, Duration::from_secs(1), RATE), Extension::Opened);
     assert_eq!(pauses(origin), 2, "a pause after the gate opened is a new one");
 }
 
 #[tokio::test(start_paused = true)]
-async fn every_waiter_resumes_at_the_same_moment() {
+async fn every_waiter_resumes_within_250_ms_of_the_pause_end() {
     let origin = "http://pause-all-workers";
     let start = Instant::now();
     extend(origin, Duration::from_secs(2), RATE);
@@ -38,7 +42,10 @@ async fn every_waiter_resumes_at_the_same_moment() {
     for waiter in waiters {
         let (open, at) = waiter.await.expect("task");
         assert!(open);
-        assert_eq!(at, Duration::from_secs(2));
+        assert!(
+            (Duration::from_secs(2)..=Duration::from_millis(2250)).contains(&at),
+            "the pause end, plus the waiter's own 0-250 ms: {at:?}"
+        );
     }
 }
 
