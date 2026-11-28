@@ -24,7 +24,7 @@ async fn overlapping_pauses_are_counted_once_and_the_gate_opens_at_the_latest_en
     let at = start.elapsed();
     assert!(
         (Duration::from_millis(2100)..=Duration::from_millis(2350)).contains(&at),
-        "the latest end, plus the waiter's 0-250 ms: {at:?}"
+        "the latest end, plus a lone waiter's 0-250 ms: {at:?}"
     );
 
     assert_eq!(extend(origin, Duration::from_secs(1), RATE), Extension::Opened);
@@ -32,21 +32,112 @@ async fn overlapping_pauses_are_counted_once_and_the_gate_opens_at_the_latest_en
 }
 
 #[tokio::test(start_paused = true)]
-async fn every_waiter_resumes_within_250_ms_of_the_pause_end() {
+async fn four_waiters_are_released_spread_over_at_least_500_ms() {
     let origin = "http://pause-all-workers";
     let start = Instant::now();
     extend(origin, Duration::from_secs(2), RATE);
     let waiters: Vec<_> = (0..4)
         .map(|_| tokio::spawn(async move { (wait_open(origin).await, start.elapsed()) }))
         .collect();
+    let mut resumed = Vec::new();
     for waiter in waiters {
         let (open, at) = waiter.await.expect("task");
         assert!(open);
         assert!(
-            (Duration::from_secs(2)..=Duration::from_millis(2250)).contains(&at),
-            "the pause end, plus the waiter's own 0-250 ms: {at:?}"
+            (Duration::from_secs(2)..=Duration::from_secs(3)).contains(&at),
+            "the pause end, plus at most the 1 s release window: {at:?}"
+        );
+        resumed.push(at);
+    }
+    resumed.sort();
+    let spread = resumed[3] - resumed[0];
+    assert!(spread >= Duration::from_millis(500), "first to last: {spread:?}");
+    for pair in resumed.windows(2) {
+        let gap = pair[1] - pair[0];
+        assert!(gap >= Duration::from_millis(187), "no two go together: {gap:?}");
+    }
+}
+
+#[test]
+fn the_release_line_is_an_even_step_per_place_plus_a_quarter_step_of_jitter() {
+    assert_eq!(release_offset_ms(0, 4, 0), 0);
+    assert_eq!(release_offset_ms(3, 4, 0), 750);
+    assert_eq!(release_offset_ms(3, 4, 1_000), 812);
+    assert_eq!(release_offset_ms(0, 1, 1_000), 250, "one waiter alone: 0-250 ms");
+    assert_eq!(release_offset_ms(0, 0, 0), 0, "no division by zero");
+    for waiters in 1..=64 {
+        assert!(
+            release_offset_ms(waiters - 1, waiters, 1_000) <= 1_000,
+            "inside the window"
         );
     }
+    // The least spread of 4: the last with no jitter, the first with all of it.
+    assert!(release_offset_ms(3, 4, 0) - release_offset_ms(0, 4, 1_000) >= 500);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_new_pause_starts_a_new_release_line() {
+    let origin = "http://pause-next-line";
+    extend(origin, Duration::from_secs(1), RATE);
+    assert!(wait_open(origin).await);
+    extend(origin, Duration::from_secs(1), RATE);
+    let start = Instant::now();
+    assert!(wait_open(origin).await);
+    let at = start.elapsed();
+    assert!(
+        (Duration::from_secs(1)..=Duration::from_millis(1250)).contains(&at),
+        "alone in the second pause's line: {at:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refused_chunk_closes_the_gate_by_the_pause_rule_and_its_retry_waits_on_it() {
+    let origin = "http://pause-chunk";
+    // A 429 with a 1 s hint: the 2 s floor, plus at most 25 %.
+    assert_eq!(
+        chunk_refused(origin, 429, Duration::from_secs(1)),
+        Some(Extension::Opened)
+    );
+    let closed = closed_for(origin);
+    assert!(
+        (Duration::from_secs(2)..=Duration::from_millis(2500)).contains(&closed),
+        "the floor, not the hint: {closed:?}"
+    );
+    let start = Instant::now();
+    assert!(wait_open(origin).await);
+    assert!(
+        start.elapsed() >= Duration::from_secs(2),
+        "the retry waited on the gate"
+    );
+
+    // The next 429 in a row takes the next rung (4 s); a longer hint wins over the rung.
+    chunk_refused(origin, 429, Duration::from_millis(500));
+    let closed = closed_for(origin);
+    assert!(
+        (Duration::from_secs(4)..=Duration::from_secs(5)).contains(&closed),
+        "the second rung: {closed:?}"
+    );
+    assert!(wait_open(origin).await);
+    answered(origin);
+    chunk_refused(origin, 429, Duration::from_secs(30));
+    let closed = closed_for(origin);
+    assert!(
+        (Duration::from_secs(30)..=Duration::from_millis(37_500)).contains(&closed),
+        "the hint: {closed:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_503_chunk_pauses_for_the_policy_wait_and_any_other_status_pauses_nothing() {
+    let origin = "http://pause-chunk-503";
+    assert_eq!(chunk_refused(origin, 403, Duration::from_secs(9)), None);
+    assert_eq!(chunk_refused(origin, 0, Duration::from_secs(9)), None);
+    assert_eq!(pauses(origin), 0);
+    assert_eq!(
+        chunk_refused(origin, 503, Duration::from_secs(3)),
+        Some(Extension::Opened)
+    );
+    assert_eq!(closed_for(origin), Duration::from_secs(3));
 }
 
 #[tokio::test(start_paused = true)]

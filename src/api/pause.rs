@@ -4,9 +4,10 @@
 //! pause costs at most the requests already in flight, and one notice is printed per pause, not per answer.
 //!
 //! How long a 429 closes the gate is the client pause rule ([`rate_limited`]): a floor that doubles with each
-//! pause in a row, or the server's hint when that is longer, plus 0-25 % jitter. When the gate opens, each
-//! waiter is let go at the pause's end plus its own 0-250 ms ([`wait_open`]), so the workers of a push do not
-//! all send in the same instant.
+//! pause in a row, or the server's hint when that is longer, plus 0-25 % jitter. A refused chunk of the direct
+//! route closes it by the same rule ([`chunk_refused`]). When the gate opens, its waiters are let go one by
+//! one over a second ([`wait_open`], [`release_offset_ms`]), so the workers of a push do not all send in the
+//! same instant.
 //!
 //! The gate is kept per API origin (`scheme://host:port`): a process talks to one API, so in a run it is the
 //! process's one pause; tests, each with a mock server of its own, never share one.
@@ -50,6 +51,9 @@ struct Gate {
     /// The 429 pauses in a row: the rung of the floor ladder the next one takes. Back to 0 on the first
     /// answer that is not a 429 ([`answered`]).
     streak: u32,
+    /// How many callers wait on the running pause: each takes the next place in its release line. Back to 0
+    /// when a new pause begins.
+    waiting: u32,
     interrupt: Option<Interrupt>,
 }
 
@@ -61,8 +65,19 @@ const RATE_LIMIT_WAIT_CAP_MS: u64 = 60_000;
 const MAX_RETRY_AFTER_SECONDS: u64 = 120;
 /// The jitter added on top of a wait, at most.
 const WAIT_JITTER_PERCENT: u64 = 25;
-/// The most a waiter is held past the pause's end.
-const RELEASE_STAGGER_MS: u64 = 250;
+/// The window after a pause's end over which its waiters are let go.
+const RELEASE_STAGGER_MS: u64 = 1_000;
+
+/// How long past the pause's end the waiter at `place` (0-based) of `waiters` is held, in milliseconds: its
+/// place times an even step (`1000 / waiters`), plus up to a quarter step of jitter (`jitter_permille`,
+/// 0..=1000). So 4 waiters go at about 0, 250, 500 and 750 ms, first to last at least 500 ms apart, and one
+/// waiter alone is held 0-250 ms. Nobody is held past the window.
+fn release_offset_ms(place: u32, waiters: u32, jitter_permille: u32) -> u64 {
+    let waiters = u64::from(waiters.max(1));
+    let step = RELEASE_STAGGER_MS / waiters;
+    let place = u64::from(place).min(waiters - 1);
+    place * step + step / 4 * u64::from(jitter_permille.min(1_000)) / 1_000
+}
 
 /// How long a 429 pauses the client, in milliseconds. This is `beebeeb_core::retry::rate_limit_wait_ms` with
 /// the same numbers, kept here until the CLI's core pin has it; call core's when the pin moves.
@@ -169,6 +184,7 @@ fn close(gate: &mut Gate, now: Instant, by: Duration) -> Extension {
         _ => {
             gate.until = Some(end);
             gate.pauses += 1;
+            gate.waiting = 0;
             Extension::Opened
         }
     }
@@ -199,32 +215,50 @@ pub(crate) fn notice(by: Duration, why: PauseReason) -> String {
 
 /// Wait until `origin`'s gate is open. `false` when the interrupt bound to it fired first.
 ///
-/// A caller that had to wait is let go at the pause's end plus its own random 0-250 ms, so the waiters of one
-/// pause do not all send in the same instant. A caller that finds the gate open is not held.
+/// A caller that had to wait takes a place in the pause's release line and is let go at the pause's end plus
+/// its place's share of a second ([`release_offset_ms`]), so the waiters of one pause come back spread out,
+/// not in one instant. A caller that finds the gate open is not held.
 pub(crate) async fn wait_open(origin: &str) -> bool {
     use rand::Rng;
-    let stagger = Duration::from_millis(rand::thread_rng().gen_range(0..=RELEASE_STAGGER_MS));
-    let mut waited = false;
+    let jitter_permille = rand::thread_rng().gen_range(0..=1_000u32);
+    // This caller's place in a pause's release line: (the pause, by its count; the place).
+    let mut place: Option<(u32, u32)> = None;
     loop {
-        let (until, interrupt) = with_gate(origin, |gate| (gate.until, gate.interrupt.clone()));
-        let Some(until) = until else {
+        let now = Instant::now();
+        let (wake, interrupt) = with_gate(origin, |gate| {
+            let wake = match gate.until {
+                // Closed: take a place in this pause's line (a new pause is a new line), sleep to its end,
+                // then read the gate again: an extension may have moved the end, and only at the end is the
+                // number of waiters known.
+                Some(until) if until > now => {
+                    if place.map(|(pause, _)| pause) != Some(gate.pauses) {
+                        place = Some((gate.pauses, gate.waiting));
+                        gate.waiting += 1;
+                    }
+                    Some(until)
+                }
+                // The pause this caller waited on is over: its place in the line says when it goes.
+                Some(until) => place
+                    .filter(|(pause, _)| *pause == gate.pauses)
+                    .map(|(_, place)| {
+                        until + Duration::from_millis(release_offset_ms(place, gate.waiting, jitter_permille))
+                    })
+                    .filter(|release| *release > now),
+                None => None,
+            };
+            (wake, gate.interrupt.clone())
+        });
+        let Some(wake) = wake else {
             return true;
         };
-        let now = Instant::now();
-        let release = until + stagger;
-        if until <= now && (!waited || release <= now) {
-            return true;
-        }
-        waited = true;
-        // Re-read after the sleep: an extension may have moved the end.
         match interrupt {
             Some(interrupt) => {
                 tokio::select! {
-                    _ = tokio::time::sleep_until(release) => {}
+                    _ = tokio::time::sleep_until(wake) => {}
                     _ = interrupt.wait() => return false,
                 }
             }
-            None => tokio::time::sleep_until(release).await,
+            None => tokio::time::sleep_until(wake).await,
         }
     }
 }
@@ -237,6 +271,20 @@ pub(crate) fn bind_interrupt(origin: &str, interrupt: Interrupt) {
 /// How many pauses `origin`'s gate had (pauses, not extensions).
 pub(crate) fn pauses(origin: &str) -> u32 {
     with_gate(origin, |gate| gate.pauses)
+}
+
+/// A failed call of a direct chunk upload (grant, storage PUT, commit) that will be tried again, by its HTTP
+/// `status` and the wait `after` core's policy ordered for it (spec §6.1). A 429 closes `origin`'s gate by the
+/// client pause rule ([`rate_limited`]), with `after` as the server's hint: core read it from the
+/// `Retry-After` header or the body's `retry_after`. A 503 closes it for `after`. `None`: any other failure
+/// pauses nothing and is the chunk's own to wait out.
+pub(crate) fn chunk_refused(origin: &str, status: u16, after: Duration) -> Option<Extension> {
+    Some(match reason_for(status)? {
+        PauseReason::RateLimited { remaining } => {
+            rate_limited(origin, Some(after.as_millis().div_ceil(1_000) as u64), remaining)
+        }
+        why @ PauseReason::Busy503 => extend(origin, after, why),
+    })
 }
 
 /// The reason a chunk-route answer pauses the process (spec §6.1), by its status: a 429 (any route) or a 503
