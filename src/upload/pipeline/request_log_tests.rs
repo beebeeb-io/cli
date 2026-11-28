@@ -113,7 +113,8 @@ async fn parallel_1_matches_main_request_log_api_large() {
     check_golden("push_parallel1_api_large", &log);
 }
 
-/// A 429 on one chunk: the log holds the refusal and the retry, and the pause line is today's, byte for byte.
+/// A 429 on one chunk: the log holds the refusal and the retry, and the pause line is the shared rule's: the server asks
+/// for 1 s, the 2 s floor wins, and the 0-25 % jitter on top never reaches the next whole second.
 #[tokio::test]
 async fn parallel_1_matches_main_request_log_api_429() {
     let s = Scratch::new("golden-api-429");
@@ -137,7 +138,7 @@ async fn parallel_1_matches_main_request_log_api_429() {
     assert!(
         printed
             .iter()
-            .any(|l| l.starts_with("err:") && l.contains("rate limited \u{2014} pausing 1s")),
+            .any(|l| l.starts_with("err:") && l.contains("rate limited \u{2014} pausing 2s")),
         "today's 429 line, through the sink, on stderr: {printed:?}"
     );
     check_golden("push_parallel1_api_429", &log);
