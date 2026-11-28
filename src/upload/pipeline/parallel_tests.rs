@@ -2,18 +2,18 @@
 //! lowered-N line, the interrupt dropping the chunks in flight, out-of-order resume, and a chunk that fails for
 //! good. Peak in flight is read from 2333's recorder; the budget from `ChunkLimits`.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use beebeeb_core::chunk_stream::ChunkFormat;
 use beebeeb_core::kdf::MasterKey;
 use uuid::Uuid;
 
-use super::{stream_encrypt_upload, UploadOutcome, UploadSpec};
+use super::{UploadOutcome, UploadSpec, stream_encrypt_upload};
 use crate::api::ApiClient;
 use crate::interrupt::Interrupt;
-use crate::test_server::{shared, spawn, ChunkHold, Mock, Scratch, Shared};
+use crate::test_server::{ChunkHold, Mock, Scratch, Shared, shared, spawn};
 use crate::upload::limits::ChunkLimits;
 use crate::upload::{Recording, UploadError};
 
